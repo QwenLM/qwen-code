@@ -27,6 +27,7 @@ import { t } from '../../i18n/index.js';
 import {
   collectMemoryDiagnostics,
   analyzeToolResultRetention,
+  canonicalToolName,
   createDebugLogger,
   type MemoryDiagnostics,
   type ToolResultRetentionStats,
@@ -475,26 +476,35 @@ function collectToolResultRetention(
     if (!history) {
       return null;
     }
+    // History records raw request names (legacy aliases like `task`), while
+    // the registry is keyed by canonical names — canonicalize before lookup.
+    const resolveToolBudgetChars = (name: string): number | undefined =>
+      config?.getToolRegistry?.()?.getTool(canonicalToolName(name))
+        ?.maxOutputChars;
     const stats = analyzeToolResultRetention(history, {
       // Compare each result against its own tool's declared budget (mirroring
       // the scheduler), so compliant high-budget results (e.g. MCP) are not
-      // flagged as oversized.
-      resolveToolBudgetChars: (name) =>
-        config?.getToolRegistry?.()?.getTool(name)?.maxOutputChars,
+      // flagged; tools declaring none fall back to the configured global
+      // threshold — the bound the scheduler applies to them.
+      resolveToolBudgetChars,
+      thresholdChars: config?.getTruncateToolOutputThreshold?.(),
     });
     const threshold = stats.oversizedThresholdChars;
     // Tool outputs live in `tool_group` items as `tools[].resultDisplay`
     // strings; scanning top-level text items would count model responses.
+    // Each display is compared against its own tool's budget, matching the
+    // API-history calibration.
     let largeOutputsInUIHistory = 0;
     for (const item of context.ui.history ?? []) {
       if (item.type !== 'tool_group') {
         continue;
       }
       for (const tool of item.tools) {
-        if (
-          typeof tool.resultDisplay === 'string' &&
-          tool.resultDisplay.length > threshold
-        ) {
+        if (typeof tool.resultDisplay !== 'string') {
+          continue;
+        }
+        const budget = resolveToolBudgetChars(tool.name) ?? threshold;
+        if (Number.isFinite(budget) && tool.resultDisplay.length > budget) {
           largeOutputsInUIHistory += 1;
         }
       }

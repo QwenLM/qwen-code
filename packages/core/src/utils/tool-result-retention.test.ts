@@ -10,6 +10,7 @@ import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   TOKEN_TO_CHAR_RATIO,
 } from '../services/compactionInputSlimming.js';
+import { TOOL_OUTPUT_TRUNCATED_PREFIX } from './truncation.js';
 import {
   OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS,
   analyzeToolResultRetention,
@@ -78,8 +79,8 @@ describe('analyzeToolResultRetention', () => {
     expect(stats.oversizedResultCount).toBe(0);
   });
 
-  it('counts oversized results strictly above the default threshold', () => {
-    const oversized = 'z'.repeat(OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS + 1);
+  it('counts un-truncated results strictly above 2x their budget', () => {
+    const oversized = 'z'.repeat(OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS * 2 + 1);
     const stats = analyzeToolResultRetention([
       toolResultContent(oversized),
       toolResultContent('small'),
@@ -87,15 +88,26 @@ describe('analyzeToolResultRetention', () => {
     expect(stats.oversizedResultCount).toBe(1);
   });
 
-  it('does not flag a result measured at exactly the threshold (strict >)', () => {
+  it('does not flag a result measured at exactly 2x the budget (strict >)', () => {
     const exact = 'z'.repeat(
-      OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS - WRAPPER_FLOOR_CHARS,
+      OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS * 2 - WRAPPER_FLOOR_CHARS,
     );
     const stats = analyzeToolResultRetention([toolResultContent(exact)]);
     expect(stats.oversizedResultCount).toBe(0);
   });
 
+  it('skips results already carrying the truncation sentinel', () => {
+    // A spilled result is bounded by a layer; its retained preview may sit
+    // above the raw budget (spill envelope) without signaling a bypass.
+    const spilled = TOOL_OUTPUT_TRUNCATED_PREFIX + '.\n' + 'x'.repeat(100_000);
+    const stats = analyzeToolResultRetention([toolResultContent(spilled)]);
+    expect(stats.oversizedResultCount).toBe(0);
+    // Still measured for totals/largest.
+    expect(stats.totalChars).toBe(spilled.length + WRAPPER_FLOOR_CHARS);
+  });
+
   it('supports a custom threshold', () => {
+    // 'abcdef' measures 70 (6 raw + 64 wrapper floor) > 2x5.
     const stats = analyzeToolResultRetention([toolResultContent('abcdef')], {
       thresholdChars: 5,
     });
@@ -112,7 +124,7 @@ describe('analyzeToolResultRetention', () => {
       [
         // Compliant high-budget result (e.g. MCP): not flagged.
         toolResultContent('m'.repeat(60_000), 'big_budget_tool'),
-        // Exceeds its own small budget: flagged.
+        // 264 measured chars > 2x100: flagged under its own small budget.
         toolResultContent('s'.repeat(200), 'small_budget_tool'),
         // Unknown tool falls back to the default threshold: not flagged.
         toolResultContent('u'.repeat(500), 'unknown_tool'),

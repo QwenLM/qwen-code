@@ -20,17 +20,21 @@ conversation history:
 
 ```mermaid
 graph TB
-    A[Raw tool output] --> B{Per-tool budget declared?}
+    A[Raw tool output] --> S{Starts with truncation sentinel?}
+    S -- yes --> J[Metadata appended after truncation, never bisected]
+    S -- no --> G{Persistence gate: over configured threshold + 3k headroom, and not exempt?}
+    G -- yes --> F[Full payload persisted to session temp file, mode 0o600]
+    G -- no --> B{Per-tool budget declared?}
     B -- yes --> C[Tool-internal bound, e.g. shell 30k, grep 20k, read-file paging]
     B -- no --> D[Scheduler gate: global threshold 25k chars + 1000 lines]
     C --> E{Still oversized?}
     D --> E
     E -- no --> H[Enters history as-is]
-    E -- yes --> F[Full payload persisted to session temp file, mode 0o600]
-    F --> G[History retains preview + metadata + read_file pointer]
-    G --> I[Model recovers full output on demand via read_file]
-    H --> J[Metadata appended after truncation, never bisected]
-    G --> J
+    E -- yes --> F
+    F --> I2[History retains preview + metadata + read_file pointer]
+    I2 --> I[Model recovers full output on demand via read_file]
+    H --> J
+    I2 --> J
     J --> K{Assembled string over 2x budget?}
     K -- yes --> L[Second pass bounds it once more]
     K -- no --> M[Per-message batch budget 200k across parallel calls]
@@ -40,6 +44,12 @@ graph TB
 
 Key properties:
 
+- **Persistence gate first.** `maybePersistLargeToolResult` runs _before_
+  per-tool truncation: any non-exempt result over the configured threshold +
+  3k headroom (default 28k) is persisted and stubbed to a preview right away.
+  Exempt: `read_file`, `read_mcp_resource`, `enter_plan_mode` (self-managed).
+  Consequently, per-tool budgets above 28k (agent 32k, web-search 102k, MCP
+  500k) are second-level bounds — the gate offloads first.
 - **Bounded before history.** Every layer acts before the result is recorded,
   so history never holds an unbounded payload.
 - **Recoverable, never dropped.** Oversized output is persisted to a session
@@ -61,13 +71,14 @@ Key properties:
 
 ## 3. Thresholds
 
-| Layer            | Budget                                                                | Configurable                                                             |
-| ---------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Per-tool         | shell 30k, grep 20k, mcp 500k, agent 32k/tail, read-file self-managed | No (declared by tool)                                                    |
-| Global           | 25k chars + 1000 lines                                                | `settings.tools.truncateToolOutputThreshold` / `truncateToolOutputLines` |
-| Combined pass    | 2x of the applicable budget                                           | No                                                                       |
-| Per-message      | 200k chars                                                            | `settings.tools.toolOutputBatchBudget`                                   |
-| Disk persistence | 50MB per file, 500MB per session                                      | No                                                                       |
+| Layer            | Budget                                                                                                  | Configurable                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Persistence gate | configured threshold + 3k headroom (default 28k); exempt: read_file, read_mcp_resource, enter_plan_mode | `settings.tools.truncateToolOutputThreshold`                             |
+| Per-tool         | shell 30k, grep 20k, mcp 500k, agent 32k/tail, read-file self-managed                                   | No (declared by tool)                                                    |
+| Global           | 25k chars + 1000 lines                                                                                  | `settings.tools.truncateToolOutputThreshold` / `truncateToolOutputLines` |
+| Combined pass    | 2x of the applicable budget                                                                             | No                                                                       |
+| Per-message      | 200k chars                                                                                              | `settings.tools.toolOutputBatchBudget`                                   |
+| Disk persistence | 50MB per file, 500MB per session                                                                        | No                                                                       |
 
 Per-tool budgets are char-only: when a tool declares one, the global line cap
 is disabled for it so self-managed paging (read-file) and char budgets (grep)
@@ -104,15 +115,19 @@ unbounded retention or data exposure):
   measured as raw chars (no JSON-escaping inflation) and nested media parts
   are billed at the image token estimate.
 - Oversized results, counted against each result's own tool budget (resolved
-  from the tool registry by `functionResponse.name`, mirroring the scheduler;
-  fallback 30k for tools declaring none). A compliant result from a
-  high-budget tool (e.g. MCP at 500k) is never flagged; a retained result
-  above its budget means a truncation layer was bypassed — the counter doubles
-  as a regression alarm.
+  from the tool registry by canonicalized `functionResponse.name`, mirroring
+  the scheduler; tools declaring none fall back to the configured global
+  threshold). Results already carrying the truncation sentinel are skipped —
+  a layer bounded them, and their retained preview can sit slightly above the
+  raw budget due to the spill envelope — and the remaining results are only
+  flagged beyond the combined-pass 2x tolerance, matching the headroom the
+  scheduler itself allows. A retained result past that bound means a
+  truncation layer was bypassed — the counter doubles as a regression alarm.
 - Whether oversized outputs are also rendered in UI history (scanned in
-  `tool_group` items' `resultDisplay`) and in compression input (yes by
-  construction, but compression reads history by reference via
-  `getHistoryShallow`, so no extra copy is held).
+  `tool_group` items' `resultDisplay`, compared per display against the same
+  per-tool budget) and in compression input (yes by construction, but
+  compression reads history by reference via `getHistoryShallow`, so no extra
+  copy is held).
 
 ## 6. Alternatives Considered
 

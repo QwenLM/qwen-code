@@ -802,7 +802,7 @@ describe('doctorCommand', () => {
           {
             functionResponse: {
               name: 'shell',
-              response: { output: 'y'.repeat(40_000) },
+              response: { output: 'y'.repeat(65_000) },
             },
           },
         ],
@@ -820,6 +820,7 @@ describe('doctorCommand', () => {
           config: {
             getSessionId: () => 'test-session',
             getCliVersion: () => '0.0.0',
+            getTruncateToolOutputThreshold: () => 25_000,
             getGeminiClient: () => ({
               getHistoryShallow: () => {
                 if (options.historyThrows) {
@@ -829,9 +830,17 @@ describe('doctorCommand', () => {
               },
             }),
             getToolRegistry: () => ({
-              // Mirrors ShellTool.maxOutputChars.
+              // Registry is keyed by canonical names (ShellTool 30k,
+              // grep_search 100); legacy aliases must be canonicalized
+              // before lookup.
               getTool: (name: string) =>
-                name === 'shell' ? { maxOutputChars: 30_000 } : undefined,
+                name === 'shell'
+                  ? { maxOutputChars: 30_000 }
+                  : name === 'grep_search'
+                    ? { maxOutputChars: 100 }
+                    : name === 'mcp_tool'
+                      ? { maxOutputChars: 500_000 }
+                      : undefined,
             }),
           },
         },
@@ -867,8 +876,11 @@ describe('doctorCommand', () => {
         {
           type: 'tool_group',
           tools: [
-            { resultDisplay: 'y'.repeat(35_000) },
-            { resultDisplay: 'small' },
+            // Above shell's 30k budget: counted.
+            { name: 'shell', resultDisplay: 'y'.repeat(35_000) },
+            // Compliant high-budget render: not counted.
+            { name: 'mcp_tool', resultDisplay: 'm'.repeat(40_000) },
+            { name: 'shell', resultDisplay: 'small' },
           ],
         },
         // Model responses must not be counted as tool-output duplication.
@@ -886,6 +898,32 @@ describe('doctorCommand', () => {
       );
     });
 
+    it('should canonicalize legacy tool names when resolving budgets', async () => {
+      // History records the raw request name; 364 measured chars exceed
+      // 2x100 only when the alias resolves to grep_search's budget.
+      const aliasedHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'search_file_content',
+                response: { output: 'a'.repeat(300) },
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(aliasedHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain('Oversized results (above tool budget): 1');
+    });
+
     it('should include retention stats in --json output', async () => {
       const result = await getMemoryCommand().action!(
         contextWithHistory(history),
@@ -898,7 +936,8 @@ describe('doctorCommand', () => {
       expect(parsed.toolResultRetention).toMatchObject({
         toolResultCount: 2,
         oversizedResultCount: 1,
-        oversizedThresholdChars: 30_000,
+        // Fallback is the configured global threshold, not the constant.
+        oversizedThresholdChars: 25_000,
         largeOutputsInUIHistory: 0,
         presentInCompressionInput: true,
       });
@@ -933,6 +972,36 @@ describe('doctorCommand', () => {
 
       const content = result?.type === 'message' ? result.content : '';
       expect(content).not.toContain('Tool result retention');
+      // Graceful degradation only: the rest of the report must survive
+      // intact (a dropped guard would replace it with an error message).
+      expect(content).toContain('timestamp: 2026-05-01T10:00:00.000Z');
+      expect(result?.type).not.toBe('error');
+    });
+
+    it('should render the compliant-session shape without compression advice', async () => {
+      const compliantHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'shell',
+                response: { output: 'x'.repeat(100) },
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(compliantHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain('Oversized results (above tool budget): 0');
+      expect(content).toContain('Oversized also in compression input: no');
+      expect(content).not.toContain('/compress can reclaim space');
     });
 
     it('should include retention stats in the interactive memory report', async () => {
