@@ -31,6 +31,7 @@ export {
 export {
   MediaMemoryRecallService,
   MediaMemoryRecallRejection,
+  type MediaMemoryCandidateSummary,
   type MediaMemoryRecallRequest,
   type MediaMemoryRecallResult,
   type MediaMemoryRecallFile,

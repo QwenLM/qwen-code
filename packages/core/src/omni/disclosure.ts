@@ -73,3 +73,14 @@ export function formatResourceHandleText(
 ): string {
   return `${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}${displayName}：${resourceId}`;
 }
+
+/** Extract the resourceId from a handle annotation emitted by
+ * {@link formatResourceHandleText}, or undefined for any other text. The
+ * handle grammar is harness-minted (`media-<n>-<hex>`), so parsing keys
+ * on it rather than on the displayName (which may itself contain the
+ * separator). */
+export function parseResourceHandleText(text: string): string | undefined {
+  if (!text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) return undefined;
+  const match = /：(media-\d+-[0-9a-f]+)$/.exec(text);
+  return match?.[1];
+}

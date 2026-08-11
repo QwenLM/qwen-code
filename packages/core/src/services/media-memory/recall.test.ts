@@ -583,3 +583,114 @@ describe('MediaMemoryRecallService — nextPolicyActions', () => {
     ]);
   });
 });
+
+describe('MediaMemoryRecallService — sideQuery manifest and selection (§9.3)', () => {
+  it('summarizes candidates without full text or local paths', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+
+    const manifest = await recallService().candidateSummaries([resourceId]);
+
+    expect(manifest.length).toBeGreaterThanOrEqual(3);
+    expect(manifest.some((c) => c.role === 'transcript')).toBe(true);
+    for (const candidate of manifest) {
+      expect((candidate.description ?? '').length).toBeLessThanOrEqual(200);
+    }
+    // Never a local path or a session handle in selector-visible data.
+    expect(JSON.stringify(manifest)).not.toContain(root);
+  });
+
+  it('caps the manifest at maxCandidateEntries deterministically', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const config = recallConfig({
+      sideQuery: {
+        ...DEFAULT_OMNI_MEMORY_CONFIG.recall.sideQuery,
+        maxCandidateEntries: 2,
+      },
+    });
+
+    const first = await recallService(config).candidateSummaries([resourceId]);
+    const second = await recallService(config).candidateSummaries([resourceId]);
+
+    expect(first).toHaveLength(2);
+    expect(second).toEqual(first);
+  });
+
+  it('validates handles like recall(): an unknown handle rejects', async () => {
+    await expect(
+      recallService().candidateSummaries(['media-9-ffff']),
+    ).rejects.toMatchObject({ reason: 'unknown_resource' });
+  });
+
+  it('materializes exactly the selected entries via the unified protocol', async () => {
+    const source = await recognizeMovie();
+    const { degradedPath } = await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const svc = recallService();
+    const manifest = await svc.candidateSummaries([resourceId]);
+    const transcript = manifest.find((c) => c.role === 'transcript')!;
+    const degraded = manifest.find((c) => c.role === 'degraded')!;
+
+    const result = await svc.recallSelection(
+      [resourceId],
+      [transcript.entryId, degraded.entryId],
+    );
+
+    expect(result.entries.map((e) => e.entryId).sort()).toEqual(
+      [transcript.entryId, degraded.entryId].sort(),
+    );
+    expect(result.status).not.toBe('miss');
+    // The selected derived artifact is session-bound like an active
+    // recall would bind it.
+    const degradedEntry = result.entries.find(
+      (e) => e.entryId === degraded.entryId,
+    )!;
+    expect(degradedEntry.resourceId).toBeDefined();
+    expect(registry.resolve(degradedEntry.resourceId!)?.fileRef).toBe(
+      degradedPath,
+    );
+  });
+
+  it('rejects an entryId outside the manifest wholesale', async () => {
+    const source = await recognizeMovie();
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const svc = recallService();
+    const manifest = await svc.candidateSummaries([resourceId]);
+
+    await expect(
+      svc.recallSelection(
+        [resourceId],
+        [manifest[0]!.entryId, 'entry-not-in-manifest'],
+      ),
+    ).rejects.toMatchObject({ reason: 'invalid_selection' });
+  });
+
+  it('rejects a selection over maxSelectedEntries wholesale', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const config = recallConfig({
+      sideQuery: {
+        ...DEFAULT_OMNI_MEMORY_CONFIG.recall.sideQuery,
+        maxSelectedEntries: 1,
+      },
+    });
+    const svc = recallService(config);
+    const manifest = await svc.candidateSummaries([resourceId]);
+
+    await expect(
+      svc.recallSelection(
+        [resourceId],
+        manifest.slice(0, 2).map((c) => c.entryId),
+      ),
+    ).rejects.toMatchObject({ reason: 'invalid_selection' });
+  });
+});

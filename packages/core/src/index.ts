@@ -697,6 +697,12 @@ export {
   createMediaMemoryRecallService,
 } from './omni/memory-recall.js';
 export {
+  runOmniMemorySideQuery,
+  formatOmniMemorySideQueryReminder,
+  extractRequestResourceIds,
+  type OmniMemorySideQueryOutcome,
+} from './omni/memory-side-query.js';
+export {
   OmniRecallMediaMemoryTool,
   type OmniRecallMediaMemoryParams,
 } from './omni/recall-media-memory-tool.js';

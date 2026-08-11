@@ -110,11 +110,33 @@ export interface MediaMemoryRecallResult {
   nextPolicyActions?: MediaMemoryNextPolicyAction[];
 }
 
+/** One candidate-manifest row for the sideQuery selector (M §9.3):
+ * enough structure to judge relevance — never the raw media, the full
+ * text, a local path, or a secret. */
+export interface MediaMemoryCandidateSummary {
+  entryId: MediaMemoryEntryId;
+  kind: OmniMemoryRecallKind;
+  role?: string;
+  scope: MediaScope;
+  channels: MediaChannel[];
+  coverage: MediaCoverage;
+  /** Bounded content preview. */
+  description?: string;
+  /** Producing tool, when known. */
+  producer?: string;
+}
+
+/** Character budget for one manifest row's content preview. */
+const CANDIDATE_DESCRIPTION_MAX_CHARS = 200;
+
 /** Whole-request rejection (M §9.2): the request itself is invalid —
- * distinct from a valid request that finds nothing (`status: 'miss'`). */
+ * distinct from a valid request that finds nothing (`status: 'miss'`).
+ * `invalid_selection` is the sideQuery variant (M §9.3): the selector
+ * returned an entryId outside the candidate manifest (unknown, cross-root
+ * — the manifest is root-bounded by construction) or over budget. */
 export class MediaMemoryRecallRejection extends Error {
   constructor(
-    readonly reason: 'empty_request' | 'unknown_resource',
+    readonly reason: 'empty_request' | 'unknown_resource' | 'invalid_selection',
     message: string,
   ) {
     super(message);
@@ -193,6 +215,25 @@ interface CandidateEntry {
     fileRef: string;
     mediaType: OmniModality;
   };
+}
+
+/** The shared output of one snapshot walk (collectFromSnapshot). */
+interface CollectedRecall {
+  files: Map<MediaFileVersionId, MediaMemoryRecallFile>;
+  candidates: Map<MediaMemoryEntryId, CandidateEntry>;
+  gaps: Array<
+    MediaMemoryRecallGap & { forResourceId: string; mediaType: OmniModality }
+  >;
+}
+
+/** Deterministic manifest order (M §9.3): newest first, entryId
+ * tiebreak — the cap must cut the same rows on every run. */
+function orderCandidates(candidates: CandidateEntry[]): CandidateEntry[] {
+  return [...candidates].sort(
+    (a, b) =>
+      b.createdAt.localeCompare(a.createdAt) ||
+      a.entry.entryId.localeCompare(b.entry.entryId),
+  );
 }
 
 interface SnapshotIndexes {
@@ -323,23 +364,7 @@ export class MediaMemoryRecallService {
   async recall(
     request: MediaMemoryRecallRequest,
   ): Promise<MediaMemoryRecallResult> {
-    if (request.resourceIds.length === 0) {
-      throw new MediaMemoryRecallRejection(
-        'empty_request',
-        'recall request must name at least one resourceId',
-      );
-    }
-    const bindings = request.resourceIds.map((resourceId) => {
-      const binding = this.registry.resolve(resourceId);
-      if (!binding) {
-        throw new MediaMemoryRecallRejection(
-          'unknown_resource',
-          `resourceId ${resourceId} was not issued in this session`,
-        );
-      }
-      return binding;
-    });
-
+    const bindings = this.resolveBindings(request.resourceIds);
     const miss: MediaMemoryRecallResult = {
       status: 'miss',
       files: [],
@@ -358,11 +383,181 @@ export class MediaMemoryRecallService {
     }
   }
 
+  /**
+   * Bounded candidate manifest for the sideQuery selector (M §9.3): every
+   * entry reachable from the named resources — same root-bounded walk as
+   * {@link recall}, configured kinds, current-version-first — summarized
+   * without full text/paths and capped at `sideQuery.maxCandidateEntries`
+   * (newest first; deterministic tiebreak). Rejections propagate like
+   * {@link recall}; an unreadable store degrades to an empty manifest.
+   */
+  async candidateSummaries(
+    resourceIds: string[],
+  ): Promise<MediaMemoryCandidateSummary[]> {
+    const bindings = this.resolveBindings(resourceIds);
+    const request: MediaMemoryRecallRequest = { resourceIds, query: '' };
+    try {
+      return await this.store.read(
+        [] as MediaMemoryCandidateSummary[],
+        async (snapshot) => {
+          const { candidates } = await this.collectFromSnapshot(
+            snapshot,
+            request,
+            bindings,
+          );
+          return orderCandidates([...candidates.values()])
+            .slice(0, this.config.sideQuery.maxCandidateEntries)
+            .map((candidate) => ({
+              entryId: candidate.entry.entryId,
+              kind: candidate.entry.kind,
+              ...(candidate.entry.role !== undefined
+                ? { role: candidate.entry.role }
+                : {}),
+              scope: candidate.entry.scope,
+              channels: candidate.entry.channels,
+              coverage: candidate.entry.coverage,
+              ...(candidate.entry.content !== undefined
+                ? {
+                    description: truncateChars(
+                      candidate.entry.content,
+                      CANDIDATE_DESCRIPTION_MAX_CHARS,
+                    ),
+                  }
+                : {}),
+              ...(candidate.entry.provenance.toolName !== undefined
+                ? { producer: candidate.entry.provenance.toolName }
+                : {}),
+            }));
+        },
+      );
+    } catch (err) {
+      debugLogger.debug(
+        `candidate manifest failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Materialize a selector's picks by the unified protocol (M §9.3): the
+   * selection must be a subset of the manifest {@link candidateSummaries}
+   * would produce for the same resources and within
+   * `sideQuery.maxSelectedEntries` — anything else (unknown id, cross-root
+   * id, over budget) rejects the WHOLE selection with `invalid_selection`,
+   * never a partial fulfilment.
+   */
+  async recallSelection(
+    resourceIds: string[],
+    entryIds: string[],
+  ): Promise<MediaMemoryRecallResult> {
+    const bindings = this.resolveBindings(resourceIds);
+    if (entryIds.length > this.config.sideQuery.maxSelectedEntries) {
+      throw new MediaMemoryRecallRejection(
+        'invalid_selection',
+        `selector returned ${entryIds.length} entryIds; at most ` +
+          `${this.config.sideQuery.maxSelectedEntries} may be selected`,
+      );
+    }
+    const request: MediaMemoryRecallRequest = { resourceIds, query: '' };
+    const miss: MediaMemoryRecallResult = {
+      status: 'miss',
+      files: [],
+      entries: [],
+      gaps: [],
+    };
+    try {
+      return await this.store.read(miss, async (snapshot) => {
+        const collected = await this.collectFromSnapshot(
+          snapshot,
+          request,
+          bindings,
+        );
+        // The manifest the selector saw is the ordered, capped view —
+        // validate against exactly that, so an id beyond the cap (which
+        // the selector was never shown) rejects like any unknown id.
+        const manifest = new Map(
+          orderCandidates([...collected.candidates.values()])
+            .slice(0, this.config.sideQuery.maxCandidateEntries)
+            .map((candidate) => [candidate.entry.entryId, candidate]),
+        );
+        const selected: CandidateEntry[] = [];
+        for (const entryId of entryIds) {
+          const candidate = manifest.get(entryId);
+          if (!candidate) {
+            throw new MediaMemoryRecallRejection(
+              'invalid_selection',
+              `selector returned entryId ${entryId} that is not in the ` +
+                `candidate manifest`,
+            );
+          }
+          selected.push(candidate);
+        }
+        return this.finishResult(snapshot, selected, collected);
+      });
+    } catch (err) {
+      if (err instanceof MediaMemoryRecallRejection) throw err;
+      debugLogger.debug(
+        `recallSelection failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return miss;
+    }
+  }
+
+  /** Shared request validation (M §9.2): every handle must have been
+   * issued by THIS session's registry; an empty list or an unknown handle
+   * rejects the whole request. */
+  private resolveBindings(
+    resourceIds: string[],
+  ): Array<NonNullable<ReturnType<MediaResourceRegistry['resolve']>>> {
+    if (resourceIds.length === 0) {
+      throw new MediaMemoryRecallRejection(
+        'empty_request',
+        'recall request must name at least one resourceId',
+      );
+    }
+    return resourceIds.map((resourceId) => {
+      const binding = this.registry.resolve(resourceId);
+      if (!binding) {
+        throw new MediaMemoryRecallRejection(
+          'unknown_resource',
+          `resourceId ${resourceId} was not issued in this session`,
+        );
+      }
+      return binding;
+    });
+  }
+
   private async recallFromSnapshot(
     snapshot: MediaMemorySnapshot,
     request: MediaMemoryRecallRequest,
     bindings: ReadonlyArray<ReturnType<MediaResourceRegistry['resolve']>>,
   ): Promise<MediaMemoryRecallResult> {
+    const collected = await this.collectFromSnapshot(
+      snapshot,
+      request,
+      bindings,
+    );
+    const limit = Math.min(
+      request.limit ?? this.config.maxEntries,
+      this.config.maxEntries,
+    );
+    const entries = rankAndSlice(
+      [...collected.candidates.values()],
+      request.query,
+      limit,
+    );
+    return this.finishResult(snapshot, entries, collected);
+  }
+
+  /** The shared walk both recall shapes sit on: resolve each binding to
+   * its file, list consulted versions (current-first §9.5), collect
+   * candidate entries across the root-bounded derivation subgraph, and
+   * derive the CURRENT version's honest gaps. */
+  private async collectFromSnapshot(
+    snapshot: MediaMemorySnapshot,
+    request: MediaMemoryRecallRequest,
+    bindings: ReadonlyArray<ReturnType<MediaResourceRegistry['resolve']>>,
+  ): Promise<CollectedRecall> {
     const indexes = indexSnapshot(snapshot);
     const kinds = this.effectiveKinds(request);
     const includeHistorical =
@@ -371,9 +566,7 @@ export class MediaMemoryRecallService {
 
     const files = new Map<MediaFileVersionId, MediaMemoryRecallFile>();
     const candidates = new Map<MediaMemoryEntryId, CandidateEntry>();
-    const gaps: Array<
-      MediaMemoryRecallGap & { forResourceId: string; mediaType: OmniModality }
-    > = [];
+    const gaps: CollectedRecall['gaps'] = [];
 
     for (const binding of bindings) {
       if (!binding) continue; // narrowed by the caller; keeps types honest
@@ -455,16 +648,19 @@ export class MediaMemoryRecallService {
       }
     }
 
-    const limit = Math.min(
-      request.limit ?? this.config.maxEntries,
-      this.config.maxEntries,
-    );
-    const entries = rankAndSlice(
-      [...candidates.values()],
-      request.query,
-      limit,
-    );
+    return { files, candidates, gaps };
+  }
 
+  /** Availability pass + assembly shared by both recall shapes: bind a
+   * session handle for each returned derived artifact still on disk,
+   * degrade the lost ones to gaps, derive advisor suggestions and the
+   * hit/partial/miss verdict. */
+  private async finishResult(
+    snapshot: MediaMemorySnapshot,
+    entries: CandidateEntry[],
+    collected: CollectedRecall,
+  ): Promise<MediaMemoryRecallResult> {
+    const { files, gaps } = collected;
     // Artifact-availability pass for the derived media actually returned:
     // bind a session handle when the object is still on disk; otherwise
     // surface the loss as a gap instead of handing out a dead handle.
