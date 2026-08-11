@@ -4159,6 +4159,186 @@ describe('runNonInteractive', () => {
     expect(errorOutput).toContain('Incorrect API key provided');
   });
 
+  it('emits an error result for API error events in JSON mode', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '401 Incorrect API key provided',
+          status: 401,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-json-api-error',
+      ),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const messages = JSON.parse(
+      processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .trim(),
+    ) as Array<{
+      type: string;
+      subtype?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const results = messages.filter((message) => message.type === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('401') },
+    });
+    expect(results[0].error?.message).toContain('Incorrect API key provided');
+  });
+
+  it('emits an error result for API error events in stream-json mode', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '401 Incorrect API key provided',
+          status: 401,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-json-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line)) as Array<{
+      type: string;
+      subtype?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const results = messages.filter((message) => message.type === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('401') },
+    });
+    expect(results[0].error?.message).toContain('Incorrect API key provided');
+  });
+
+  it('emits an error result for API error events while draining stream-json notifications', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+
+    const notificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted an event.</summary>\n' +
+      '</task-notification>';
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      cb?.('Monitor event', notificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Monitor launched.' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 2 },
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.Error,
+            value: {
+              error: {
+                message: '401 Incorrect API key provided',
+                status: 401,
+              },
+            },
+          },
+        ]),
+      );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-id-drain-api-error',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line)) as Array<{
+      type: string;
+      subtype?: string;
+      is_error?: boolean;
+      error?: { message?: string };
+    }>;
+    const results = messages.filter((message) => message.type === 'result');
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: { message: expect.stringContaining('401') },
+    });
+  });
+
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
     // Regression test for the bug where a 4xx error event flowed through
     // both the stream handler and handleError, each calling
