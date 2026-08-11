@@ -659,6 +659,13 @@ export async function resolveAtCommandQuery({
           // Pure-transcript delivery (§6.2): the policies replaced the
           // media with text-only deliverables — no media Part is emitted
           // for the primary (additional deliverables, if any, still are).
+          // The primary disclosure (chained prior lossy steps, decision
+          // D8) still renders: the transcript was derived through them.
+          if (delivery.disclosure) {
+            urlMediaParts.push({
+              text: core.formatDisclosureText(urlBase, delivery.disclosure),
+            });
+          }
           urlMediaParts.push(...additionalParts);
           urlMediaParts.push(...transcriptParts);
           urlMediaLabels.push(ref.url);

@@ -885,9 +885,18 @@ export async function readMediaViaOmniDelivery(params: {
     if (!delivery.fileUri && transcriptParts.length > 0) {
       // Pure-transcript delivery (§6.2): the policies replaced the media
       // with text-only deliverables — no media Part is emitted for the
-      // primary (additional media deliverables, if any, still are).
+      // primary (additional media deliverables, if any, still are). The
+      // primary disclosure (chained prior lossy steps, decision D8) still
+      // renders: the transcript was derived through those steps.
+      const disclosureParts = delivery.disclosure
+        ? [{ text: formatDisclosureText(displayName, delivery.disclosure) }]
+        : [];
       return {
-        llmContent: [...additionalParts, ...transcriptParts],
+        llmContent: [
+          ...disclosureParts,
+          ...additionalParts,
+          ...transcriptParts,
+        ],
         returnDisplay: `Read ${delivery.recognized.modality} as transcript (omni policy): ${relativePathForDisplay}`,
         tokenEstimate: delivery.tokenEstimate,
       };

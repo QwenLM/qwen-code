@@ -151,9 +151,17 @@ export async function processToolResultOmniMedia(
       if (!delivery.fileUri && transcriptParts.length > 0) {
         // Pure-transcript delivery (§6.2): the policies replaced the media
         // with text-only deliverables — nothing was uploaded for the
-        // primary (uploaded extras were already charged above).
+        // primary (uploaded extras were already charged above). The
+        // primary disclosure (chained prior lossy steps, decision D8)
+        // still renders: the transcript was derived through those steps.
         changed = true;
-        return [...additionalParts, ...transcriptParts];
+        return delivery.disclosure
+          ? [
+              { text: formatDisclosureText(displayName, delivery.disclosure) },
+              ...additionalParts,
+              ...transcriptParts,
+            ]
+          : [...additionalParts, ...transcriptParts];
       }
       changed = true;
       uploadsRemaining--;
