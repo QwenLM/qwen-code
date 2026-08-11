@@ -336,7 +336,39 @@ describe('WorkspaceSection label', () => {
     ).toHaveLength(1);
   });
 
+  it('does not flash the empty notice while a fresh source settles', async () => {
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn(
+          () => new Promise<{ sessions: DaemonSessionSummary[] }>(() => {}),
+        ),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({ client, expanded: true, sourceType: 'channel' });
+    await flush();
+
+    // The new query key's fetch is in flight with no settled page yet, so
+    // the section renders nothing instead of "No sessions" for the
+    // round-trip.
+    expect(container.textContent).not.toContain('No sessions');
+  });
+
   it('groups a secondary workspace with its own channel catalog', async () => {
+    const listSessionGroups = vi.fn().mockResolvedValue({
+      groups: [
+        {
+          id: 'organization-group',
+          name: 'Organization group',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    });
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
@@ -360,18 +392,7 @@ describe('WorkspaceSection label', () => {
             },
           ],
         }),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [
-            {
-              id: 'organization-group',
-              name: 'Organization group',
-              color: 'blue',
-              order: 0,
-              createdAt: '2026-01-01T00:00:00.000Z',
-              updatedAt: '2026-01-01T00:00:00.000Z',
-            },
-          ],
-        }),
+        listSessionGroups,
         workspaceChannelTypes: vi.fn().mockResolvedValue([
           {
             type: 'dingtalk',
@@ -427,6 +448,9 @@ describe('WorkspaceSection label', () => {
     expect(
       container.querySelector('section[aria-label="Organization group"]'),
     ).toBeNull();
+    // Channel mode discards the organization sections, so the catalog fetch
+    // must be skipped too, mirroring the sidebar's own org prefetch gates.
+    expect(listSessionGroups).not.toHaveBeenCalled();
   });
 
   it('renders channel sessions flat while the channel catalog failed to load', async () => {

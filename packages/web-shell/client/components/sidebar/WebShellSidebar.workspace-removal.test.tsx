@@ -74,6 +74,7 @@ const {
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
   const channelState = {
+    error: undefined as Error | undefined,
     data: undefined as
       | {
           catalog: Array<{
@@ -781,6 +782,7 @@ beforeEach(() => {
   active.loading = false;
   active.error = null;
   archived.sessions.length = 0;
+  channelState.error = undefined;
   channelState.data = undefined;
   channelState.catalog = [];
   channelState.channels = {};
@@ -3488,6 +3490,30 @@ describe('WebShellSidebar session source switch', () => {
     channelState.reload.mockClear();
     await switchSessionSource('Tasks');
     expect(clearIntervalSpy).toHaveBeenCalledWith(activePollId);
+  });
+
+  it('backs off the channel catalog poll while the channels hook errors', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    channelState.error = new Error('channels endpoint down');
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+
+    // A persistently failing channels endpoint must not be re-requested on
+    // the 2s active cadence; the poll downshifts like the sibling pollers.
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 2_000),
+    ).toBe(false);
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 30_000),
+    ).toBe(true);
   });
 
   it('keeps a flat channel list when channel metadata is unavailable', async () => {
