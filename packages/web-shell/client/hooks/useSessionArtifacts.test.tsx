@@ -215,4 +215,22 @@ describe('useSessionArtifacts', () => {
       'replacement',
     ]);
   });
+
+  it('returns a referentially stable empty array when artifacts are unsupported', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: [] },
+    };
+
+    await renderHookHost();
+    const first = latestState?.artifacts;
+    expect(first).toEqual([]);
+
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toBe(first);
+
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toBe(first);
+  });
 });

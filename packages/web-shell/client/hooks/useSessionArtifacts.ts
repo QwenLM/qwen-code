@@ -10,6 +10,11 @@ import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 
+// Callers pass `artifacts` through effect deps (ChatPane reports it to the
+// pane host); a fresh empty array per render would re-fire those effects
+// every render and loop the host's state update.
+const EMPTY_ARTIFACTS: DaemonSessionArtifact[] = [];
+
 export interface SessionArtifactsState {
   artifacts: DaemonSessionArtifact[];
   artifactById: ReadonlyMap<string, DaemonSessionArtifact>;
@@ -104,7 +109,8 @@ export function useSessionArtifacts(): SessionArtifactsState {
     [artifacts, owner],
   );
 
-  const visibleArtifacts = loadedOwnerRef.current === owner ? artifacts : [];
+  const visibleArtifacts =
+    loadedOwnerRef.current === owner ? artifacts : EMPTY_ARTIFACTS;
   return {
     artifacts: visibleArtifacts,
     artifactById,
