@@ -26,6 +26,16 @@ export const ROOT_RESERVE_FRACTION = 0.1;
 export const MIN_ROOT_RESERVE_MB = 256;
 export const MAX_ROOT_RESERVE_MB = 1_024;
 
+/**
+ * Adaptive live-journal growth: the daemon-wide pool (carved from the
+ * effective budget) that per-session journal caps may grow into beyond
+ * their baseline when an in-flight turn outgrows them. A ceiling, not a
+ * preallocation — nothing is reserved until a session actually grows.
+ */
+export const JOURNAL_GROWTH_POOL_FRACTION = 0.05;
+export const MIN_JOURNAL_GROWTH_POOL_MB = 32;
+export const MAX_JOURNAL_GROWTH_POOL_MB = 1_024;
+
 export type MemoryBudgetSource = 'flag' | 'derived';
 export type AvailableMemorySource = 'constrained' | 'host';
 
@@ -188,6 +198,22 @@ export function recommendedChildShareMb(
     MAX_CHILD_HEAP_MB,
   );
   return Math.min(share, budget.legacyChildCeilingMb);
+}
+
+/**
+ * Daemon-wide pool, in MB, that adaptive live-journal growth may draw on.
+ * Divides the same capacity denominator as the child policy; the journal
+ * lives in the daemon heap rather than in a child, but the budget is the
+ * single figure this module offers and 5% of it keeps the pool a rounding
+ * error next to child heaps while still covering several fully-grown
+ * sessions (per-session growth hard-caps at 256 MiB).
+ */
+export function journalGrowthPoolMb(budget: DaemonMemoryBudget): number {
+  return clamp(
+    Math.floor(budget.effectiveBudgetMb * JOURNAL_GROWTH_POOL_FRACTION),
+    MIN_JOURNAL_GROWTH_POOL_MB,
+    MAX_JOURNAL_GROWTH_POOL_MB,
+  );
 }
 
 export function resolveDaemonMemoryBudget(

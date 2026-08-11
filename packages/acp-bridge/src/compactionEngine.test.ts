@@ -1321,6 +1321,171 @@ describe('TurnBoundaryCompactionEngine', () => {
     });
   });
 
+  describe('adaptive live-journal growth', () => {
+    const markerOf = (snap: { liveJournal: BridgeEvent[] }) =>
+      snap.liveJournal.find((e) => e.type === 'history_truncated');
+
+    it('grows the caps instead of evicting when the advisor grants headroom', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: (current) => ({
+          maxEvents: current.maxEvents * 2,
+          maxBytes: current.maxBytes * 2,
+        }),
+      });
+      for (let i = 1; i <= 5; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeUndefined();
+      expect(snap.liveJournal.map((e) => e.id)).toEqual([1, 2, 3, 4, 5]);
+      // Two breaches (entries 3 and 5), each doubling the caps.
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 8,
+        maxBytes: 32 * 1024 * 1024,
+      });
+    });
+
+    it('passes the current (already grown) caps to the advisor', () => {
+      const seen: Array<{ maxEvents: number; maxBytes: number }> = [];
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+        onJournalGrowth: (current) => {
+          seen.push({ ...current });
+          return seen.length < 3
+            ? { maxEvents: current.maxEvents * 2, maxBytes: current.maxBytes * 2 }
+            : undefined;
+        },
+      });
+      for (let i = 1; i <= 6; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      // Each ask reports the caps as grown by the previous grant; the third
+      // ask (which refuses) still observes the grown caps.
+      expect(seen).toEqual([
+        { maxEvents: 1, maxBytes: 8 * 1024 * 1024 },
+        { maxEvents: 2, maxBytes: 16 * 1024 * 1024 },
+        { maxEvents: 4, maxBytes: 32 * 1024 * 1024 },
+      ]);
+    });
+
+    it('falls back to eviction when the advisor refuses', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: () => undefined,
+      });
+      for (let i = 1; i <= 4; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)?.data).toMatchObject({
+        truncatedEvents: 2,
+        retainedEvents: 2,
+        maxEvents: 2,
+      });
+      expect(snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id)).toEqual([3, 4]);
+    });
+
+    it('degrades to eviction when the advisor throws', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: () => {
+          throw new Error('advisor exploded');
+        },
+      });
+      for (let i = 1; i <= 4; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeDefined();
+      expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(2);
+    });
+
+    it('treats a non-growing or malformed grant as a refusal', () => {
+      const grants: Array<{ maxEvents: number; maxBytes: number } | undefined> =
+        [
+          // bytes not larger than current
+          { maxEvents: 10, maxBytes: 8 * 1024 * 1024 },
+          // not a safe integer
+          { maxEvents: 10, maxBytes: Number.NaN },
+        ];
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        now: () => 1_000_000,
+        onJournalGrowth: () => grants.shift(),
+      });
+      for (let i = 1; i <= 4; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeDefined();
+      expect(engine.journalLimits().maxEvents).toBe(2);
+    });
+
+    it('throttles re-asks after a refusal until the interval elapses', () => {
+      let clockMs = 0;
+      const advisor = vi.fn(() => undefined);
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+        now: () => clockMs,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'a'));
+      engine.ingest(makeUserMessage(2, 'b'));
+      expect(advisor).toHaveBeenCalledTimes(1);
+
+      // Still over the cap, but inside the refusal throttle window.
+      engine.ingest(makeUserMessage(3, 'c'));
+      engine.ingest(makeUserMessage(4, 'd'));
+      expect(advisor).toHaveBeenCalledTimes(1);
+
+      clockMs += 10_000;
+      engine.ingest(makeUserMessage(5, 'e'));
+      expect(advisor).toHaveBeenCalledTimes(2);
+    });
+
+    it('resets the refusal throttle at a turn boundary', () => {
+      const clockMs = 0;
+      const advisor = vi.fn(() => undefined);
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+        now: () => clockMs,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'a'));
+      engine.ingest(makeUserMessage(2, 'b'));
+      expect(advisor).toHaveBeenCalledTimes(1);
+
+      engine.ingest(makeTurnComplete(3));
+      engine.ingest(makeUserMessage(4, 'c'));
+      engine.ingest(makeUserMessage(5, 'd'));
+      expect(advisor).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps grown caps across turn boundaries', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: (current) => ({
+          maxEvents: current.maxEvents * 4,
+          maxBytes: current.maxBytes * 4,
+        }),
+      });
+      for (let i = 1; i <= 5; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+      engine.ingest(makeTurnComplete(6));
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 8,
+        maxBytes: 32 * 1024 * 1024,
+      });
+    });
+  });
+
   describe('multi-turn sessions', () => {
     it('compacts multiple turns independently', () => {
       const engine = new TurnBoundaryCompactionEngine();

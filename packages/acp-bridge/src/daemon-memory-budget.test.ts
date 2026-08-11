@@ -10,10 +10,13 @@ import {
   detectAvailableMemoryMb,
   formatMemoryBudgetStderr,
   isValidMemoryBudgetMb,
+  journalGrowthPoolMb,
   legacyChildCeilingMb,
   MAX_CHILD_HEAP_MB,
+  MAX_JOURNAL_GROWTH_POOL_MB,
   MAX_MEMORY_BUDGET_MB,
   MIN_CHILD_HEAP_MB,
+  MIN_JOURNAL_GROWTH_POOL_MB,
   MIN_MEMORY_BUDGET_MB,
   normalizeMemoryBudgetMb,
   recommendedChildShareMb,
@@ -307,5 +310,34 @@ describe('formatMemoryBudgetStderr', () => {
     const message = formatMemoryBudgetStderr(budget);
     expect(message).toContain('; below the 1024 MB minimum budget');
     expect(message).not.toContain('a derived budget needs');
+  });
+});
+
+describe('journalGrowthPoolMb', () => {
+  it.each([
+    // available MB, expected pool MB (5% of effective budget, clamped)
+    [32_768, 819],
+    [16_384, 409],
+    [8_192, 204],
+    [2_048, 51],
+  ])(
+    'derives 5%% of the effective budget from %i MB available',
+    (availableMemoryMb, expectedPoolMb) => {
+      const budget = resolveDaemonMemoryBudget({ availableMemoryMb });
+      expect(journalGrowthPoolMb(budget)).toBe(expectedPoolMb);
+    },
+  );
+
+  it('floors at the minimum on a below-minimum host', () => {
+    const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
+    expect(journalGrowthPoolMb(budget)).toBe(MIN_JOURNAL_GROWTH_POOL_MB);
+  });
+
+  it('caps at the maximum on a huge budget', () => {
+    const budget = resolveDaemonMemoryBudget({
+      budgetMb: MAX_MEMORY_BUDGET_MB,
+      availableMemoryMb: MAX_MEMORY_BUDGET_MB,
+    });
+    expect(journalGrowthPoolMb(budget)).toBe(MAX_JOURNAL_GROWTH_POOL_MB);
   });
 });

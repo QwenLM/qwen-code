@@ -399,19 +399,26 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         default: DEFAULT_MAX_JOURNAL_EVENTS,
         description:
-          'Per-session cap on replay entries retained in the in-flight live ' +
-          'journal (current unfinished turn). Compatible text/thought chunks ' +
-          'share bounded entries. When exceeded, the oldest entries are ' +
-          'dropped. Must be a positive safe integer.',
+          'Per-session baseline cap on replay entries retained in the ' +
+          'in-flight live journal (current unfinished turn). Compatible ' +
+          'text/thought chunks share bounded entries. When exceeded, the ' +
+          'daemon first tries adaptive growth (see --max-journal-bytes); ' +
+          'without granted headroom the oldest entries are dropped. Pinning ' +
+          'this flag disables adaptive growth. Must be a positive safe ' +
+          'integer.',
       })
       .option('max-journal-bytes', {
         type: 'number',
         default: DEFAULT_MAX_JOURNAL_BYTES,
         description:
-          'Per-session source-event byte cap on the in-flight live journal. ' +
-          'When exceeded, the oldest entries are dropped whole (at least ' +
-          'one is always kept), so the retained tail can be much smaller ' +
-          'than the cap. Must be a positive safe integer.',
+          'Per-session baseline source-event byte cap on the in-flight live ' +
+          'journal. When a turn outgrows it, adaptive growth raises the ' +
+          "session's caps (per-session hard cap 256 MiB) within a growth " +
+          'pool derived from --memory-budget-mb; without granted headroom ' +
+          'the oldest entries are dropped whole (at least one is always ' +
+          'kept), so the retained tail can be much smaller than the cap. ' +
+          'Pinning this flag (or --max-journal-events) disables adaptive ' +
+          'growth. Must be a positive safe integer.',
       })
       .option('http-bridge', {
         type: 'boolean',

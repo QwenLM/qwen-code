@@ -23,8 +23,10 @@ export {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   MAX_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
+  normalizeJournalGrowthPoolBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
 } from './replayWindowLimits.js';
@@ -131,6 +133,22 @@ export interface ReplayWindowEviction {
   retainedEvents: number;
 }
 
+/** Current journal caps of a growth request/acknowledgement. */
+export interface JournalLimits {
+  maxEvents: number;
+  maxBytes: number;
+}
+
+/**
+ * Asked before the journal evicts entries past its caps. Returning larger
+ * caps raises them in place (no eviction needed while under the new caps);
+ * returning `undefined` — or throwing — falls through to eviction. Called
+ * at most once per eviction breach, throttled after a refusal.
+ */
+export type JournalGrowthAdvisor = (
+  current: JournalLimits,
+) => JournalLimits | undefined;
+
 export interface TurnBoundaryCompactionEngineOptions {
   maxReplayBytes?: number;
   onReplayWindowEviction?: (eviction: ReplayWindowEviction) => void;
@@ -147,7 +165,22 @@ export interface TurnBoundaryCompactionEngineOptions {
    */
   maxJournalEvents?: number;
   maxJournalBytes?: number;
+  /**
+   * Adaptive growth hook: consulted before evicting when a turn outgrows
+   * the caps above. Absent → behavior is exactly the fixed-cap eviction.
+   */
+  onJournalGrowth?: JournalGrowthAdvisor;
+  /** Test seam for the growth-refusal throttle. */
+  now?: () => number;
 }
+
+/**
+ * After a growth refusal, don't ask again until this much later — a turn
+ * that keeps overflowing would otherwise call the advisor on every append.
+ * A grant resets the throttle (doubling means at most ~log2(hard cap /
+ * baseline) asks per session).
+ */
+const JOURNAL_GROWTH_REASK_INTERVAL_MS = 10_000;
 
 /**
  * Compaction engine that merges events at turn boundaries.
@@ -162,8 +195,13 @@ export interface TurnBoundaryCompactionEngineOptions {
  */
 export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private readonly maxReplayBytes: number;
-  private readonly maxJournalEvents: number;
-  private readonly maxJournalBytes: number;
+  // Mutable: adaptive growth (see `maybeGrowJournalLimits`) raises these
+  // in place when the advisor grants headroom.
+  private maxJournalEvents: number;
+  private maxJournalBytes: number;
+  private readonly onJournalGrowth: JournalGrowthAdvisor | undefined;
+  private readonly now: () => number;
+  private journalGrowthDeniedAt: number | undefined;
   private readonly onReplayWindowEviction:
     | ((eviction: ReplayWindowEviction) => void)
     | undefined;
@@ -216,7 +254,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
     this.maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
     this.maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
+    this.onJournalGrowth = opts.onJournalGrowth;
+    this.now = opts.now ?? Date.now;
     this.onReplayWindowEviction = opts.onReplayWindowEviction;
+  }
+
+  /** Current journal caps — may have grown past the configured baseline. */
+  journalLimits(): JournalLimits {
+    return { maxEvents: this.maxJournalEvents, maxBytes: this.maxJournalBytes };
   }
 
   ingest(event: BridgeEvent, byteLength?: number): void {
@@ -426,6 +471,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       this.journalTotalEvents += 1;
     }
 
+    if (
+      this.liveJournal.length > this.maxJournalEvents ||
+      this.journalTotalBytes > this.maxJournalBytes
+    ) {
+      this.maybeGrowJournalLimits();
+    }
+
     while (
       this.liveJournal.length > this.maxJournalEvents ||
       (this.journalTotalBytes > this.maxJournalBytes &&
@@ -440,6 +492,47 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         this.liveJournalTextSegment = undefined;
       }
     }
+  }
+
+  /**
+   * Consults the growth advisor once the journal breaches its caps and
+   * applies a grant in place, so the eviction loop below only drops what
+   * still exceeds the (possibly raised) caps. Never throws: a misbehaving
+   * advisor degrades to plain eviction, matching the engine's
+   * best-effort contract.
+   */
+  private maybeGrowJournalLimits(): void {
+    const advisor = this.onJournalGrowth;
+    if (!advisor || this.closed) return;
+    const now = this.now();
+    if (
+      this.journalGrowthDeniedAt !== undefined &&
+      now - this.journalGrowthDeniedAt < JOURNAL_GROWTH_REASK_INTERVAL_MS
+    ) {
+      return;
+    }
+    let grant: JournalLimits | undefined;
+    try {
+      grant = advisor({
+        maxEvents: this.maxJournalEvents,
+        maxBytes: this.maxJournalBytes,
+      });
+    } catch {
+      grant = undefined;
+    }
+    if (
+      grant &&
+      Number.isSafeInteger(grant.maxBytes) &&
+      Number.isSafeInteger(grant.maxEvents) &&
+      grant.maxBytes > this.maxJournalBytes &&
+      grant.maxEvents >= this.maxJournalEvents
+    ) {
+      this.maxJournalBytes = grant.maxBytes;
+      this.maxJournalEvents = grant.maxEvents;
+      this.journalGrowthDeniedAt = undefined;
+      return;
+    }
+    this.journalGrowthDeniedAt = now;
   }
 
   private classifySessionUpdate(event: BridgeEvent): void {
@@ -657,6 +750,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.journalTotalEvents = 0;
     this.journalTruncatedEvents = 0;
     this.liveJournalTextSegment = undefined;
+    // Grown caps intentionally persist across turn boundaries — they are
+    // session ceilings, not per-turn state. A refusal, however, belonged
+    // to the finished turn's pressure; a new turn gets a fresh ask.
+    this.journalGrowthDeniedAt = undefined;
   }
 
   private addReplaySegment(events: BridgeEvent[], turnCount: number): void {

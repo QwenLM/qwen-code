@@ -52,6 +52,7 @@ import {
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   formatMemoryBudgetStderr,
+  journalGrowthPoolMb,
   resolveDaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
@@ -2525,11 +2526,11 @@ async function runQwenServeImpl(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once, for reporting only. Nothing
-  // downstream consumes them to size a child: dividing a pool by a workspace
-  // count is unsound while registration does not spawn a child, and bounding
-  // the aggregate needs admission at spawn time keyed on live children. This
-  // establishes the denominator that work will be designed against.
+  // Resolve the daemon's memory figures once. Nothing downstream consumes
+  // them to size a child: dividing a pool by a workspace count is unsound
+  // while registration does not spawn a child, and bounding the aggregate
+  // needs admission at spawn time keyed on live children. The one consumer
+  // today is the adaptive live-journal growth pool below.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
@@ -2539,6 +2540,17 @@ async function runQwenServeImpl(
   ) {
     writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
+  // Adaptive live-journal growth: sessions whose in-flight turn outgrows the
+  // journal caps can grow into a daemon-wide pool derived from the memory
+  // budget, instead of silently truncating the live replay window (the
+  // canonical case: one turn fanning out many concurrent subagents). An
+  // operator-pinned journal flag disables growth — explicit config wins.
+  const journalGrowthPoolBytes =
+    opts.maxJournalEvents === undefined &&
+    opts.maxJournalBytes === undefined &&
+    opts.daemonMemoryBudget !== undefined
+      ? journalGrowthPoolMb(opts.daemonMemoryBudget) * 1024 * 1024
+      : undefined;
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
     workspaceRegistrationStore === undefined &&
@@ -4098,6 +4110,9 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? { journalGrowthPoolBytes }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -4500,6 +4515,9 @@ async function runQwenServeImpl(
           : {}),
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
+          : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? { journalGrowthPoolBytes }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
@@ -5053,6 +5071,9 @@ async function runQwenServeImpl(
             : {}),
           ...(opts.maxJournalBytes !== undefined
             ? { maxJournalBytes: opts.maxJournalBytes }
+            : {}),
+          ...(journalGrowthPoolBytes !== undefined
+            ? { journalGrowthPoolBytes }
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }

@@ -262,6 +262,21 @@ export interface BridgeOptions {
    */
   maxJournalBytes?: number;
   /**
+   * Pool, in bytes, that this bridge's per-session live-journal caps may
+   * grow into when an in-flight turn outgrows `maxJournalEvents` /
+   * `maxJournalBytes` (adaptive growth). The bridge doubles a breaching
+   * session's caps — never past a per-session hard cap of 256 MiB — while
+   * the growth granted across the bridge's live sessions stays within this
+   * pool. Accounting is per bridge: a multi-workspace daemon runs one
+   * bridge per workspace and each holds its own pool, so it is a ceiling
+   * on that bridge's growth, not a process-wide reservation. `undefined`
+   * (the default) disables growth: fixed-cap eviction, exactly the
+   * pre-growth behavior. `runQwenServe` derives a pool from the daemon
+   * memory budget unless the operator pinned the journal flags. Must be a
+   * positive safe integer when provided.
+   */
+  journalGrowthPoolBytes?: number;
+  /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
    * cancelled — the per-session FIFO can drain instead of poisoning

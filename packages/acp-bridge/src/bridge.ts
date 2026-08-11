@@ -44,11 +44,14 @@ import {
   type BridgeEvent,
 } from './eventBus.js';
 import {
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
+  normalizeJournalGrowthPoolBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
   TurnBoundaryCompactionEngine,
 } from './compactionEngine.js';
+import { createJournalGrowthPolicy } from './journalGrowthPolicy.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -1593,6 +1596,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   );
   const maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
   const maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
+  // Adaptive live-journal growth is opt-in via the pool: `runQwenServe`
+  // derives one from the daemon memory budget (and skips it when the
+  // operator pinned the journal flags). No pool → fixed-cap eviction,
+  // exactly the pre-growth behavior.
+  const journalGrowthPoolBytes = normalizeJournalGrowthPoolBytes(
+    opts.journalGrowthPoolBytes,
+  );
+  const journalGrowthPolicy =
+    journalGrowthPoolBytes !== undefined
+      ? createJournalGrowthPolicy({
+          baselineEvents: maxJournalEvents,
+          baselineBytes: maxJournalBytes,
+          poolBytes: journalGrowthPoolBytes,
+          hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+        })
+      : undefined;
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -4331,6 +4350,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `replay window evicted ${JSON.stringify(eviction)}`,
           );
         },
+        // Adaptive growth: the engine asks before evicting past its caps.
+        // The policy accounts growth daemon-wide from every live session's
+        // CURRENT journal cap (stateless — no ledger to reconcile when a
+        // session is reaped), so granted headroom dies with its session.
+        ...(journalGrowthPolicy
+          ? {
+              onJournalGrowth: (current: {
+                maxEvents: number;
+                maxBytes: number;
+              }) => {
+                const grant = journalGrowthPolicy.grant({
+                  currentMaxEvents: current.maxEvents,
+                  currentMaxBytes: current.maxBytes,
+                  allSessionLimitBytes: [...byId.values()].map(
+                    (entry) =>
+                      entry.events.journalLimitBytes() ?? maxJournalBytes,
+                  ),
+                });
+                if (grant) {
+                  teeServeDebugLine(
+                    `live journal growth session=${JSON.stringify(sessionId)}: ` +
+                      `${current.maxBytes} -> ${grant.maxBytes} bytes, ` +
+                      `${current.maxEvents} -> ${grant.maxEvents} entries`,
+                  );
+                }
+                return grant;
+              },
+            }
+          : {}),
       }),
       {
         // Fired once, on the FIRST ingest/seed failure (the bus keeps the
