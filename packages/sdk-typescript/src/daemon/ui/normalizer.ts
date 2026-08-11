@@ -467,14 +467,16 @@ function normalizeHistoryTruncated(
   }
   const fullTranscriptAvailable = event.data['fullTranscriptAvailable'];
   const limits = [
-    maxEvents === undefined ? undefined : `${maxEvents} events`,
+    maxEvents === undefined
+      ? undefined
+      : `${maxEvents} ${scope === 'live_journal' ? 'replay entries' : 'events'}`,
     `${maxBytes} bytes`,
   ]
     .filter((limit): limit is string => limit !== undefined)
     .join(' / ');
   const text =
     scope === 'live_journal'
-      ? `History truncated for live turn replay: kept the latest ${retainedEvents} events and dropped ${truncatedEvents} older replay events (limits: ${limits}). ${
+      ? `History truncated for live turn replay: kept the latest ${retainedEvents} source events and dropped ${truncatedEvents} older source events (limits: ${limits}). ${
           fullTranscriptAvailable
             ? 'Complete content remains available after the turn finishes.'
             : 'Complete content is not available for automatic recovery.'
@@ -780,12 +782,14 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const meta = extractUpdateMeta(update);
       return [
         {
           ...base,
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(meta ? { meta } : {}),
         },
       ];
     }
