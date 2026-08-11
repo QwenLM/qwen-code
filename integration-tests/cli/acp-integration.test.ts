@@ -499,6 +499,7 @@ function setupAcpTest(
     // deterministic regardless of how the ambient openai credentials resolve.
     await rig.setup('acp set config option', {
       settings: {
+        model: { name: 'e2e-initial-model' },
         modelProviders: {
           openai: [
             {
@@ -509,6 +510,7 @@ function setupAcpTest(
             },
           ],
         },
+        env: { OPENAI_API_KEY: 'test-key' },
       },
     });
 

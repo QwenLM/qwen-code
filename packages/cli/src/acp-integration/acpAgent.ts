@@ -11486,21 +11486,16 @@ class QwenAgent implements Agent {
             }
 
             const newModelName = newMerged.model?.name;
+            const modelSelectionChanged =
+              oldMerged.model?.name !== newModelName;
             if (
-              changed.has('model') &&
+              modelSelectionChanged &&
               newModelName &&
               newModelName !== config.getModel() &&
               authType
             ) {
               try {
                 await config.switchModel(authType, newModelName);
-                // The long-lived Session can retain an older settings object
-                // after the cache reload replaces it. Apply the freshly loaded
-                // snapshot after the generic model-change observer runs.
-                session.syncReasoningSettingsForCurrentModel(newMerged);
-                await session.sendConfigOptionsUpdate(
-                  this.buildConfigOptions(session.getConfig()),
-                );
               } catch (err) {
                 debugLogger.warn(
                   `reload: switchModel failed for session ${id}: ${err}`,
@@ -11514,6 +11509,18 @@ class QwenAgent implements Agent {
                   `reload: refreshAuth failed for session ${id}: ${err}`,
                 );
               }
+            }
+            if (
+              changed.has('model') &&
+              (!modelSelectionChanged || newModelName === config.getModel())
+            ) {
+              // The long-lived Session can retain an older settings object
+              // after the cache reload replaces it. Apply the freshly loaded
+              // snapshot after any model refresh or switch completes.
+              session.syncReasoningSettingsForCurrentModel(newMerged);
+              await session.sendConfigOptionsUpdate(
+                this.buildConfigOptions(session.getConfig()),
+              );
             }
 
             if (changed.has('tools')) {
@@ -12156,6 +12163,7 @@ class QwenAgent implements Agent {
       settings,
       () => this.activeWorkReporter?.notifyChanged(),
       (currentConfig) => this.buildConfigOptions(currentConfig),
+      () => loadSettingsCached(config.getTargetDir()),
     );
     this.sessions.set(sessionId, session);
     // The Session set itself is part of the snapshot: publish so the daemon
@@ -12277,13 +12285,14 @@ class QwenAgent implements Agent {
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
     const modelOptions = this.buildSelectableModelOptions(config);
-    const rawCurrentModelId = (config.getModel() || '').trim();
+    const rawCurrentModelId = config.getModel() || '';
+    const currentModelSelectionId = rawCurrentModelId.trim();
     const currentAuthType = config.getAuthType?.();
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = getCurrentAcpModelId(
       modelOptions,
-      activeRuntimeSnapshot?.id ?? rawCurrentModelId,
+      activeRuntimeSnapshot?.id ?? currentModelSelectionId,
       activeRuntimeSnapshot?.authType ?? currentAuthType,
       activeRuntimeSnapshot
         ? undefined

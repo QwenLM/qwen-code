@@ -19,6 +19,7 @@ import {
   type ModelProvidersConfig,
   type ProviderModelConfig,
   type ProviderProtocolConfig,
+  type ReasoningEffort,
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
@@ -196,6 +197,8 @@ export interface ResolvedCliGenerationConfig {
   generationConfig: Partial<ContentGeneratorConfig>;
   /** Exact selected modelProviders baseUrl; null selects an implicit route. */
   registryBaseUrl?: string | null;
+  /** User-global effort retained independently of model-scoped resolution. */
+  globalReasoningEffortPreference?: ReasoningEffort;
   /** Source attribution for each resolved field */
   sources: ContentGeneratorConfigSources;
   /** Warnings generated during resolution */
@@ -530,6 +533,9 @@ export function resolveCliGenerationConfig(
     generationConfig,
     ...(modelProvider
       ? { registryBaseUrl: modelProvider.baseUrl ?? null }
+      : {}),
+    ...(reasoningEffort
+      ? { globalReasoningEffortPreference: reasoningEffort }
       : {}),
     sources: resolved.sources,
     warnings: [

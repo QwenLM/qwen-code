@@ -371,6 +371,22 @@ class FakeBridge {
             currentValue: 'default',
             options: [],
           },
+          {
+            id: 'thinking',
+            name: 'Thinking',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'on',
+            options: [],
+          },
+          {
+            id: 'effort',
+            name: 'Effort',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'xhigh',
+            options: [],
+          },
         ],
       },
     };
@@ -1360,6 +1376,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.result.configOptions.map((option) => option.id)).toEqual([
       'model',
       'mode',
+      'thinking',
+      'effort',
     ]);
   });
 
@@ -3228,9 +3246,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [frame] = (await got) as Array<{
       id: number;
-      result: { configOptions: unknown };
+      result: { configOptions: Array<{ id: string }> };
     }>;
     expect(frame.id).toBe(910);
+    expect(frame.result.configOptions.map((option) => option.id)).toEqual([
+      'model',
+      'mode',
+      'thinking',
+      'effort',
+    ]);
     expect(bridge.configOptionCalls).toEqual([
       {
         sessionId: 'sess-1',
@@ -3256,9 +3280,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     const [frame] = (await got) as Array<{
       id: number;
-      result: { configOptions: unknown };
+      result: { configOptions: Array<{ id: string }> };
     }>;
     expect(frame.id).toBe(911);
+    expect(frame.result.configOptions.map((option) => option.id)).toEqual([
+      'model',
+      'mode',
+      'thinking',
+      'effort',
+    ]);
     expect(bridge.configOptionCalls).toEqual([
       {
         sessionId: 'sess-1',
@@ -4958,7 +4988,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain(
       'ConfigId not supported by this transport: reasoning_effort',
     );
-    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(frame.error.message).toContain(
+      '(supported: model, mode, thinking, effort)',
+    );
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
   });

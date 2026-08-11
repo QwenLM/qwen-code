@@ -1167,6 +1167,8 @@ export interface ConfigParameters {
   ideMode?: boolean;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
+  /** Global effort retained while registered/runtime models own live state. */
+  globalReasoningEffortPreference?: ReasoningEffort;
   /** Exact initial model registry baseUrl; null selects an implicit route. */
   initialModelRegistryBaseUrl?: string | null;
   /**
@@ -2410,6 +2412,8 @@ export class Config {
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
+    this.globalReasoningEffortPreference =
+      params.globalReasoningEffortPreference;
 
     // Create ModelsConfig for centralized model management
     // Prefer params.authType over generationConfig.authType because:
@@ -3723,7 +3727,7 @@ export class Config {
           ? undefined
           : this.globalReasoningEffortPreference;
     if (reasoningEffortToRestore) {
-      this.setReasoningEffort(reasoningEffortToRestore);
+      this.applyReasoningEffort(reasoningEffortToRestore);
     }
     this.applyRegisteredModelReasoning({
       priorThinkingDisabled:
@@ -4315,6 +4319,10 @@ export class Config {
       this.reasoningEffortPreference = undefined;
       this.globalReasoningEffortPreference = undefined;
     }
+    this.applyReasoningEffort(effort);
+  }
+
+  private applyReasoningEffort(effort: ReasoningEffort | undefined): void {
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
     ): void => {
@@ -4582,11 +4590,20 @@ export class Config {
     const previousModelHasReasoningControls =
       !context.sourceWasRuntimeSnapshot &&
       Boolean(getModelReasoningControls(this.contentGeneratorConfig.model));
-    const priorReasoningEffort = previousModelHasReasoningControls
-      ? undefined
-      : this.getReasoningEffort();
+    const sourceRuntimeReasoningEffort = context.sourceWasRuntimeSnapshot
+      ? this.getReasoningEffort()
+      : undefined;
+    const priorReasoningEffort =
+      previousModelHasReasoningControls || context.sourceWasRuntimeSnapshot
+        ? undefined
+        : this.getReasoningEffort();
     if (priorReasoningEffort) {
       this.globalReasoningEffortPreference = priorReasoningEffort;
+    } else if (
+      sourceRuntimeReasoningEffort &&
+      this.globalReasoningEffortPreference === undefined
+    ) {
+      this.globalReasoningEffortPreference = sourceRuntimeReasoningEffort;
     }
 
     // Keep full history (including thought parts) on model switch.
@@ -4694,7 +4711,7 @@ export class Config {
         const globalEffort =
           priorReasoningEffort ?? this.globalReasoningEffortPreference;
         if (globalEffort && this.contentGeneratorConfig.reasoning !== false) {
-          this.setReasoningEffort(globalEffort);
+          this.applyReasoningEffort(globalEffort);
         }
       }
       resetPreloadedContentGenerator(this.contentGenerator);
@@ -4738,7 +4755,7 @@ export class Config {
       const globalEffort =
         priorReasoningEffort ?? this.globalReasoningEffortPreference;
       if (globalEffort && this.contentGeneratorConfig.reasoning !== false) {
-        this.setReasoningEffort(globalEffort);
+        this.applyReasoningEffort(globalEffort);
       }
     }
   }

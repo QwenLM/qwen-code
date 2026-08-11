@@ -4646,7 +4646,7 @@ describe('Server Config (config.ts)', () => {
           globalReasoningEffortPreference?: string;
         }
       ).globalReasoningEffortPreference = undefined;
-      await modelsConfig.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+      await modelsConfig.setModel('coder-model');
 
       expect(config.getActiveRuntimeModelSnapshot()).toBeUndefined();
       expect(
@@ -4688,6 +4688,26 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().reasoning).toEqual({
         effort: 'low',
       });
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBe('high');
+
+      await modelsConfig.setModel('coder-model');
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBe('high');
     });
 
     it('keeps a runtime snapshot effort on a full-refresh switch', async () => {
@@ -4712,6 +4732,7 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       });
       await config.refreshAuth(sourceAuthType);
+      config.setReasoningEffort('high');
 
       const modelsConfig = config.getModelsConfig();
       const snapshotId = '$runtime|openai|snapshot-model';
@@ -4759,6 +4780,13 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().reasoning).toEqual({
         effort: 'low',
       });
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBe('high');
     });
 
     it('keeps an effort selection as a preference before auth initializes', () => {
@@ -5065,6 +5093,49 @@ describe('Server Config (config.ts)', () => {
       });
 
       await handleModelChange('coder-model');
+      expect(config.getReasoningEffort()).toBe('high');
+    });
+
+    it('restores a startup global effort after leaving a registered model', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.QWEN_OAUTH,
+        model: 'qwen3.8-max',
+        globalReasoningEffortPreference: 'high',
+        generationConfig: {
+          model: 'qwen3.8-max',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          reasoning: { effort: 'xhigh' },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'qwen3.8-max',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+          reasoning: { effort: 'xhigh' },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType: AuthType.QWEN_OAUTH,
+          model: 'coder-model',
+          apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
       expect(config.getReasoningEffort()).toBe('high');
     });
 

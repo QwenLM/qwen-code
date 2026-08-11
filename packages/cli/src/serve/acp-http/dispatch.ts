@@ -420,7 +420,12 @@ const MAX_FILE_LINE_LIMIT = 2000;
  * setter's rejection message so the advertised set and the set reported as
  * supported cannot drift apart.
  */
-const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = [
+  'model',
+  'mode',
+  'thinking',
+  'effort',
+];
 
 class AcpParamError extends Error {}
 
@@ -1171,7 +1176,8 @@ export class AcpDispatcher {
 
   /**
    * The session's ACP-shaped config options supported by this HTTP transport
-   * (currently model and mode), read from the child's own session state.
+   * (model, mode, thinking, and effort), read from the child's own session
+   * state.
    * Every response built from this helper (`session/new`,
    * `session/load`/`session/resume`, `session/fork`, and the
    * `session/set_config_option` result) is gated to the ids the transport
@@ -1319,8 +1325,8 @@ export class AcpDispatcher {
           audio: true,
           embeddedContext: true,
         },
-        // Model + mode are exposed via the STANDARD `session/set_config_option`
-        // (categories `model`/`mode`); advertise that here.
+        // Session options are exposed via the standard
+        // `session/set_config_option`; advertise that here.
         configOptions: true,
         // Vendor extensions are advertised under `_meta` keyed by domain
         // (ACP convention, e.g. `_meta: { "zed.dev": … }`). Clients

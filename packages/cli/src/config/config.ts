@@ -2278,6 +2278,8 @@ export async function loadCliConfig(
     providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
+    globalReasoningEffortPreference:
+      resolvedCliConfig.globalReasoningEffortPreference,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     warnings: resolvedCliConfig.warnings,
     bareMode,

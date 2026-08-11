@@ -3122,6 +3122,58 @@ describe('Session', () => {
       );
     });
 
+    it('merges reasoning writes into the latest settings snapshot', async () => {
+      currentModel = 'qwen3.8-max';
+      const latestSettings = {
+        ...mockSettings,
+        merged: {
+          model: {
+            reasoningPreferences: {
+              'qwen3.8-max': { thinkingEnabled: false },
+            },
+          },
+        },
+        user: {
+          settings: {
+            model: {
+              reasoningPreferences: {
+                'qwen3.8-max': { thinkingEnabled: false },
+              },
+            },
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+      vi.mocked(latestSettings.forScope).mockImplementation(
+        (scope: SettingScope) =>
+          scope === SettingScope.Workspace
+            ? latestSettings.workspace
+            : latestSettings.user,
+      );
+      const getLatestSettings = vi.fn().mockReturnValue(latestSettings);
+      const latestSession = new Session(
+        'latest-settings-session',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        undefined,
+        undefined,
+        getLatestSettings,
+      );
+      vi.mocked(latestSettings.setValue).mockClear();
+
+      await latestSession.setEffort('medium');
+
+      expect(latestSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningPreferences',
+        {
+          'qwen3.8-max': { thinkingEnabled: false, effort: 'medium' },
+        },
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
     it('retains the live preset effort when turning thinking off', async () => {
       currentModel = 'qwen3.8-max';
       // Live effort comes from a provider preset (no stored preference) and

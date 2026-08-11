@@ -1880,6 +1880,16 @@ describe('modelConfigUtils', () => {
         ).toEqual({ effort });
       });
 
+      it('retains the unclamped global effort independently', () => {
+        const result = resolveForModel('qwen3.8-max', {
+          name: 'qwen3.8-max',
+          reasoningEffort: 'high',
+        });
+
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        expect(result.globalReasoningEffortPreference).toBe('high');
+      });
+
       it('maps Thinking Off to reasoning false', () => {
         expect(
           resolveForModel('qwen3.8-max', {

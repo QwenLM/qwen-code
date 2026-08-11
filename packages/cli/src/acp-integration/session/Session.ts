@@ -1609,6 +1609,7 @@ export class Session implements SessionContext {
     private readonly buildConfigOptions?: (
       config: Config,
     ) => SessionConfigOption[],
+    private readonly getLatestSettings?: () => LoadedSettings,
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
@@ -7289,8 +7290,9 @@ export class Session implements SessionContext {
     // thinking off never substitutes the registry default for it ("Turning
     // thinking off does not erase the tier"). Stored preferences still win.
     const liveEffort = this.config.getReasoningEffortPreference();
+    const settings = this.getLatestSettings?.() ?? this.settings;
     const storedPreference = getModelReasoningPreference(
-      this.settings.merged,
+      settings.merged,
       model,
     );
     const resolved = resolveModelReasoningControls(model, {
@@ -7303,19 +7305,15 @@ export class Session implements SessionContext {
     });
     this.config.setThinkingEnabled(value === 'on', resolved?.effort);
     const scope =
-      getOwnKeyScope(this.settings, 'model') ??
-      getPersistScopeForModelSelection(this.settings);
-    this.settings.setValue(
+      getOwnKeyScope(settings, 'model') ??
+      getPersistScopeForModelSelection(settings);
+    settings.setValue(
       scope,
       'model.reasoningPreferences',
-      mergeModelReasoningPreference(
-        this.settings.forScope(scope).settings,
-        model,
-        {
-          thinkingEnabled: value === 'on',
-          ...(resolved?.effort ? { effort: resolved.effort } : {}),
-        },
-      ),
+      mergeModelReasoningPreference(settings.forScope(scope).settings, model, {
+        thinkingEnabled: value === 'on',
+        ...(resolved?.effort ? { effort: resolved.effort } : {}),
+      }),
     );
   }
 
@@ -7332,7 +7330,7 @@ export class Session implements SessionContext {
       : getModelReasoningControls(model);
     if (!registration) return;
     const rawPreference = getModelReasoningPreference(
-      settingsOverride ?? this.settings.merged,
+      settingsOverride ?? (this.getLatestSettings?.() ?? this.settings).merged,
       model,
     );
     const preference =
@@ -7383,19 +7381,16 @@ export class Session implements SessionContext {
     }
     const effort = value as (typeof registration.effort.supported)[number];
     this.config.setReasoningEffort(effort);
+    const settings = this.getLatestSettings?.() ?? this.settings;
     const scope =
-      getOwnKeyScope(this.settings, 'model') ??
-      getPersistScopeForModelSelection(this.settings);
-    this.settings.setValue(
+      getOwnKeyScope(settings, 'model') ??
+      getPersistScopeForModelSelection(settings);
+    settings.setValue(
       scope,
       'model.reasoningPreferences',
-      mergeModelReasoningPreference(
-        this.settings.forScope(scope).settings,
-        model,
-        {
-          effort,
-        },
-      ),
+      mergeModelReasoningPreference(settings.forScope(scope).settings, model, {
+        effort,
+      }),
     );
   }
 
