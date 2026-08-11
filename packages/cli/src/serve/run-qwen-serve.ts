@@ -21,9 +21,11 @@ import express, {
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
-  scrubAndReportInheritedLoaderEnv,
+  acquireInheritedLoaderEnvScrub,
+  clearLoaderKeyRejectionReporterIfCurrent,
   scrubInheritedLoaderEnv,
   setLoaderKeyRejectionReporter,
+  type LoaderKeyRejectionReporter,
 } from '../config/shared-env-keys.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
@@ -34,6 +36,7 @@ import {
   normalizeMaxJournalEvents,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
@@ -1284,6 +1287,7 @@ function createBootstrapCapabilities(input: {
       maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
         input.opts.maxPendingPromptsPerSession,
       ),
+      sessionRestoreTimeoutMs: resolveSessionRestoreTimeoutMs(input.opts),
     },
   };
 }
@@ -1964,6 +1968,10 @@ interface DaemonLoggerLifecycleCallbacks {
   // startup fails after the scrub — the close() path is unreachable then,
   // and an embedded caller must not keep a permanently scrubbed env.
   scrubApplied(restoreScrubbedLoaderEnv: () => void): void;
+  // Called with the loader-key rejection reporter this run installed, so the
+  // startup-failure catch can clear it only when it is still the active one —
+  // a co-resident daemon that installed after us must keep its own reporter.
+  reporterInstalled(reporter: LoaderKeyRejectionReporter): void;
 }
 
 /**
@@ -2027,6 +2035,7 @@ export async function runQwenServe(
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
   let restoreScrubbedLoaderEnv: (() => void) | undefined;
+  let installedLoaderRejectionReporter: LoaderKeyRejectionReporter | undefined;
   try {
     return await runQwenServeImpl(optsIn, deps, {
       initialized: (logger) => {
@@ -2041,12 +2050,18 @@ export async function runQwenServe(
       scrubApplied: (restore) => {
         restoreScrubbedLoaderEnv = restore;
       },
+      reporterInstalled: (reporter) => {
+        installedLoaderRejectionReporter = reporter;
+      },
     });
   } catch (error) {
     // Startup failed after the scrub and (when the logger was up) the
     // reporter install; the close() path that reverts both is unreachable.
-    if (daemonLog) {
-      setLoaderKeyRejectionReporter(undefined);
+    // Clear only our own reporter so a co-resident daemon keeps its own.
+    if (installedLoaderRejectionReporter) {
+      clearLoaderKeyRejectionReporterIfCurrent(
+        installedLoaderRejectionReporter,
+      );
     }
     if (daemonLog && owner === 'startup') {
       const startupLog = daemonLog;
@@ -2100,9 +2115,6 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  // Snapshot before any scrub: close() restores the host's launch
-  // environment from this copy, not from the (possibly scrubbed) base env.
-  const launchEnv = { ...process.env };
   const baseEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...(optsIn.memoryProjectScope !== undefined
@@ -2128,20 +2140,19 @@ async function runQwenServeImpl(
     Object.freeze(baseEnv);
   // The daemon process itself is done with loader vars either way:
   // session-shell subprocesses run here with process.env while their cwd is
-  // another workspace. The scrub is reverted on close() so an embedded
-  // caller reusing the host process gets its launch environment back.
-  const scrubbedLoaderEnvKeys = scrubAndReportInheritedLoaderEnv(
+  // another workspace. The scrub is reference-counted (see
+  // acquireInheritedLoaderEnvScrub) so overlapping embedded daemons in one
+  // process do not restore each other's loader vars mid-flight, and reverted
+  // on close() so an embedded caller reusing the host process gets its launch
+  // environment back.
+  const loaderEnvScrub = acquireInheritedLoaderEnvScrub(
     process.env,
     'qwen serve',
     'daemon',
   );
+  const scrubbedLoaderEnvKeys = loaderEnvScrub.removedKeys;
   const restoreScrubbedLoaderEnv = (): void => {
-    for (const key of scrubbedLoaderEnvKeys) {
-      if (Object.hasOwn(process.env, key)) continue;
-      const value = launchEnv[key];
-      if (value === undefined) continue;
-      process.env[key] = value;
-    }
+    loaderEnvScrub.release();
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
@@ -2439,8 +2450,9 @@ async function runQwenServeImpl(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
           ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
-            'token gates API routes; /health and /demo remain pre-auth ' +
-            'on loopback unless --require-auth is set)'
+            'token gates API routes; the Web Shell static assets stay ' +
+            'pre-auth in every mode unless --no-web, and /health stays ' +
+            'pre-auth on loopback unless --require-auth is set)'
           : ''),
     );
   }
@@ -2664,12 +2676,20 @@ async function runQwenServeImpl(
   // capability checks, settings reloads); boot stderr is long gone by then,
   // so fresh loader-key rejections must land in the durable daemon log or
   // they vanish without a diagnostic.
-  setLoaderKeyRejectionReporter((source, freshKeys) => {
+  const loaderRejectionReporter: LoaderKeyRejectionReporter = (
+    source,
+    freshKeys,
+  ) => {
     daemonLog.warn(
       'rejected loader-affecting env keys; they were not applied',
-      { source, rejectedKeys: freshKeys },
+      {
+        source,
+        rejectedKeys: freshKeys,
+      },
     );
-  });
+  };
+  setLoaderKeyRejectionReporter(loaderRejectionReporter);
+  loggerLifecycle.reporterInstalled(loaderRejectionReporter);
   // Boot stderr rarely survives desktop/systemd daemon launches, so persist
   // the scrub decision in the durable daemon log as well.
   if (scrubbedLoaderEnvKeys.length > 0) {
@@ -2815,6 +2835,8 @@ async function runQwenServeImpl(
     }
     assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  opts.sessionRestoreTimeoutMs = sessionRestoreTimeoutMs;
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
   // bridge treats a non-finite / negative value as the "disabled"
@@ -4082,6 +4104,7 @@ async function runQwenServeImpl(
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -4107,7 +4130,9 @@ async function runQwenServeImpl(
         permissionAudit: permissionAuditPublisher,
         statusProvider,
         delegateReadTextFileToClient: false,
-        fileSystem: createBridgeFileSystemAdapter(fsFactory),
+        fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             primaryGenerationGuard.assertOpen();
@@ -4482,6 +4507,7 @@ async function runQwenServeImpl(
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -4509,7 +4535,9 @@ async function runQwenServeImpl(
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
         delegateReadTextFileToClient: false,
-        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
+        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: true,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             secondaryGenerationGuard.assertOpen();
@@ -5032,6 +5060,7 @@ async function runQwenServeImpl(
           ...(opts.initializeTimeoutMs !== undefined
             ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
+          sessionRestoreTimeoutMs,
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
             : {}),
@@ -5061,7 +5090,9 @@ async function runQwenServeImpl(
             env: wsEnv.effectiveEnv,
           }),
           delegateReadTextFileToClient: false,
-          fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+          fileSystem: createBridgeFileSystemAdapter(wsFsFactory, {
+            allowSameHostToolWritesOutsideWorkspace: true,
+          }),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {
               generationGuard.assertOpen();
@@ -5644,6 +5675,7 @@ async function runQwenServeImpl(
 
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
+      getSessionBridges: () => runtimeBridges,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       ...(workspaceTrustHotReloadAvailable
         ? {
@@ -7222,7 +7254,9 @@ async function runQwenServeImpl(
                         daemonLog.info('daemon stopped');
                       }
                     });
-                    setLoaderKeyRejectionReporter(undefined);
+                    clearLoaderKeyRejectionReporterIfCurrent(
+                      loaderRejectionReporter,
+                    );
                     await daemonLog.close();
                   }
                   restoreScrubbedLoaderEnv();
@@ -7540,6 +7574,7 @@ async function runQwenServeImpl(
         const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
+          opts.strictPort !== true &&
           opts.port !== 0 &&
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1

@@ -38,6 +38,10 @@ export default defineConfig({
   resolve: {
     alias: {
       // Use built SDK bundle for e2e tests
+      '@qwen-code/sdk/daemon/transports': resolve(
+        __dirname,
+        '../packages/sdk-typescript/dist/daemon/transports.js',
+      ),
       '@qwen-code/sdk/daemon': resolve(
         __dirname,
         '../packages/sdk-typescript/dist/daemon/index.js',

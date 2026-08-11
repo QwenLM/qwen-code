@@ -30,6 +30,8 @@ import {
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 
+export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
+
 export type SettingsType =
   | 'boolean'
   | 'string'
@@ -1597,6 +1599,19 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description:
           'Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.',
+        showInDialog: false,
+      },
+      openAILogRetentionDays: {
+        type: 'number',
+        label: 'OpenAI Log Retention (days)',
+        category: 'Model',
+        // LoadedSettings._merged is cached without verified setValue→recompute
+        // paths in all UI flows (same rationale as general.cleanupPeriodDays).
+        requiresRestart: true,
+        default: DEFAULT_OPENAI_LOG_RETENTION_DAYS,
+        minimum: 0,
+        description:
+          'Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Log files older than this are removed by an interactive-session background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour). For a custom openAILoggingDir, configure this at user or system scope; workspace-scoped retention is skipped because one directory can be shared by multiple workspaces.',
         showInDialog: false,
       },
       generationConfig: {

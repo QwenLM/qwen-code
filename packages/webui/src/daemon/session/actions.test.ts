@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
+  type DaemonCapabilities,
   type DaemonSessionClient,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
   getConnectionAfterSessionClear,
+  resolveSessionRestoreTimeouts,
 } from './actions';
 import type {
   ActivePrompt,
@@ -121,6 +123,47 @@ describe('getConnectionAfterSessionClear', () => {
       catchingUp: undefined,
       error: undefined,
     });
+  });
+});
+
+/**
+ * A capabilities payload advertising a restore budget. Typed rather than cast
+ * so renaming or moving `limits.sessionRestoreTimeoutMs` fails typecheck here
+ * instead of silently falling back to the client defaults.
+ */
+function advertisingRestoreBudget(
+  sessionRestoreTimeoutMs: number,
+): DaemonCapabilities {
+  return {
+    v: 1,
+    mode: 'http-bridge',
+    features: [],
+    modelServices: [],
+    limits: { sessionRestoreTimeoutMs },
+  };
+}
+
+describe('resolveSessionRestoreTimeouts', () => {
+  it('uses 70s request and 75s watchdog defaults for old daemons', () => {
+    expect(resolveSessionRestoreTimeouts(undefined)).toEqual({
+      requestTimeoutMs: 70_000,
+      watchdogTimeoutMs: 75_000,
+    });
+  });
+
+  it('derives both client budgets from the advertised server timeout', () => {
+    expect(
+      resolveSessionRestoreTimeouts(advertisingRestoreBudget(90_000)),
+    ).toEqual({
+      requestTimeoutMs: 100_000,
+      watchdogTimeoutMs: 105_000,
+    });
+  });
+
+  it('disables derived timers that exceed the JavaScript timer ceiling', () => {
+    expect(
+      resolveSessionRestoreTimeouts(advertisingRestoreBudget(2_147_483_647)),
+    ).toEqual({ requestTimeoutMs: 0, watchdogTimeoutMs: undefined });
   });
 });
 
@@ -303,7 +346,34 @@ describe('createDaemonSessionActions', () => {
       loadingTranscript: true,
       catchingUp: undefined,
     });
-    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      requestTimeoutMs: 70_000,
+    });
+  });
+
+  it('carries the daemon-advertised restore budget into the load request', async () => {
+    // Live path for the whole chain: advertised capability -> connection ->
+    // resolveSessionRestoreTimeouts -> pending load. Dropping the capabilities
+    // argument at the real call site leaves every default-budget assertion
+    // green, so this is the only test that fails when the advertised budget
+    // stops reaching the SDK.
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        capabilities: advertisingRestoreBudget(90_000),
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-b',
+      requestTimeoutMs: 100_000,
+    });
   });
 
   it('detaches the old same-session attachment after its replacement loads', async () => {
@@ -459,10 +529,18 @@ describe('createDaemonSessionActions', () => {
         loadingTranscript: true,
       });
 
-      vi.advanceTimersByTime(30_000);
+      // Split the boundary so a shorter watchdog cannot pass this test.
+      let settledEarly = false;
+      void loadPromise.catch(() => {
+        settledEarly = true;
+      });
+      await vi.advanceTimersByTimeAsync(74_999);
+      expect(settledEarly).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
 
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
+        status: 'disconnected',
         sessionId: 'session-b',
         loadingTranscript: undefined,
         catchingUp: undefined,
@@ -503,6 +581,7 @@ describe('createDaemonSessionActions', () => {
       sessionId: 'session-a',
       mode: 'attach',
     });
+    expect(pendingSessionLoadRef.current?.requestTimeoutMs).toBeUndefined();
     expect(setAttachSessionNonce).toHaveBeenCalledOnce();
     const nonceUpdater = setAttachSessionNonce.mock.calls[0]?.[0];
     expect(typeof nonceUpdater).toBe('function');
@@ -738,19 +817,39 @@ describe('createDaemonSessionActions', () => {
 
   it('restarts the event stream after prompt admission', async () => {
     const restartEventStream = vi.fn();
+    const onAdmissionStarted = vi.fn();
     const session = createMockSession('session-a');
     const { actions } = createActionsHarness({
       restartEventStream,
       session,
     });
 
-    const prompt = actions.sendPrompt('hello');
+    const prompt = actions.sendPrompt('hello', { onAdmissionStarted });
 
     await vi.waitFor(() => {
       expect(restartEventStream).toHaveBeenCalledWith('session-a');
     });
+    expect(onAdmissionStarted).toHaveBeenCalledOnce();
     await actions.cancel();
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
+  it('starts admission only after local prompt guards pass', async () => {
+    const onAdmissionStarted = vi.fn();
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      activePrompts: new Map([
+        ['session-a', { controller: new AbortController() } as ActivePrompt],
+      ]),
+      session,
+    });
+
+    await expect(
+      actions.sendPrompt('hello', { onAdmissionStarted }),
+    ).rejects.toThrow('A prompt is already in progress');
+
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
+    expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('does not restart the event stream when the admitted prompt is stale', async () => {
@@ -769,6 +868,147 @@ describe('createDaemonSessionActions', () => {
 
     await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
     expect(restartEventStream).not.toHaveBeenCalled();
+  });
+
+  it('does not apply a late model update to a replacement attachment', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const target = createMockSession('session-a', 'client-b');
+    const result = { applied: true };
+    const deferred = createDeferred<typeof result>();
+    source.setModel.mockReturnValueOnce(deferred.promise);
+    const { actions, getConnection, replaceConnection, sessionRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: source.sessionId,
+          clientId: source.clientId,
+          currentModel: 'source-model',
+        },
+        session: source,
+      });
+
+    const pending = actions.setModel('late-source-model');
+    sessionRef.current = target as unknown as DaemonSessionClient;
+    replaceConnection({
+      status: 'connected',
+      sessionId: target.sessionId,
+      clientId: target.clientId,
+      currentModel: 'target-model',
+    });
+    deferred.resolve(result);
+
+    await expect(pending).resolves.toBe(result);
+    expect(getConnection()).toMatchObject({
+      clientId: 'client-b',
+      currentModel: 'target-model',
+    });
+  });
+
+  it('does not apply a late approval mode to a replacement attachment', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const target = createMockSession('session-a', 'client-b');
+    const result = {
+      sessionId: 'session-a',
+      mode: 'yolo',
+      previous: 'default',
+      persisted: false,
+    };
+    const deferred = createDeferred<typeof result>();
+    source.client.setSessionApprovalMode.mockReturnValueOnce(deferred.promise);
+    const { actions, getConnection, replaceConnection, sessionRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: source.sessionId,
+          clientId: source.clientId,
+          currentMode: 'default',
+        },
+        session: source,
+      });
+
+    const pending = actions.setApprovalMode('yolo');
+    sessionRef.current = target as unknown as DaemonSessionClient;
+    replaceConnection({
+      status: 'connected',
+      sessionId: target.sessionId,
+      clientId: target.clientId,
+      currentMode: 'plan',
+    });
+    deferred.resolve(result);
+
+    await expect(pending).resolves.toBe(result);
+    expect(getConnection()).toMatchObject({
+      clientId: 'client-b',
+      currentMode: 'plan',
+    });
+  });
+
+  it('does not apply late commands to a replacement attachment', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const target = createMockSession('session-a', 'client-b');
+    const status = supportedCommandsStatus('session-a', 'source-command');
+    const deferred = createDeferred<typeof status>();
+    source.supportedCommands.mockReturnValueOnce(deferred.promise);
+    const targetStatus = supportedCommandsStatus('session-a', 'target-command');
+    const { actions, getConnection, replaceConnection, sessionRef } =
+      createActionsHarness({ session: source });
+
+    const pending = actions.refreshCommands();
+    sessionRef.current = target as unknown as DaemonSessionClient;
+    replaceConnection({
+      status: 'connected',
+      sessionId: target.sessionId,
+      clientId: target.clientId,
+      commands: [commandInfo('target-command')],
+      skills: ['target-skill'],
+      supportedCommands: targetStatus,
+    });
+    deferred.resolve(status);
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(getConnection()).toMatchObject({
+      clientId: 'client-b',
+      commands: [commandInfo('target-command')],
+      skills: ['target-skill'],
+      supportedCommands: targetStatus,
+    });
+  });
+
+  it('does not apply late context to a replacement attachment', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const target = createMockSession('session-a', 'client-b');
+    const context = {
+      ...contextStatus('session-a'),
+      state: {
+        models: { currentModelId: 'source-model' },
+        modes: { currentModeId: 'source-mode' },
+      },
+    };
+    const deferred = createDeferred<typeof context>();
+    source.context.mockReturnValueOnce(deferred.promise);
+    const targetContext = contextStatus('session-a');
+    const { actions, getConnection, replaceConnection, sessionRef } =
+      createActionsHarness({ session: source });
+
+    const pending = actions.getContext();
+    sessionRef.current = target as unknown as DaemonSessionClient;
+    replaceConnection({
+      status: 'connected',
+      sessionId: target.sessionId,
+      clientId: target.clientId,
+      context: targetContext,
+      currentModel: 'target-model',
+      currentMode: 'target-mode',
+    });
+    deferred.resolve(context);
+
+    await expect(pending).resolves.toBe(context);
+    expect(getConnection()).toMatchObject({
+      clientId: 'client-b',
+      context: targetContext,
+      currentModel: 'target-model',
+      currentMode: 'target-mode',
+    });
   });
 });
 
@@ -790,6 +1030,9 @@ function createActionsHarness(
   let connection: DaemonConnectionState = opts.connection ?? {
     status: 'connected',
     workspaceCwd: '/workspace',
+  };
+  const replaceConnection = (next: DaemonConnectionState) => {
+    connection = next;
   };
   const sessionRef = {
     current: opts.session as unknown as DaemonSessionClient | undefined,
@@ -816,7 +1059,7 @@ function createActionsHarness(
     pendingSessionLoadIdRef: { current: 0 },
     heartbeatSupportedRef: { current: false },
     manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
-    skipNextCleanupDetachSessionIdRef: { current: undefined },
+    skipNextCleanupDetachSessionRef: { current: undefined },
     passiveAssistantDoneTimerRef: { current: undefined },
     getCreateSessionRequest: () => ({ workspaceCwd: '/workspace' }),
     createDetachedSession: (opts.createDetachedSession ??
@@ -848,25 +1091,37 @@ function createActionsHarness(
     activePromptsRef,
     getConnection: () => connection,
     pendingSessionLoadRef,
+    replaceConnection,
     sessionRef,
     store,
   };
 }
 
-function createMockSession(sessionId: string) {
+function createMockSession(
+  sessionId: string,
+  clientId = `client-${sessionId}`,
+) {
   return {
     sessionId,
     workspaceCwd: '/workspace',
-    clientId: `client-${sessionId}`,
+    clientId,
     client: {
       createOrAttachSession: vi.fn(),
-      setSessionApprovalMode: vi.fn(),
+      setSessionApprovalMode: vi.fn(async () => ({
+        sessionId,
+        mode: 'default',
+        previous: 'default',
+        persisted: false,
+      })),
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
     },
     cancel: vi.fn(async () => undefined),
+    context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
+    setModel: vi.fn(async () => ({})),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
+    supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
   };
 }

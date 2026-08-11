@@ -261,6 +261,8 @@ export interface SendPromptOptions {
    * message in the JSONL transcript. Used by Ctrl+Y retry.
    */
   retry?: boolean;
+  /** Fired after local validation, immediately before dispatch to the daemon. */
+  onAdmissionStarted?: () => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
@@ -315,6 +317,7 @@ export interface DaemonTodoList {
 
 export interface SubmitPromptResult {
   promptId: string;
+  removedAfterAbort?: true;
 }
 
 export interface DaemonSessionActions {
@@ -496,7 +499,9 @@ export interface PendingSessionLoad {
   id: number;
   sessionId: string;
   mode: 'load' | 'resume' | 'attach';
-  timeout: ReturnType<typeof setTimeout>;
+  timeout?: ReturnType<typeof setTimeout>;
+  /** SDK timeout for load/resume; `0` disables its timer. */
+  requestTimeoutMs?: number;
   resolve: () => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;

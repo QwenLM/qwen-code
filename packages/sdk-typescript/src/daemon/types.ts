@@ -24,6 +24,8 @@ export interface DaemonCapabilitiesLimits {
   maxPendingPromptsPerSession?: number | null;
   maxSessionsPerWorkspace?: number | null;
   maxTotalSessions?: number | null;
+  /** Server-side deadline for ACP session load/resume. */
+  sessionRestoreTimeoutMs?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -930,7 +932,7 @@ export interface DaemonRestoredSession extends DaemonSession {
   artifactWarnings?: string[];
   /** Compacted events for completed turns (load only). */
   compactedReplay?: DaemonEvent[];
-  /** Raw events since last turn boundary — current incomplete turn (load only). */
+  /** Bounded replay events for the current incomplete turn (load only). */
   liveJournal?: DaemonEvent[];
   /** True when older persisted records precede this load replay page. */
   historyHasMore?: boolean;
@@ -1416,6 +1418,7 @@ export const DAEMON_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',
