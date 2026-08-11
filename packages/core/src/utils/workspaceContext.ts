@@ -295,14 +295,7 @@ export function resolveWorkspacePath(pathToCheck: string): string {
     const resolved = fs.realpathSync(pathToCheck);
     return typeof resolved === 'string' ? resolved : pathToCheck;
   } catch (error: unknown) {
-    if (
-      isNodeError(error) &&
-      error.code === 'ENOENT' &&
-      error.path &&
-      // realpathSync does not set error.path correctly for symlinks to
-      // non-existent files.
-      !isFileSymlink(error.path)
-    ) {
+    if (isResolvableMissingPathError(error)) {
       return resolveMissingPath(pathToCheck);
     }
 
@@ -319,12 +312,7 @@ function resolveMissingPath(pathToCheck: string): string {
       const resolvedAncestor = fs.realpathSync(ancestor);
       return path.join(resolvedAncestor, ...missingTail);
     } catch (error: unknown) {
-      if (
-        !isNodeError(error) ||
-        error.code !== 'ENOENT' ||
-        !error.path ||
-        isFileSymlink(error.path)
-      ) {
+      if (!isResolvableMissingPathError(error)) {
         throw error;
       }
 
@@ -336,6 +324,17 @@ function resolveMissingPath(pathToCheck: string): string {
       ancestor = parent;
     }
   }
+}
+
+function isResolvableMissingPathError(error: unknown): boolean {
+  return (
+    isNodeError(error) &&
+    error.code === 'ENOENT' &&
+    !!error.path &&
+    // realpathSync does not set error.path correctly for symlinks to
+    // non-existent files.
+    !isFileSymlink(error.path)
+  );
 }
 
 /**
