@@ -6,6 +6,7 @@
 
 import { useState, useCallback } from 'react';
 import type { Config, ReasoningEffort } from '@qwen-code/qwen-code-core';
+import { applyReasoningEffort } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -37,21 +38,20 @@ export const useEffortCommand = (
         }
         // Apply at runtime (next turn) and persist for future sessions; provider
         // adapters clamp the tier to what the active model supports.
-        config.setReasoningEffort(effort);
+        const applied = applyReasoningEffort(config, effort);
         loadedSettings.setValue(
           getPersistScopeForModelSelection(loadedSettings),
           'model.reasoningEffort',
           effort,
         );
-        // Mirror the slash-command path's read-back so the dialog reports the
-        // outcome in-chat instead of silently closing (the status line is the
-        // only other signal). `setReasoningEffort` is a no-op when thinking is
+        // Report the outcome in-chat instead of silently closing (the status
+        // line is the only other signal). The setter no-ops when thinking is
         // explicitly disabled (`reasoning: false`): the tier is still persisted
         // for future sessions, but say it won't take effect until thinking is
-        // re-enabled; otherwise confirm the requested tier.
+        // re-enabled.
         if (addItem) {
           const feedbackItem: HistoryItemWithoutId & Record<string, unknown> =
-            config.getReasoningEffort() !== effort
+            !applied
               ? {
                   type: MessageType.INFO,
                   text: t(
