@@ -3777,9 +3777,12 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: {} as Record<string, Record<string, unknown> | null>,
             description:
-              'User fixed policies keyed by policy id. Merged with system ' +
-              'defaults by id (whole-entry replacement); null tombstones a ' +
-              'default policy. Validated and normalized at startup.',
+              'User fixed policies keyed by policy id. There are no ' +
+              'built-in default policies: nothing runs unless configured ' +
+              'here. Across settings scopes entries merge by id ' +
+              '(whole-entry replacement); a null entry tombstones a policy ' +
+              'from a lower-priority scope. Validated and normalized at ' +
+              'startup.',
             showInDialog: false,
             mergeStrategy: MergeStrategy.SHALLOW_MERGE,
           },
