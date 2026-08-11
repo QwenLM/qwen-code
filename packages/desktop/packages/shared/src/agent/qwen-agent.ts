@@ -4603,6 +4603,9 @@ export class QwenAgent extends BaseAgent {
     const userRecordUuids = new Set<string>();
     const invocations = new Map<string, SlashCommandInvocation>();
     const seenResults = new Set<string>();
+    // An invocation pairs with at most one result, so a later same-name
+    // orphan result cannot re-emit an already-paired invocation's user row.
+    const consumedInvocations = new Set<string>();
     const messages: Message[] = [];
     let idCounter = 0;
 
@@ -4665,6 +4668,7 @@ export class QwenAgent extends BaseAgent {
         let ancestorUuid = parentUuid;
         const visited = new Set<string>();
         let invocation: SlashCommandInvocation | undefined;
+        let invocationUuid: string | undefined;
         const resultCommandName = rawCommand.split(/\s+/, 1)[0];
         while (ancestorUuid && !visited.has(ancestorUuid)) {
           visited.add(ancestorUuid);
@@ -4672,21 +4676,26 @@ export class QwenAgent extends BaseAgent {
           const candidate = invocations.get(ancestorUuid);
           if (candidate) {
             if (
-              candidate.rawCommand.split(/\s+/, 1)[0] === resultCommandName
+              candidate.rawCommand.split(/\s+/, 1)[0] === resultCommandName &&
+              !consumedInvocations.has(ancestorUuid)
             ) {
               invocation = candidate;
+              invocationUuid = ancestorUuid;
             }
             break;
           }
           ancestorUuid = parentUuidByUuid.get(ancestorUuid);
         }
-        if (invocation && !invocation.hidden) {
-          messages.push({
-            id: `qwen-${sessionId}-slash-${++idCounter}`,
-            role: 'user',
-            content: invocation.rawCommand,
-            timestamp: invocation.timestamp,
-          });
+        if (invocation && invocationUuid) {
+          consumedInvocations.add(invocationUuid);
+          if (!invocation.hidden) {
+            messages.push({
+              id: `qwen-${sessionId}-slash-${++idCounter}`,
+              role: 'user',
+              content: invocation.rawCommand,
+              timestamp: invocation.timestamp,
+            });
+          }
         }
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,

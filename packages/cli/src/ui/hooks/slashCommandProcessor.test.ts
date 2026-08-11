@@ -881,7 +881,8 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand(input);
       });
 
-      expect(mockAddItem).toHaveBeenCalledWith(
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        1,
         { type: MessageType.USER, text: input, sentToModel: false },
         expect.any(Number),
       );

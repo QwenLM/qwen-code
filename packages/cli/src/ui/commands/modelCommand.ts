@@ -47,8 +47,16 @@ const COMPACTION_MODEL_CONFIGURATION_HINT =
 const IMAGE_MODEL_CONFIGURATION_HINT =
   'Configure a model with imageOnly: true, baseUrl, and envKey in settings.modelProviders. Run /model --image <model-id> to select it.';
 
-const MODEL_PICKER_FLAG_PATTERN =
-  '(?:fast|voice|vision|compaction|image|project|global)';
+const MODEL_PICKER_FLAGS = [
+  'fast',
+  'voice',
+  'vision',
+  'compaction',
+  'image',
+  'project',
+  'global',
+] as const;
+const MODEL_PICKER_FLAG_PATTERN = `(?:${MODEL_PICKER_FLAGS.join('|')})`;
 const MODEL_PICKER_ONLY_PATTERN = new RegExp(
   `^(?:\\s*--${MODEL_PICKER_FLAG_PATTERN})*\\s*$`,
 );
