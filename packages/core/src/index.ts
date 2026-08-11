@@ -241,6 +241,10 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export {
+  resolveSlimmingConfig,
+  type ResolvedSlimmingConfig,
+} from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export type {

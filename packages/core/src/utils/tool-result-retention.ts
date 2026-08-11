@@ -9,7 +9,10 @@ import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   estimatePartChars,
 } from '../services/compactionInputSlimming.js';
-import { TOOL_OUTPUT_TRUNCATED_PREFIX } from './truncation.js';
+import {
+  COMBINED_PASS_TOLERANCE_FACTOR,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+} from './truncation.js';
 
 // Fallback oversized budget for tool results whose producing tool declares no
 // `maxOutputChars` (or when no budget resolver is supplied). Callers should
@@ -18,11 +21,6 @@ import { TOOL_OUTPUT_TRUNCATED_PREFIX } from './truncation.js';
 // 32k, web-search 102k, MCP 500k) are resolved per-tool via
 // `resolveToolBudgetChars`, and self-managed tools declare `Infinity`.
 export const OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS = 30_000;
-
-// Mirrors the scheduler's combined-pass tolerance: metadata appended after
-// truncation is only re-bounded above 2x the applicable budget, so compliant
-// retained content can legitimately measure up to twice its tool's budget.
-const OVERSIZED_TOLERANCE_FACTOR = 2;
 
 export interface ToolResultRetentionStats {
   /** Number of function-response (tool result) parts retained in history. */
@@ -54,6 +52,14 @@ export interface AnalyzeToolResultRetentionOptions {
    * so compliant results from high-budget tools (e.g. MCP) are never flagged.
    */
   resolveToolBudgetChars?: (toolName: string) => number | undefined;
+  /**
+   * Image token estimate for billing nested media parts, mirroring the
+   * compression pipeline's `resolveSlimmingConfig`. Defaults to
+   * `DEFAULT_IMAGE_TOKEN_ESTIMATE`; production callers should pass the
+   * resolved value so both diagnostics and compression agree about the
+   * same history.
+   */
+  imageTokenEstimate?: number;
 }
 
 /**
@@ -73,12 +79,17 @@ export function analyzeToolResultRetention(
   const thresholdChars =
     options.thresholdChars ?? OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS;
 
+  const imageTokenEstimate =
+    options.imageTokenEstimate ?? DEFAULT_IMAGE_TOKEN_ESTIMATE;
+
   const stats: ToolResultRetentionStats = {
     toolResultCount: 0,
     totalChars: 0,
     largestResultChars: 0,
     oversizedResultCount: 0,
-    oversizedThresholdChars: thresholdChars,
+    oversizedThresholdChars: Number.isFinite(thresholdChars)
+      ? thresholdChars
+      : 0,
   };
 
   for (const content of history) {
@@ -87,7 +98,7 @@ export function analyzeToolResultRetention(
         continue;
       }
 
-      const chars = estimatePartChars(part, DEFAULT_IMAGE_TOKEN_ESTIMATE);
+      const chars = estimatePartChars(part, imageTokenEstimate);
       stats.toolResultCount += 1;
       stats.totalChars += chars;
       if (chars > stats.largestResultChars) {
@@ -108,7 +119,7 @@ export function analyzeToolResultRetention(
       if (
         !alreadyTruncated &&
         Number.isFinite(budget) &&
-        chars > budget * OVERSIZED_TOLERANCE_FACTOR
+        chars > budget * COMBINED_PASS_TOLERANCE_FACTOR
       ) {
         stats.oversizedResultCount += 1;
       }

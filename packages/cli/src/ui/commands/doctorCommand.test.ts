@@ -841,6 +841,15 @@ describe('doctorCommand', () => {
                     : name === 'mcp_tool'
                       ? { maxOutputChars: 500_000 }
                       : undefined,
+              // Display names as stored in IndividualToolCallDisplay.name;
+              // the diagnostics builds a displayName → budget map from
+              // these because UI history uses display names, not registry
+              // keys.
+              getAllTools: () => [
+                { displayName: 'Shell', maxOutputChars: 30_000 },
+                { displayName: 'Grep', maxOutputChars: 100 },
+                { displayName: 'MCP Tool', maxOutputChars: 500_000 },
+              ],
             }),
           },
         },
@@ -922,6 +931,31 @@ describe('doctorCommand', () => {
 
       const content = result?.type === 'message' ? result.content : '';
       expect(content).toContain('Oversized results (above tool budget): 1');
+    });
+
+    it('should resolve UI budgets by display name, not registry key', async () => {
+      // IndividualToolCallDisplay.name stores the tool's displayName
+      // (e.g. 'Shell'), not the registry key (e.g. 'shell'). Without the
+      // displayName → budget map, getTool('Shell') returns undefined and
+      // the budget falls back to the global threshold (25k), falsely
+      // counting a 28k output as oversized (28k > 25k). With the map,
+      // 'Shell' resolves to 30k and 28k < 30k → not oversized.
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [{ name: 'Shell', resultDisplay: 'x'.repeat(28_000) }],
+        },
+      ] as unknown as CommandContext['ui']['history'];
+
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, uiHistory),
+        '',
+      );
+
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain(
+        'Oversized also rendered in UI history: 0 item(s)',
+      );
     });
 
     it('should include retention stats in --json output', async () => {

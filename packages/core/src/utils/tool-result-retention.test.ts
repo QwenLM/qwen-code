@@ -184,6 +184,31 @@ describe('analyzeToolResultRetention', () => {
     );
   });
 
+  it('uses a configurable imageTokenEstimate for nested media parts', () => {
+    const customEstimate = 800;
+    const stats = analyzeToolResultRetention(
+      [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'img' },
+                [PARTS_KEY]: [{ inlineData: {} }],
+              },
+            },
+          ],
+        },
+      ],
+      { imageTokenEstimate: customEstimate },
+    );
+    const imageChars = customEstimate * TOKEN_TO_CHAR_RATIO;
+    expect(stats.totalChars).toBe(
+      'img'.length + imageChars + WRAPPER_FLOOR_CHARS,
+    );
+  });
+
   it('does not throw on unserializable structured payloads', () => {
     const circular: Record<string, unknown> = { content: [{ text: 'data' }] };
     circular['self'] = circular;
@@ -196,5 +221,16 @@ describe('analyzeToolResultRetention', () => {
     // No string output and no nested parts: only the wrapper floor counts.
     expect(stats.toolResultCount).toBe(1);
     expect(stats.totalChars).toBe(WRAPPER_FLOOR_CHARS);
+  });
+
+  it('reports oversizedThresholdChars as 0 when truncation is disabled (Infinity)', () => {
+    const stats = analyzeToolResultRetention(
+      [toolResultContent('x'.repeat(100))],
+      { thresholdChars: Infinity },
+    );
+    expect(stats.oversizedThresholdChars).toBe(0);
+    // JSON-serializable: JSON.stringify(Infinity) would drop the key to
+    // null, which confuses --json consumers. The guard prevents that.
+    expect(JSON.parse(JSON.stringify(stats)).oversizedThresholdChars).toBe(0);
   });
 });

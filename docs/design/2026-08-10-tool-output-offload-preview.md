@@ -111,9 +111,11 @@ unbounded retention or data exposure):
 `/doctor memory` now reports, live and by reference (no history clone):
 
 - Tool results in history, total retained chars, largest result. Sizes reuse
-  the compression pipeline's `estimatePartChars` model, so string outputs are
-  measured as raw chars (no JSON-escaping inflation) and nested media parts
-  are billed at the image token estimate.
+  the compression pipeline's `estimatePartChars` model with the same
+  `imageTokenEstimate` (resolved via `resolveSlimmingConfig` from env >
+  settings > default), so diagnostics and compression agree about the same
+  history: string outputs are measured as raw chars (no JSON-escaping
+  inflation) and nested media parts are billed at the image token estimate.
 - Oversized results, counted against each result's own tool budget (resolved
   from the tool registry by canonicalized `functionResponse.name`, mirroring
   the scheduler; tools declaring none fall back to the configured global
@@ -125,9 +127,14 @@ unbounded retention or data exposure):
   truncation layer was bypassed — the counter doubles as a regression alarm.
 - Whether oversized outputs are also rendered in UI history (scanned in
   `tool_group` items' `resultDisplay`, compared per display against the same
-  per-tool budget) and in compression input (yes by construction, but
-  compression reads history by reference via `getHistoryShallow`, so no extra
-  copy is held).
+  per-tool budget — UI history stores display names, not registry keys, so a
+  display-name → budget map is built from the tool registry at scan time) and
+  in compression input (yes by construction, but compression reads history by
+  reference via `getHistoryShallow`, so no extra copy is held). Phase-1 scope:
+  only string `resultDisplay` values are measured; structured display objects
+  (file diffs, ANSI captures, agent result summaries) carry their own
+  rendering contracts and are not char-comparable in the same way — they are
+  left for a follow-up PR.
 
 ## 6. Alternatives Considered
 

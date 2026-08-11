@@ -31,6 +31,15 @@ export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated';
 
 /**
+ * Tolerance factor applied by the scheduler's combined (second) pass:
+ * metadata appended after truncation is only re-bounded above 2x the
+ * applicable budget, so compliant retained content can legitimately
+ * measure up to twice its tool's budget. Shared with the retention
+ * diagnostics so both use the same tolerance.
+ */
+export const COMBINED_PASS_TOLERANCE_FACTOR = 2;
+
+/**
  * Truncates large tool output and saves the full content to a temp file.
  * Used by the shell tool to prevent excessively large outputs from being
  * sent to the LLM context.
