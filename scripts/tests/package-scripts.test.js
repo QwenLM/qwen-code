@@ -468,6 +468,9 @@ describe('package scripts', () => {
       publishJob,
       'Publish remaining channel packages',
     );
+    expect(channelStep).toContain(
+      'for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do',
+    );
     expect(channelStep).toContain('(\n');
     expect(channelStep).toContain(')');
     // A fully-skipped publish must be visible, not silently green.

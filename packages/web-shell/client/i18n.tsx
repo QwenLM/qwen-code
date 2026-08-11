@@ -2592,6 +2592,44 @@ const EN: Messages = {
   'channels.editor.environmentReference': '$ENV_VAR supported',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.dws.dwsPath': 'DWS executable',
+  'channels.editor.field.dws.dwsPath.description':
+    'Optional path to dws. Leave empty to resolve it from PATH',
+  'channels.editor.field.dws.profile': 'DWS profile',
+  'channels.editor.field.dws.profile.description':
+    'Optional profile name or corpId. Leave empty to use the active profile',
+  'channels.editor.field.dws.disableAtMessages': 'Disable @ message listening',
+  'channels.editor.field.dws.disableAtMessages.description':
+    'Turn off the default subscription for DingTalk messages that mention the authenticated DWS user',
+  'channels.editor.field.dws.imUserIds':
+    'Direct-message users (comma-separated)',
+  'channels.editor.field.dws.imUserIds.description':
+    'DingTalk user IDs whose direct messages should start tasks',
+  'channels.editor.field.dws.imGroupIds': 'Message groups (comma-separated)',
+  'channels.editor.field.dws.imGroupIds.description':
+    'Open conversation IDs whose prefixed messages should start tasks',
+  'channels.editor.field.dws.documentIds': 'Documents (comma-separated)',
+  'channels.editor.field.dws.documentIds.description':
+    'DingTalk document IDs or URLs to watch',
+  'channels.editor.field.dws.wikiSpaceIds': 'Knowledge bases (comma-separated)',
+  'channels.editor.field.dws.wikiSpaceIds.description':
+    'DingTalk knowledge-base workspace IDs or URLs whose documents should be watched',
+  'channels.editor.field.dws.wikiDiscoveryInterval':
+    'Knowledge-base discovery interval (ms)',
+  'channels.editor.field.dws.wikiDiscoveryInterval.description':
+    'How often knowledge-base document lists are refreshed. Defaults to 300000 milliseconds',
+  'channels.editor.field.dws.trigger': 'Poll-source trigger',
+  'channels.editor.field.dws.trigger.description':
+    'Prefix for document comments and configured group messages. Defaults to /qwen',
+  'channels.editor.field.dws.pollInterval': 'Poll interval (ms)',
+  'channels.editor.field.dws.pollInterval.description':
+    'Defaults to 60000 milliseconds',
+  'channels.editor.field.dws.senderPolicy': 'Sender Policy',
+  'channels.editor.field.dws.senderPolicy.description':
+    'Controls which DingTalk users may start DWS tasks',
+  'channels.editor.field.dws.allowedUsers': 'Allowed Users (comma-separated)',
+  'channels.editor.field.dws.allowedUsers.description':
+    'DingTalk user IDs used by Allowlist and Pairing policies',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
@@ -5267,6 +5305,41 @@ const ZH: Messages = {
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
+  'channels.editor.field.dws.dwsPath': 'DWS 可执行文件',
+  'channels.editor.field.dws.dwsPath.description':
+    '可选的 dws 路径；留空时从 PATH 查找',
+  'channels.editor.field.dws.profile': 'DWS 身份',
+  'channels.editor.field.dws.profile.description':
+    '可选的 profile 名称或 corpId；留空时使用当前身份',
+  'channels.editor.field.dws.disableAtMessages': '关闭 @我的消息监听',
+  'channels.editor.field.dws.disableAtMessages.description':
+    '关闭默认启用的、提及当前 DWS 登录用户的钉钉消息订阅',
+  'channels.editor.field.dws.imUserIds': '单聊用户（逗号分隔）',
+  'channels.editor.field.dws.imUserIds.description':
+    '这些钉钉用户 ID 发来的单聊消息会启动任务',
+  'channels.editor.field.dws.imGroupIds': '消息群（逗号分隔）',
+  'channels.editor.field.dws.imGroupIds.description':
+    '这些群会话中带触发词的消息会启动任务',
+  'channels.editor.field.dws.documentIds': '文档（逗号分隔）',
+  'channels.editor.field.dws.documentIds.description':
+    '需要监听的钉钉文档 ID 或 URL',
+  'channels.editor.field.dws.wikiSpaceIds': '知识库（逗号分隔）',
+  'channels.editor.field.dws.wikiSpaceIds.description':
+    '递归监听这些钉钉知识库 ID 或 URL 下的文档',
+  'channels.editor.field.dws.wikiDiscoveryInterval': '知识库发现间隔（毫秒）',
+  'channels.editor.field.dws.wikiDiscoveryInterval.description':
+    '刷新知识库文档列表的间隔，默认 300000 毫秒',
+  'channels.editor.field.dws.trigger': '轮询来源触发词',
+  'channels.editor.field.dws.trigger.description':
+    '文档评论和指定群消息以此前缀开头时启动任务，默认为 /qwen',
+  'channels.editor.field.dws.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.dws.pollInterval.description': '默认 60000 毫秒',
+  'channels.editor.field.dws.senderPolicy': '发送者策略',
+  'channels.editor.field.dws.senderPolicy.description':
+    '控制哪些钉钉用户可以启动 DWS 任务',
+  'channels.editor.field.dws.allowedUsers': '允许的用户（逗号分隔）',
+  'channels.editor.field.dws.allowedUsers.description':
+    '钉钉用户 ID，用于 Allowlist 和 Pairing 策略',
   'channels.editor.field.wecom.botId': 'Bot ID',
   'channels.editor.field.wecom.secret': 'Bot Secret',
   'channels.editor.field.wecom.wsUrl': 'WebSocket URL',
