@@ -6,7 +6,7 @@
 
 import {
   ApprovalMode,
-  AuthType,
+  type AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,

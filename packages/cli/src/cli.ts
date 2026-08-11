@@ -13,8 +13,7 @@ import {
   statSync,
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { ArgumentsCamelCase, Argv } from 'yargs';
-import type { Options } from 'yargs';
+import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import {
   TOP_LEVEL_DEPRECATED_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
