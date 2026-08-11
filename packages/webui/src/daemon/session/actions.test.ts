@@ -876,6 +876,60 @@ describe('createDaemonSessionActions', () => {
     expect(restartEventStream).not.toHaveBeenCalled();
   });
 
+  it('preserves ambiguous stable-id admission failures for reconciliation', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('response lost')),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(
+      actions.enqueueMidTurnMessage('follow up', { messageId: 'stable-id' }),
+    ).rejects.toThrow('response lost');
+    // The stable id must reach the session client verbatim: the daemon's
+    // messageId-keyed idempotency and the reconciliation rings never match
+    // if this hop drops the option.
+    expect(session.enqueueMidTurnMessage).toHaveBeenCalledWith('follow up', {
+      messageId: 'stable-id',
+    });
+  });
+
+  it('keeps legacy mid-turn admission failures best-effort', async () => {
+    const session = {
+      ...createMockSession('session-a'),
+      enqueueMidTurnMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('daemon unavailable')),
+    };
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.enqueueMidTurnMessage('follow up')).resolves.toEqual({
+      accepted: false,
+    });
+  });
+
+  it('resolves undefined when getMidTurnMessages fails instead of throwing', async () => {
+    // Snapshot failure is unknown state. The caller must not infer that it is
+    // safe to resend.
+    const session = {
+      ...createMockSession('session-a'),
+      getMidTurnMessages: vi.fn().mockRejectedValue(new Error('daemon 500')),
+    };
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('resolves undefined from getMidTurnMessages when no session exists', async () => {
+    const { actions } = createActionsHarness();
+
+    await expect(actions.getMidTurnMessages()).resolves.toBeUndefined();
+  });
+
   it('does not apply a late model update to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
