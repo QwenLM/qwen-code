@@ -457,16 +457,6 @@ function stripWrappers(s: string): string {
 
 const TRAILING_GAP_CHAR_RE = /[.!…,;:\s]/;
 
-/** Trailing punctuation/whitespace strip for the normalize and fold keys. */
-function stripTrailingGapChars(s: string): string {
-  // Walked backwards rather than replaced with an end-anchored class run:
-  // that shape backtracks quadratically when a long run fails to reach
-  // the end.
-  let end = s.length;
-  while (end > 0 && TRAILING_GAP_CHAR_RE.test(s.charAt(end - 1))) end--;
-  return s.slice(0, end);
-}
-
 /** Wrapping bracket/quote pairs stripped only SYMMETRICALLY. */
 const GAP_WRAPPER_CLOSES: Record<string, string> = {
   '(': ')',
@@ -486,8 +476,9 @@ const GAP_WRAPPER_CLOSES: Record<string, string> = {
  * clause's closing paren intact for the classifier's parenthesized shape.
  */
 function stripGapWrappers(s: string): string {
-  // Two-pointer like stripTrailingGapChars — this parse runs on every
-  // agent return, so no anchored class runs that could backtrack.
+  // Two-pointer (walk both ends inward) rather than end-anchored class
+  // runs — this parse runs on every agent return, so nothing that could
+  // backtrack quadratically when a long run fails to reach the edge.
   let start = 0;
   let end = s.length;
   for (;;) {
