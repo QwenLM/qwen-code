@@ -377,6 +377,44 @@ describe('createSpawnChannelFactory env policy', () => {
     writer.releaseLock();
   });
 
+  it('stops estimating a large response once its byte budget is exceeded', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 5_000,
+      },
+    })('/tmp/project');
+    let elementReads = 0;
+    const response = new Proxy(
+      Array.from({ length: 10_000 }, () => 0),
+      {
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/u.test(property)) {
+            elementReads++;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+        getOwnPropertyDescriptor(target, property) {
+          if (typeof property === 'string' && /^\d+$/u.test(property)) {
+            elementReads++;
+          }
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        },
+      },
+    );
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
+    expect(elementReads).toBeLessThan(1_000);
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
   it('keeps the default factory unbounded and validates opt-in limits early', () => {
     expect(DAEMON_ACP_NDJSON_LIMITS).toEqual({
       maxFrameBytes: 64 * 1024 * 1024,

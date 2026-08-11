@@ -4224,12 +4224,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     mode: ApprovalMode,
     clientId: string,
-  ): Promise<void> {
+  ): Promise<ApprovalMode> {
     try {
-      await applyApprovalMode(entry, mode, false, clientId);
+      const result = await applyApprovalMode(entry, mode, false, clientId);
+      return result.previous;
     } catch (err) {
       await rollbackAttachRegistration(entry, clientId);
       throw err;
+    }
+  }
+
+  async function rollbackApprovalModeForRejectedAttach(
+    entry: SessionEntry,
+    previous: ApprovalMode,
+    clientId: string,
+  ): Promise<void> {
+    if (byId.get(entry.sessionId) !== entry) return;
+    try {
+      await applyApprovalMode(entry, previous, false, clientId);
+    } catch (err) {
+      writeStderrLine(
+        `attach: failed to restore approval mode for session ${entry.sessionId}: ${extractErrorMessage(err)}`,
+      );
     }
   }
 
@@ -5571,10 +5587,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(existing, req.approvalMode, clientId);
+        const previousApprovalMode = await applyApprovalModeForAttach(
+          existing,
+          req.approvalMode,
+          clientId,
+        );
         try {
           assertAttachableSessionEntry(req.sessionId, existing);
         } catch (error) {
+          await rollbackApprovalModeForRejectedAttach(
+            existing,
+            previousApprovalMode,
+            clientId,
+          );
           await rollbackAttachRegistration(existing, clientId);
           throw error;
         }
@@ -5680,10 +5705,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `coalesceState.count`, so only the ledger is updated here.
       recordAttachRef(entry, clientId);
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
+        const previousApprovalMode = await applyApprovalModeForAttach(
+          entry,
+          req.approvalMode,
+          clientId,
+        );
         try {
           assertAttachableSessionEntry(restored.sessionId, entry);
         } catch (error) {
+          await rollbackApprovalModeForRejectedAttach(
+            entry,
+            previousApprovalMode,
+            clientId,
+          );
           await rollbackAttachRegistration(entry, clientId);
           throw error;
         }
@@ -6087,13 +6121,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const clientId = registerClient(racedEntry, req.clientId);
         recordAttachRef(racedEntry, clientId);
         if (req.approvalMode) {
+          let previousApprovalMode: ApprovalMode;
           try {
-            await applyApprovalMode(
+            const result = await applyApprovalMode(
               racedEntry,
               req.approvalMode,
               false,
               clientId,
             );
+            previousApprovalMode = result.previous;
           } catch (err) {
             await rollbackAttachRegistration(
               racedEntry,
@@ -6105,6 +6141,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             assertAttachableSessionEntry(req.sessionId, racedEntry);
           } catch (error) {
+            await rollbackApprovalModeForRejectedAttach(
+              racedEntry,
+              previousApprovalMode,
+              clientId,
+            );
             await rollbackAttachRegistration(
               racedEntry,
               clientId,
@@ -6778,8 +6819,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            await applyApprovalModeForAttach(
+            previousApprovalMode = await applyApprovalModeForAttach(
               existing,
               req.approvalMode,
               clientId,
@@ -6788,6 +6830,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             assertAttachableSessionEntry(existing.sessionId, existing);
           } catch (error) {
+            if (previousApprovalMode !== undefined) {
+              await rollbackApprovalModeForRejectedAttach(
+                existing,
+                previousApprovalMode,
+                clientId,
+              );
+            }
             await rollbackAttachRegistration(existing, clientId);
             throw error;
           }
@@ -6855,8 +6904,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            await applyApprovalModeForAttach(
+            previousApprovalMode = await applyApprovalModeForAttach(
               attachedEntry,
               req.approvalMode,
               clientId,
@@ -6865,6 +6915,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             assertAttachableSessionEntry(session.sessionId, attachedEntry);
           } catch (error) {
+            if (previousApprovalMode !== undefined) {
+              await rollbackApprovalModeForRejectedAttach(
+                attachedEntry,
+                previousApprovalMode,
+                clientId,
+              );
+            }
             await rollbackAttachRegistration(attachedEntry, clientId);
             throw error;
           }

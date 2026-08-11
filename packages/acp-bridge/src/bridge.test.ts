@@ -15362,6 +15362,66 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('restores approval mode when an attach loses a close race', async () => {
+      const approvalResult = deferred<void>();
+      const closeResult = deferred<Record<string, unknown>>();
+      const closeStarted = deferred<void>();
+      const modeCalls: string[] = [];
+      let currentMode: ApprovalMode = ApprovalMode.DEFAULT;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+            const mode = (params as { mode: ApprovalMode }).mode;
+            modeCalls.push(mode);
+            if (modeCalls.length === 1) await approvalResult.promise;
+            const previous = currentMode;
+            currentMode = mode;
+            return { previous, current: mode };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            closeStarted.resolve();
+            return closeResult.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionScope: 'single',
+        sessionReapIntervalMs: 1,
+        sessionIdleTimeoutMs: 1,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      const attach = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'single',
+        approvalMode: ApprovalMode.YOLO,
+      });
+      await vi.waitFor(() => expect(modeCalls).toEqual([ApprovalMode.YOLO]));
+      await closeStarted.promise;
+      approvalResult.resolve();
+
+      await expect(attach).rejects.toMatchObject({ code: 'session_closing' });
+      expect(modeCalls).toEqual([ApprovalMode.YOLO, ApprovalMode.DEFAULT]);
+      expect(currentMode).toBe(ApprovalMode.DEFAULT);
+      expect(
+        bridge.getDaemonStatusSnapshot().sessions[0]?.currentApprovalMode,
+      ).toBe(ApprovalMode.DEFAULT);
+
+      closeResult.resolve({
+        closed: false,
+        holds: [agentHold('late-agent')],
+      });
+      await vi.waitFor(() => expect(bridge.activeWork).toBe(true));
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
     it('rolls back restored sessions when approval-mode initialization fails', async () => {
       const bridge = makeBridge({
         channelFactory: rejectingApprovalModeFactory(),

@@ -619,6 +619,67 @@ describe('ndJsonStream', () => {
     writer.releaseLock();
   });
 
+  it('allows an owned bulk response beyond inbound structure limits', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      undefined,
+      limits({ maxFrameBytes: 128_000, maxQueuedBytes: 128_000 }),
+    );
+    const writer = stream.writable.getWriter();
+    await writer.write({
+      jsonrpc: '2.0',
+      id: 41,
+      method: 'session/load',
+      params: {},
+    });
+    const response = {
+      jsonrpc: '2.0',
+      id: 41,
+      result: { updates: Array.from({ length: 4_097 }, () => null) },
+    } satisfies AnyMessage;
+    inputController.enqueue(encoder.encode(`${JSON.stringify(response)}\n`));
+    inputController.close();
+
+    await expect(readAll(stream.readable)).resolves.toEqual([response]);
+    writer.releaseLock();
+  });
+
+  it('rejects oversized request structures without materializing values', async () => {
+    const params = Object.fromEntries(
+      Array.from({ length: 10_001 }, (_, index) => [`k${index}`, index]),
+    );
+    const request = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'client/request',
+      params,
+    } satisfies AnyMessage;
+    const line = `${JSON.stringify(request)}\n`;
+    const onTransportError = vi.fn();
+    const valuesSpy = vi.spyOn(Object, 'values');
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([encoder.encode(line)]),
+      { onTransportError },
+      limits({ maxFrameBytes: 256_000, maxQueuedBytes: 256_000 }),
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([]);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ndjson_invalid_message' }),
+    );
+    expect(valuesSpy).not.toHaveBeenCalled();
+    valuesSpy.mockRestore();
+  });
+
   it('accepts a matching response before local write completion', async () => {
     let inputController!: ReadableStreamDefaultController<Uint8Array>;
     const input = new ReadableStream<Uint8Array>({

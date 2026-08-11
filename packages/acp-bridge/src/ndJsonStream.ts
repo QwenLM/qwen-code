@@ -450,8 +450,9 @@ function handleBoundedLine(
   if (!isJsonRpcMessage(parsed)) {
     throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
   }
+  const isResponse = isJsonRpcResponseMessage(parsed);
   if (
-    !hasBoundedJsonStructure(parsed) ||
+    (!isResponse && !hasBoundedJsonStructure(parsed)) ||
     (validateInboundMessage && !validateInboundMessage(parsed))
   ) {
     throw logBoundedInvalidMessage('ndjson_invalid_message', lineBytes);
@@ -534,14 +535,30 @@ function hasBoundedJsonStructure(value: unknown): boolean {
     if (Array.isArray(current.value)) {
       if (current.value.length > MAX_JSON_ARRAY_LENGTH) return false;
       for (let index = current.value.length - 1; index >= 0; index--) {
+        if (
+          nodes + stack.length >= MAX_JSON_NODES ||
+          current.depth + 1 > MAX_JSON_DEPTH
+        ) {
+          return false;
+        }
         stack.push({
           value: current.value[index],
           depth: current.depth + 1,
         });
       }
     } else if (isRecord(current.value)) {
-      for (const child of Object.values(current.value)) {
-        stack.push({ value: child, depth: current.depth + 1 });
+      for (const key in current.value) {
+        if (!Object.hasOwn(current.value, key)) continue;
+        if (
+          nodes + stack.length >= MAX_JSON_NODES ||
+          current.depth + 1 > MAX_JSON_DEPTH
+        ) {
+          return false;
+        }
+        stack.push({
+          value: current.value[key],
+          depth: current.depth + 1,
+        });
       }
     }
   }

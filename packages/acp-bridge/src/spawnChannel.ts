@@ -206,12 +206,60 @@ class OutboundOperationBudget {
   }
 }
 
+type PreparedResponseEstimationFrame =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'array'; value: unknown[]; index: number }
+  | {
+      kind: 'record';
+      value: Record<string, unknown>;
+      keys: Generator<string, void, unknown>;
+      first: boolean;
+    };
+
+function* enumerableOwnKeys(
+  value: Record<string, unknown>,
+): Generator<string, void, unknown> {
+  for (const key in value) {
+    if (Object.hasOwn(value, key)) yield key;
+  }
+}
+
 function estimatePreparedResponseBytes(value: unknown, limitBytes: number) {
   let bytes = 0;
-  const stack: unknown[] = [value];
+  const stack: PreparedResponseEstimationFrame[] = [{ kind: 'value', value }];
   const seen = new WeakSet<object>();
   while (stack.length > 0) {
-    const current = stack.pop();
+    const frame = stack.pop()!;
+    if (frame.kind === 'array') {
+      if (frame.index >= frame.value.length) continue;
+      if (frame.index > 0) bytes++;
+      if (bytes > limitBytes) return limitBytes + 1;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        frame.value,
+        String(frame.index),
+      );
+      if (descriptor?.get || descriptor?.set) return limitBytes + 1;
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: 'value', value: descriptor?.value });
+      continue;
+    }
+    if (frame.kind === 'record') {
+      const next = frame.keys.next();
+      if (next.done) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        frame.value,
+        next.value,
+      );
+      if (!descriptor || descriptor.get || descriptor.set) {
+        return limitBytes + 1;
+      }
+      bytes += (frame.first ? 0 : 1) + Buffer.byteLength(next.value) + 3;
+      if (bytes > limitBytes) return limitBytes + 1;
+      stack.push({ ...frame, first: false });
+      stack.push({ kind: 'value', value: descriptor.value });
+      continue;
+    }
+    const current = frame.value;
     if (current === null) {
       bytes += 4;
     } else if (current === undefined) {
@@ -223,21 +271,24 @@ function estimatePreparedResponseBytes(value: unknown, limitBytes: number) {
     } else if (typeof current === 'boolean') {
       bytes += 5;
     } else if (Array.isArray(current)) {
-      if (seen.has(current)) return limitBytes + 1;
-      seen.add(current);
-      bytes += 2 + Math.max(0, current.length - 1);
-      for (let index = current.length - 1; index >= 0; index--) {
-        stack.push(current[index]);
+      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+        return limitBytes + 1;
       }
+      seen.add(current);
+      bytes += 2;
+      stack.push({ kind: 'array', value: current, index: 0 });
     } else if (isPlainRecord(current)) {
-      if (seen.has(current) || hasJsonAccessors(current)) return limitBytes + 1;
-      seen.add(current);
-      const entries = Object.entries(current);
-      bytes += 2 + Math.max(0, entries.length - 1);
-      for (const [key, entryValue] of entries) {
-        bytes += Buffer.byteLength(key) + 3;
-        stack.push(entryValue);
+      if (seen.has(current) || Object.hasOwn(current, 'toJSON')) {
+        return limitBytes + 1;
       }
+      seen.add(current);
+      bytes += 2;
+      stack.push({
+        kind: 'record',
+        value: current,
+        keys: enumerableOwnKeys(current),
+        first: true,
+      });
     } else {
       return limitBytes + 1;
     }
@@ -254,14 +305,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!isObjectValue(value) || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
-}
-
-function hasJsonAccessors(value: Record<string, unknown>): boolean {
-  if (Object.hasOwn(value, 'toJSON')) return true;
-  return Object.values(Object.getOwnPropertyDescriptors(value)).some(
-    (descriptor) =>
-      descriptor.get !== undefined || descriptor.set !== undefined,
-  );
 }
 
 export function getAcpMemoryArgs(): string[] {
