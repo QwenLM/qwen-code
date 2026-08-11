@@ -1,0 +1,585 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  DEFAULT_OMNI_MEMORY_CONFIG,
+  MediaMemoryRecallRejection,
+  MediaMemoryRecallService,
+  MediaMemoryService,
+  MediaResourceRegistry,
+  type MediaMemoryBinding,
+} from './index.js';
+import type { NormalizedOmniMemoryRecall } from './config.js';
+
+let root: string;
+let moviePath: string;
+let clock: number;
+let service: TestMediaMemoryService;
+let registry: MediaResourceRegistry;
+
+class TestMediaMemoryService extends MediaMemoryService {
+  protected override now(): string {
+    return new Date(clock++).toISOString();
+  }
+}
+
+const SHA_MOVIE = 'a'.repeat(64);
+const SHA_MOVIE_V2 = 'b'.repeat(64);
+const SHA_DEGRADED = 'c'.repeat(64);
+const SHA_TRANSCRIPT = 'd'.repeat(64);
+const SHA_AUDIO = 'e'.repeat(64);
+
+beforeEach(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-memory-recall-'));
+  clock = 1_754_870_400_000;
+  service = new TestMediaMemoryService(root);
+  registry = new MediaResourceRegistry();
+  moviePath = path.join(root, 'src', 'breaking-surface.mkv');
+  await fs.mkdir(path.dirname(moviePath), { recursive: true });
+  await fs.writeFile(moviePath, 'movie-bytes');
+});
+
+afterEach(async () => {
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+function recallConfig(
+  overrides?: Partial<NormalizedOmniMemoryRecall>,
+): NormalizedOmniMemoryRecall {
+  return {
+    ...DEFAULT_OMNI_MEMORY_CONFIG.recall,
+    kinds: [...DEFAULT_OMNI_MEMORY_CONFIG.recall.kinds],
+    ...overrides,
+  };
+}
+
+function recallService(
+  config = recallConfig(),
+  options?: ConstructorParameters<typeof MediaMemoryRecallService>[3],
+): MediaMemoryRecallService {
+  return new MediaMemoryRecallService(root, config, registry, options);
+}
+
+async function recognizeMovie(sha256 = SHA_MOVIE): Promise<MediaMemoryBinding> {
+  const commit = await service.recordFileRecognized({
+    fileRef: moviePath,
+    sha256,
+    mediaType: 'video',
+    metadata: { durationMs: 4_860_000, width: 1920, height: 1080 },
+    sizeBytes: 123_456_789,
+    mimeType: 'video/x-matroska',
+    origin: 'user',
+    source: { protocol: 'local', locator: 'breaking-surface.mkv' },
+    recognition: {
+      ingestionConfigHash: 'ingest-hash',
+      detectorVersion: 'omni-sniff-ffprobe/1',
+      probeStatus: 'complete',
+    },
+  });
+  expect(commit).toBeDefined();
+  return commit!;
+}
+
+/** Write a fake managed object and return its absolute path. */
+async function writeObject(name: string): Promise<string> {
+  const objectPath = path.join(root, 'objects', name);
+  await fs.mkdir(path.dirname(objectPath), { recursive: true });
+  await fs.writeFile(objectPath, `bytes-of-${name}`);
+  return objectPath;
+}
+
+async function commitDegrade(source: MediaMemoryBinding): Promise<{
+  degradedPath: string;
+  binding: MediaMemoryBinding;
+}> {
+  const degradedPath = await writeObject('degraded.mp4');
+  const commit = await service.commitPolicySucceeded({
+    invocationId: 'inv-degrade',
+    source,
+    executionOrigin: {
+      kind: 'fixed_policy',
+      policyId: 'video-default',
+      stage: 'preprocessing',
+    },
+    toolName: 'omni_degrade_video',
+    toolVersion: '1',
+    finalArguments: { height: 480 },
+    omniConfigHash: 'hash-degrade',
+    startedAt: '2026-08-11T00:00:00.000Z',
+    completedAt: '2026-08-11T00:00:05.000Z',
+    outputs: [
+      {
+        kind: 'media',
+        objectPath: degradedPath,
+        sha256: SHA_DEGRADED,
+        mediaType: 'video',
+        metadata: { durationMs: 4_860_000, width: 854, height: 480 },
+        sizeBytes: 1_000_000,
+        mimeType: 'video/mp4',
+        role: 'degraded',
+        disclosure: 'downscaled to 480p',
+      },
+    ],
+  });
+  expect(commit).toBeDefined();
+  return { degradedPath, binding: commit!.mediaBindings.get(SHA_DEGRADED)! };
+}
+
+async function commitTranscript(
+  source: MediaMemoryBinding,
+  text = 'Two divers surface at dawn near the wreck.',
+): Promise<void> {
+  const objectPath = await writeObject('transcript.txt');
+  const commit = await service.commitPolicySucceeded({
+    invocationId: 'inv-transcribe',
+    source,
+    executionOrigin: { kind: 'model' },
+    toolName: 'omni_transcribe',
+    finalArguments: { language: 'auto' },
+    omniConfigHash: 'hash-transcribe',
+    startedAt: '2026-08-11T00:01:00.000Z',
+    completedAt: '2026-08-11T00:01:30.000Z',
+    outputs: [
+      {
+        kind: 'text',
+        objectPath,
+        sha256: SHA_TRANSCRIPT,
+        mimeType: 'text/plain',
+        text,
+        sizeBytes: text.length,
+        role: 'transcript',
+      },
+    ],
+  });
+  expect(commit).toBeDefined();
+}
+
+function bindSource(source: MediaMemoryBinding): string {
+  return registry.bind({
+    ...source,
+    fileRef: moviePath,
+    mediaType: 'video',
+  }).resourceId;
+}
+
+describe('MediaMemoryRecallService — request validation', () => {
+  it('rejects an empty request outright', async () => {
+    await expect(
+      recallService().recall({ resourceIds: [], query: 'anything' }),
+    ).rejects.toThrow(MediaMemoryRecallRejection);
+  });
+
+  it('rejects the whole request on a handle this session never issued', async () => {
+    const source = await recognizeMovie();
+    const resourceId = bindSource(source);
+    await expect(
+      recallService().recall({
+        resourceIds: [resourceId, 'media-9-deadbeef'],
+        query: 'anything',
+      }),
+    ).rejects.toThrow(/not issued in this session/);
+  });
+});
+
+describe('MediaMemoryRecallService — full graph recall', () => {
+  it('returns metadata, outputs, and executions of the current version graph', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'what happens in the movie',
+    });
+
+    expect(result.status).toBe('hit');
+    expect(result.gaps).toEqual([]);
+    expect(result.files).toEqual([
+      {
+        fileId: source.fileId,
+        fileVersionId: source.fileVersionId,
+        current: true,
+        mediaType: 'video',
+      },
+    ]);
+
+    const byKind = new Map(result.entries.map((e) => [e.kind, e]));
+    expect([...byKind.keys()].sort()).toEqual([
+      'derived_media',
+      'execution',
+      'metadata',
+      'policy_result',
+    ]);
+    expect(result.entries).toHaveLength(5); // 2 executions
+
+    const metadata = byKind.get('metadata')!;
+    expect(metadata.content).toContain('"width":1920');
+    expect(metadata.channels).toEqual(['technical_metadata']);
+    expect(metadata.provenance.omniConfigHash).toBe('ingest-hash');
+
+    const transcript = byKind.get('policy_result')!;
+    expect(transcript.role).toBe('transcript');
+    expect(transcript.content).toContain('surface at dawn');
+    expect(transcript.channels).toEqual(['speech_text']);
+    expect(transcript.evidenceRefs[0].fileVersionId).toBe(source.fileVersionId);
+    expect(transcript.evidenceRefs[0].executionId).toBeDefined();
+    expect(transcript.provenance.toolName).toBe('omni_transcribe');
+
+    const derived = byKind.get('derived_media')!;
+    expect(derived.disclosure).toBe('downscaled to 480p');
+    expect(derived.provenance.policyId).toBe('video-default');
+    expect(derived.provenance.stage).toBe('preprocessing');
+    // A fresh session handle was bound for the derived artifact and never
+    // leaks a path.
+    expect(derived.resourceId).toBeDefined();
+    const bound = registry.resolve(derived.resourceId!);
+    expect(bound?.fileVersionId).toBeDefined();
+    expect(JSON.stringify(result)).not.toContain(root);
+  });
+
+  it('reaches entries parented on intermediate derivatives (audio → transcript chain)', async () => {
+    const source = await recognizeMovie();
+    const audioPath = await writeObject('audio.m4a');
+    const audioCommit = await service.commitPolicySucceeded({
+      invocationId: 'inv-extract',
+      source,
+      executionOrigin: {
+        kind: 'fixed_policy',
+        policyId: 'video-default',
+        stage: 'preprocessing',
+      },
+      toolName: 'omni_extract_audio',
+      finalArguments: {},
+      omniConfigHash: 'hash-extract',
+      startedAt: '2026-08-11T00:00:00.000Z',
+      completedAt: '2026-08-11T00:00:02.000Z',
+      outputs: [
+        {
+          kind: 'media',
+          objectPath: audioPath,
+          sha256: SHA_AUDIO,
+          mediaType: 'audio',
+          metadata: { durationMs: 4_860_000 },
+          sizeBytes: 5_000_000,
+          mimeType: 'audio/mp4',
+          role: 'extracted_audio',
+        },
+      ],
+    });
+    await commitTranscript(audioCommit!.mediaBindings.get(SHA_AUDIO)!);
+    const resourceId = bindSource(source);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'transcript',
+      kinds: ['policy_result'],
+    });
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].role).toBe('transcript');
+    // Evidence points at the audio derivative it was transcribed from.
+    expect(result.entries[0].evidenceRefs[0].fileVersionId).not.toBe(
+      source.fileVersionId,
+    );
+  });
+});
+
+describe('MediaMemoryRecallService — filters, limit, ranking', () => {
+  it('narrows by kinds and roles', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const svc = recallService();
+
+    const kindsOnly = await svc.recall({
+      resourceIds: [resourceId],
+      query: 'q',
+      kinds: ['derived_media'],
+    });
+    expect(kindsOnly.entries.map((e) => e.kind)).toEqual(['derived_media']);
+
+    const rolesOnly = await svc.recall({
+      resourceIds: [resourceId],
+      query: 'q',
+      roles: ['transcript'],
+    });
+    expect(rolesOnly.entries.map((e) => e.role)).toEqual(['transcript']);
+  });
+
+  it('ranks query-relevant entries first and applies the entry budget', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source, 'The captain reads the tide tables.');
+    const resourceId = bindSource(source);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'tide tables transcript',
+      limit: 2,
+    });
+
+    expect(result.entries).toHaveLength(2);
+    expect(result.entries[0].role).toBe('transcript');
+  });
+
+  it('caps request limit at the configured maxEntries', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+
+    const result = await recallService(recallConfig({ maxEntries: 3 })).recall({
+      resourceIds: [resourceId],
+      query: 'q',
+      limit: 100,
+    });
+    expect(result.entries).toHaveLength(3);
+  });
+
+  it('bounds entry content at maxTextChars', async () => {
+    const source = await recognizeMovie();
+    await commitTranscript(source, 'x'.repeat(500));
+    const resourceId = bindSource(source);
+
+    const result = await recallService(
+      recallConfig({ maxTextChars: 40 }),
+    ).recall({ resourceIds: [resourceId], query: 'q', roles: ['transcript'] });
+    expect(result.entries[0].content).toHaveLength(40);
+  });
+});
+
+describe('MediaMemoryRecallService — current-version-first (§9.5)', () => {
+  it('consults only the current version and hints at bound history', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const staleResourceId = bindSource(source);
+    const fresh = await recognizeMovie(SHA_MOVIE_V2); // content changed on disk
+
+    const result = await recallService().recall({
+      resourceIds: [staleResourceId],
+      query: 'q',
+    });
+
+    // Nothing processed for the new content yet → only its metadata comes
+    // back, with an explicit not_processed gap and the stale version
+    // listed as history.
+    expect(result.status).toBe('partial');
+    expect(result.entries.map((e) => e.kind)).toEqual(['metadata']);
+    expect(result.gaps).toEqual([
+      {
+        scope: {},
+        channels: ['visual', 'acoustic', 'speech_text'],
+        reason: 'not_processed',
+      },
+    ]);
+    expect(result.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          fileVersionId: fresh.fileVersionId,
+          current: true,
+        }),
+        expect.objectContaining({
+          fileVersionId: source.fileVersionId,
+          current: false,
+        }),
+      ]),
+    );
+  });
+
+  it('returns historical entries when explicitly requested', async () => {
+    const source = await recognizeMovie();
+    await commitTranscript(source);
+    const staleResourceId = bindSource(source);
+    await recognizeMovie(SHA_MOVIE_V2);
+
+    const result = await recallService().recall({
+      resourceIds: [staleResourceId],
+      query: 'q',
+      includeHistoricalVersions: true,
+      roles: ['transcript'],
+    });
+
+    expect(result.entries.map((e) => e.role)).toEqual(['transcript']);
+  });
+});
+
+describe('MediaMemoryRecallService — gaps and availability', () => {
+  it('reports unprocessed channels as gaps (partial status)', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source); // visual+acoustic covered, no transcript
+    const resourceId = bindSource(source);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+
+    expect(result.status).toBe('partial');
+    expect(result.gaps).toEqual([
+      { scope: {}, channels: ['speech_text'], reason: 'not_processed' },
+    ]);
+  });
+
+  it('reports sampled-only coverage as partial_coverage', async () => {
+    const source = await recognizeMovie();
+    const keyframePath = await writeObject('keyframe.jpg');
+    await service.commitPolicySucceeded({
+      invocationId: 'inv-keyframes',
+      source,
+      executionOrigin: { kind: 'model' },
+      toolName: 'omni_extract_keyframes',
+      finalArguments: {},
+      omniConfigHash: 'hash-keyframes',
+      startedAt: '2026-08-11T00:00:00.000Z',
+      completedAt: '2026-08-11T00:00:01.000Z',
+      outputs: [
+        {
+          kind: 'media',
+          objectPath: keyframePath,
+          sha256: SHA_DEGRADED,
+          mediaType: 'image',
+          metadata: { width: 1920, height: 1080 },
+          sizeBytes: 100_000,
+          mimeType: 'image/jpeg',
+          role: 'keyframe',
+        },
+      ],
+    });
+    const resourceId = bindSource(source);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+
+    expect(result.gaps).toEqual(
+      expect.arrayContaining([
+        { scope: {}, channels: ['visual'], reason: 'partial_coverage' },
+        {
+          scope: {},
+          channels: ['acoustic', 'speech_text'],
+          reason: 'not_processed',
+        },
+      ]),
+    );
+  });
+
+  it('flags a deleted source file as artifact_unavailable (D5)', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    await fs.rm(moviePath);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+
+    expect(result.status).toBe('partial');
+    expect(result.gaps).toEqual([
+      {
+        scope: {},
+        channels: ['visual', 'acoustic', 'speech_text'],
+        reason: 'artifact_unavailable',
+      },
+    ]);
+    // The memory itself is intact — entries still come back.
+    expect(result.entries.length).toBeGreaterThan(0);
+  });
+
+  it('withholds the handle of a deleted derived artifact', async () => {
+    const source = await recognizeMovie();
+    const { degradedPath } = await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    await fs.rm(degradedPath);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+
+    const derived = result.entries.find((e) => e.kind === 'derived_media')!;
+    expect(derived.resourceId).toBeUndefined();
+    expect(result.gaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reason: 'artifact_unavailable' }),
+      ]),
+    );
+  });
+
+  it('degrades to a miss with an unavailability gap when the graph lost the binding', async () => {
+    // A handle minted in-session, but the store never saw the version
+    // (e.g. memory.json was corrupt-rebuilt after binding).
+    const resourceId = registry.bind({
+      fileId: 'f-ghost',
+      fileVersionId: 'v-ghost',
+      rootFileId: 'f-ghost',
+      fileRef: moviePath,
+      mediaType: 'video',
+    }).resourceId;
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+
+    expect(result.status).toBe('miss');
+    expect(result.entries).toEqual([]);
+    expect(result.gaps).toEqual([
+      {
+        scope: {},
+        channels: ['visual', 'acoustic', 'speech_text'],
+        reason: 'artifact_unavailable',
+      },
+    ]);
+  });
+});
+
+describe('MediaMemoryRecallService — nextPolicyActions', () => {
+  it('omits the field without an advisor and emits its suggestions with one', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source); // speech_text gap
+    const resourceId = bindSource(source);
+
+    const plain = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+    expect(plain.nextPolicyActions).toBeUndefined();
+
+    const advised = await recallService(recallConfig(), {
+      advise: ({ resourceId: rid, gap }) =>
+        gap.reason === 'not_processed' && gap.channels.includes('speech_text')
+          ? [
+              {
+                toolName: 'omni_transcribe',
+                resourceId: rid,
+                arguments: {},
+                reason: 'speech has not been transcribed',
+              },
+            ]
+          : [],
+    }).recall({ resourceIds: [resourceId], query: 'q' });
+
+    expect(advised.nextPolicyActions).toEqual([
+      {
+        toolName: 'omni_transcribe',
+        resourceId,
+        arguments: {},
+        reason: 'speech has not been transcribed',
+      },
+    ]);
+  });
+});

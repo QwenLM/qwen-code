@@ -24,6 +24,22 @@ export {
   type PolicySucceededCommit,
 } from './service.js';
 export {
+  MediaResourceRegistry,
+  type MediaResourceBinding,
+} from './registry.js';
+export {
+  MediaMemoryRecallService,
+  MediaMemoryRecallRejection,
+  type MediaMemoryRecallRequest,
+  type MediaMemoryRecallResult,
+  type MediaMemoryRecallFile,
+  type MediaMemoryRecallEntry,
+  type MediaMemoryRecallGap,
+  type MediaMemoryRecallProvenance,
+  type MediaMemoryRecallAdvisor,
+  type MediaMemoryNextPolicyAction,
+} from './recall.js';
+export {
   OmniMemoryConfigError,
   DEFAULT_OMNI_MEMORY_CONFIG,
   OMNI_MEMORY_RECALL_KINDS,
