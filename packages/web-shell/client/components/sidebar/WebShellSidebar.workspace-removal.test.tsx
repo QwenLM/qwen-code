@@ -126,6 +126,10 @@ const {
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
           listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+          workspaceChannelTypes: vi.fn().mockResolvedValue([]),
+          workspaceChannels: vi
+            .fn()
+            .mockResolvedValue({ revision: '0', instances: {} }),
           archiveSessionsData,
           unarchiveSessionsData,
           exportArchivedSession,
@@ -738,6 +742,10 @@ beforeEach(() => {
   workspace.client.workspaceByCwd.mockImplementation(() => ({
     listWorkspaceSessions,
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    workspaceChannelTypes: vi.fn().mockResolvedValue([]),
+    workspaceChannels: vi
+      .fn()
+      .mockResolvedValue({ revision: '0', instances: {} }),
     archiveSessionsData,
     unarchiveSessionsData,
     deleteSessionsData,
@@ -3249,7 +3257,7 @@ describe('WebShellSidebar session source switch', () => {
       sessions: [channelSession],
       loading: false,
     };
-    const taskResult = {
+    let taskResult = {
       ...active,
       sessions: [taskSession],
       loading: false,
@@ -3290,6 +3298,41 @@ describe('WebShellSidebar session source switch', () => {
     ).find((candidate) => candidate.textContent?.includes('Channel session'));
     expect(row).toBeDefined();
     expect(row!.querySelector('[class*="sessionStatusDot"]')).not.toBeNull();
+
+    // A Tasks-source reconcile while the channel marker exists must not wipe
+    // it: the marker belongs to the inactive source and must survive.
+    await switchSessionSource('Tasks');
+    taskResult = {
+      ...taskResult,
+      sessions: [
+        taskSession,
+        {
+          sessionId: 'second-task-session',
+          displayName: 'Second task session',
+          workspaceCwd: '/tmp/project',
+          sourceType: 'default',
+        },
+      ],
+    };
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, sessions: [...channelResult.sessions] };
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const restoredRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('Channel session'));
+    expect(restoredRow).toBeDefined();
+    expect(
+      restoredRow!.querySelector('[class*="sessionStatusDot"]'),
+    ).not.toBeNull();
   });
 
   it('applies the source switch to the archived list', async () => {
@@ -3400,6 +3443,7 @@ describe('WebShellSidebar session source switch', () => {
     connection.capabilities = channelCapabilities;
     workspace.capabilities = channelCapabilities;
     const setIntervalSpy = vi.spyOn(window, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(window, 'clearInterval');
     renderSidebar();
     await ensureWorkspaceExpanded('project');
     expect(useSessionCatalogPollingSpy).not.toHaveBeenCalledWith(
@@ -3424,6 +3468,10 @@ describe('WebShellSidebar session source switch', () => {
       ([, timeout]) => timeout === 2_000,
     );
     expect(activePoll).toBeDefined();
+    const activePollIndex = setIntervalSpy.mock.calls
+      .map(([, timeout]) => timeout)
+      .lastIndexOf(2_000);
+    const activePollId = setIntervalSpy.mock.results[activePollIndex]?.value;
     channelState.reload.mockClear();
 
     await act(async () => {
@@ -3434,6 +3482,12 @@ describe('WebShellSidebar session source switch', () => {
     });
 
     expect(channelState.reload).toHaveBeenCalledOnce();
+
+    // Leaving the Channels tab tears the interval down; otherwise the sidebar
+    // keeps reloading the channel catalog while the Tasks tab is active.
+    channelState.reload.mockClear();
+    await switchSessionSource('Tasks');
+    expect(clearIntervalSpy).toHaveBeenCalledWith(activePollId);
   });
 
   it('keeps a flat channel list when channel metadata is unavailable', async () => {
@@ -3879,6 +3933,82 @@ describe('WebShellSidebar session source switch', () => {
       window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
     ).not.toContain('channel-type:');
   });
+  it('does not reconcile channel sections against the previous source page', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    const dingSession: DaemonSessionSummary = {
+      sessionId: 'ding-one-session',
+      displayName: 'DingTalk one',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'ding-one',
+    };
+    const feishuSession: DaemonSessionSummary = {
+      sessionId: 'feishu-one-session',
+      displayName: 'Feishu one',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'feishu-one',
+    };
+    // The source switch retains the previous page (identity unchanged) until
+    // the channel fetch settles, and that page still carries a channel row.
+    const retainedPage = [taskSession, dingSession];
+    let channelPage: DaemonSessionSummary[] | undefined = undefined;
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return channelPage
+            ? { ...active, sessions: channelPage, data: channelPage }
+            : { ...active, sessions: retainedPage, data: retainedPage };
+        }
+        return { ...active, sessions: retainedPage, data: retainedPage };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    expect(container.textContent).toContain('Task session');
+
+    await switchSessionSource('Channels');
+
+    // The settled page still belongs to the tasks source, so its DingTalk
+    // section must not consume the channel initial-catalog latch.
+    expect(container.querySelector('section[aria-label="Feishu"]')).toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+
+    channelPage = [dingSession, feishuSession];
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Both sections register against the true channel-source page: expanded,
+    // and not persisted as mid-session auto-collapses.
+    for (const label of ['DingTalk', 'Feishu']) {
+      const group = container.querySelector<HTMLElement>(
+        `section[aria-label="${label}"]`,
+      );
+      expect(group).not.toBeNull();
+      expect(
+        group!.querySelector('button[aria-expanded="true"]'),
+      ).not.toBeNull();
+    }
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
 });
 
 describe('WebShellSidebar session list notices', () => {
@@ -3940,6 +4070,51 @@ describe('WebShellSidebar session list notices', () => {
     await ensureWorkspaceExpanded('project');
 
     expect(container.textContent).toContain('Loading sessions...');
+  });
+
+  it('keeps the settled empty notice while a background refresh is in flight', async () => {
+    active.sessions = [];
+    active.loading = true;
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Loading sessions...');
+  });
+
+  it('keeps the settled empty notice when a background refresh failed', async () => {
+    active.sessions = [];
+    active.error = new Error('daemon restarted');
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Failed to load sessions');
+  });
+
+  it('offers a retry when the first page load failed', async () => {
+    active.sessions = [];
+    active.error = new Error('daemon restarted');
+    useSessions.mockImplementation((options?: { archiveState?: string }) => {
+      const state = options?.archiveState === 'archived' ? archived : active;
+      return { ...state, data: undefined };
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Failed to load sessions');
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Failed to load sessions'));
+    expect(retry).toBeDefined();
+    await act(async () => {
+      click(retry!);
+      await Promise.resolve();
+    });
+    expect(active.reload).toHaveBeenCalled();
   });
 });
 

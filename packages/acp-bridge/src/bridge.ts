@@ -1038,7 +1038,7 @@ function echoPromptToSessionBus(
   const serverTimestamp = Date.now();
   const echoPrompt = prompt.slice(0, MAX_ECHO_CONTENT_BLOCKS);
   if (
-    displayText !== undefined &&
+    displayText &&
     !echoPrompt.some((part) => isRecord(part) && part['type'] === 'text')
   ) {
     const textPart = prompt

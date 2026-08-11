@@ -609,6 +609,7 @@ export function WebShellSidebar({
     catalog: channelTypeCatalog,
     channels: channelInstances,
     reload: reloadChannelCatalog,
+    error: channelCatalogError,
   } = useChannels({
     autoLoad: channelGroupingEnabled,
     enabled: channelGroupingEnabled,
@@ -1470,9 +1471,12 @@ export function WebShellSidebar({
   const channelCatalogPollInFlightRef = useRef(false);
   useEffect(() => {
     if (!channelGroupingEnabled) return;
-    const pollInterval = !error
-      ? ACTIVE_SESSION_POLL_INTERVAL_MS
-      : IDLE_SESSION_POLL_INTERVAL_MS;
+    // Back off on the channels hook's OWN failures too — a persistently
+    // failing channels endpoint must not be re-requested every 2s.
+    const pollInterval =
+      !error && !channelCatalogError
+        ? ACTIVE_SESSION_POLL_INTERVAL_MS
+        : IDLE_SESSION_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
       if (document.hidden || channelCatalogPollInFlightRef.current) return;
       channelCatalogPollInFlightRef.current = true;
@@ -1481,7 +1485,12 @@ export function WebShellSidebar({
       });
     }, pollInterval);
     return () => window.clearInterval(intervalId);
-  }, [channelGroupingEnabled, error, reloadChannelCatalog]);
+  }, [
+    channelCatalogError,
+    channelGroupingEnabled,
+    error,
+    reloadChannelCatalog,
+  ]);
 
   useEffect(() => {
     if (lastTrackedSessionSourceRef.current !== sessionSource) {

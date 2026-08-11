@@ -957,6 +957,61 @@ describe('createChannelWorkerSupervisor', () => {
     );
   });
 
+  it('revokes the worker prompt authorization when the worker exits naturally', async () => {
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', { type: 'ready', channels: ['telegram'] });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    const promptAuthorization = env['QWEN_CHANNEL_DAEMON_WORKER']!;
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(true);
+
+    child.emit('exit', 1, null);
+
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
+    ).toBe(false);
+  });
+
+  it('revokes the worker prompt authorization when spawn throws', async () => {
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(
+        (_execPath: string, _argv: string[], options: unknown) => {
+          capturedEnv = (options as { env: NodeJS.ProcessEnv }).env;
+          throw new Error('spawn ENOENT');
+        },
+      ),
+    });
+
+    await expect(supervisor.start()).rejects.toThrow('spawn ENOENT');
+
+    const promptAuthorization = capturedEnv?.['QWEN_CHANNEL_DAEMON_WORKER'];
+    expect(promptAuthorization).toBeDefined();
+    expect(
+      isChannelWorkerPromptAuthorized(promptAuthorization!, '/workspace'),
+    ).toBe(false);
+  });
+
   it('restarts a ready worker after unexpected exit within budget', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);

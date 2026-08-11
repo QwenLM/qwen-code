@@ -541,6 +541,27 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+// Mirror production query modes: `group=pinned` is the pinned bucket;
+// `group=all` (and missing group) returns the full active list. The UI
+// excludes pinned rows from organized sections via `excludePinned`.
+function filterScenarioSessions(
+  scenario: WebShellDaemonScenario,
+  searchParams: URLSearchParams,
+): DaemonSessionSummary[] {
+  const group = searchParams.get('group');
+  const sourceType = searchParams.get('sourceType');
+  const sourceSessions = sourceType
+    ? scenario.sessions.filter(
+        (session) =>
+          session.sourceType === sourceType ||
+          (sourceType === 'default' && session.sourceType === undefined),
+      )
+    : scenario.sessions;
+  return group === 'pinned'
+    ? sourceSessions.filter((session) => Boolean(session.isPinned))
+    : sourceSessions;
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
@@ -565,6 +586,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
@@ -636,7 +658,11 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
@@ -847,24 +873,14 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror production query modes: `group=pinned` is the pinned bucket;
-    // `group=all` (and missing group) returns the full active list. The UI
-    // excludes pinned rows from organized sections via `excludePinned`.
-    const group = searchParams.get('group');
-    const sourceType = searchParams.get('sourceType');
-    const sourceSessions = sourceType
-      ? scenario.sessions.filter(
-          (session) =>
-            session.sourceType === sourceType ||
-            (sourceType === 'default' && session.sourceType === undefined),
-        )
-      : scenario.sessions;
-    const sessions =
-      group === 'pinned'
-        ? sourceSessions.filter((session) => Boolean(session.isPinned))
-        : sourceSessions;
-    await json(route, { sessions });
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    await json(route, {
+      sessions: filterScenarioSessions(scenario, searchParams),
+    });
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {

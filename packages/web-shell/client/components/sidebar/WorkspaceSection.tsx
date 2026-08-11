@@ -198,6 +198,7 @@ export function WorkspaceSection({
     page: sessionsPage,
     reload: reloadSessions,
     stale: sessionsStale,
+    loading: sessionsLoading,
   } = sessionsResult;
   const sessionsActive = sessionsEnabled && sessionsVisible;
   const previousSessionsActiveRef = useRef(sessionsActive);
@@ -228,7 +229,12 @@ export function WorkspaceSection({
   }, [sessionsResult.error, workspace.cwd]);
 
   useEffect(() => {
-    if (!renderSessions || disabled || !organizationEnabled) {
+    if (
+      !renderSessions ||
+      disabled ||
+      !organizationEnabled ||
+      channelGroupingEnabled
+    ) {
       setGroups([]);
       return;
     }
@@ -246,6 +252,7 @@ export function WorkspaceSection({
       cancelled = true;
     };
   }, [
+    channelGroupingEnabled,
     client,
     disabled,
     organizationEnabled,
@@ -284,7 +291,7 @@ export function WorkspaceSection({
     // The catalog rides its own tick so instances added or removed while a
     // section is expanded reach the grouping logic without a collapse cycle.
     const timer = setInterval(() => {
-      void loadChannelCatalog();
+      if (document.visibilityState === 'visible') void loadChannelCatalog();
     }, 10_000);
     return () => clearInterval(timer);
   }, [
@@ -369,7 +376,8 @@ export function WorkspaceSection({
   }, [excludePinned, searchQuery, sessions]);
 
   const groupedSessions = useMemo(() => {
-    if (!organizationEnabled || groups.length === 0) return null;
+    if (!organizationEnabled || channelGroupingEnabled || groups.length === 0)
+      return null;
     const assigned = new Set<string>();
     const sections = groups.map((group) => {
       const items = visibleSessions.filter(
@@ -384,7 +392,7 @@ export function WorkspaceSection({
         (session) => !assigned.has(session.sessionId),
       ),
     };
-  }, [groups, organizationEnabled, visibleSessions]);
+  }, [channelGroupingEnabled, groups, organizationEnabled, visibleSessions]);
 
   const channelSessionGroups = useMemo(
     () =>
@@ -479,7 +487,12 @@ export function WorkspaceSection({
                 {loadErrorLabel}
               </div>
             ) : visibleSessions.length === 0 ? (
-              <div className={styles.empty}>{noSessionsLabel}</div>
+              // A source switch swaps the query key; until the new source's
+              // page settles there is no data yet, so the "no sessions" notice
+              // would flash for a whole fetch round-trip.
+              sessionsLoading && sessionsPage === undefined ? null : (
+                <div className={styles.empty}>{noSessionsLabel}</div>
+              )
             ) : channelSessionGroups ? (
               <>
                 {channelSessionGroups.map((group) => (

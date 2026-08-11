@@ -322,6 +322,18 @@ describe('WorkspaceSection label', () => {
     renderSection({ client, expanded: true, sourceType: 'channel' });
     await flush();
     expect(container.textContent).not.toContain('Load failed');
+    // The switch must actually initiate the new source's fetch, not leave the
+    // section stuck on the failed tasks load.
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceType: 'channel' }),
+    );
+    expect(
+      listWorkspaceSessionsPage.mock.calls.filter(
+        ([options]) =>
+          (options as { sourceType?: string } | undefined)?.sourceType ===
+          'channel',
+      ),
+    ).toHaveLength(1);
   });
 
   it('groups a secondary workspace with its own channel catalog', async () => {
@@ -612,6 +624,24 @@ describe('WorkspaceSection label', () => {
     await flush();
 
     expect(workspaceChannelTypes).toHaveBeenCalledTimes(2);
+
+    // Background tabs skip the tick entirely, matching the sibling pollers.
+    const originalVisibility = document.visibilityState;
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    });
+    await act(async () => {
+      const callback = poll![0];
+      if (typeof callback === 'function') callback();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(workspaceChannelTypes).toHaveBeenCalledTimes(2);
+    Object.defineProperty(document, 'visibilityState', {
+      value: originalVisibility,
+      configurable: true,
+    });
     setIntervalSpy.mockRestore();
   });
 });

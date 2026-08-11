@@ -203,6 +203,29 @@ describe('tryGenerateSessionTitle', () => {
     expect(prompt).not.toContain('hidden second instructions');
   });
 
+  it('treats an all-empty display projection as intentionally empty', async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Should never be used' },
+    });
+
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['', ''],
+    );
+
+    // `''` entries mean "projection recorded, user-authored text empty" —
+    // stay in projection mode (`empty_history`) instead of falling back to
+    // the raw history, which carries the hidden model context.
+    expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
+    expect(generateJson).not.toHaveBeenCalled();
+  });
+
   it('does not align a display projection onto an intervening system turn', async () => {
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',
@@ -230,6 +253,8 @@ describe('tryGenerateSessionTitle', () => {
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',
       history: [
+        { role: 'user', parts: [{ text: 'oldest hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Oldest reply' }] },
         { role: 'user', parts: [{ text: 'older hidden instructions' }] },
         { role: 'model', parts: [{ text: 'Older reply' }] },
         { role: 'user', parts: [{ text: 'current hidden instructions' }] },
@@ -238,13 +263,18 @@ describe('tryGenerateSessionTitle', () => {
       generateJsonResult: { title: 'Answer greeting' },
     });
 
+    // Resumed sessions replay `undefined` for every user turn recorded before
+    // display-projection tracking existed; only the newest turn projects.
     await tryGenerateSessionTitle(config, new AbortController().signal, [
+      undefined,
+      undefined,
       '当前消息',
     ]);
 
     const call = generateJson.mock.calls[0][0] as { contents: Content[] };
     const prompt = call.contents[0]?.parts?.[0]?.text;
     expect(prompt).toContain('当前消息');
+    expect(prompt).not.toContain('undefined');
     expect(prompt).not.toContain('older hidden instructions');
     expect(prompt).not.toContain('current hidden instructions');
   });
