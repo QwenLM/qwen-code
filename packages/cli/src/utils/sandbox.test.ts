@@ -108,6 +108,7 @@ describe('start_sandbox', () => {
 
   it('omits the warnings file environment variable when it is unset', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
     vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
       String(filePath),

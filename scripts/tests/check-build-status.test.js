@@ -81,7 +81,10 @@ describe('scripts/check-build-status.js', () => {
     // whose first line is JSON. One `console.log` here — the shape this pins
     // against — puts "Checking build status..." at the top of that file. Status
     // and warnings belong on stderr, whatever build state the checker finds.
-    const { stdout } = await runChecker(root);
+    const { stdout } = await runChecker(root, {
+      ...process.env,
+      QWEN_CODE_WARNINGS_FILE: '',
+    });
     expect(stdout).toBe('');
   });
 
