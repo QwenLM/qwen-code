@@ -482,6 +482,36 @@ describe('GitModePopover existing branches', () => {
     );
   });
 
+  it('surfaces an unavailable branch list as an error with retry', async () => {
+    // `available: false` must not render as a loaded-but-empty list ("No
+    // matching branches") with no recovery path.
+    workspaceGitBranches.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: false,
+      local: [],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    expect(document.body.textContent).toContain(
+      'Branch list is not available for this workspace.',
+    );
+    expect(document.body.textContent).not.toContain('No matching branches');
+    expect(optionButtons()).toHaveLength(0);
+    const retry = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Retry',
+    );
+    expect(retry).toBeTruthy();
+  });
+
   it('re-enables the choices after a failed checkout so a retry can proceed', async () => {
     workspaceGitCheckout
       .mockRejectedValueOnce(new Error('index locked'))

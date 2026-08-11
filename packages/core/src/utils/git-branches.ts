@@ -286,6 +286,76 @@ export interface GitCheckoutResult {
   detached: boolean;
 }
 
+interface CheckoutLanding {
+  /** Branch HEAD should be on after the switch (branch/DWIM targets). */
+  branch?: string;
+  /** Ref whose commit HEAD should point at (branch, tag, or SHA targets). */
+  commitRef?: string;
+}
+
+/**
+ * Run one `git checkout` step, absorbing a failing post-checkout hook: git
+ * runs that hook AFTER HEAD has moved and exits non-zero when it fails, even
+ * though the switch itself completed. Verify where HEAD landed instead of
+ * trusting the exit code: on the expected target the step is treated as
+ * successful so callers report (and refresh) the real state; anywhere else
+ * roll back to the captured original HEAD and rethrow, so a failed checkout
+ * never leaves the workspace half-moved.
+ */
+async function runCheckoutStep(
+  cwd: string,
+  args: string[],
+  landing: CheckoutLanding,
+  original: { ref: string; commit: string },
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  try {
+    await runGit(cwd, args, env);
+    return;
+  } catch (err) {
+    if (await checkoutLanded(cwd, landing, env)) return;
+    if (original.ref) {
+      await runGit(cwd, ['checkout', original.ref, '--'], env).catch(() => {});
+    } else if (original.commit) {
+      await runGit(
+        cwd,
+        ['checkout', '--detach', original.commit, '--'],
+        env,
+      ).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+async function checkoutLanded(
+  cwd: string,
+  landing: CheckoutLanding,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const [nowBranchRaw, nowCommitRaw, targetCommitRaw] = await Promise.all([
+    runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env).catch(
+      () => '',
+    ),
+    runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => ''),
+    landing.commitRef
+      ? runGit(
+          cwd,
+          [
+            'rev-parse',
+            '--verify',
+            '--end-of-options',
+            `${landing.commitRef}^{commit}`,
+          ],
+          env,
+        ).catch(() => '')
+      : Promise.resolve(''),
+  ]);
+  if (landing.branch && nowBranchRaw.trim() === landing.branch) return true;
+  const nowCommit = nowCommitRaw.trim();
+  const targetCommit = targetCommitRaw.trim();
+  return targetCommit !== '' && nowCommit === targetCommit;
+}
+
 /**
  * Checkout a branch, tag, or revision. Returns the resulting HEAD state.
  * Throws on dirty tree or invalid ref.
@@ -298,6 +368,21 @@ export async function gitCheckout(
   if (!isValidCheckoutRef(ref)) {
     throw new Error(`invalid checkout ref: ${ref}`);
   }
+  // Snapshot HEAD before switching: `runCheckoutStep` needs it both to
+  // verify a hook-failed landing and to roll back a genuinely failed one.
+  const originalRef = (
+    await runGit(
+      cwd,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      env,
+    ).catch(() => '')
+  ).trim();
+  const original = {
+    ref: originalRef,
+    commit: originalRef
+      ? ''
+      : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim(),
+  };
   // A remote-tracking ref (remote/branch) needs more than a bare
   // `git checkout <branch>`: with two remotes carrying the same branch name
   // the bare name is ambiguous ("matched multiple remote tracking branches"),
@@ -326,11 +411,23 @@ export async function gitCheckout(
       .then(() => true)
       .catch(() => false);
     if (hasLocal) {
-      await runGit(cwd, ['checkout', localName, '--'], env);
+      await runCheckoutStep(
+        cwd,
+        ['checkout', localName, '--'],
+        { branch: localName, commitRef: localName },
+        original,
+        env,
+      );
     } else {
       // `--track` forces commit-ish interpretation of the verified
       // remote-tracking ref, so no pathspec terminator is needed.
-      await runGit(cwd, ['checkout', '--track', ref], env);
+      await runCheckoutStep(
+        cwd,
+        ['checkout', '--track', ref],
+        { branch: localName, commitRef: ref },
+        original,
+        env,
+      );
     }
     const head = (
       await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
@@ -339,7 +436,13 @@ export async function gitCheckout(
   }
   // `--` terminates options/pathspecs so a validated ref can never be
   // reinterpreted as a path (e.g. `.` wiping the working tree).
-  await runGit(cwd, ['checkout', ref, '--'], env);
+  await runCheckoutStep(
+    cwd,
+    ['checkout', ref, '--'],
+    { branch: ref, commitRef: ref },
+    original,
+    env,
+  );
   const headRaw = await runGit(
     cwd,
     ['symbolic-ref', '--short', 'HEAD'],

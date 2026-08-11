@@ -175,9 +175,6 @@ test('git mode chip checks out an existing branch', async ({
     .getByRole('textbox', { name: 'Search branches…' })
     .fill('origin');
   await expect(list.getByRole('option')).toHaveCount(1);
-  await list.getByRole('option', { name: 'origin/develop' }).click();
-
-  await expect(popover).not.toBeVisible();
   // Match the workspace-scoped route exactly: the legacy process-scoped
   // checkout would mutate the bound workspace instead of the session's
   // resolved runtime, and the mock daemon answers both identically.
@@ -187,7 +184,15 @@ test('git mode chip checks out an existing branch', async ({
         request.method === 'GET' &&
         /^\/workspaces\/[^/]+\/git\/?$/.test(request.path),
     ).length;
+  // Capture the baseline BEFORE the checkout click: the success path fires
+  // the git-status refetch within milliseconds (the same commit that closes
+  // the popover), while waiting for the popover to close resolves late — a
+  // baseline taken after that wait already includes the follow-up requests
+  // and the increase poll below can never fire.
   const statusCallsAtCheckout = gitStatusRequests();
+  await list.getByRole('option', { name: 'origin/develop' }).click();
+
+  await expect(popover).not.toBeVisible();
   await expect
     .poll(() =>
       daemon.requests.find(

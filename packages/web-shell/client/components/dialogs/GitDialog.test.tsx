@@ -193,10 +193,20 @@ describe('GitDialog', () => {
         {
           sha: 'abcdef1234567890',
           shortSha: 'abcdef1',
-          subject: 'keep selected',
+          subject: 'head commit',
           authorName: 'Author',
           authorEmail: 'author@example.com',
           authorDate: Math.floor(Date.now() / 1000) - 60,
+          parents: [],
+          refs: '',
+        },
+        {
+          sha: '1234567890abcdef',
+          shortSha: '1234567',
+          subject: 'keep selected',
+          authorName: 'Author',
+          authorEmail: 'author@example.com',
+          authorDate: Math.floor(Date.now() / 1000) - 120,
           parents: [],
           refs: '',
         },
@@ -215,6 +225,27 @@ describe('GitDialog', () => {
     });
     await flush();
     expect(source.value).toBe('commit');
+
+    // Explicitly select the NON-head entry: with a single-entry fixture a
+    // reset to the list default would be indistinguishable from preserving
+    // the selection.
+    const commitTrigger = document.body.querySelector(
+      'button[aria-label="Select commit"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      commitTrigger.click();
+    });
+    await flush();
+    const olderOption = Array.from(
+      document.body.querySelectorAll('[role="option"]'),
+    ).find((option) =>
+      option.textContent?.includes('keep selected'),
+    ) as HTMLButtonElement;
+    expect(olderOption).toBeTruthy();
+    await act(async () => {
+      olderOption.click();
+    });
+    await flush();
     expect(
       document.body.querySelector('button[aria-label="Select commit"]')
         ?.textContent,

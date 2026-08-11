@@ -122,6 +122,8 @@ const EN: Messages = {
   'gitMode.existingSearch': 'Search branches…',
   'gitMode.existingLoading': 'Loading branches…',
   'gitMode.existingEmpty': 'No matching branches',
+  'gitMode.branchesUnavailable':
+    'Branch list is not available for this workspace.',
   'gitMode.existingLocal': 'Local',
   'gitMode.existingRemote': (v) => `Remote · ${v?.remote ?? 'other'}`,
   'gitMode.branch': 'New branch',
@@ -2918,6 +2920,7 @@ const ZH: Messages = {
   'gitMode.existingSearch': '搜索分支…',
   'gitMode.existingLoading': '正在加载分支…',
   'gitMode.existingEmpty': '没有匹配的分支',
+  'gitMode.branchesUnavailable': '此工作区的分支列表不可用。',
   'gitMode.existingLocal': '本地',
   'gitMode.existingRemote': (v) => `远程 · ${v?.remote ?? '其他'}`,
   'gitMode.branch': '新建分支',

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
@@ -502,8 +502,12 @@ describe('workspace Git diff routes', () => {
     // must resolve the ?cwd parameter to it. With a non-existent ?cwd the
     // resolver falls back to the runtime root, and the assertion below could
     // not tell containment apart from the fallback.
-    const workspaceRoot = mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-git-diff-route-'),
+    // realpath the tmpdir root: the route resolves ?cwd through
+    // fs.realpathSync, and on macOS os.tmpdir() is /var/folders/… while
+    // realpath yields /private/var/folders/… — the raw paths would never
+    // match there.
+    const workspaceRoot = realpathSync(
+      mkdtempSync(path.join(os.tmpdir(), 'qwen-git-diff-route-')),
     );
     const containedCwd = path.join(workspaceRoot, 'wt');
     mkdirSync(containedCwd);

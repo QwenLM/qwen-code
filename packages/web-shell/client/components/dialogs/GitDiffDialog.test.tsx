@@ -593,12 +593,13 @@ describe('GitDiffDialog', () => {
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined);
   });
 
-  it('refetches a selected commit source when the revision bumps', async () => {
+  it('preserves the selected commit source when the revision bumps', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     workspaceGitLog.mockResolvedValue({
       available: true,
       entries: [
         { sha: 'abcdef1234567890', shortSha: 'abcdef1', subject: 'head' },
+        { sha: '1234567890abcdef', shortSha: '1234567', subject: 'older' },
       ],
       hasMore: false,
     });
@@ -624,6 +625,30 @@ describe('GitDiffDialog', () => {
     await flush();
     expect(workspaceGitLog).toHaveBeenCalledTimes(1);
 
+    // Explicitly pick the NON-head entry: with a single-entry fixture the
+    // default reselection would be indistinguishable from preservation.
+    const commitTrigger = document.body.querySelector(
+      'button[aria-label="Select commit"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      commitTrigger.click();
+    });
+    await flush();
+    const olderOption = Array.from(
+      document.body.querySelectorAll('[role="option"]'),
+    ).find((option) =>
+      option.textContent?.includes('older'),
+    ) as HTMLButtonElement;
+    expect(olderOption).toBeTruthy();
+    await act(async () => {
+      olderOption.click();
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'commit',
+      ref: '1234567890abcdef',
+    });
+
     act(() => {
       root.render(
         <I18nProvider language="en">
@@ -633,12 +658,88 @@ describe('GitDiffDialog', () => {
     });
     await flush();
 
-    // The cached commit list is dropped and refetched; the mode stays put.
+    // The cached commit list is dropped and refetched; the mode AND the
+    // explicit selection both survive the refresh.
     expect(source.value).toBe('commit');
     expect(workspaceGitLog).toHaveBeenCalledTimes(2);
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'commit',
-      ref: 'abcdef1234567890',
+      ref: '1234567890abcdef',
+    });
+  });
+
+  it('preserves the selected branch source when the revision bumps', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitBranches.mockResolvedValue({
+      head: 'current-branch',
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'develop', isHead: false },
+        { name: 'bugfix/x', isHead: false },
+      ],
+      remote: [{ name: 'origin/main', isHead: false }],
+      tags: [],
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={0} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+
+    // The default pick is 'develop' (first non-head local); explicitly select
+    // another branch so a reset-to-default would be visible.
+    const branchTrigger = document.body.querySelector(
+      'button[aria-label="Select branch"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      branchTrigger.click();
+    });
+    await flush();
+    const bugfixOption = Array.from(
+      document.body.querySelectorAll('[role="option"]'),
+    ).find((option) =>
+      option.textContent?.includes('bugfix/x'),
+    ) as HTMLButtonElement;
+    expect(bugfixOption).toBeTruthy();
+    await act(async () => {
+      bugfixOption.click();
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'bugfix/x',
+    });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={1} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(source.value).toBe('branch');
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'bugfix/x',
     });
   });
 

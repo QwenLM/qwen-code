@@ -225,6 +225,55 @@ describe('gitCheckout', () => {
       'LOCAL EDIT\n',
     );
   });
+
+  it('reports success when only the post-checkout hook fails', async () => {
+    // Git runs the post-checkout hook AFTER HEAD has moved and exits
+    // non-zero when it fails. The switch itself completed, so the result
+    // must reflect the real state instead of claiming a failure.
+    const dir = makeRepo();
+    git(dir, 'branch', 'target');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+    const result = await gitCheckout(dir, 'target');
+
+    expect(result).toEqual({ branch: 'target', detached: false });
+    expect(currentBranch(dir)).toBe('target');
+  });
+
+  it('reports a detached landing when the hook fails on a tag checkout', async () => {
+    const dir = makeRepo();
+    git(dir, 'tag', 'v1.0');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+    const result = await gitCheckout(dir, 'v1.0');
+
+    expect(result.detached).toBe(true);
+  });
+
+  it('still rejects a refused checkout without moving HEAD', async () => {
+    const dir = makeRepo();
+    // The target branch rewrites a.txt; the dirty local edit makes git
+    // refuse the switch BEFORE moving HEAD.
+    git(dir, 'checkout', '-q', '-b', 'target');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'target version\n');
+    git(dir, 'commit', '-q', '-am', 'target change');
+    git(dir, 'checkout', '-q', 'master');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+    expect(currentBranch(dir)).toBe('master');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
 });
 
 describe('gitCreateBranch', () => {

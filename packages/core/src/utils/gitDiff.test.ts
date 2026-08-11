@@ -563,6 +563,249 @@ describe('fetchGitDiff', () => {
     expect(lines).toContain('+local untracked');
   });
 
+  it('drops an identical-content collision row', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'same.txt'), 'same\n');
+    await git(repo, 'add', 'same.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'same.txt'), 'same\n');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats.filesCount).toBe(0);
+    expect(result?.perFileStats.has('same.txt')).toBe(false);
+  });
+
+  it('keeps a truncated collision row when content diverges past the cap', async () => {
+    // Both sides share their first MAX_DIFF_SIZE_BYTES and diverge only after
+    // the cap: the compared prefixes are identical, so the row must survive
+    // on `truncated` alone instead of being dropped as "identical".
+    const prefix = 'a\n'.repeat(MAX_DIFF_SIZE_BYTES / 2);
+    const baselineContent = prefix + 'b\n'.repeat(100_000);
+    const worktreeContent = prefix + 'c\n'.repeat(100_000);
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'big.txt'), baselineContent);
+    await git(repo, 'add', 'big.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'big.txt'), worktreeContent);
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.perFileStats.get('big.txt')).toMatchObject({
+      added: 0,
+      removed: 0,
+      isBinary: false,
+      truncated: true,
+    });
+    expect(result?.stats.filesCount).toBe(1);
+  });
+
+  it('propagates truncation on a capped collision replacement row', async () => {
+    const baselineContent = 'x\n'.repeat(600_000); // ~1.2 MB
+    const worktreeContent = 'y\n' + 'x\n'.repeat(599_999);
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'big.txt'), baselineContent);
+    await git(repo, 'add', 'big.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'big.txt'), worktreeContent);
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    const row = result?.perFileStats.get('big.txt');
+    expect(row?.isBinary).toBe(false);
+    expect(row?.truncated).toBe(true);
+    expect(row?.added).toBeGreaterThan(0);
+    const hunks = await fetchGitDiffHunksForFile(repo, 'big.txt', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks).not.toBeNull();
+    expect(hunks?.truncated).toBe(true);
+  });
+
+  it('keeps a mode-only collision row when the executable bit changed', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+    await fs.chmod(path.join(repo, 'run.sh'), 0o755);
+    await git(repo, 'add', 'run.sh');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    // Recreated untracked, identical content but without the executable bit.
+    await fs.writeFile(path.join(repo, 'run.sh'), '#!/bin/sh\n');
+    await fs.chmod(path.join(repo, 'run.sh'), 0o644);
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    // The phantom deletion is replaced by a 0/0 row, not dropped: the
+    // executable bit flip is a real metadata change against the baseline.
+    expect(result?.perFileStats.get('run.sh')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: false,
+      truncated: false,
+    });
+    expect(result?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 0,
+      linesRemoved: 0,
+    });
+  });
+
+  it('keeps one opaque row for a binary collision', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'logo.bin'), Buffer.from([1, 0, 2, 0]));
+    await git(repo, 'add', 'logo.bin');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'logo.bin'), Buffer.from([3, 0, 4, 0]));
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats.filesCount).toBe(1);
+    expect(result?.perFileStats.get('logo.bin')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: true,
+    });
+  });
+
+  it('shows an empty-baseline-blob collision as an all-added row with hunks', async () => {
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'keep.txt'), '');
+    await git(repo, 'add', 'keep.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'keep.txt'), 'line1\nline2\n');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.perFileStats.get('keep.txt')).toMatchObject({
+      added: 2,
+      removed: 0,
+      isBinary: false,
+    });
+    // The phantom-deletion diff of an empty file carries no hunks; the
+    // single-file endpoint must still return the worktree comparison.
+    const hunks = await fetchGitDiffHunksForFile(repo, 'keep.txt', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toEqual(['+line1', '+line2']);
+  });
+
+  it('returns hunks for a >1MB collision file the parser skipped', async () => {
+    const baselineContent = 'x\n'.repeat(600_000); // ~1.2 MB
+    const worktreeContent = 'changed first line\n' + 'x\n'.repeat(599_999);
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'big.txt'), baselineContent);
+    await git(repo, 'add', 'big.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'big.txt'), worktreeContent);
+
+    const hunks = await fetchGitDiffHunksForFile(repo, 'big.txt', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks).not.toBeNull();
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain(
+      '+changed first line',
+    );
+  });
+
+  it('returns deletion hunks for a bracketed path with a glob-matching sibling', async () => {
+    // `foo[1].txt` tracked at the baseline and deleted from the worktree; an
+    // untracked `foo1.txt` exists. Without the `:(literal)` pathspec magic
+    // the ls-files probe matched the sibling and misrouted the hunks.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'foo[1].txt'), 'old\n');
+    await git(repo, 'add', 'foo[1].txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'foo1.txt'), 'sibling\n');
+
+    const hunks = await fetchGitDiffHunksForFile(
+      repo,
+      'foo[1].txt',
+      undefined,
+      { mode: 'branch', ref: 'baseline' },
+    );
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('-old');
+  });
+
+  it('returns deletion hunks for a file replaced by an untracked directory', async () => {
+    // Baseline tracks the FILE `a`; the worktree replaces it with the
+    // directory `a/` holding untracked `a/x`. A bare pathspec matches the
+    // descendant, so the untracked probe must compare exact entries.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(path.join(repo, 'a'), 'content\n');
+    await git(repo, 'add', 'a');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.mkdir(path.join(repo, 'a'));
+    await fs.writeFile(path.join(repo, 'a', 'x'), 'x\n');
+
+    const hunks = await fetchGitDiffHunksForFile(repo, 'a', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('-content');
+  });
+
+  it('diffs a tracked file whose name contains pathspec magic', async () => {
+    const magicName = ':(glob)trap.txt';
+    await fs.writeFile(path.join(repo, magicName), 'old\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await fs.writeFile(path.join(repo, magicName), 'new\n');
+
+    const hunks = await fetchGitDiffHunksForFile(repo, magicName);
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('+new');
+    expect(hunks?.hunks.flatMap((h) => h.lines)).toContain('-old');
+  });
+
   it('synthesizes an all-added hunk for a branch-mode untracked file absent from the baseline', async () => {
     await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
     await git(repo, 'add', '.');

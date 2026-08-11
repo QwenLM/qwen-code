@@ -16,6 +16,7 @@ import {
   SearchIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { sanitizeControlChars } from './messages/toolFormatting';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
 
@@ -142,7 +143,12 @@ export function GitModePopover({
       .workspaceByCwd(workspaceCwd)
       .workspaceGitBranches()
       .then((result) => {
-        if (!cancelled) setExistingBranches(result);
+        if (cancelled) return;
+        if (result.available === false) {
+          setExistingError(t('gitMode.branchesUnavailable'));
+          return;
+        }
+        setExistingBranches(result);
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -157,7 +163,7 @@ export function GitModePopover({
     return () => {
       cancelled = true;
     };
-  }, [client, open, selectedMode, workspaceCwd, existingRetryNonce]);
+  }, [client, open, selectedMode, workspaceCwd, existingRetryNonce, t]);
 
   const existingGroups = useMemo(() => {
     const query = existingSearch.trim().toLowerCase();
@@ -397,7 +403,7 @@ export function GitModePopover({
                             className={`${styles.existingGroupChevron} ${expanded ? '' : styles.existingGroupChevronCollapsed}`}
                             aria-hidden="true"
                           />
-                          <span>{group}</span>
+                          <span>{sanitizeControlChars(group)}</span>
                         </button>
                         {expanded &&
                           items.map((item) => (
@@ -413,7 +419,7 @@ export function GitModePopover({
                               }
                             >
                               <GitBranchIcon size={13} />
-                              <span>{item.name}</span>
+                              <span>{sanitizeControlChars(item.name)}</span>
                               {checkoutRef === item.ref && (
                                 <Loader2Icon
                                   className={styles.spin}

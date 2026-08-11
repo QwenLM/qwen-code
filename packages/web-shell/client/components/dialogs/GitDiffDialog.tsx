@@ -535,11 +535,10 @@ export function GitDiffContent({
   }, [workspaceCwd, gitCwd]);
 
   useEffect(() => {
-    // Refresh (not reset): the selected source stays, but the cached lists
-    // and refs are dropped so the fetch effects below re-run against the
-    // post-mutation repository state.
-    setCommitRef('');
-    setBranchRef('');
+    // Refresh (not reset): the cached lists are dropped so the fetch effects
+    // below re-run against the post-mutation repository state, but the
+    // selected source stays — the resolve handlers keep it when it survives
+    // the refresh.
     setCommits(null);
     setCommitsHasMore(false);
     setBranches(null);
@@ -561,7 +560,11 @@ export function GitDiffContent({
         }
         setCommits(result.entries);
         setCommitsHasMore(result.hasMore);
-        setCommitRef(result.entries[0]?.sha ?? '');
+        setCommitRef((current) =>
+          current && result.entries.some((entry) => entry.sha === current)
+            ? current
+            : (result.entries[0]?.sha ?? ''),
+        );
       })
       .catch(() => {
         if (!cancelled) setSourceError('commit');
@@ -569,7 +572,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd, mode, commits, sourceNonce]);
+  }, [client, workspaceCwd, gitCwd, mode, commits, sourceNonce, revision]);
 
   useEffect(() => {
     if (mode !== 'branch' || branches !== null) return;
@@ -585,11 +588,17 @@ export function GitDiffContent({
           return;
         }
         setBranches(result);
-        setBranchRef(
-          result.local.find((branch) => !branch.isHead)?.name ??
-            result.remote[0]?.name ??
-            '',
-        );
+        setBranchRef((current) => {
+          const names = [
+            ...result.local.map((branch) => branch.name),
+            ...result.remote.map((branch) => branch.name),
+          ];
+          return current && names.includes(current)
+            ? current
+            : (result.local.find((branch) => !branch.isHead)?.name ??
+                result.remote[0]?.name ??
+                '');
+        });
       })
       .catch(() => {
         if (!cancelled) setSourceError('branch');
@@ -597,7 +606,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd, mode, branches, sourceNonce]);
+  }, [client, workspaceCwd, gitCwd, mode, branches, sourceNonce, revision]);
 
   const options = useMemo<
     DaemonWorkspaceGitDiffOptions | undefined | null
@@ -616,7 +625,7 @@ export function GitDiffContent({
     () =>
       (commits ?? []).map((commit) => ({
         value: commit.sha,
-        label: `${commit.shortSha} ${commit.subject}`,
+        label: `${commit.shortSha} ${sanitizeControlChars(commit.subject)}`,
       })),
     [commits],
   );
@@ -627,11 +636,11 @@ export function GitDiffContent({
         .filter((branch) => !branch.isHead)
         .map((branch) => ({
           value: branch.name,
-          label: branch.name,
+          label: sanitizeControlChars(branch.name),
         })),
       ...(branches?.remote ?? []).map((branch) => ({
         value: branch.name,
-        label: branch.name,
+        label: sanitizeControlChars(branch.name),
       })),
     ],
     [branches],
@@ -753,8 +762,9 @@ export function GitDiffContent({
           <DiffFileRow
             // Key by workspace + path so switching workspace remounts the row
             // instead of reusing another workspace's hunks/open state for a
-            // path both workspaces share.
-            key={`${workspaceCwd}:${gitCwd ?? ''}:${mode}:${options?.ref ?? ''}:${file.path}`}
+            // path both workspaces share. `revision` remounts on refresh so an
+            // expanded row never pairs pre-mutation hunks with new statistics.
+            key={`${workspaceCwd}:${gitCwd ?? ''}:${mode}:${options?.ref ?? ''}:${revision ?? 0}:${file.path}`}
             workspaceCwd={workspaceCwd}
             gitCwd={gitCwd}
             file={file}
