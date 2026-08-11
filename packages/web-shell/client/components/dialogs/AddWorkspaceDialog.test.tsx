@@ -434,7 +434,7 @@ describe('AddWorkspaceDialog', () => {
       act(() => {
         browseButton().click();
       });
-      // While the picker is open, the blur timer sets the suppress flag.
+      // Simulate the picker staying open well past the blur window.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(100);
       });
@@ -494,16 +494,62 @@ describe('AddWorkspaceDialog', () => {
       expect(listbox()).not.toBeNull();
     });
 
-    it('shows an error when the system picker fails', async () => {
-      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+    it('keeps the pick-triggered lookup closed until the first edit', async () => {
+      let resolvePick!: (value: string | undefined) => void;
+      const onPick = vi.fn(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            resolvePick = resolve;
+          }),
+      );
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
         <AddWorkspaceDialog
           onClose={vi.fn()}
           onAdd={vi.fn()}
           onPick={onPick}
+          onSuggest={onSuggest}
         />,
       );
 
+      act(() => {
+        browseButton().click();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      await act(async () => {
+        resolvePick('/Users/me/code');
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(input().value).toBe('/Users/me/code');
+      // Refocusing to fine-tune the picked path while its lookup is still
+      // pending must not pop the list open; only a real edit may.
+      act(() => input().focus());
+      await settle();
+      expect(listbox()).toBeNull();
+
+      type('/Users/me/code/s');
+      await settle();
+      expect(listbox()).not.toBeNull();
+    });
+
+    it('shows an error when the system picker fails', async () => {
+      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      // The picker rejects instantly (e.g. no zenity/osascript on a
+      // headless host), settling before the input's 100 ms blur timer.
       await act(async () => {
         browseButton().click();
         await Promise.resolve();
@@ -513,6 +559,19 @@ describe('AddWorkspaceDialog', () => {
       expect(alert()?.textContent).toContain(
         'Unable to open the system folder picker',
       );
+
+      // Let the blur window elapse: a still-pending blur timer must not
+      // re-set the suppress flag the error path cleared.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      act(() => input().focus());
+      type('/home/me/co');
+      await settle();
+
+      expect(onSuggest).toHaveBeenCalledWith('/home/me/co');
+      expect(listbox()).not.toBeNull();
     });
 
     it('never queries for a non-absolute value', async () => {

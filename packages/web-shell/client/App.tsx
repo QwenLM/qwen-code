@@ -202,7 +202,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { isEditableTarget } from './utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from './utils/dom';
 import {
   invokeSlashCommandHandler,
   SLASH_COMMAND_PATTERN,
@@ -3861,8 +3861,8 @@ export function App({
     }
     // document.activeElement retargets to the shadow host in shadow-DOM
     // portal mode; read the focused node from the surface's own root.
-    const surfaceRoot = surface.getRootNode() as Document | ShadowRoot;
-    if (!surface.contains(surfaceRoot.activeElement)) surface.focus();
+    const surfaceActive = getShadowAwareActiveElement(surface);
+    if (!surface.contains(surfaceActive)) surface.focus();
     // Keydowns inside the sandboxed HTML preview iframe never reach the
     // surface's Tab-wrap handler or the window Escape handler, and a Tab
     // past the preview's last focusable lands focus natively outside the
@@ -3922,9 +3922,7 @@ export function App({
         return;
       }
       const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
-      const focused = (
-        event.currentTarget.getRootNode() as Document | ShadowRoot
-      ).activeElement;
+      const focused = getShadowAwareActiveElement(event.currentTarget);
       if (!first || !last) {
         if (focused === event.currentTarget) event.preventDefault();
         return;
@@ -9660,9 +9658,7 @@ export function App({
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
-              onSuggest={(prefix) =>
-                workspaceActions.suggestWorkspacePaths(prefix)
-              }
+              onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={async () => {
                 const result = await workspaceActions.pickWorkspaceDirectory();
                 return result.selected ? result.path : undefined;

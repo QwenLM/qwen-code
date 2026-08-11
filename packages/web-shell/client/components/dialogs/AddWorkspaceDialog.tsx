@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import {
@@ -75,6 +76,9 @@ export function AddWorkspaceDialog({
   // Set when a suggestion is accepted or the list is dismissed, so the
   // path-change effect knows whether to reopen the list for that update.
   const suppressNextFetchOpenRef = useRef(false);
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -104,15 +108,10 @@ export function AddWorkspaceDialog({
           setSuggestions(result.suggestions);
           setHostSep(result.sep || '/');
           setHighlight(-1);
-          // document.activeElement retargets to the shadow host in
-          // shadow-DOM portal mode; read focus from the input's own root.
+          const input = inputRef.current;
           if (
-            (
-              inputRef.current?.getRootNode() as
-                | Document
-                | ShadowRoot
-                | undefined
-            )?.activeElement === inputRef.current &&
+            input !== null &&
+            getShadowAwareActiveElement(input) === input &&
             (openOnResult || listOpenRef.current)
           ) {
             setListOpen(result.suggestions.length > 0);
@@ -160,25 +159,37 @@ export function AddWorkspaceDialog({
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
     inputRef.current?.blur();
+    // The blur above scheduled the delayed suppress/close; apply both now
+    // and cancel the timer so a fast-settling picker cannot race it and
+    // re-set the flag after the outcome below has been handled.
+    if (blurTimeoutRef.current !== undefined) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = undefined;
+    }
+    closeList();
+    suppressNextFetchOpenRef.current = true;
     setBrowsing(true);
     setError(null);
+    let pickedPath: string | undefined;
     try {
-      const selectedPath = await onPick();
-      if (selectedPath) {
+      pickedPath = await onPick();
+      if (pickedPath && pickedPath !== path) {
+        // Leave the suppress flag set: the path-change effect consumes it,
+        // keeping the pick-triggered lookup closed until the first edit.
         ++suggestSeqRef.current;
-        setPath(selectedPath);
+        setPath(pickedPath);
         setSuggestions([]);
-        closeList();
+      } else {
+        // Cancelled, failed, or same-value pick: the first edit must open.
+        suppressNextFetchOpenRef.current = false;
       }
     } catch {
+      suppressNextFetchOpenRef.current = false;
       setError(t('sidebar.addWorkspaceBrowseError'));
     } finally {
       setBrowsing(false);
-      // The blur before the picker set suppressNextFetchOpenRef; clear it so
-      // the first edit after a cancelled or no-op pick still opens the list.
-      suppressNextFetchOpenRef.current = false;
     }
-  }, [onPick, closeList, t]);
+  }, [onPick, path, closeList, t]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -293,7 +304,11 @@ export function AddWorkspaceDialog({
                   onKeyDown={handleInputKeyDown}
                   onBlur={() => {
                     // Delay so a mousedown on a suggestion wins over blur.
-                    setTimeout(() => {
+                    if (blurTimeoutRef.current !== undefined) {
+                      clearTimeout(blurTimeoutRef.current);
+                    }
+                    blurTimeoutRef.current = setTimeout(() => {
+                      blurTimeoutRef.current = undefined;
                       suppressNextFetchOpenRef.current = true;
                       closeList();
                     }, 100);
@@ -318,6 +333,7 @@ export function AddWorkspaceDialog({
                   <Button
                     type="button"
                     variant="outline"
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={() => void pickDirectory()}
                     disabled={submitting || browsing}
                   >
