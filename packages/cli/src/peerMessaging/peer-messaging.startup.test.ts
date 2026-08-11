@@ -43,7 +43,6 @@ const { ApprovalMode, buildUserFrame, resolvePeerSocketPath } = await import(
 const { PeerMessaging } = await import('./peer-messaging.js');
 
 const isWindows = process.platform === 'win32';
-const describePosix = describe.skipIf(isWindows);
 const SELF_SOCKET = resolvePeerSocketPath(456);
 const PEER_SOCKET = resolvePeerSocketPath(123);
 
@@ -71,7 +70,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describePosix('PeerMessaging.start startup window', () => {
+describe.skipIf(isWindows)('PeerMessaging.start startup window', () => {
   it('gates a frame that arrives before the inbox finishes binding', async () => {
     const sent = frame();
     arriveDuringStartup(sent);
@@ -156,61 +155,64 @@ describePosix('PeerMessaging.start startup window', () => {
   });
 });
 
-describePosix('PeerMessaging.start when the bind fails after listen', () => {
-  // `startPeerInbox` returns null after `listen()` when the socket chmod
-  // fails. The gate has been wired since before the bind, so frames can
-  // already have been admitted during the window — and `start()` must
-  // settle them instead of walking away.
-  function failAfterAdmitting(frame: PeerUserFrame): void {
-    startPeerInboxMock.mockImplementation(
-      async (options: { onFrame: (frame: PeerUserFrame) => void }) => {
-        options.onFrame(frame);
-        return null;
-      },
-    );
-  }
+describe.skipIf(isWindows)(
+  'PeerMessaging.start when the bind fails after listen',
+  () => {
+    // `startPeerInbox` returns null after `listen()` when the socket chmod
+    // fails. The gate has been wired since before the bind, so frames can
+    // already have been admitted during the window — and `start()` must
+    // settle them instead of walking away.
+    function failAfterAdmitting(frame: PeerUserFrame): void {
+      startPeerInboxMock.mockImplementation(
+        async (options: { onFrame: (frame: PeerUserFrame) => void }) => {
+          options.onFrame(frame);
+          return null;
+        },
+      );
+    }
 
-  it('expires a held startup-window frame when the bind fails', async () => {
-    const sent = frame();
-    failAfterAdmitting(sent);
+    it('expires a held startup-window frame when the bind fails', async () => {
+      const sent = frame();
+      failAfterAdmitting(sent);
 
-    const messaging = await PeerMessaging.start({
-      socketPath: SELF_SOCKET,
-      getApprovalMode: () => null,
-      getPolicySetting: () => undefined,
+      const messaging = await PeerMessaging.start({
+        socketPath: SELF_SOCKET,
+        getApprovalMode: () => null,
+        getPolicySetting: () => undefined,
+      });
+
+      expect(messaging).toBeNull();
+      expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
+        PEER_SOCKET,
+        expect.objectContaining({ status: 'held', origMsgId: sent.msgId }),
+      );
+      expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
+        PEER_SOCKET,
+        expect.objectContaining({ status: 'expired', origMsgId: sent.msgId }),
+      );
     });
 
-    expect(messaging).toBeNull();
-    expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
-      PEER_SOCKET,
-      expect.objectContaining({ status: 'held', origMsgId: sent.msgId }),
-    );
-    expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
-      PEER_SOCKET,
-      expect.objectContaining({ status: 'expired', origMsgId: sent.msgId }),
-    );
-  });
+    it('replaces the premature delivered receipt of a buffered frame', async () => {
+      const sent = frame();
+      failAfterAdmitting(sent);
 
-  it('replaces the premature delivered receipt of a buffered frame', async () => {
-    const sent = frame();
-    failAfterAdmitting(sent);
+      // Prompting receiver: the gate accepted the frame into the
+      // pre-submitFn buffer and receipted it delivered at accept time.
+      const messaging = await PeerMessaging.start({
+        socketPath: SELF_SOCKET,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getPolicySetting: () => undefined,
+      });
 
-    // Prompting receiver: the gate accepted the frame into the
-    // pre-submitFn buffer and receipted it delivered at accept time.
-    const messaging = await PeerMessaging.start({
-      socketPath: SELF_SOCKET,
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getPolicySetting: () => undefined,
+      expect(messaging).toBeNull();
+      expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
+        PEER_SOCKET,
+        expect.objectContaining({ status: 'delivered', origMsgId: sent.msgId }),
+      );
+      expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
+        PEER_SOCKET,
+        expect.objectContaining({ status: 'expired', origMsgId: sent.msgId }),
+      );
     });
-
-    expect(messaging).toBeNull();
-    expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
-      PEER_SOCKET,
-      expect.objectContaining({ status: 'delivered', origMsgId: sent.msgId }),
-    );
-    expect(sendDeliveryStatusMock).toHaveBeenCalledWith(
-      PEER_SOCKET,
-      expect.objectContaining({ status: 'expired', origMsgId: sent.msgId }),
-    );
-  });
-});
+  },
+);
