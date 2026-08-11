@@ -716,6 +716,41 @@ describe('VoiceButton', () => {
     click(button);
 
     expect(mocks.capture.stop).not.toHaveBeenCalled();
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+    click(button);
+    expect(mocks.capture.stop).toHaveBeenCalledOnce();
+  });
+
+  it('honours a stop click after a quick hold released outside', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 1_000);
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    // Release outside: pointer capture delivers pointerup to the button, but
+    // the trailing click lands elsewhere — ignoreNextClickRef leaks.
+    mocks.capture.stop.mockClear();
+    pointer(button, 'pointerup', 1, 0, 1_100);
+    const outside = document.createElement('button');
+    click(outside);
+
+    // A real click on the button must still stop the recording.
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown', 1, 0, 2_000);
     click(button);
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
