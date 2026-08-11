@@ -105,6 +105,45 @@ describe('start_sandbox', () => {
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);
   });
+
+  it('omits the warnings file environment variable when it is unset', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    expect(
+      args.filter((arg) => arg.startsWith('QWEN_CODE_WARNINGS_FILE=')),
+    ).toEqual([]);
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
 });
 
 describe('resolveSeatbeltProfileFile', () => {
