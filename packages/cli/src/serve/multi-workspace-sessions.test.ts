@@ -118,6 +118,10 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
   }>;
+  readonly getMidTurnMessagesCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   readonly removeMidTurnMessageCalls: Array<{
     sessionId: string;
     messageId: string;
@@ -387,6 +391,7 @@ function makeBridge(
   const recapCalls: FakeBridge['recapCalls'] = [];
   const btwCalls: FakeBridge['btwCalls'] = [];
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
+  const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
   const removeMidTurnMessageCalls: FakeBridge['removeMidTurnMessageCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
@@ -422,6 +427,7 @@ function makeBridge(
     recapCalls,
     btwCalls,
     midTurnMessageCalls,
+    getMidTurnMessagesCalls,
     removeMidTurnMessageCalls,
     taskCancelCalls,
     goalClearCalls,
@@ -636,7 +642,21 @@ function makeBridge(
           : {}),
       };
     },
-    removeMidTurnMessage(
+    getMidTurnMessages(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      getMidTurnMessagesCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return {
+        messages: [],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      };
+    },
+    async removeMidTurnMessage(
       sessionId: string,
       messageId: string,
       context?: BridgeClientRequestContext,
@@ -2802,6 +2822,10 @@ describe('multi-workspace session dispatch', () => {
         .set('Authorization', TEST_AUTHORIZATION)
         .send({ message: 'blocked' }),
       request(app)
+        .get('/session/secondary-session/mid-turn-messages')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION),
+      request(app)
         .post('/session/secondary-session/tasks/task-1/cancel')
         .set('Host', host())
         .set('Authorization', TEST_AUTHORIZATION)
@@ -2818,7 +2842,7 @@ describe('multi-workspace session dispatch', () => {
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      403, 403, 403, 403, 403, 403, 403,
+      403, 403, 403, 403, 403, 403, 403, 403,
     ]);
     for (const response of responses) {
       expect(response.body.code).toBe('untrusted_workspace');
@@ -2828,6 +2852,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.recapCalls).toEqual([]);
       expect(bridge.btwCalls).toEqual([]);
       expect(bridge.midTurnMessageCalls).toEqual([]);
+      expect(bridge.getMidTurnMessagesCalls).toEqual([]);
       expect(bridge.removeMidTurnMessageCalls).toEqual([]);
       expect(bridge.taskCancelCalls).toEqual([]);
       expect(bridge.goalClearCalls).toEqual([]);

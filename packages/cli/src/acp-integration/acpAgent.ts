@@ -250,6 +250,7 @@ import {
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -12210,6 +12211,7 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
+    startNonInteractiveOpenAILogHousekeeping(config, settings);
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
