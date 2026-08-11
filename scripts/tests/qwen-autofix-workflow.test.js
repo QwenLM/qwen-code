@@ -10755,7 +10755,7 @@ exit 1
     );
   });
 
-  it('detects loop guard output before it falls out of the log tail', () => {
+  it('detects the terminal loop result despite later log output', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
@@ -10765,6 +10765,7 @@ exit 1
             isError: true,
           }),
         )});`,
+        // Trailing output must not replace the already parsed terminal result.
         "process.stdout.write('x'.repeat(21_000));",
         'process.exit(1);',
       ]);
@@ -10935,6 +10936,66 @@ exit 1
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'finished without required output file(s)',
       );
+    });
+  });
+
+  it('drops oversized stdout lines from API-error diagnostics', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const oversizedToolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content:
+                'x'.repeat(1_045_000) +
+                '[API Error: 429 quota exceeded]' +
+                'x'.repeat(55_000),
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(oversizedToolResult)}, () => process.exit(1));`,
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'status 1',
+      );
+      expect(result.stdout).toContain(
+        'dropped oversized stream-json line; full bytes in agent.log',
+      );
+    });
+  });
+
+  it('resumes parsing after a terminated oversized stdout line', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const loopResult = qwenResultLine({
+        errorMessage: 'Loop detection halted the run',
+        isError: true,
+      });
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write('x'.repeat(1_100_000) + '\\n' + ${JSON.stringify(
+          loopResult,
+        )});`,
+        'process.exitCode = 1;',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+      expect(
+        result.stdout.match(/dropped oversized stream-json line/g),
+      ).toHaveLength(1);
     });
   });
 
@@ -12124,7 +12185,7 @@ describe('run-agent idle watchdog', () => {
       stub: [
         '#!/bin/bash',
         'if [[ " $* " == *" --output-format stream-json "* && " $* " == *" --include-partial-messages "* ]]; then',
-        '    for i in $(seq 1 8); do echo "{\\"type\\":\\"progress\\",\\"step\\":$i}"; sleep 0.4; done',
+        '    for i in $(seq 1 8); do echo "{\\"type\\":\\"stream_event\\",\\"event\\":{\\"type\\":\\"input_json_delta\\",\\"partial_json\\":\\"x\\"}}"; sleep 0.4; done',
         'else',
         '    sleep 4',
         'fi',

@@ -39,6 +39,8 @@ const QWEN_IDLE_TIMEOUT_MS =
     ? parsedIdleTimeoutMs
     : 20 * 60 * 1000;
 const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
+const OVERSIZED_STREAM_JSON_LINE_NOTICE =
+  '[run-agent] dropped oversized stream-json line; full bytes in agent.log\n';
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -268,13 +270,14 @@ function runQwen(options, prompt) {
           if (part.length <= remaining) {
             stdoutCarry += part;
           } else {
-            appendDiagnostic(`${stdoutCarry}${part.slice(0, remaining)}`);
             stdoutCarry = '';
             discardingOversizedStdoutLine = true;
           }
         }
         if (terminated) {
-          if (!discardingOversizedStdoutLine) {
+          if (discardingOversizedStdoutLine) {
+            process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+          } else {
             consumeStreamJsonLine(stdoutCarry, true);
           }
           stdoutCarry = '';
@@ -282,7 +285,9 @@ function runQwen(options, prompt) {
         }
       }
       if (final) {
-        if (!discardingOversizedStdoutLine) {
+        if (discardingOversizedStdoutLine) {
+          process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+        } else {
           consumeStreamJsonLine(stdoutCarry, false);
         }
         stdoutCarry = '';
