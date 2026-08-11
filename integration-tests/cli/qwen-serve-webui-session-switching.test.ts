@@ -35,6 +35,7 @@ let DaemonSessionProvider: typeof import('@qwen-code/webui/daemon-react-sdk').Da
 let useActions: typeof import('@qwen-code/webui/daemon-react-sdk').useActions;
 let useConnection: typeof import('@qwen-code/webui/daemon-react-sdk').useConnection;
 let useTranscriptBlocks: typeof import('@qwen-code/webui/daemon-react-sdk').useTranscriptBlocks;
+let restoreSessionRequestRecorder: (() => void) | undefined;
 const originalGlobalDescriptors = new Map(
   ['window', 'document', 'navigator', 'IS_REACT_ACT_ENVIRONMENT'].map(
     (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
@@ -75,6 +76,8 @@ afterAll(() => {
 });
 
 afterEach(async () => {
+  restoreSessionRequestRecorder?.();
+  restoreSessionRequestRecorder = undefined;
   if (root) {
     await act(async () => root?.unmount());
     root = undefined;
@@ -107,7 +110,7 @@ function installSessionRequestRecorder(
   const requests: RecordedSessionRequest[] = [];
   let recording = true;
   globalThis.fetch = async (input, init) => {
-    const request = input instanceof Request ? input : new Request(input, init);
+    const request = new Request(input, init);
     const url = new URL(request.url);
     const match = url.pathname.match(/^\/session\/([^/]+)\//);
     if (recording) {
@@ -120,12 +123,18 @@ function installSessionRequestRecorder(
     }
     return respond?.(request) ?? originalFetch(request);
   };
+  const stop = () => {
+    if (!recording) return;
+    recording = false;
+    globalThis.fetch = originalFetch;
+    if (restoreSessionRequestRecorder === stop) {
+      restoreSessionRequestRecorder = undefined;
+    }
+  };
+  restoreSessionRequestRecorder = stop;
   return {
     requests,
-    stop() {
-      recording = false;
-      globalThis.fetch = originalFetch;
-    },
+    stop,
   };
 }
 
@@ -333,19 +342,21 @@ describe('qwen serve WebUI transactional session switching', () => {
     state: Awaited<ReturnType<typeof setupActiveSource>>,
   ) {
     state.recorder.stop();
-    await act(async () => {
-      await activeDaemon?.client
-        .cancel(state.source.sessionId)
-        .catch(() => undefined);
-    });
-    if (root) {
-      await act(async () => root?.unmount());
-      root = undefined;
+    try {
+      await act(async () => {
+        await state.getActions().cancel();
+        await state.promptOutcome;
+      });
+    } finally {
+      if (root) {
+        await act(async () => root?.unmount());
+        root = undefined;
+      }
+      state.container.remove();
+      await activeDaemon?.dispose();
+      activeDaemon = undefined;
+      fs.rmSync(state.workspace, { recursive: true, force: true });
     }
-    state.container.remove();
-    await activeDaemon?.dispose();
-    activeDaemon = undefined;
-    fs.rmSync(state.workspace, { recursive: true, force: true });
   }
 
   function executionRequests(requests: readonly RecordedSessionRequest[]) {
