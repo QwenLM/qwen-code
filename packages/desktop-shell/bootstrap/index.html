@@ -243,19 +243,20 @@
           </div>
         </div>
         <div class="status">
-          <div id="pulse" class="pulse idle"></div>
+          <div id="pulse" class="pulse"></div>
           <div>
-            <h2 id="title">Choose where to work</h2>
+            <h2 id="title">Starting Qwen Code</h2>
             <p id="detail">
-              Qwen Code runs locally and keeps the existing Web Shell as the
-              only interface.
+              Preparing the local workspace and bundled runtime…
             </p>
             <div id="workspace" class="workspace" hidden></div>
             <pre id="error"></pre>
           </div>
         </div>
         <div class="actions">
-          <button id="choose" class="primary">Choose workspace</button>
+          <button id="choose" class="primary" hidden>
+            Choose another workspace
+          </button>
           <button id="retry" hidden>Retry</button>
           <button id="logs">Open logs</button>
           <button id="update" hidden>Install update</button>
