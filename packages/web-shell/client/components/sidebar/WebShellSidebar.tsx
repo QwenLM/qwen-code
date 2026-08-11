@@ -14,7 +14,6 @@ import {
   useActions,
   useChannels,
   useConnection,
-  useSessions,
   useWorkspace,
   useWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
@@ -97,6 +96,13 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
+import {
+  useSessionCatalogController,
+  useSessionCatalogPolling,
+  useSessionCatalogQueries,
+  useWebShellSessions,
+} from '../../session-catalog/session-catalog-hooks';
+import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -309,11 +315,15 @@ interface WebShellSidebarProps {
     workspaceCwd?: string,
   ) => Promise<void> | void;
   onSelectCurrentSession?: () => void;
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string,
+    sessionId: string,
+    displayName: string,
+  ) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
   mobileOpen?: boolean;
-  sessionListReloadToken?: number;
   /**
    * Phase 4: workspace cwd picked for the next new session (undefined =
    * primary). Only meaningful on multi-workspace daemons.
@@ -530,11 +540,11 @@ export function WebShellSidebar({
   onNewSession,
   onLoadSession,
   onSelectCurrentSession,
+  onSessionRenameConfirmed,
   onError,
   theme,
   onThemeChange,
   mobileOpen,
-  sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
@@ -554,6 +564,9 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const footerItems = useMemo(
     () =>
       new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
@@ -636,7 +649,8 @@ export function WebShellSidebar({
     deleteSession,
     exportSession,
     archiveSession,
-  } = useSessions({
+    catalogQuery,
+  } = useWebShellSessions({
     autoLoad: true,
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
@@ -646,8 +660,8 @@ export function WebShellSidebar({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
-  // useDaemonResource starts with loading=false before autoLoad runs, so
-  // !loading is not “settled”. Treat the first data as the ready signal (empty
+  // The catalog starts with loading=false before its subscription requests
+  // data, so !loading is not “settled”. Treat the first data as the ready signal (empty
   // lists are still defined data) so the initial-catalog latch waits. Errors
   // must NOT settle it: a latch consumed against a failed request would treat
   // every section from the eventual successful reload as brand-new,
@@ -671,21 +685,17 @@ export function WebShellSidebar({
   }, [sessionsPage, sessionSource]);
   const loadPinnedSessions =
     organizationEnabled && selectedSessionSource !== 'channel';
-  const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
-    useSessions({
-      autoLoad: loadPinnedSessions,
-      enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
-      pageSize: SESSION_LIST_PAGE_SIZE,
-      archiveState: 'active',
-      ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
-      view: 'organized',
-      group: 'pinned',
-    });
+  const { sessions: primaryPinnedSessions } = useWebShellSessions({
+    autoLoad: loadPinnedSessions,
+    enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
+    pageSize: SESSION_LIST_PAGE_SIZE,
+    archiveState: 'active',
+    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+    view: 'organized',
+    group: 'pinned',
+  });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [pinnedExpanded, setPinnedExpanded] = useState(true);
-  const [secondaryPinnedSessions, setSecondaryPinnedSessions] = useState<
-    DaemonSessionSummary[]
-  >([]);
   const {
     sessions: archivedSessions,
     loading: archivedLoading,
@@ -693,7 +703,8 @@ export function WebShellSidebar({
     reload: reloadArchived,
     deleteSession: deleteArchivedSession,
     unarchiveSession,
-  } = useSessions({
+    catalogQuery: archivedCatalogQuery,
+  } = useWebShellSessions({
     autoLoad: true,
     enabled:
       sessionArchiveEnabled &&
@@ -706,14 +717,6 @@ export function WebShellSidebar({
       ? { view: 'organized' as const, group: 'all' }
       : {}),
   });
-  const [secondaryArchivedSessions, setSecondaryArchivedSessions] = useState<
-    DaemonSessionSummary[]
-  >([]);
-  const [secondaryArchivedLoading, setSecondaryArchivedLoading] =
-    useState(false);
-  const [secondaryArchivedError, setSecondaryArchivedError] = useState(false);
-  const [secondaryArchivedReloadToken, setSecondaryArchivedReloadToken] =
-    useState(0);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [menuGroups, setMenuGroups] = useState<DaemonSessionGroup[]>([]);
   const [colorOptions, setColorOptions] = useState<
@@ -801,9 +804,8 @@ export function WebShellSidebar({
     id: string;
     key: string;
   } | null>(null);
-  // Bump the token WorkspaceSection instances watch, so the per-workspace
-  // session lists re-poll immediately after a mutation instead of waiting for
-  // their 10s interval. Stable identity — safe (and required) in consumer deps.
+  // Keep the token for WorkspaceSection's group and Git consumers. Session
+  // catalogs are invalidated directly through their owning workspace.
   const bumpWorkspaceReload = useCallback(() => {
     setWorkspaceSessionsReloadToken((v) => v + 1);
   }, []);
@@ -828,7 +830,6 @@ export function WebShellSidebar({
   >({ default: null, channel: null });
   const lastTrackedSessionSourceRef = useRef(sessionSource);
   const autoOpenedContextRef = useRef<string | null>(null);
-  const pollInFlightRef = useRef(false);
   const resizeTeardownRef = useRef<((updateState: boolean) => void) | null>(
     null,
   );
@@ -869,6 +870,106 @@ export function WebShellSidebar({
       ? availableWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
       : availableWorkspaces;
   }, [connection.workspaceCwd, lockedWorkspaceCwd, projectName, workspaces]);
+  const secondaryWorkspaceCwds = useMemo(
+    () =>
+      displayedWorkspaces
+        .filter((entry) => !entry.primary && entry.trusted)
+        .map((entry) => entry.cwd),
+    [displayedWorkspaces],
+  );
+  const secondaryPinnedQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'active',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          view: 'organized',
+          group: 'pinned',
+        },
+      })),
+    [secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryPinnedSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryPinnedQueries,
+    {
+      autoLoad: true,
+      enabled: organizationEnabled && selectedSessionSource !== 'channel',
+    },
+  );
+  const secondaryPinnedSessions = useMemo(
+    () =>
+      secondaryPinnedSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryPinnedSnapshots],
+  );
+  const secondaryArchivedEnabled =
+    archivedExpanded &&
+    sessionArchiveEnabled &&
+    workspaceQualifiedRestCoreEnabled;
+  const secondaryArchivedQueries = useMemo<SessionCatalogQuery[]>(
+    () =>
+      secondaryWorkspaceCwds.map((workspaceCwd) => ({
+        routeKind: 'qualified',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'archived',
+          ...(selectedSessionSource
+            ? { sourceType: selectedSessionSource }
+            : {}),
+          ...(organizationEnabled
+            ? { view: 'organized' as const, group: 'all' }
+            : {}),
+        },
+      })),
+    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+  );
+  const secondaryArchivedSnapshots = useSessionCatalogQueries(
+    workspace.client,
+    secondaryArchivedQueries,
+    { autoLoad: true, enabled: secondaryArchivedEnabled },
+  );
+  const secondaryArchivedSessions = useMemo(
+    () =>
+      secondaryArchivedSnapshots.flatMap(
+        (snapshot) => snapshot.page?.sessions ?? [],
+      ),
+    [secondaryArchivedSnapshots],
+  );
+  const secondaryArchivedLoading = secondaryArchivedSnapshots.some(
+    (snapshot) => snapshot.loading,
+  );
+  const secondaryArchivedError = secondaryArchivedSnapshots.some(
+    (snapshot) => snapshot.error !== undefined,
+  );
+  const toggleArchived = useCallback(() => {
+    if (!archivedExpanded) {
+      const queries = [
+        ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
+          ? [archivedCatalogQuery]
+          : []),
+        ...(workspaceQualifiedRestCoreEnabled ? secondaryArchivedQueries : []),
+      ];
+      if (queries.length > 0) {
+        sessionCatalogController.refreshQueries(queries);
+      }
+    }
+    setArchivedExpanded((expanded) => !expanded);
+  }, [
+    archivedCatalogQuery,
+    archivedExpanded,
+    includePrimaryWorkspaceSessions,
+    secondaryArchivedQueries,
+    sessionCatalogController,
+    workspaceQualifiedRestCoreEnabled,
+  ]);
   const liveWorkspaces = useMemo(
     () => displayedWorkspaces.filter((entry) => entry.kind === 'live'),
     [displayedWorkspaces],
@@ -1111,51 +1212,6 @@ export function WebShellSidebar({
     [canMutateSessionArchive, sessionActionItems],
   );
 
-  useEffect(() => {
-    if (!organizationEnabled || selectedSessionSource === 'channel') {
-      setSecondaryPinnedSessions([]);
-      return;
-    }
-    const secondaryWorkspaces = displayedWorkspaces.filter(
-      (entry) => !entry.primary && entry.trusted,
-    );
-    let cancelled = false;
-    void Promise.allSettled(
-      secondaryWorkspaces.map(async (entry) => {
-        const result = await workspace.client
-          .workspaceByCwd(entry.cwd)
-          .listWorkspaceSessions({
-            pageSize: SESSION_LIST_PAGE_SIZE,
-            archiveState: 'active',
-            ...(selectedSessionSource
-              ? { sourceType: selectedSessionSource }
-              : {}),
-            view: 'organized',
-            group: 'pinned',
-          });
-        return result.map((session) => ({
-          ...session,
-          workspaceCwd: entry.cwd,
-        }));
-      }),
-    ).then((results) => {
-      if (cancelled) return;
-      setSecondaryPinnedSessions(
-        results.flatMap((result) =>
-          result.status === 'fulfilled' ? result.value : [],
-        ),
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    displayedWorkspaces,
-    organizationEnabled,
-    selectedSessionSource,
-    workspace.client,
-    workspaceSessionsReloadToken,
-  ]);
   const allArchivedSessions = useMemo(() => {
     const byIdentity = new Map<string, DaemonSessionSummary>();
     for (const session of [
@@ -1180,80 +1236,6 @@ export function WebShellSidebar({
     (includePrimaryWorkspaceSessions && Boolean(archivedError)) ||
     secondaryArchivedError;
 
-  useEffect(() => {
-    if (!archivedExpanded) return;
-    if (!sessionArchiveEnabled || !workspaceQualifiedRestCoreEnabled) {
-      setSecondaryArchivedSessions([]);
-      setSecondaryArchivedLoading(false);
-      setSecondaryArchivedError(false);
-      return;
-    }
-    const secondaryWorkspaces = displayedWorkspaces.filter(
-      (entry) => !entry.primary && entry.trusted,
-    );
-    if (secondaryWorkspaces.length === 0) {
-      setSecondaryArchivedSessions([]);
-      setSecondaryArchivedLoading(false);
-      setSecondaryArchivedError(false);
-      return;
-    }
-    let cancelled = false;
-    setSecondaryArchivedLoading(true);
-    void Promise.allSettled(
-      secondaryWorkspaces.map(async (entry) => {
-        const sessions = await workspace.client
-          .workspaceByCwd(entry.cwd)
-          .listWorkspaceSessions({
-            pageSize: SESSION_LIST_PAGE_SIZE,
-            archiveState: 'archived',
-            ...(selectedSessionSource
-              ? { sourceType: selectedSessionSource }
-              : {}),
-            ...(organizationEnabled
-              ? { view: 'organized' as const, group: 'all' }
-              : {}),
-          });
-        return sessions.map((session) => ({
-          ...session,
-          workspaceCwd: entry.cwd,
-        }));
-      }),
-    )
-      .then((results) => {
-        if (cancelled) return;
-        const failures = results.filter(
-          (result) => result.status === 'rejected',
-        );
-        setSecondaryArchivedSessions(
-          results.flatMap((result) =>
-            result.status === 'fulfilled' ? result.value : [],
-          ),
-        );
-        setSecondaryArchivedError(failures.length > 0);
-        for (const failure of failures) {
-          console.warn(
-            '[WebShellSidebar] archived session load failed:',
-            failure.reason,
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setSecondaryArchivedLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    archivedExpanded,
-    displayedWorkspaces,
-    organizationEnabled,
-    secondaryArchivedReloadToken,
-    sessionArchiveEnabled,
-    selectedSessionSource,
-    workspace.client,
-    workspaceQualifiedRestCoreEnabled,
-    workspaceSessionsReloadToken,
-  ]);
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
   // Numeric releases render as "v1.2.3"; a non-semver fallback such as
   // "unknown" is shown as-is so we never produce a bogus "vunknown".
@@ -1469,56 +1451,35 @@ export function WebShellSidebar({
     () => sessions.some((session) => session.hasActivePrompt),
     [sessions],
   );
-
-  useEffect(() => {
-    if (
-      !projectExpanded &&
-      !hasRunningSession &&
-      selectedSessionSource !== 'channel'
-    ) {
-      return;
-    }
-    const pollInterval =
-      (hasRunningSession || selectedSessionSource === 'channel') && !error
+  const sessionPollInterval =
+    projectExpanded || hasRunningSession || selectedSessionSource === 'channel'
+      ? (hasRunningSession || selectedSessionSource === 'channel') && !error
         ? ACTIVE_SESSION_POLL_INTERVAL_MS
-        : IDLE_SESSION_POLL_INTERVAL_MS;
+        : IDLE_SESSION_POLL_INTERVAL_MS
+      : undefined;
+  useSessionCatalogPolling(
+    workspace.client,
+    includePrimaryWorkspaceSessions ? catalogQuery : undefined,
+    sessionPollInterval,
+  );
+  // Channel grouping rides the session poll cadence: instances added or
+  // removed while the channel source is active must reach the grouping logic
+  // without a source switch.
+  const channelCatalogPollInFlightRef = useRef(false);
+  useEffect(() => {
+    if (!channelGroupingEnabled) return;
+    const pollInterval = !error
+      ? ACTIVE_SESSION_POLL_INTERVAL_MS
+      : IDLE_SESSION_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      if (document.hidden || pollInFlightRef.current) return;
-      pollInFlightRef.current = true;
-      const reloadSessions = reload();
-      const reloadCatalog = channelGroupingEnabled
-        ? reloadChannelCatalog()
-        : Promise.resolve(undefined);
-      void Promise.allSettled([reloadSessions, reloadCatalog]).finally(() => {
-        pollInFlightRef.current = false;
+      if (document.hidden || channelCatalogPollInFlightRef.current) return;
+      channelCatalogPollInFlightRef.current = true;
+      void reloadChannelCatalog().finally(() => {
+        channelCatalogPollInFlightRef.current = false;
       });
     }, pollInterval);
     return () => window.clearInterval(intervalId);
-  }, [
-    error,
-    channelGroupingEnabled,
-    hasRunningSession,
-    projectExpanded,
-    reload,
-    reloadChannelCatalog,
-    selectedSessionSource,
-  ]);
-
-  const prevReloadTokenRef = useRef(sessionListReloadToken);
-  useEffect(() => {
-    if (
-      sessionListReloadToken !== undefined &&
-      sessionListReloadToken !== prevReloadTokenRef.current &&
-      !document.hidden &&
-      !pollInFlightRef.current
-    ) {
-      prevReloadTokenRef.current = sessionListReloadToken;
-      pollInFlightRef.current = true;
-      void reload().finally(() => {
-        pollInFlightRef.current = false;
-      });
-    }
-  }, [sessionListReloadToken, reload]);
+  }, [channelGroupingEnabled, error, reloadChannelCatalog]);
 
   useEffect(() => {
     if (lastTrackedSessionSourceRef.current !== sessionSource) {
@@ -1589,6 +1550,7 @@ export function WebShellSidebar({
       if (selectedWorkspaceCwd === removed.cwd) {
         onSelectWorkspace?.(undefined);
       }
+      sessionCatalogController.invalidateWorkspace(removed.cwd);
       setWorkspaceSessionsReloadToken((token) => token + 1);
       try {
         await workspace.refreshCapabilities?.();
@@ -1607,6 +1569,7 @@ export function WebShellSidebar({
       reload,
       reloadArchived,
       selectedWorkspaceCwd,
+      sessionCatalogController,
       workspace,
     ],
   );
@@ -1768,8 +1731,11 @@ export function WebShellSidebar({
         try {
           const created = await onNewSession(workspaceCwd);
           if (created) {
-            void reload().catch(() => undefined);
             bumpWorkspaceReload();
+            const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
+            if (ownerCwd) {
+              sessionCatalogController.invalidateWorkspace(ownerCwd);
+            }
           }
         } catch (err) {
           if (!isAbortError(err)) {
@@ -1781,7 +1747,14 @@ export function WebShellSidebar({
         }
       })();
     },
-    [bumpWorkspaceReload, onError, onNewSession, reload, t],
+    [
+      bumpWorkspaceReload,
+      onError,
+      onNewSession,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
+      t,
+    ],
   );
 
   const handleLoadSession = useCallback(
@@ -1878,16 +1851,25 @@ export function WebShellSidebar({
       return;
     }
     const sessionId = currentSessionId;
+    const workspaceCwd = connection.workspaceCwd;
     const sessionIdentity = currentSessionIdentity;
     if (!sessionIdentity || busySessionIdsRef.current.has(sessionIdentity)) {
       return;
     }
     setSessionBusy(sessionId, true, connection.workspaceCwd);
+    let renamed = false;
     actions
       .renameSession(nextName)
       .then(() => {
+        renamed = true;
+        if (workspaceCwd) {
+          if (onSessionRenameConfirmed) {
+            onSessionRenameConfirmed(workspaceCwd, sessionId, nextName);
+          } else {
+            sessionCatalogController.renamed(workspaceCwd, sessionId, nextName);
+          }
+        }
         cancelRename();
-        reload();
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => {
@@ -1895,7 +1877,10 @@ export function WebShellSidebar({
         cancelRename();
       })
       .finally(() => {
-        setSessionBusy(sessionId, false, connection.workspaceCwd);
+        if (!renamed && workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
+        setSessionBusy(sessionId, false, workspaceCwd);
       });
   }, [
     actions,
@@ -1907,8 +1892,9 @@ export function WebShellSidebar({
     currentSessionId,
     editingName,
     editingSessionIdentity,
+    onSessionRenameConfirmed,
     onError,
-    reload,
+    sessionCatalogController,
     setSessionBusy,
     t,
   ]);
@@ -2039,14 +2025,15 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
-        // A hard delete unlinks the transcript from BOTH the active and
-        // archived directories, so resync both lists regardless of origin.
-        void reload();
-        void reloadArchived();
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
+        const workspaceCwd =
+          deleteCandidate.workspaceCwd ?? primaryWorkspaceCwd;
+        if (scope.kind !== 'primary' && workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
         setSessionBusy(sessionId, false, deleteCandidate.workspaceCwd);
       });
   }, [
@@ -2057,9 +2044,9 @@ export function WebShellSidebar({
     deleteSession,
     getIdentityForSession,
     onError,
-    reload,
-    reloadArchived,
+    primaryWorkspaceCwd,
     resolveSessionWorkspaceScope,
+    sessionCatalogController,
     setSessionBusy,
     t,
     workspace.client,
@@ -2224,9 +2211,6 @@ export function WebShellSidebar({
                 // in the UI), matching assignSessionGroup.
                 { groupId: group.id, color: null },
               );
-              if (!groupEditor.workspaceCwd) {
-                void reload().catch(() => undefined);
-              }
               bumpWorkspaceReload();
             } catch (err) {
               reportCreatedGroupAssignmentFailure(err);
@@ -2249,6 +2233,10 @@ export function WebShellSidebar({
             : t('sidebar.groupUpdateFailed'),
         );
       } finally {
+        const workspaceCwd = groupEditor.workspaceCwd ?? primaryWorkspaceCwd;
+        if (workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
         setGroupBusy(false);
       }
     })();
@@ -2262,9 +2250,10 @@ export function WebShellSidebar({
     canOrganizeWorkspace,
     closeGroupEditor,
     onError,
-    reload,
+    primaryWorkspaceCwd,
     reloadGroups,
     resolveWorkspaceScope,
+    sessionCatalogController,
     t,
     workspaceActions,
     workspace.client,
@@ -2300,8 +2289,9 @@ export function WebShellSidebar({
       .deleteSessionGroup(deleteGroupCandidate.group.id)
       .then(() => {
         setDeleteGroupCandidate(null);
-        if (deleteGroupCandidate.workspaceCwd) bumpWorkspaceReload();
-        else void reload().catch(() => undefined);
+        if (deleteGroupCandidate.workspaceCwd) {
+          bumpWorkspaceReload();
+        }
       })
       .catch((err: unknown) => onError(err, t('sidebar.groupDeleteFailed')))
       .then(() =>
@@ -2309,16 +2299,24 @@ export function WebShellSidebar({
           ? undefined
           : reloadGroups().catch(() => undefined),
       )
-      .finally(() => setGroupBusy(false));
+      .finally(() => {
+        const workspaceCwd =
+          deleteGroupCandidate.workspaceCwd ?? primaryWorkspaceCwd;
+        if (workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
+        setGroupBusy(false);
+      });
   }, [
     deleteGroupCandidate,
     canOrganizeWorkspace,
     onError,
-    reload,
+    primaryWorkspaceCwd,
     reloadGroups,
     t,
     bumpWorkspaceReload,
     resolveWorkspaceScope,
+    sessionCatalogController,
     workspace.client,
     workspaceActions,
   ]);
@@ -2377,12 +2375,14 @@ export function WebShellSidebar({
           isPinned: !session.isPinned,
         })
         .then(() => {
-          void reload().catch(() => undefined);
-          void reloadPinnedSessions().catch(() => undefined);
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
@@ -2391,9 +2391,9 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
+      primaryWorkspaceCwd,
       canOrganizeSession,
-      reload,
-      reloadPinnedSessions,
+      sessionCatalogController,
       setSessionBusy,
       t,
     ],
@@ -2407,10 +2407,10 @@ export function WebShellSidebar({
       // session off-limits, mirroring the delete guard.
       if (!canArchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const scope = resolveSessionWorkspaceScope(session);
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
@@ -2429,9 +2429,11 @@ export function WebShellSidebar({
         } catch (err) {
           onError(err, t('sidebar.archiveFailed'));
         } finally {
-          void reload().catch(() => undefined);
-          void reloadArchived().catch(() => undefined);
           bumpWorkspaceReload();
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (scope.kind !== 'primary' && workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
       })();
@@ -2442,8 +2444,8 @@ export function WebShellSidebar({
       canArchiveSession,
       getIdentityForSession,
       onError,
-      reload,
-      reloadArchived,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
       setSessionBusy,
       t,
       resolveSessionWorkspaceScope,
@@ -2457,10 +2459,10 @@ export function WebShellSidebar({
       const sessionIdentity = getIdentityForSession(session);
       if (!canUnarchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
+      const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          const scope = resolveSessionWorkspaceScope(session);
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
@@ -2479,9 +2481,11 @@ export function WebShellSidebar({
         } catch (err) {
           onError(err, t('sidebar.unarchiveFailed'));
         } finally {
-          void reload().catch(() => undefined);
-          void reloadArchived().catch(() => undefined);
           bumpWorkspaceReload();
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (scope.kind !== 'primary' && workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
       })();
@@ -2491,8 +2495,8 @@ export function WebShellSidebar({
       canUnarchiveSession,
       getIdentityForSession,
       onError,
-      reload,
-      reloadArchived,
+      primaryWorkspaceCwd,
+      sessionCatalogController,
       setSessionBusy,
       t,
       unarchiveSession,
@@ -2574,11 +2578,14 @@ export function WebShellSidebar({
         // group (or "Ungrouped", groupId=null) clears any color tag.
         .updateSessionOrganization(sessionId, { groupId, color: null })
         .then(() => {
-          void reload().catch(() => undefined);
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
@@ -2587,8 +2594,9 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
+      primaryWorkspaceCwd,
       canOrganizeSession,
-      reload,
+      sessionCatalogController,
       setSessionBusy,
       t,
     ],
@@ -2618,11 +2626,14 @@ export function WebShellSidebar({
         // Picking a color clears any named-group assignment (single choice).
         .updateSessionOrganization(sessionId, { color, groupId: null })
         .then(() => {
-          void reload().catch(() => undefined);
           bumpWorkspaceReload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
@@ -2631,8 +2642,9 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
+      primaryWorkspaceCwd,
       canOrganizeSession,
-      reload,
+      sessionCatalogController,
       setSessionBusy,
       t,
     ],
@@ -3652,7 +3664,7 @@ export function WebShellSidebar({
         type="button"
         className={styles.archivedHeader}
         aria-expanded={archivedExpanded}
-        onClick={() => setArchivedExpanded((expanded) => !expanded)}
+        onClick={toggleArchived}
       >
         <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
           {t('sidebar.archivedTitle')}
@@ -3677,8 +3689,10 @@ export function WebShellSidebar({
         className={styles.retry}
         type="button"
         onClick={() => {
-          void reloadArchived();
-          setSecondaryArchivedReloadToken((token) => token + 1);
+          void reloadArchived().catch(() => undefined);
+          for (const workspaceCwd of secondaryWorkspaceCwds) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
         }}
       >
         {t('sidebar.loadFailed')}
@@ -3721,9 +3735,11 @@ export function WebShellSidebar({
     reloadArchived,
     renderSessionRow,
     searchQuery,
+    secondaryWorkspaceCwds,
+    sessionCatalogController,
     sessionArchiveEnabled,
-    setSecondaryArchivedReloadToken,
     t,
+    toggleArchived,
   ]);
 
   return (

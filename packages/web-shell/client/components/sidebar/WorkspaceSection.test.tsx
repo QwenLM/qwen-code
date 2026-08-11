@@ -34,7 +34,7 @@ const {
       workspaceGitPull: vi
         .fn()
         .mockResolvedValue({ success: true, output: '' }),
-      listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
     }),
   };
   return {
@@ -74,7 +74,7 @@ function makeClient(): DaemonClient {
       workspaceGitPull: vi
         .fn()
         .mockResolvedValue({ success: true, output: '' }),
-      listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
       listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     })),
   } as unknown as DaemonClient;
@@ -207,17 +207,19 @@ describe('WorkspaceSection label', () => {
   });
 
   it('shows the complete read-only session name in a native tooltip', async () => {
-    const listWorkspaceSessions = vi.fn().mockResolvedValue([
-      {
-        sessionId: 'session-1',
-        displayName: 'A very long session name',
-        createdAt: '2026-01-01T00:00:00.000Z',
-      } as DaemonSessionSummary,
-    ]);
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'session-1',
+          displayName: 'A very long session name',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        } as DaemonSessionSummary,
+      ],
+    });
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions,
+        listWorkspaceSessionsPage,
         listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
       })),
     } as unknown as DaemonClient;
@@ -235,94 +237,80 @@ describe('WorkspaceSection label', () => {
   });
 
   it('does not render sessions loaded for the previous source', async () => {
-    let resolveChannel: (sessions: DaemonSessionSummary[]) => void = () => {};
-    const channelSessions = new Promise<DaemonSessionSummary[]>((resolve) => {
-      resolveChannel = resolve;
-    });
-    // Every default-source request gets its OWN pending promise so the
-    // pre-switch request can settle late, after the switch.
-    const defaultResolvers: Array<(sessions: DaemonSessionSummary[]) => void> =
-      [];
-    const listWorkspaceSessions = vi.fn((options?: { sourceType?: string }) =>
-      options?.sourceType === 'channel'
-        ? channelSessions
-        : new Promise<DaemonSessionSummary[]>((resolve) => {
-            defaultResolvers.push(resolve);
-          }),
+    let resolveChannel: (page: {
+      sessions: DaemonSessionSummary[];
+    }) => void = () => {};
+    const channelPage = new Promise<{ sessions: DaemonSessionSummary[] }>(
+      (resolve) => {
+        resolveChannel = resolve;
+      },
+    );
+    let resolveDefault: (page: {
+      sessions: DaemonSessionSummary[];
+    }) => void = () => {};
+    const defaultPage = new Promise<{ sessions: DaemonSessionSummary[] }>(
+      (resolve) => {
+        resolveDefault = resolve;
+      },
+    );
+    const listWorkspaceSessionsPage = vi.fn(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'channel' ? channelPage : defaultPage,
     );
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions,
+        listWorkspaceSessionsPage,
         listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
       })),
     } as unknown as DaemonClient;
 
+    // Switch to the channel source while the default request is still in
+    // flight. The catalog store keeps one snapshot per query, so the sources
+    // cannot clobber each other.
     renderSection({ client, expanded: true, sourceType: 'default' });
-    defaultResolvers[0]!([
-      {
-        sessionId: 'task-session',
-        displayName: 'Task session',
-        sourceType: 'default',
-      },
-    ]);
-    await flush();
-    expect(container.textContent).toContain('Task session');
-
-    // A poll tick still on the default source issues a second request that
-    // stays pending across the source switch below.
-    renderSection({
-      client,
-      expanded: true,
-      sourceType: 'default',
-      reloadToken: 1,
-    });
-
-    renderSection({
-      client,
-      expanded: true,
-      sourceType: 'channel',
-      reloadToken: 1,
-    });
+    renderSection({ client, expanded: true, sourceType: 'channel' });
     expect(container.textContent).not.toContain('Task session');
 
-    resolveChannel([
-      {
-        sessionId: 'channel-session',
-        displayName: 'Channel session',
-        sourceType: 'channel',
-      },
-    ]);
+    // The pre-switch default response settles AFTER the switch; it belongs
+    // to the default source's catalog entry and must not clobber the
+    // channel list now on screen.
+    resolveDefault({
+      sessions: [
+        {
+          sessionId: 'task-session',
+          displayName: 'Task session',
+          sourceType: 'default',
+        },
+      ],
+    });
     await flush();
-    expect(container.textContent).toContain('Channel session');
+    expect(container.textContent).not.toContain('Task session');
 
-    // The pending pre-switch default response settles AFTER the switch; the
-    // requestId ordering guard must drop it — without it the stale write
-    // clobbers the new-source list and the section renders the empty
-    // placeholder until the next poll (indefinitely for read-only
-    // workspaces, which have no polling interval).
-    defaultResolvers[1]!([
-      {
-        sessionId: 'stale-task-session',
-        displayName: 'Stale task session',
-        sourceType: 'default',
-      },
-    ]);
+    resolveChannel({
+      sessions: [
+        {
+          sessionId: 'channel-session',
+          displayName: 'Channel session',
+          sourceType: 'channel',
+        },
+      ],
+    });
     await flush();
     expect(container.textContent).toContain('Channel session');
-    expect(container.textContent).not.toContain('Stale task session');
   });
 
   it('does not carry a load error across a source switch', async () => {
-    const listWorkspaceSessions = vi.fn((options?: { sourceType?: string }) =>
-      options?.sourceType === 'channel'
-        ? new Promise<DaemonSessionSummary[]>(() => {})
-        : Promise.reject(new Error('tasks unavailable')),
+    const listWorkspaceSessionsPage = vi.fn(
+      (options?: { sourceType?: string }) =>
+        options?.sourceType === 'channel'
+          ? new Promise<{ sessions: DaemonSessionSummary[] }>(() => {})
+          : Promise.reject(new Error('tasks unavailable')),
     );
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions,
+        listWorkspaceSessionsPage,
         listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
       })),
     } as unknown as DaemonClient;
@@ -340,24 +328,26 @@ describe('WorkspaceSection label', () => {
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions: vi.fn().mockResolvedValue([
-          {
-            sessionId: 'ding-session',
-            displayName: 'DingTalk secondary',
-            sourceType: 'channel',
-            sourceId: 'secondary-ding',
-            groupId: 'organization-group',
-          },
-          {
-            sessionId: 'feishu-session',
-            displayName: 'Feishu secondary',
-            sourceType: 'channel',
-            sourceId: 'secondary-feishu',
-            // Channel mode must keep pinned rows inside their platform
-            // section (excludePinned is off for the channel source).
-            isPinned: true,
-          },
-        ]),
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [
+            {
+              sessionId: 'ding-session',
+              displayName: 'DingTalk secondary',
+              sourceType: 'channel',
+              sourceId: 'secondary-ding',
+              groupId: 'organization-group',
+            },
+            {
+              sessionId: 'feishu-session',
+              displayName: 'Feishu secondary',
+              sourceType: 'channel',
+              sourceId: 'secondary-feishu',
+              // Channel mode must keep pinned rows inside their platform
+              // section (excludePinned is off for the channel source).
+              isPinned: true,
+            },
+          ],
+        }),
         listSessionGroups: vi.fn().mockResolvedValue({
           groups: [
             {
@@ -432,15 +422,17 @@ describe('WorkspaceSection label', () => {
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions: vi.fn().mockResolvedValue([
-          {
-            sessionId: 'ding-session',
-            displayName: 'DingTalk session',
-            sourceType: 'channel',
-            sourceId: 'ding-one',
-            groupId: 'organization-group',
-          },
-        ]),
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [
+            {
+              sessionId: 'ding-session',
+              displayName: 'DingTalk session',
+              sourceType: 'channel',
+              sourceId: 'ding-one',
+              groupId: 'organization-group',
+            },
+          ],
+        }),
         listSessionGroups: vi.fn().mockResolvedValue({
           groups: [
             {
@@ -519,14 +511,16 @@ describe('WorkspaceSection label', () => {
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions: vi.fn().mockResolvedValue([
-          {
-            sessionId: 'channel-session',
-            displayName: 'Channel session',
-            sourceType: 'channel',
-            sourceId: 'instance',
-          },
-        ]),
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+          sessions: [
+            {
+              sessionId: 'channel-session',
+              displayName: 'Channel session',
+              sourceType: 'channel',
+              sourceId: 'instance',
+            },
+          ],
+        }),
         listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
         workspaceChannelTypes,
         workspaceChannels,
@@ -588,7 +582,7 @@ describe('WorkspaceSection label', () => {
     const client = {
       workspaceByCwd: vi.fn(() => ({
         workspaceGit,
-        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
         listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
         workspaceChannelTypes,
         workspaceChannels,
@@ -619,6 +613,109 @@ describe('WorkspaceSection label', () => {
 
     expect(workspaceChannelTypes).toHaveBeenCalledTimes(2);
     setIntervalSpy.mockRestore();
+  });
+});
+
+describe('WorkspaceSection session loading', () => {
+  it('refreshes the catalog when an expanded workspace loses trust', async () => {
+    const listWorkspaceSessionsPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-1',
+            displayName: 'Trusted session',
+          } as DaemonSessionSummary,
+        ],
+      })
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-2',
+            displayName: 'Read-only session',
+          } as DaemonSessionSummary,
+        ],
+      });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+    const trustedSecondary = { ...untrustedWorkspace, trusted: true };
+
+    renderSection({
+      workspace: trustedSecondary,
+      client,
+      expanded: true,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Trusted session');
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Read-only session');
+  });
+
+  it('refreshes a retained read-only catalog when the section reopens', async () => {
+    const listWorkspaceSessionsPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-1',
+            displayName: 'Initial session',
+          } as DaemonSessionSummary,
+        ],
+      })
+      .mockResolvedValueOnce({
+        sessions: [
+          {
+            sessionId: 'session-2',
+            displayName: 'Updated session',
+          } as DaemonSessionSummary,
+        ],
+      });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Initial session');
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: false,
+    });
+    await flush();
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Updated session');
   });
 });
 

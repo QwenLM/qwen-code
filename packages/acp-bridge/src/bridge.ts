@@ -1457,6 +1457,7 @@ const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
+const MAX_EMPTY_TRANSCRIPT_PAGES = 20;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // Per-session cap on undrained mid-turn messages: a busy turn with no drain
@@ -4950,11 +4951,40 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
-        const page = await requestSessionTranscriptPage({
-          sessionId: entry.sessionId,
-          direction: 'backward',
-          limit: historyPageSize,
-        });
+        const seenCursors = new Set<string>();
+        let emptyPageCount = 0;
+        let cursor: string | undefined;
+        let page: BridgeSessionTranscriptPage;
+        do {
+          page = await requestSessionTranscriptPage({
+            sessionId: entry.sessionId,
+            ...(cursor ? { cursor } : { direction: 'backward' }),
+            limit: historyPageSize,
+          });
+          const nextCursor = page.nextCursor;
+          if (
+            page.events.length === 0 &&
+            page.hasMore &&
+            (nextCursor === undefined || seenCursors.has(nextCursor))
+          ) {
+            throw new Error('Transcript cursor did not advance');
+          }
+          if (
+            page.events.length === 0 &&
+            page.hasMore &&
+            ++emptyPageCount >= MAX_EMPTY_TRANSCRIPT_PAGES
+          ) {
+            throw new Error('Transcript empty-page limit exceeded');
+          }
+          cursor = nextCursor;
+          if (cursor !== undefined) seenCursors.add(cursor);
+        } while (
+          page.events.length === 0 &&
+          page.hasMore &&
+          cursor !== undefined &&
+          page.partial !== true &&
+          page.replayError === undefined
+        );
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&

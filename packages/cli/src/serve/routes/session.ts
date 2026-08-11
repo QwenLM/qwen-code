@@ -67,6 +67,7 @@ import {
 import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -442,6 +443,27 @@ export function registerSessionRoutes(
     sessionShellCommandEnabled,
     virtualSubagentSessions,
   } = deps;
+  const invalidateSessionLists = (
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+  ): void => {
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      workspaceCwd: runtime.workspaceCwd,
+      archiveStates,
+    });
+  };
+  const runWithSessionListInvalidation = async <T>(
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+    mutation: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await mutation();
+    } finally {
+      invalidateSessionLists(runtime, archiveStates);
+    }
+  };
   const requestedSessionIdAdmission =
     deps.requestedSessionIdAdmission ??
     createRequestedSessionIdAdmission({
@@ -3685,10 +3707,12 @@ export function registerSessionRoutes(
     try {
       // ACP session/close can fall back to a shared gate because it has
       // connection-local promptAbort state; REST close does not.
-      await archiveCoordinator.runExclusiveMany([sessionId], async () =>
-        runtime.bridge.closeSession(
-          sessionId,
-          clientId !== undefined ? { clientId } : undefined,
+      await runWithSessionListInvalidation(runtime, ['active'], () =>
+        archiveCoordinator.runExclusiveMany([sessionId], async () =>
+          runtime.bridge.closeSession(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          ),
         ),
       );
       clearBranchSessionEntry(sessionId);
@@ -3710,18 +3734,23 @@ export function registerSessionRoutes(
     try {
       const runtime = workspaceRegistry.primary;
       const service = createWorkspaceRuntimeSessionService(runtime);
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        deleteDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          bridge,
-          coordinator: archiveCoordinator,
-          onError: ({ phase, sessionId, error }) => {
-            writeStderrLine(
-              `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
-            );
-          },
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            deleteDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              bridge,
+              coordinator: archiveCoordinator,
+              onError: ({ phase, sessionId, error }) => {
+                writeStderrLine(
+                  `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+                );
+              },
+            }),
+          ),
       );
       for (const removedId of result.removed) {
         clearBranchSessionEntry(removedId);
@@ -3743,13 +3772,18 @@ export function registerSessionRoutes(
     });
 
     try {
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        archiveDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          bridge,
-          coordinator: archiveCoordinator,
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            archiveDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              bridge,
+              coordinator: archiveCoordinator,
+            }),
+          ),
       );
       res.status(200).json({
         archived: result.archived,
@@ -3772,12 +3806,17 @@ export function registerSessionRoutes(
     });
 
     try {
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        unarchiveDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          coordinator: archiveCoordinator,
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            unarchiveDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              coordinator: archiveCoordinator,
+            }),
+          ),
       );
       res.status(200).json({
         unarchived: result.unarchived,
@@ -3804,18 +3843,23 @@ export function registerSessionRoutes(
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const service = createWorkspaceRuntimeSessionService(runtime);
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          deleteDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            bridge: runtime.bridge,
-            coordinator: archiveCoordinator,
-            onError: ({ phase, sessionId, error }) => {
-              writeStderrLine(
-                `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
-              );
-            },
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              deleteDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                bridge: runtime.bridge,
+                coordinator: archiveCoordinator,
+                onError: ({ phase, sessionId, error }) => {
+                  writeStderrLine(
+                    `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+                  );
+                },
+              }),
+            ),
         );
         for (const removedId of result.removed) {
           clearBranchSessionEntry(removedId);
@@ -3841,13 +3885,18 @@ export function registerSessionRoutes(
         onWarning: logSessionArchiveWarning,
       });
       try {
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          archiveDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            bridge: runtime.bridge,
-            coordinator: archiveCoordinator,
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              archiveDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                bridge: runtime.bridge,
+                coordinator: archiveCoordinator,
+              }),
+            ),
         );
         res.status(200).json({
           archived: result.archived,
@@ -3874,12 +3923,17 @@ export function registerSessionRoutes(
         onWarning: logSessionArchiveWarning,
       });
       try {
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          unarchiveDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            coordinator: archiveCoordinator,
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              unarchiveDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                coordinator: archiveCoordinator,
+              }),
+            ),
         );
         res.status(200).json({
           unarchived: result.unarchived,
@@ -3918,11 +3972,16 @@ export function registerSessionRoutes(
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
             : undefined;
-        const effective = runtime.bridge.updateSessionMetadata(
-          sessionId,
-          { displayName },
-          clientId !== undefined ? { clientId } : undefined,
-        );
+        let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
+        try {
+          effective = runtime.bridge.updateSessionMetadata(
+            sessionId,
+            { displayName },
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        } finally {
+          invalidateSessionLists(runtime, ['active']);
+        }
         res.status(200).json({ sessionId, ...effective });
       },
     ),
@@ -4376,6 +4435,7 @@ export function registerSessionRoutes(
           ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
               listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
                 mergeLive: !readOnlySecondary,
+                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
               }),
             )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
