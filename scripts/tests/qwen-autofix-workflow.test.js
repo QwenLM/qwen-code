@@ -11582,6 +11582,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     hugeFail = false,
     noIdentity = false,
     trackedDirt = false,
+    commFail = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -11698,6 +11699,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         ].join('\n'),
       );
       chmodSync(join(bin, 'npm'), 0o755);
+      if (commFail) {
+        // Shadows the system comm via PATH precedence: the signature
+        // comparison itself fails (the SIGPIPE-under-pipefail class), so
+        // the gate takes its fail-closed retryable exit.
+        writeFileSync(join(bin, 'comm'), '#!/bin/bash\nexit 1\n');
+        chmodSync(join(bin, 'comm'), 0o755);
+      }
       const rt = join(dir, 'rt');
       mkdirSync(rt);
       writeFileSync(
@@ -11795,6 +11803,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // The baseline leg's own transcript is the ONLY proof behind the
     // verdict — it must reach the rejection document.
     expect(r.rejection).toContain(`stub build FAILED at ${r.baselineSha}`);
+    // No repair runs for a pre-existing failure — the dist/ steering note
+    // is for the repair agent and stays out of this document.
+    expect(r.rejection).not.toContain(
+      'run npm run build before typecheck/tests',
+    );
     expect(r.headAfter).toBe('feature');
   });
 
@@ -11934,6 +11947,25 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('DIFFERENT reason');
+    // The same repair handoff as the green path — the dist/ warning must
+    // seed this rejection too.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+  });
+
+  it('seeds the dist-rebuild warning when the signature comparison itself fails', () => {
+    // comm failing (SIGPIPE under pipefail, an infrastructure hiccup)
+    // takes the same retryable handoff as the green/different-signature
+    // exits — without the note the repair agent trusts baseline-built
+    // dist/ and chases phantom dist-consuming failures.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      commFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+    expect(r.headAfter).toBe('feature');
   });
 
   it('keeps the green path intact', () => {
