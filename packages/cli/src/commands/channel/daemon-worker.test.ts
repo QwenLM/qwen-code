@@ -178,7 +178,6 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
   })),
 );
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
-const mockRouterSetChannelApprovalMode = vi.hoisted(() => vi.fn());
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterRestoreRoutes = vi.hoisted(() =>
   vi.fn(() => ({ restored: 1, dropped: 0 })),
@@ -193,7 +192,6 @@ const mockSessionRouter = vi.hoisted(() =>
       _persistPath?: string,
     ) => ({
       setChannelScope: mockRouterSetChannelScope,
-      setChannelApprovalMode: mockRouterSetChannelApprovalMode,
       clearAll: mockRouterClearAll,
       restoreRoutes: mockRouterRestoreRoutes,
       dispose: mockRouterDispose,
@@ -1115,38 +1113,6 @@ describe('runChannelDaemonWorker', () => {
       'thread',
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('feishu', 'single');
-    expect(mockRouterSetChannelApprovalMode).not.toHaveBeenCalled();
-  });
-
-  it('applies channel approval mode only for webhook-enabled channels', async () => {
-    const sdk = createSdk();
-    mockParseConfiguredChannels.mockResolvedValueOnce([
-      {
-        ...parsedTelegram,
-        config: {
-          ...parsedTelegram.config,
-          approvalMode: 'yolo',
-          webhooks: { sources: {} },
-        },
-      },
-      {
-        ...parsedFeishu,
-        config: { ...parsedFeishu.config, approvalMode: 'yolo' },
-      },
-    ]);
-
-    await runChannelDaemonWorker({
-      daemonUrl: 'http://127.0.0.1:4170',
-      workspace: '/workspace',
-      selection: { mode: 'all' },
-      loadDaemonSdk: async () => sdk,
-    });
-
-    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledTimes(1);
-    expect(mockRouterSetChannelApprovalMode).toHaveBeenCalledWith(
-      'telegram',
-      'yolo',
-    );
   });
 
   it('sanitizes channel names before writing connected logs', async () => {

@@ -847,6 +847,7 @@ export abstract class ChannelBase {
     this.router =
       options?.router ||
       new SessionRouter(bridge, config.cwd, config.sessionScope);
+    this.router.setChannelApprovalMode(name, config.approvalMode);
 
     this.registerSharedCommands();
     if (this.loopController) {

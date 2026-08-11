@@ -209,6 +209,10 @@ class TestableDwsChannel extends DwsChannel {
   approvalMode(): string | undefined {
     return this.config.approvalMode;
   }
+
+  resolveSession(): Promise<string> {
+    return this.router.resolve(this.name, 'alice', 'doc-1', 'comment-1');
+  }
 }
 
 let qwenHome: string;
@@ -302,12 +306,24 @@ describe('DwsChannel', () => {
 
   it('requires manual tool approval for document-triggered sessions', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
+    const bridge = makeBridge();
+    const channel = new TestableDwsChannel(
+      'test-dws',
       makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      bridge,
+      undefined,
+      client,
     );
+    channels.push(channel);
+    await channel.connect();
+    await channel.resolveSession();
 
     expect(channel.approvalMode()).toBe('default');
+    expect(bridge.newSession).toHaveBeenCalledWith(
+      '/tmp/test',
+      { approvalMode: 'default', sourceId: 'test-dws' },
+      expect.any(Object),
+    );
     await expect(
       readyChannel(
         client,

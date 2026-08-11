@@ -519,9 +519,6 @@ export async function runChannelDaemonWorker(
     router = createdRouter;
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
-      if (config['webhooks']) {
-        createdRouter.setChannelApprovalMode(name, config.approvalMode);
-      }
     }
     const restoredRoutes = createdRouter.restoreRoutes();
     writeStdoutLine(

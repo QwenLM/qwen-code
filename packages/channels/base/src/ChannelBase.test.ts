@@ -431,6 +431,31 @@ describe('ChannelBase', () => {
     ).toBe('/tmp/channel-state');
   });
 
+  it('applies the channel approval mode to standalone sessions', async () => {
+    const channel = createChannel({ approvalMode: 'plan' });
+
+    await channel.handleInbound(envelope());
+
+    expect(bridge.newSession).toHaveBeenCalledWith(
+      '/tmp',
+      { approvalMode: 'plan', sourceId: 'test-chan' },
+      expect.any(Object),
+    );
+  });
+
+  it('applies the channel approval mode to sessions on a shared router', async () => {
+    const router = new SessionRouter(bridge, '/tmp');
+    const channel = createChannel({ approvalMode: 'plan' }, { router });
+
+    await channel.handleInbound(envelope());
+
+    expect(bridge.newSession).toHaveBeenCalledWith(
+      '/tmp',
+      { approvalMode: 'plan', sourceId: 'test-chan' },
+      expect.any(Object),
+    );
+  });
+
   describe('proactive delivery boundary', () => {
     it('recognizes typed delivery errors across module instances', () => {
       expect(
@@ -2088,6 +2113,7 @@ describe('ChannelBase', () => {
           channelName: 'other-channel',
           chatId: 'chat1',
         })),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
@@ -8612,6 +8638,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -8645,6 +8672,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -8678,6 +8706,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -8710,6 +8739,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -8754,6 +8784,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
@@ -8798,6 +8829,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
@@ -8821,6 +8853,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
@@ -8862,6 +8895,7 @@ describe('ChannelBase', () => {
       const router = {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
+        setChannelApprovalMode: vi.fn(),
         setBridge: vi.fn(),
       };
       const ch = createChannel({}, {
