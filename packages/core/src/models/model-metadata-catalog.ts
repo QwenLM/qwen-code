@@ -86,6 +86,13 @@ function hasSameLoadOptions(
   );
 }
 
+function isCatalogFresh(state: CatalogState): boolean {
+  return (
+    state.lastSuccessfulRefreshAt !== undefined &&
+    Date.now() - state.lastSuccessfulRefreshAt < CACHE_TTL_MS
+  );
+}
+
 function getCachePath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'models-dev.json');
 }
@@ -271,6 +278,7 @@ function refreshCatalog(
   state: CatalogState,
   cachePath: string,
   keepFresh: boolean,
+  allowOptionsHandoff = true,
 ): void {
   if (state.refresh) return;
 
@@ -288,8 +296,12 @@ function refreshCatalog(
     })
     .finally(() => {
       state.refresh = undefined;
-      if (state.options !== refreshOptions) {
-        refreshCatalog(state, cachePath, keepFresh);
+      if (
+        allowOptionsHandoff &&
+        state.options !== refreshOptions &&
+        !isCatalogFresh(state)
+      ) {
+        refreshCatalog(state, cachePath, keepFresh, false);
         return;
       }
       if (keepFresh) {
@@ -349,10 +361,11 @@ export function loadModelMetadataCatalog(
   if (optionsChanged) state.options = options;
 
   if (state.current) {
-    const catalogIsFresh =
-      state.lastSuccessfulRefreshAt !== undefined &&
-      Date.now() - state.lastSuccessfulRefreshAt < CACHE_TTL_MS;
-    if (optionsChanged && options.cachePath === undefined && !catalogIsFresh) {
+    if (
+      optionsChanged &&
+      options.cachePath === undefined &&
+      !isCatalogFresh(state)
+    ) {
       refreshCatalog(state, cachePath, true);
     }
     return Promise.resolve(state.current);

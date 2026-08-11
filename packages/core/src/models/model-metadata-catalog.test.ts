@@ -1112,8 +1112,7 @@ describe('loadModelMetadataCatalog', () => {
       ([, delay]) => delay === 60 * 60 * 1000,
     );
     const refreshTimer = timeoutSpy.mock.results[refreshIndex]?.value as
-      | ReturnType<typeof setTimeout>
-      | undefined;
+      ReturnType<typeof setTimeout> | undefined;
     expect(refreshTimer).toBeDefined();
     expect(refreshTimer?.hasRef()).toBe(false);
     if (refreshTimer) clearTimeout(refreshTimer);
@@ -1139,8 +1138,7 @@ describe('loadModelMetadataCatalog', () => {
     );
     expect(refreshIndex).toBeGreaterThanOrEqual(0);
     const refreshTimer = timeoutSpy.mock.results[refreshIndex]?.value as
-      | ReturnType<typeof setTimeout>
-      | undefined;
+      ReturnType<typeof setTimeout> | undefined;
     if (refreshTimer) clearTimeout(refreshTimer);
     const refresh = timeoutSpy.mock.calls[refreshIndex]?.[0];
     expect(refresh).toBeTypeOf('function');
@@ -1265,7 +1263,7 @@ describe('loadModelMetadataCatalog', () => {
     });
   });
 
-  it('uses the latest proxy options after an in-flight refresh', async () => {
+  it('uses the latest proxy options after an in-flight refresh fails', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
@@ -1288,7 +1286,7 @@ describe('loadModelMetadataCatalog', () => {
     await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
     await vi.waitFor(() => expect(undiciFetch).toHaveBeenCalledOnce());
     await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
-    firstResponse.resolve(new Response(JSON.stringify(catalog)));
+    firstResponse.resolve(new Response(null, { status: 500 }));
 
     await vi.waitFor(() => expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => {
@@ -1301,26 +1299,59 @@ describe('loadModelMetadataCatalog', () => {
     });
   });
 
-  it('does not refetch a fresh shared catalog when workspace proxies alternate', async () => {
+  it('bounds in-flight proxy handoffs when workspaces alternate', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const firstResponse = deferred<Response>();
+    const secondResponse = deferred<Response>();
     const close = vi.fn(async () => undefined);
     const EnvHttpProxyAgent = vi.fn(() => ({ close }));
-    const undiciFetch = vi.fn(
-      async () => new Response(JSON.stringify(catalog)),
-    );
+    const undiciFetch = vi
+      .fn()
+      .mockImplementationOnce(() => firstResponse.promise)
+      .mockImplementationOnce(() => secondResponse.promise)
+      .mockResolvedValue(new Response(JSON.stringify(catalog)));
     runtimeFetchMock.loadUndici.mockResolvedValue({
       EnvHttpProxyAgent,
       fetch: undiciFetch,
     });
 
     await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(undiciFetch).toHaveBeenCalledOnce());
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+    firstResponse.resolve(new Response(null, { status: 500 }));
+    await vi.waitFor(() => expect(undiciFetch).toHaveBeenCalledTimes(2));
 
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    secondResponse.resolve(new Response(null, { status: 500 }));
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(undiciFetch).toHaveBeenCalledTimes(2);
+    expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not refetch a fresh shared catalog when workspace proxies alternate', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const pendingResponse = deferred<Response>();
+    const undiciFetch = vi.fn(() => pendingResponse.promise);
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
     await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
     await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
     await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+    pendingResponse.resolve(new Response(JSON.stringify(catalog)));
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(undiciFetch).toHaveBeenCalledOnce();
     expect(EnvHttpProxyAgent).toHaveBeenCalledOnce();
