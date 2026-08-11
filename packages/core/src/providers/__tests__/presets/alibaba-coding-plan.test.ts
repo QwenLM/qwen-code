@@ -38,7 +38,10 @@ describe('coding plan provider', () => {
     expect(plan.providerId).toBe('coding-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [CODING_PLAN_ENV_KEY]: 'sk-coding' });
-    expect(plan.modelSelection).toEqual({ modelId: template[0].id });
+    expect(plan.modelSelection).toEqual({
+      modelId: template[0].id,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+    });
     expect(plan.modelProviders).toEqual([
       {
         authType: AuthType.USE_OPENAI,
@@ -51,7 +54,7 @@ describe('coding plan provider', () => {
       },
     ]);
     expect(plan.providerState).toEqual({
-      'providerMetadata.coding-plan': {
+      'providerMetadata.coding-plan--aliyun': {
         baseUrl: CODING_PLAN_CHINA_BASE_URL,
         version,
       },
