@@ -83,6 +83,15 @@ describe('VirtualSubagentSessions', () => {
     expect(() =>
       createVirtualSubagentSessionId('parent session', 'agent-1'),
     ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent/session', 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent:session', 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent.session', 'agent-1'),
+    ).toThrow('valid id parts');
     expect(() => createVirtualSubagentSessionId('parent-session', '')).toThrow(
       'valid id parts',
     );
@@ -143,6 +152,15 @@ describe('VirtualSubagentSessions', () => {
 
     expect(
       parseVirtualSubagentSessionId(`subagent.${parentPart}.garbage`),
+    ).toBeUndefined();
+  });
+
+  it('rejects a parent part outside the strict charset', () => {
+    const parentPart = Buffer.from('../foo', 'utf8').toString('base64url');
+    const agentPart = Buffer.from('agent-1', 'utf8').toString('base64url');
+
+    expect(
+      parseVirtualSubagentSessionId(`subagent.${parentPart}.${agentPart}`),
     ).toBeUndefined();
   });
 

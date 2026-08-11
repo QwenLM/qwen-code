@@ -8785,60 +8785,70 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('resolves and cancels a virtual subagent through its routes', async () => {
-      const bridge = fakeBridge({
-        cancelSessionTaskImpl: async () => ({ cancelled: true }),
-      });
-      const resolveSpy = vi
-        .spyOn(VirtualSubagentSessions.prototype, 'resolve')
-        .mockResolvedValue({
-          sessionId: createVirtualSubagentSessionId(
+    it.each([
+      ['agent%3A8', 'agent:8'],
+      ['agent%2F8', 'agent/8'],
+    ])(
+      'resolves and cancels a virtual subagent through its routes: %s',
+      async (encodedTaskId, toolCallId) => {
+        const taskId = `general-purpose-${toolCallId}`;
+        const bridge = fakeBridge({
+          cancelSessionTaskImpl: async () => ({ cancelled: true }),
+        });
+        const resolveSpy = vi
+          .spyOn(VirtualSubagentSessions.prototype, 'resolve')
+          .mockResolvedValue({
+            sessionId: createVirtualSubagentSessionId('s-1', taskId),
+            taskId,
+            title: 'Investigate',
+            status: 'running',
+          });
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const resolveRes = await request(app)
+            .get(`/session/s-1/subagents/${encodedTaskId}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const cancelRes = await request(app)
+            .post(`/session/s-1/subagents/${encodedTaskId}/cancel`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+
+          expect(resolveRes.status).toBe(200);
+          expect(resolveRes.headers['cache-control']).toBe('no-store');
+          expect(resolveRes.body).toMatchObject({
+            taskId,
+            status: 'running',
+          });
+          expect(cancelRes.status).toBe(200);
+          expect(cancelRes.body).toEqual({ cancelled: true });
+          expect(resolveSpy).toHaveBeenCalledTimes(2);
+          expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual([
             's-1',
-            'general-purpose-agent:8',
-          ),
-          taskId: 'general-purpose-agent:8',
-          title: 'Investigate',
-          status: 'running',
-        });
-      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const app = createServeApp(
-        { ...tokenOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-
-      try {
-        const resolveRes = await request(app)
-          .get('/session/s-1/subagents/agent%3A8')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
-        const cancelRes = await request(app)
-          .post('/session/s-1/subagents/agent%3A8/cancel')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
-
-        expect(resolveRes.status).toBe(200);
-        expect(resolveRes.headers['cache-control']).toBe('no-store');
-        expect(resolveRes.body).toMatchObject({
-          taskId: 'general-purpose-agent:8',
-          status: 'running',
-        });
-        expect(cancelRes.status).toBe(200);
-        expect(cancelRes.body).toEqual({ cancelled: true });
-        expect(resolveSpy).toHaveBeenCalledTimes(2);
-        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'agent:8']);
-        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'agent:8']);
-        expect(bridge.cancelSessionTaskCalls).toEqual([
-          {
-            sessionId: 's-1',
-            taskId: 'general-purpose-agent:8',
-            taskKind: 'agent',
-          },
-        ]);
-      } finally {
-        resolveSpy.mockRestore();
-      }
-    });
+            toolCallId,
+          ]);
+          expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual([
+            's-1',
+            toolCallId,
+          ]);
+          expect(bridge.cancelSessionTaskCalls).toEqual([
+            {
+              sessionId: 's-1',
+              taskId,
+              taskKind: 'agent',
+            },
+          ]);
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      },
+    );
 
     it('requires the parent runtime for virtual heartbeat and detach', async () => {
       const primaryBridge = fakeBridge();
