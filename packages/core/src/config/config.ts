@@ -6429,6 +6429,12 @@ export class Config {
   }
 
   isOmniEnabled(): boolean {
+    // Bare mode means the minimal toolset and no experimental pipelines:
+    // gating here (the single choke point) keeps every omni surface off —
+    // tool registration, content normalization, the ffmpeg runtime
+    // assertion, and the delivery gate — and deliberately wins over the
+    // env-var opt-in below.
+    if (this.bareMode) return false;
     // Omni is experimental and opt-in: enabled via settings or env var.
     if (process.env['QWEN_CODE_ENABLE_OMNI'] === '1') return true;
     return this.omniEnabled;
