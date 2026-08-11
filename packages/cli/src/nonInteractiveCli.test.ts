@@ -631,6 +631,7 @@ describe('runNonInteractive', () => {
     async ({ input, expectedText }) => {
       setupMetricsMock();
       mockGetCommands.mockReturnValue([goalCommand]);
+      mockConfig.getChatRecordingService.mockReturnValue(undefined);
       mockConfig.getGoalRuntimeReady = vi.fn(async () => {
         throw new GoalPersistenceUnavailableError('chat recording is disabled');
       });
