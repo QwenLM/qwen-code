@@ -309,6 +309,26 @@ function assignGroups(
   }
 }
 
+function removeGroupAllowlistMembership(
+  config: Record<string, unknown>,
+  instance: DaemonChannelInstanceSnapshot,
+): void {
+  const previous = instance.config['groups'];
+  const previousGroups = isRecord(previous) ? previous : {};
+  const groups = Object.fromEntries(
+    Object.entries(previousGroups).filter(
+      ([groupId, groupConfig]) =>
+        isRecord(groupConfig) &&
+        (groupId === '*' || Object.keys(groupConfig).length > 0),
+    ),
+  );
+  if (Object.keys(groups).length > 0) {
+    config['groups'] = groups;
+  } else {
+    delete config['groups'];
+  }
+}
+
 export function buildChannelUpsertRequest(
   descriptor: DaemonChannelTypeDescriptor,
   draft: ChannelEditorDraft,
@@ -341,7 +361,7 @@ export function buildChannelUpsertRequest(
     if (config['groupPolicy'] === 'allowlist') {
       assignGroups(config, draft.allowedGroupIds, instance);
     } else if (instance?.config['groupPolicy'] === 'allowlist') {
-      delete config['groups'];
+      removeGroupAllowlistMembership(config, instance);
     }
   }
   return { expectedRevision, config, secrets };

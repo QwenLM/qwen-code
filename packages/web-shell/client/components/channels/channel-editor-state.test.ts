@@ -306,15 +306,17 @@ describe('Channel editor state', () => {
     ).not.toHaveProperty('groups');
   });
 
-  it('removes stored group settings when leaving allowlist policy', () => {
+  it('removes allowlist-only groups but keeps behavior settings when leaving allowlist', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       ...configuredInstance(),
       config: {
         ...configuredInstance().config,
         groupPolicy: 'allowlist',
         groups: {
+          '*': { requireMention: false },
           'group-a': {},
           'group-b': { requireMention: true },
+          'group-c': { dispatchMode: 'collect', groupHistoryLimit: 25 },
         },
       },
     };
@@ -327,8 +329,12 @@ describe('Channel editor state', () => {
         draft,
         'revision-open',
         instance,
-      ).config,
-    ).not.toHaveProperty('groups');
+      ).config.groups,
+    ).toEqual({
+      '*': { requireMention: false },
+      'group-b': { requireMention: true },
+      'group-c': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    });
   });
 
   it('preserves stored group settings for an unchanged non-allowlist policy', () => {

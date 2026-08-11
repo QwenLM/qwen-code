@@ -702,6 +702,41 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
   });
 
+  it('rejects reserved keys inside unchanged known group fields', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "*": { "requireMention": { "__proto__": { "legacy": true } } }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: {
+            '*': {
+              requireMention: JSON.parse(
+                '{"__proto__":{"legacy":true}}',
+              ) as unknown,
+            },
+          },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('re-validates an unchanged stored scalar instead of preserving it', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,

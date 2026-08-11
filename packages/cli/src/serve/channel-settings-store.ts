@@ -205,7 +205,8 @@ function assertSharedField(
           !valid &&
           !(
             Object.hasOwn(previousGroup, nestedKey) &&
-            isDeepStrictEqual(previousGroup[nestedKey], nestedValue)
+            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            !containsUnsafeObjectKey(nestedValue)
           )
         ) {
           throw invalidConfig(
