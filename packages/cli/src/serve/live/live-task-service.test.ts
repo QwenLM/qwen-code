@@ -386,6 +386,9 @@ describe('LiveTaskService', () => {
       expect.objectContaining({ view: 'organized', group: 'all' }),
       { runtimeBaseDir: '/runtime/project' },
     );
+    expect(listWorkspaceSessionsForResponse.mock.calls[1]?.[0]).toBe(
+      harness.projectBridge,
+    );
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
