@@ -72,3 +72,10 @@ export class MediaResourceRegistry {
     return this.byVersionId.get(fileVersionId);
   }
 }
+
+/** Structural view of the Config accessor (same pattern as
+ * `OmniMemoryConfigView`): a config without the accessor — stub configs,
+ * embedders skipping initialize — reads as "no session registry". */
+export interface OmniMediaRegistryView {
+  getOmniMediaResourceRegistry?: () => MediaResourceRegistry;
+}

@@ -26,6 +26,7 @@ export {
 export {
   MediaResourceRegistry,
   type MediaResourceBinding,
+  type OmniMediaRegistryView,
 } from './registry.js';
 export {
   MediaMemoryRecallService,

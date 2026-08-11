@@ -53,6 +53,8 @@ import {
   MediaMemoryService,
   MEDIA_DETECTOR_VERSION,
   type MediaMemoryBinding,
+  type MediaResourceRegistry,
+  type OmniMediaRegistryView,
   type OmniMemoryConfigView,
 } from '../services/media-memory/index.js';
 
@@ -456,6 +458,22 @@ export async function processMediaForOmniDelivery(
         maxInlineTextBytes: memoryConfig.collection.maxInlineTextBytes,
       })
     : undefined;
+  // Session resource registry (M §5.2): every memory-known resource this
+  // delivery puts in front of the model gets an opaque session handle,
+  // making it addressable by recall without ever exposing a path.
+  const registry = memoryService
+    ? (config as OmniMediaRegistryView).getOmniMediaResourceRegistry?.()
+    : undefined;
+  const bindSessionResource = (
+    item: PolicyDeliveryResource,
+  ): ReturnType<MediaResourceRegistry['bind']> | undefined =>
+    registry && item.memoryBinding
+      ? registry.bind({
+          ...item.memoryBinding,
+          fileRef: item.filePath,
+          mediaType: item.recognized.modality,
+        })
+      : undefined;
   let sourceSha256: string | undefined;
   let sourceBinding: MediaMemoryBinding | undefined;
   if (memoryService) {
@@ -492,6 +510,9 @@ export async function processMediaForOmniDelivery(
     sha256: sourceSha256,
     memoryBinding: sourceBinding,
   };
+  // The source is always addressable by recall, even when preprocessing
+  // later replaces the delivered bytes with a derivative.
+  bindSessionResource(final);
   /** Media deliverables beyond the primary (multi-output fixed policies). */
   let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
@@ -583,6 +604,10 @@ export async function processMediaForOmniDelivery(
     }
     final = deliveries[0];
     extraDeliveries = deliveries.slice(1);
+    // Every delivered derivative becomes session-addressable (bind is
+    // idempotent — the source keeps its already-issued handle if a no_op
+    // policy passed it through unchanged).
+    for (const delivery of deliveries) bindSessionResource(delivery);
   }
 
   // Hash → upload-cache lookup → store promotion → upload. Shared by the
@@ -831,6 +856,7 @@ export async function processMediaForOmniDelivery(
       } else if (priorDisclosure) {
         final = { ...final, disclosure: priorDisclosure };
       }
+      bindSessionResource(final);
       guard = evaluateTransportLimits(config, final.recognized, displayName);
     }
   }

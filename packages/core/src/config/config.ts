@@ -33,6 +33,7 @@ import type {
   OmniPolicyToolsSettings,
 } from '../omni/policy/types.js';
 import type { NormalizedOmniMemoryConfig } from '../services/media-memory/config.js';
+import { MediaResourceRegistry } from '../services/media-memory/registry.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
@@ -1975,6 +1976,10 @@ export class Config {
   /** Normalized `omni.memory` view; set once during initialize() when
    * omni is enabled. */
   private omniMemoryConfig?: NormalizedOmniMemoryConfig;
+  /** Session-lifetime binder between persistent media-memory identities
+   * and the opaque resource handles the model sees (M §5.2); created
+   * lazily on first use, never persisted. */
+  private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -6488,6 +6493,15 @@ export class Config {
    * completes (or when omni is disabled). */
   getOmniMemoryConfig(): NormalizedOmniMemoryConfig | undefined {
     return this.omniMemoryConfig;
+  }
+
+  /** Session registry binding persistent media-memory identities to the
+   * opaque `resourceId` handles the model references (M §5.2). One
+   * instance per session; a handle is only meaningful in the session
+   * that minted it. */
+  getOmniMediaResourceRegistry(): MediaResourceRegistry {
+    this.omniMediaResourceRegistry ??= new MediaResourceRegistry();
+    return this.omniMediaResourceRegistry;
   }
 
   getOmniQuarantineRetentionDays(): number {

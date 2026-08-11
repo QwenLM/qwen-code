@@ -9,6 +9,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
+import {
+  MediaMemoryService,
+  MediaResourceRegistry,
+} from '../services/media-memory/index.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { isOmniDeliveryActive } from './index.js';
 import { effectiveMaxDownloadFileBytes } from './index.js';
@@ -1824,5 +1828,55 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         }),
       },
     );
+  });
+
+  it('mounts memory-known deliveries into the session resource registry', async () => {
+    const degradedPath = path.join(tmpDir, 'objects', 'deadbeef.jpg');
+    const derivedBinding = {
+      fileId: 'f-derived',
+      fileVersionId: 'v-derived',
+      rootFileId: 'f-root',
+    };
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: degradedPath,
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          degraded: true,
+          memoryBinding: derivedBinding,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const registry = new MediaResourceRegistry();
+    const filePath = await realFile('pic.png');
+    const config = {
+      ...policyConfig(),
+      getOmniMemoryConfig: () => ({ collection: { maxInlineTextBytes: 4096 } }),
+      getOmniMediaResourceRegistry: () => registry,
+    } as unknown as Config;
+
+    await mod.processMediaForOmniDelivery(filePath, config);
+
+    // The derivative the model actually received is session-addressable,
+    // resolving back to its harness-side locator and memory identity.
+    const derived = registry.resolveVersion('v-derived');
+    expect(derived).toMatchObject({
+      ...derivedBinding,
+      fileRef: degradedPath,
+      mediaType: 'image',
+    });
+    expect(registry.resolve(derived!.resourceId)).toBe(derived);
+    // The original source stays addressable too, under the version the
+    // collection pass recorded for its content hash.
+    const memory = new MediaMemoryService(tmpDir);
+    const sourceBinding = await memory.findBindingBySha256('a'.repeat(64));
+    expect(sourceBinding).toBeDefined();
+    const source = registry.resolveVersion(sourceBinding!.fileVersionId);
+    expect(source?.fileRef).toBe(filePath);
+    expect(source?.mediaType).toBe('image');
   });
 });
