@@ -26,6 +26,7 @@ import {
   type AgentViewPtyDisposable,
   type AgentViewPtyHostExit,
   type AgentViewPtyHostHandle,
+  type AgentViewPtyImplementation,
 } from './pty-host.js';
 import { getAgentViewSessionPaths } from './supervisor-store.js';
 import { bridgeAgentViewTerminal } from './terminal-bridge.js';
@@ -40,6 +41,7 @@ const CONNECT_HOST_READY_RETRIES = 10;
 const HOST_READY_DELAY_MS = 50;
 const HOST_READY_REQUEST_TIMEOUT_MS = 250;
 const REMOTE_HOST_EXIT_POLL_MS = 5000;
+const SHUTDOWN_GRACE_MS = 2_000;
 const UNIX_SOCKET_PATH_LIMIT = 100;
 const MAX_PTY_HOST_REQUEST_LINE_BYTES = 1024 * 1024;
 // JSON escaping inflates control bytes up to 6x, so a full 1 MiB
@@ -92,6 +94,7 @@ export interface RunAgentViewPtyHostProcessOptions {
   launchPath: string;
   socketPath: string;
   authToken?: string;
+  loadPty?: () => Promise<AgentViewPtyImplementation | null>;
 }
 
 export async function launchAgentViewPtyHostProcess(
@@ -360,9 +363,12 @@ export async function runAgentViewPtyHostProcess({
   launchPath,
   socketPath,
   authToken,
+  loadPty,
 }: RunAgentViewPtyHostProcessOptions): Promise<void> {
   const launch = JSON.parse(await fs.readFile(launchPath, 'utf8')) as unknown;
-  const host = await launchAgentViewPtyHost(launch);
+  const host = await launchAgentViewPtyHost(launch, {
+    ...(loadPty ? { loadPty } : {}),
+  });
   const server = createAgentViewPtyHostServer(host, socketPath, {
     authToken: authToken ?? process.env[PTY_HOST_AUTH_TOKEN_ENV],
   });
@@ -408,10 +414,17 @@ export function getAgentViewPtyHostSocketPath(
   const lengthFallback = fallbackCandidates.find(
     (item) => Buffer.byteLength(item) < UNIX_SOCKET_PATH_LIMIT,
   );
-  if (!lengthFallback) {
-    throw new Error('Agent View PTY host socket path is too long.');
+  if (fallback) {
+    return fallback;
   }
-  return fallback ?? lengthFallback;
+  if (lengthFallback) {
+    // Both fallback directories failed the availability check; fail fast
+    // instead of spawning a host that can never bind its socket.
+    throw new Error(
+      'Agent View PTY host socket fallback directories are not writable.',
+    );
+  }
+  throw new Error('Agent View PTY host socket path is too long.');
 }
 
 async function callAgentViewPtyHost(
@@ -523,7 +536,7 @@ async function requestAgentViewPtyHost(
 export function createAgentViewPtyHostServer(
   host: AgentViewPtyHostHandle,
   socketPath: string,
-  options: { authToken?: string } = {},
+  options: { authToken?: string; shutdownGraceMs?: number } = {},
 ): { listen(): Promise<void>; close(): Promise<void> } {
   const attachState: {
     activeAttachSocket: net.Socket | undefined;
@@ -562,6 +575,7 @@ export function createAgentViewPtyHostServer(
         attachState,
         leftover,
         options.authToken,
+        options.shutdownGraceMs,
       ).catch(() => {
         socket.destroy();
       });
@@ -624,6 +638,7 @@ async function respondToHostLine(
   },
   leftover: Buffer = Buffer.alloc(0),
   authToken?: string,
+  shutdownGraceMs?: number,
 ): Promise<void> {
   const request = parseHostRequest(line);
   if (!request) {
@@ -695,7 +710,7 @@ async function respondToHostLine(
   }
 
   try {
-    const result = await handleHostRequest(host, request);
+    const result = await handleHostRequest(host, request, shutdownGraceMs);
     socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
   } catch (error) {
     socket.end(
@@ -713,6 +728,7 @@ async function respondToHostLine(
 async function handleHostRequest(
   host: AgentViewPtyHostHandle,
   request: AgentViewPtyHostRequest,
+  shutdownGraceMs?: number,
 ): Promise<unknown> {
   switch (request.op) {
     case 'status':
@@ -732,7 +748,7 @@ async function handleHostRequest(
       host.kill(signalParam(request.params));
       return { killed: true };
     case 'shutdown':
-      await shutdownHost(host);
+      await shutdownHost(host, shutdownGraceMs);
       return { shuttingDown: true };
     case 'attachStream':
       throw new Error('attachStream must use the streaming path.');
@@ -743,12 +759,28 @@ async function handleHostRequest(
   }
 }
 
-async function shutdownHost(host: AgentViewPtyHostHandle): Promise<void> {
+async function shutdownHost(
+  host: AgentViewPtyHostHandle,
+  graceMs: number = SHUTDOWN_GRACE_MS,
+): Promise<void> {
   if (host.shutdown) {
     await host.shutdown();
-    return;
+  } else {
+    host.kill('SIGTERM');
   }
-  host.kill('SIGTERM');
+  // A TERM-resistant worker (e.g. `trap '' TERM`) would otherwise keep
+  // host.exited pending forever: the host process would never exit and its
+  // socket lock would block every future launch of the session.
+  const timer = setTimeout(() => {
+    try {
+      host.kill('SIGKILL');
+    } catch {
+      // The worker exited between the grace deadline and this kill.
+    }
+  }, graceMs);
+  timer.unref?.();
+  const cancel = () => clearTimeout(timer);
+  void host.exited.then(cancel, cancel);
 }
 
 async function waitForSpawnedPtyHost(

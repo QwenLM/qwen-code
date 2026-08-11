@@ -49,6 +49,30 @@ describe('AgentViewAttachLeaseManager', () => {
     }
   });
 
+  it('isolates leases across sessions', () => {
+    const clock = fakeClock('2026-07-17T00:00:00.000Z');
+    let idCounter = 0;
+    const manager = new AgentViewAttachLeaseManager({
+      now: clock.now,
+      createLeaseId: () => `lease-${++idCounter}`,
+    });
+
+    const first = manager.acquire('session-a', { clientId: 'terminal-a' });
+    const second = manager.acquire('session-b', { clientId: 'terminal-b' });
+
+    expect(first.ok && first.lease.leaseId).toBe('lease-1');
+    expect(second.ok && second.lease.leaseId).toBe('lease-2');
+
+    // Session B's lease must not disturb session A's.
+    expect(manager.get('session-a')?.leaseId).toBe('lease-1');
+    expect(manager.heartbeat('session-a', 'lease-1')?.leaseId).toBe('lease-1');
+
+    // Releasing session A must not affect session B.
+    expect(manager.release('session-a', 'lease-1')).toBe(true);
+    expect(manager.get('session-a')).toBeUndefined();
+    expect(manager.get('session-b')?.leaseId).toBe('lease-2');
+  });
+
   it('rejects a second acquire while a lease is active', () => {
     const clock = fakeClock('2026-07-17T00:00:00.000Z');
     const manager = new AgentViewAttachLeaseManager({

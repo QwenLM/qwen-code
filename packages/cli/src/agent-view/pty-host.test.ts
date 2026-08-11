@@ -84,6 +84,17 @@ describe('BoundedOutputRing', () => {
     expect(ring.retainedBytes).toBeLessThanOrEqual(6);
   });
 
+  it('copies the retained tail of oversized chunks off the source buffer', () => {
+    const ring = new BoundedOutputRing(4);
+    const source = Buffer.alloc(1024, 0x61);
+
+    ring.append(source);
+    // A retained subarray view would observe this mutation.
+    source.fill(0x62);
+
+    expect(ring.toString()).toBe('aaaa');
+  });
+
   it('coalesces small chunks while preserving the byte cap', () => {
     const ring = new BoundedOutputRing(1024 * 1024);
 
@@ -355,6 +366,56 @@ describe('launchAgentViewPtyHost', () => {
     expect(env['QWEN_AGENT_VIEW_SESSION_ID']).toBeUndefined();
     expect(env['QWEN_AGENT_VIEW_SIDEBAND']).toBeUndefined();
     expect(env['QWEN_AGENT_VIEW_ACTIVE_CWD']).toBeUndefined();
+  });
+
+  it('lets the launch env override inherited process env values', async () => {
+    const pty = createFakePty();
+    const key = 'QWEN_AGENT_VIEW_MERGE_TEST';
+    const previous = process.env[key];
+    process.env[key] = 'inherited';
+    try {
+      await launchAgentViewPtyHost(
+        { ...createLaunch(), env: { [key]: 'from-launch' } },
+        { pty },
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
+
+    expect(pty.spawnCalls[0]?.options.env[key]).toBe('from-launch');
+  });
+
+  it('spawns the PTY with an explicit xterm-256color terminal name', async () => {
+    const pty = createFakePty();
+
+    await launchAgentViewPtyHost(createLaunch(), { pty });
+
+    // node-pty overrides env.TERM with the spawn name, so both must agree.
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
+  });
+
+  it('strips an inherited sideband token the launch env does not replace', async () => {
+    const pty = createFakePty();
+    const previous = process.env['QWEN_AGENT_VIEW_TOKEN'];
+    process.env['QWEN_AGENT_VIEW_TOKEN'] = 'outer-token';
+    try {
+      await launchAgentViewPtyHost(createLaunch(), { pty });
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_AGENT_VIEW_TOKEN'];
+      } else {
+        process.env['QWEN_AGENT_VIEW_TOKEN'] = previous;
+      }
+    }
+
+    expect(
+      pty.spawnCalls[0]?.options.env['QWEN_AGENT_VIEW_TOKEN'],
+    ).toBeUndefined();
   });
 
   it('passes kill signals through to the PTY process', async () => {

@@ -17,6 +17,7 @@ import {
   getAgentViewPtyHostSocketPath,
   INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   launchAgentViewPtyHostProcess,
+  runAgentViewPtyHostProcess,
 } from './pty-host-process.js';
 import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import { BoundedOutputRing, type AgentViewPtyHostHandle } from './pty-host.js';
@@ -175,29 +176,35 @@ describe('Agent View PTY host process server', () => {
     socket.destroy();
   });
 
-  it('reclaims a stale socket lock left by a dead process', async () => {
-    const host = fakeHost();
-    const socketPath = shortSocketPath();
-    await fs.mkdir(path.dirname(socketPath), { recursive: true });
-    await fs.writeFile(`${socketPath}.lock`, '2147483647');
-    const server = createAgentViewPtyHostServer(host, socketPath);
-    servers.push(server);
+  it.skipIf(process.platform === 'win32')(
+    'reclaims a stale socket lock left by a dead process',
+    async () => {
+      const host = fakeHost();
+      const socketPath = shortSocketPath();
+      await fs.mkdir(path.dirname(socketPath), { recursive: true });
+      await fs.writeFile(`${socketPath}.lock`, '2147483647');
+      const server = createAgentViewPtyHostServer(host, socketPath);
+      servers.push(server);
 
-    await expect(server.listen()).resolves.toBeUndefined();
-  });
+      await expect(server.listen()).resolves.toBeUndefined();
+    },
+  );
 
-  it('releases the socket lock on close so the path can be reused', async () => {
-    const host = fakeHost();
-    const socketPath = shortSocketPath();
-    const first = createAgentViewPtyHostServer(host, socketPath);
-    await first.listen();
-    const second = createAgentViewPtyHostServer(fakeHost(), socketPath);
-    servers.push(second);
+  it.skipIf(process.platform === 'win32')(
+    'releases the socket lock on close so the path can be reused',
+    async () => {
+      const host = fakeHost();
+      const socketPath = shortSocketPath();
+      const first = createAgentViewPtyHostServer(host, socketPath);
+      await first.listen();
+      const second = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      servers.push(second);
 
-    await expect(second.listen()).rejects.toThrow('already in use');
-    await first.close();
-    await expect(second.listen()).resolves.toBeUndefined();
-  });
+      await expect(second.listen()).rejects.toThrow('already in use');
+      await first.close();
+      await expect(second.listen()).resolves.toBeUndefined();
+    },
+  );
 
   it('rejects non-positive or non-integer resize dimensions', async () => {
     const host = fakeHost();
@@ -230,6 +237,45 @@ describe('Agent View PTY host process server', () => {
     expect(host.killedWith).toBeUndefined();
   });
 
+  it('escalates a TERM-resistant worker to SIGKILL after the grace period', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      shutdownGraceMs: 20,
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
+      shuttingDown: true,
+    });
+    expect(host.shutdowns).toBe(1);
+
+    await waitFor(() => host.killedWith === 'SIGKILL');
+  });
+
+  it('does not escalate when the worker exits within the grace period', async () => {
+    const host = fakeHost();
+    let resolveExited: (exit: { exitCode: number }) => void = () => {};
+    host.exited = new Promise<{ exitCode: number }>((resolve) => {
+      resolveExited = resolve;
+    });
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      shutdownGraceMs: 20,
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
+      shuttingDown: true,
+    });
+    resolveExited({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(host.killedWith).toBeUndefined();
+  });
+
   it('requires auth when the host server has a token', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -247,6 +293,84 @@ describe('Agent View PTY host process server', () => {
     ).resolves.toMatchObject({
       workerPid: 1234,
     });
+  });
+
+  it('wires the env host token into the entrypoint server', async () => {
+    const launchDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-entrypoint-'),
+    );
+    socketDirs.add(launchDir);
+    const launchPath = path.join(launchDir, 'launch.json');
+    await fs.writeFile(
+      launchPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId: 'session-entry',
+        argv: ['qwen', '--agent-view-worker'],
+        env: { QWEN_AGENT_VIEW_WORKER: '1' },
+        entrypoint: 'qwen',
+        projectCwd: '/repo',
+        activeCwd: '/repo',
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      }),
+    );
+    let exitCallback: ((event: { exitCode: number }) => void) | undefined;
+    const socketPath = shortSocketPath();
+    // The token travels via the host env, mirroring the spawn contract.
+    const previousToken = process.env[PTY_HOST_AUTH_TOKEN_ENV];
+    process.env[PTY_HOST_AUTH_TOKEN_ENV] = 'entry-token';
+    try {
+      const runPromise = runAgentViewPtyHostProcess({
+        launchPath,
+        socketPath,
+        loadPty: async () => ({
+          name: 'injected',
+          module: {
+            spawn: () => ({
+              pid: 4321,
+              write: () => {},
+              onData: () => ({ dispose: () => {} }),
+              onExit: (callback: (event: { exitCode: number }) => void) => {
+                exitCallback = callback;
+                return { dispose: () => {} };
+              },
+              resize: () => {},
+              kill: () => {},
+            }),
+          },
+        }),
+      });
+      try {
+        let status: unknown;
+        for (let attempt = 0; attempt < 50 && status === undefined; attempt++) {
+          try {
+            status = await requestHost(
+              socketPath,
+              'status',
+              undefined,
+              'entry-token',
+            );
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        }
+
+        expect(status).toEqual({ pid: process.pid, workerPid: 4321 });
+        await expect(requestHost(socketPath, 'status')).rejects.toThrow(
+          'Unauthorized PTY host request.',
+        );
+      } finally {
+        exitCallback?.({ exitCode: 0 });
+        await runPromise;
+      }
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env[PTY_HOST_AUTH_TOKEN_ENV];
+      } else {
+        process.env[PTY_HOST_AUTH_TOKEN_ENV] = previousToken;
+      }
+    }
   });
 
   it('requires auth for attach streams', async () => {

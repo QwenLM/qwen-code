@@ -144,8 +144,10 @@ export class BoundedOutputRing {
     this.totalBytesValue += chunk.byteLength;
 
     if (chunk.byteLength >= this.maxBytes) {
+      // Copy instead of retaining a subarray view: a view would pin the
+      // entire backing ArrayBuffer of the (potentially huge) source chunk.
       const retained = trimUtf8Start(
-        chunk.subarray(chunk.byteLength - this.maxBytes),
+        Buffer.from(chunk.subarray(chunk.byteLength - this.maxBytes)),
       );
       this.chunks = [retained];
       this.retainedBytesValue = retained.byteLength;
