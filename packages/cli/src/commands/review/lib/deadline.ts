@@ -302,6 +302,21 @@ export function expectedRoundSeconds(
  * seconds-old span clamped to the floor — committed the pair at one
  * round's price for up to two rounds' wall, and near the deadline the
  * pair consumed the reserve and hit the outer timeout before posting.
+ *
+ * The price deliberately covers the pair's AUDITOR fan-outs only: the pair
+ * launches in the same response as the Step 4 verifier shards, which share
+ * the same pool waves, and if they stretch the batch past the priced waves
+ * the extra wall is bounded by the verifier batch's own wave count — one
+ * wave for any normal finding set — which the reserve the gate holds ahead
+ * of every admission is there to carry.
+ *
+ * One ledger shape the price does not correct: the pair stamps rounds 1
+ * and 2 seconds apart, so after the pair returns, the span from round 2's
+ * stamp to the next admission covers the pair's whole wall, and every solo
+ * round after it prices at up to twice its true cost. Accepted
+ * conservatism: an over-priced gate refuses a round near the deadline that
+ * would have fit — a capped verdict that still posts — never the
+ * killed-before-compose shape the gate exists to prevent.
  */
 export function expectedAdmissionSeconds(
   planPath: string,
@@ -317,7 +332,7 @@ export function expectedAdmissionSeconds(
   const predecessorInFlight =
     last !== undefined && nowMs - last.atMs < MIN_OBSERVED_ROUND_SECONDS * 1000;
   if (!predecessorInFlight) {
-    return costliestSpanSeconds(stamps, nowMs) ?? DEFAULT_ROUND_SECONDS;
+    return expectedRoundSeconds(planPath, round, nowMs);
   }
   const single =
     costliestSpanSeconds(stamps.slice(0, -1), last.atMs) ??
