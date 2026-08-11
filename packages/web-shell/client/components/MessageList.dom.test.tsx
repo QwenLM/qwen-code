@@ -114,12 +114,15 @@ type MessageListHandle = import('./MessageList').MessageListHandle;
 // jsdom provides neither ResizeObserver (MessageList's resize guard) nor a real
 // scrollIntoView (the non-virtual scroll path) — stub both.
 const resizeObserverCallbacks: ResizeObserverCallback[] = [];
+let resizeObserversFireOnObserve = true;
 class ResizeObserverStub {
   constructor(private readonly callback: ResizeObserverCallback) {
     resizeObserverCallbacks.push(callback);
   }
   observe() {
-    this.callback([], this as unknown as ResizeObserver);
+    if (resizeObserversFireOnObserve) {
+      this.callback([], this as unknown as ResizeObserver);
+    }
   }
   unobserve() {}
   disconnect() {}
@@ -147,7 +150,9 @@ afterEach(() => {
     container.remove();
   }
   resizeObserverCallbacks.length = 0;
+  resizeObserversFireOnObserve = true;
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 type UserMessage = Extract<Message, { role: 'user' }>;
@@ -2630,6 +2635,99 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
+  it('finishes cooldown following unless the user scrolls up', () => {
+    resizeObserversFireOnObserve = false;
+    let scrollHeight = 1200;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 0;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      nextFrameId += 1;
+      frames.set(nextFrameId, callback);
+      return nextFrameId;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((frameId) => {
+      frames.delete(frameId);
+    });
+    const messages = [userMsg('u1'), thinkingMsg('t1')];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const ref = createRef<MessageListHandle>();
+    mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+
+    renderInto(root, messages, ref, {
+      catchingUp: true,
+      isResponding: true,
+    });
+    renderInto(root, messages, ref, {
+      catchingUp: false,
+      isResponding: true,
+    });
+    expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    renderInto(
+      root,
+      [userMsg('u1'), { ...thinkingMsg('t1'), content: 'thinking more' }],
+      ref,
+      {
+        catchingUp: false,
+        isResponding: true,
+      },
+    );
+    expect(scrollTop).toBe(600);
+
+    act(() => {
+      const pendingFrames = [...frames.values()];
+      frames.clear();
+      pendingFrames.forEach((callback) => callback(0));
+    });
+    expect(scrollTop).toBe(1200);
+
+    frames.clear();
+    act(() => ref.current?.scrollToBottom('auto'));
+    scrollHeight = 2400;
+    renderInto(
+      root,
+      [userMsg('u1'), { ...thinkingMsg('t1'), content: 'thinking even more' }],
+      ref,
+      {
+        catchingUp: false,
+        isResponding: true,
+      },
+    );
+    const list = container.querySelector('[data-web-shell-message-list]');
+    act(() => {
+      list?.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, deltaY: -10 }),
+      );
+      scrollTop = 900;
+      list?.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    act(() => {
+      const pendingFrames = [...frames.values()];
+      frames.clear();
+      pendingFrames.forEach((callback) => callback(0));
+    });
+    expect(scrollTop).toBe(900);
+  });
+
   it('does not treat a user_shell row as a new chat prompt', () => {
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
@@ -2777,6 +2875,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
     await nextFrame();
 
+    expect(scrollTop).toBe(600);
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
   });
 
