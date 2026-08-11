@@ -22,8 +22,10 @@ import { observedTestCounts } from '../test-plan.js';
 import {
   detectMavenOwnership,
   isDependencyFailureLine,
+  isSourceFailureLine,
   mavenExecutable,
   mavenToolchainAdapter,
+  reportPaths,
   shellSelector,
 } from './maven-toolchain.js';
 
@@ -60,7 +62,9 @@ const result = (
   exitCode: 0,
   seconds: 1,
   timedOut: false,
-  output: '',
+  // A real Maven run always frames output; the empty-output exit-0 shape
+  // is the adapter's "never ran" classification, not a clean run.
+  output: '[INFO] BUILD SUCCESS',
   ...overrides,
 });
 
@@ -723,7 +727,7 @@ describe('maven toolchain adapter', () => {
     const output = report.test[0]?.output ?? '';
     expect(output).not.toContain('TEST-Stale.xml');
     expect(output).toContain(
-      '[maven-test-report] core/target/surefire-reports/TEST-SameTest.xml: tests=2, failures=1, errors=0, skipped=0',
+      '[maven-test-report] core (1 failing report(s)): tests=2, failures=1, errors=0, skipped=0',
     );
     expect(output).toContain(
       '[maven-test-failure] core/target/surefire-reports/TEST-SameTest.xml: example.SameTest#coreFailure',
@@ -952,14 +956,16 @@ describe('maven toolchain adapter', () => {
       '[maven-test-report] core (150 report(s)): tests=300, failures=0, errors=0, skipped=0',
     );
     expect(output).not.toContain('TEST-Clean0.xml');
-    // Failing reports keep per-report identity, capped.
-    expect(output).toContain('TEST-Fail0.xml');
-    // The marker carries per-report CLAMPED passed totals (each omitted
-    // report here passed zero), so one anomalous report inside the batch
-    // cannot cancel its batchmates' counts at parse time.
+    // Failing reports roll up per PROJECT like the clean side — the
+    // per-report lines' byte-order cap lost module attribution for
+    // everything past the bound. The per-report case markers survive (they
+    // are the module-qualified failure evidence); the COUNT line is the
+    // rollup.
     expect(output).toContain(
-      '[maven-test-report] 20 more failing report(s) omitted: ' +
-        'tests=0, failures=0, errors=0, skipped=0',
+      '[maven-test-report] core (120 failing report(s)): tests=120, failures=120, errors=0, skipped=0',
+    );
+    expect(output).toContain(
+      '[maven-test-failure] core/target/surefire-reports/TEST-Fail0.xml: example.FailTest#fails',
     );
   });
 
@@ -998,18 +1004,20 @@ describe('maven toolchain adapter', () => {
   });
 
   it('carries clamped passed totals in the failing omission marker', () => {
-    writeReactor();
+    const modules = Array.from({ length: 103 }, (_, i) => `mod${i}`);
+    writeProject('.', modules);
+    for (const module of modules) writeProject(module);
 
-    const report = runAdapter(['core/src/Main.java'], {
+    const report = runAdapter(['mod0/src/main/java/Main.java'], {
       exec: (command) => {
-        const dir = join(root, 'core', 'target', 'surefire-reports');
-        mkdirSync(dir, { recursive: true });
-        for (let i = 0; i < 103; i++) {
+        for (const module of modules) {
+          const dir = join(root, module, 'target', 'surefire-reports');
+          mkdirSync(dir, { recursive: true });
           writeFileSync(
-            join(dir, `TEST-Fail${i}.xml`),
-            // Fail99 sorts into the omitted tail and passes zero despite
+            join(dir, 'TEST-Fail.xml'),
+            // mod99 sorts into the omitted tail and passes zero despite
             // recording a test; its batchmates each pass one.
-            i === 99
+            module === 'mod99'
               ? '<testsuite tests="1" failures="5" errors="0" skipped="0"><testcase classname="example.T" name="fails"><failure/></testcase></testsuite>'
               : '<testsuite tests="2" failures="1" errors="0" skipped="0"><testcase classname="example.T" name="fails"><failure/></testcase></testsuite>',
           );
@@ -1020,10 +1028,10 @@ describe('maven toolchain adapter', () => {
 
     const output = report.test[0]?.output ?? '';
     expect(output).toContain(
-      '[maven-test-report] 3 more failing report(s) omitted: ' +
+      '[maven-test-report] 3 more failing project rollup(s) omitted: ' +
         'tests=2, failures=0, errors=0, skipped=0',
     );
-    // 100 kept failing-report lines pass one test each; the batch passes 2.
+    // 100 kept failing rollups pass one test each; the omitted batch passes 2.
     expect(observedTestCounts(report)).toEqual([102]);
   });
 
@@ -1610,7 +1618,7 @@ describe('maven toolchain adapter', () => {
   it('treats settings referenced by .mvn/maven.config as dependency inputs', () => {
     writeReactor();
     mkdirSync(join(root, '.mvn'));
-    writeFileSync(join(root, '.mvn', 'maven.config'), '-s settings.xml\n');
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-s\nsettings.xml\n');
     writeFileSync(join(root, 'settings.xml'), '<settings/>\n');
 
     const report = runAdapter(['settings.xml'], {
@@ -1635,7 +1643,7 @@ describe('maven toolchain adapter', () => {
     mkdirSync(join(root, '.mvn'));
     writeFileSync(
       join(root, '.mvn', 'maven.config'),
-      `-s settings.xml ${'x'.repeat(2 * 1024 * 1024)}\n`,
+      `-s\nsettings.xml ${'x'.repeat(2 * 1024 * 1024)}\n`,
     );
     writeFileSync(join(root, 'settings.xml'), '<settings/>\n');
 
@@ -1653,7 +1661,7 @@ describe('maven toolchain adapter', () => {
     expect(oversized.note).toContain('infrastructure evidence');
 
     // ...and under the cap the identical config suppresses it.
-    writeFileSync(join(root, '.mvn', 'maven.config'), '-s settings.xml\n');
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-s\nsettings.xml\n');
     const undersized = runAdapter(['settings.xml'], {
       exec: (command) =>
         result(command, {
@@ -2281,10 +2289,56 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('was spent');
   });
 
+  it('applies the attempt floor to a --no-install run with no warm-up', () => {
+    // The disclosure check runs unconditionally after the warm-up block: a
+    // lifecycle-only run below the floor must not execute a sub-floor
+    // deadline and record the manufactured timeout as a real run.
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = runAdapter(['core/src/Main.java'], {
+      timeout: 300,
+      budget: 5,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(calls).toEqual([]);
+    expect(report.install).toBeNull();
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('granted budget (5s) is below the');
+    expect(report.note).toContain('15s minimum');
+  });
+
   it.each([
     ['[ERROR] Non-resolvable import POM for example:bom:1 at line 42'],
     ['[ERROR] Failure to find example:core:jar:1 in central was cached'],
     ['[ERROR] Could not find artifact example:core:jar:1 in central'],
+    ['[ERROR] Failed to collect dependencies at example:core:jar:1'],
+    ['[ERROR] Failed to read artifact descriptor for example:core:jar:1'],
+    ['[ERROR] Non-resolvable parent POM for example:core:1'],
+    [
+      '[ERROR] org.apache.maven.plugin.dependency.PluginResolutionException: boom',
+    ],
+    [
+      '[ERROR] org.eclipse.aether.resolution.DependencyResolutionException: boom',
+    ],
+    ["[ERROR] No plugin found for prefix 'jetty'"],
+    ['[ERROR] Unknown host: repo.maven.apache.org'],
+    ['[ERROR] Name or service not known'],
+    ['[ERROR] Temporary failure in name resolution'],
+    ['[ERROR] Connection reset'],
+    [
+      '[ERROR] PKIX path building failed: unable to find valid certification path',
+    ],
+    ['[ERROR] status code: 401, reason phrase: Unauthorized'],
+    ['[ERROR] status code: 403, reason phrase: Forbidden'],
+    ['[ERROR] status code: 407, reason phrase: Proxy Authentication Required'],
+    ['[ERROR] status code: 429, reason phrase: Too Many Requests'],
+    ['[ERROR] status code: 503, reason phrase: Service Unavailable'],
   ])('classifies %s as a dependency failure', (line) => {
     expect(isDependencyFailureLine(line)).toBe(true);
   });
@@ -2299,6 +2353,12 @@ describe('maven toolchain adapter', () => {
 
     writeFileSync(join(root, 'mvnw'), '#!/bin/sh\n');
     expect(mavenExecutable(root, 'linux')).toBe('./mvnw');
+
+    // The win32 branch carries the same size gate on `mvnw.cmd`.
+    writeFileSync(join(root, 'mvnw.cmd'), '');
+    expect(mavenExecutable(root, 'win32')).toBe('mvn');
+    writeFileSync(join(root, 'mvnw.cmd'), '@echo off\n');
+    expect(mavenExecutable(root, 'win32')).toBe('mvnw.cmd');
   });
 
   it('reads a fail-never plugin goal failure as a swallowed failure', () => {
@@ -2423,8 +2483,7 @@ describe('maven toolchain adapter', () => {
         result(command, {
           exitCode: 1,
           output:
-            'Error: Failed to download Maven distribution.\n' +
-            'curl: (22) The requested URL returned error: 404',
+            "wget: unable to resolve host address 'repo.maven.apache.org'\n",
         }),
     });
 
@@ -2618,5 +2677,517 @@ describe('maven toolchain adapter', () => {
 
     expect(report.note).toContain('Correlate compiler or test errors');
     expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('fails closed to reactor-wide for a real module nested under a non-root aggregator src/ path', () => {
+    // The R1-1 positive control beyond the root: `agg` aggregates
+    // `<module>src/core</module>`; collapsing to `agg` would run
+    // `-pl agg -am`, and `-am` adds only UPSTREAM projects — the changed
+    // module would never compile or test under a green verdict.
+    writeProject('.', ['agg']);
+    writeProject('agg', ['src/core']);
+    writeProject('agg/src/core');
+    const calls: string[] = [];
+
+    const report = runAdapter(['agg/src/core/src/main/java/Foo.java'], {
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+    expect(report.affected).toEqual(['.']);
+  });
+
+  it('still scopes to the owning module when only test-data-shape fixtures sit under its src/', () => {
+    // `src/test/` and `src/it/` are the principled fixture shapes: the skip
+    // there must not cost the module a reactor-wide run.
+    writeReactor();
+    writeProject('core/src/it/projects/sample');
+    const calls: string[] = [];
+
+    runAdapter(
+      ['core/src/main/java/Core.java', 'core/src/it/projects/sample/App.java'],
+      {
+        exec: (command) => {
+          calls.push(command);
+          return result(command);
+        },
+      },
+    );
+
+    expect(calls).toEqual([
+      'mvn --batch-mode --no-transfer-progress -pl core -am test',
+    ]);
+  });
+
+  it('cross-checks surefire stdout summaries against a relocated report directory', () => {
+    // Reports written to a non-default `<reportsDirectory>` sit outside the
+    // sweep; the framed `Tests run:` summary Surefire prints even under
+    // testFailureIgnore is the cross-check that keeps the run green no more.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0\n' +
+            '[INFO] BUILD SUCCESS',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when a reports directory is unreadable',
+    () => {
+      // An unreadable directory is the same epistemic state as the caps: the
+      // sweep did not see everything. chmod 000 is within what a PR's own
+      // test/shutdown hook can do — the threat model this file grants.
+      writeReactor();
+      const dir = join(root, 'core', 'target', 'surefire-reports');
+      const report = runAdapter(['core/src/Main.java'], {
+        exec: (command) => {
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, 'TEST-Core.xml'),
+            '<testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="T" name="f"><failure/></testcase></testsuite>',
+          );
+          chmodSync(dir, 0o000);
+          return result(command);
+        },
+      });
+
+      // Restore so the sandbox cleanup can remove the tree.
+      chmodSync(dir, 0o755);
+      expect(report.ok).toBe(false);
+      expect(report.test[0]?.evidenceCapped).toBe(true);
+    },
+  );
+
+  it('rejects a report whose comment swallows a later failing suite', () => {
+    // A raw `<!--` in unescaped `<system-out>` text whose matching `-->`
+    // sits inside a LATER failing suite: honoring it swallowed the failing
+    // header. The comment interior closes elements still open where it
+    // started — the swallowing shape — so the report joins the parser's
+    // fail-closed rejections instead of reading green.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="A" name="passes">' +
+            '<system-out>before <!-- swallow</system-out></testcase>' +
+            '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="B" name="fails"><failure/></testcase>' +
+            '</testsuite> after --></testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
+  });
+
+  it('keeps CDATA-wrapped system-out with XML samples parseable', () => {
+    // The rejection above is comment-only on purpose: surefire's own writer
+    // wraps test stdout in CDATA, and that stdout routinely contains XML
+    // samples closing the very elements open around the section.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="A" name="passes">' +
+            '<system-out><![CDATA[</system-out></testcase> sample]]></system-out>' +
+            '</testcase></testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+  });
+
+  it('reads failing case bodies as failures when the header is zeroed', () => {
+    // A rewritten report: `failures="0" errors="0"` attributes over a live
+    // `<failure>` body. The parsed proof of failure is authoritative — the
+    // green-wash this adapter's threat model exists to catch.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.T" name="fails"><failure message="boom"/></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.output).toContain(
+      '[maven-test-failure] core/target/surefire-reports/TEST-Core.xml: example.T#fails',
+    );
+  });
+
+  it('treats a fully-read zero-suite report as known-empty, not unknown', () => {
+    // A small suite-less XML a PR's own tests write (failsafe-summary.xml is
+    // the same shape) contributes no evidence and no gap — it must not hold
+    // the whole run uncertified.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'failsafe-summary.xml'), '<failsafe-summary/>');
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+  });
+
+  it('classifies a wrapper SHA-256 validation failure as infrastructure', () => {
+    // apache/maven-wrapper prints this verbatim on a checksum mismatch; the
+    // pinning fixture uses the wording a real wrapper emits.
+    writeReactor();
+    writeWrapper();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            'Error: Failed to validate Maven distribution SHA-256, ' +
+            'your Maven distribution might be compromised.',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+  });
+
+  it('classifies a silent wget bootstrap death as infrastructure', () => {
+    // Both wrapper generations try wget before curl, and the distribution
+    // download runs it quiet: a DNS failure dies exit 4 with EMPTY output —
+    // no wording to match. The absence of any Maven-framed line pins the
+    // death to bootstrap.
+    writeReactor();
+    writeWrapper();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 4, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+    expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it('reads an unframed selector-rejection wording from test stdout as evidence, not rejection', () => {
+    // The classifier anchors on Maven's framing: a PR test echoing the
+    // wording must not discard the run's fresh evidence into `unsupported`.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output:
+            'some test printed: Could not find the selected project in the reactor: core\n' +
+            '[INFO] BUILD SUCCESS',
+        });
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(true);
+  });
+
+  it('falls back to mvn when the wrapper name is a directory', () => {
+    // A directory named `mvnw` is searchable (passes X_OK) but dies exit 126
+    // on execution; the isFile() gate treats it as absent on both platforms.
+    writeProject('.');
+    mkdirSync(join(root, 'mvnw'));
+    chmodSync(join(root, 'mvnw'), 0o755);
+    expect(mavenExecutable(root, 'linux')).toBe('mvn');
+
+    mkdirSync(join(root, 'mvnw.cmd'));
+    expect(mavenExecutable(root, 'win32')).toBe('mvn');
+  });
+
+  it('reads a non-empty stub wrapper that exits 0 as never run, not as tested nothing', () => {
+    // Trimming the wrapper to `#!/bin/sh` keeps the exec bit and passes the
+    // size gate: exit 0, zero reports, zero Maven output. Enumerating
+    // wrapper shapes misses it; classifying the run does not.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.neverRan).toBe(true);
+    expect(report.note).toContain('without starting Maven');
+  });
+
+  it('mirrors Maven line-by-line maven.config reading for spaced arguments', () => {
+    // Maven reads one argument per line: `-s` and a spaced path are two
+    // lines. Whitespace tokenizing recorded the truncated path and let the
+    // PR's own breakage launder into infrastructure.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-s\nci/my settings.xml\n',
+    );
+    mkdirSync(join(root, 'ci'));
+    writeFileSync(join(root, 'ci', 'my settings.xml'), '<settings/>\n');
+
+    const report = runAdapter(['ci/my settings.xml'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('does not read maven.config comment lines as arguments', () => {
+    // A `#` line naming flags must not record a spurious input that could
+    // withdraw the carve-out for an unrelated environmental failure.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '# -s ci/real.xml\n');
+    mkdirSync(join(root, 'ci'));
+    writeFileSync(join(root, 'ci', 'real.xml'), '<settings/>\n');
+
+    const report = runAdapter(['ci/real.xml'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it.each([
+    '-s=ci/settings.xml\n',
+    // Maven reads one argument PER LINE: the paired forms are two lines.
+    '--settings\nci/settings.xml\n',
+    '--settings=ci/settings.xml\n',
+    '-gs\nci/settings.xml\n',
+    '-gs=ci/settings.xml\n',
+  ])(
+    'treats the %j maven.config spelling as a settings dependency input',
+    (config) => {
+      writeReactor();
+      mkdirSync(join(root, '.mvn'));
+      writeFileSync(join(root, '.mvn', 'maven.config'), config);
+      mkdirSync(join(root, 'ci'));
+      writeFileSync(join(root, 'ci', 'settings.xml'), '<settings/>\n');
+
+      const report = runAdapter(['ci/settings.xml'], {
+        exec: (command) =>
+          result(command, {
+            exitCode: 1,
+            output:
+              '[ERROR] Could not resolve dependencies for project example:core',
+          }),
+      });
+
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    },
+  );
+
+  it('treats a POM nested under a bare src/ module path as a resolution input', () => {
+    // A reactor can aggregate `<module>src/core</module>`: that POM feeds
+    // resolution like any other. Excluding EVERY src/-nested POM laundered
+    // the PR's own resolution breakage into an infrastructure outage.
+    writeProject('.', ['src/core']);
+    writeProject('src/core');
+
+    const report = runAdapter(['src/core/pom.xml'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: '[ERROR] Non-resolvable parent POM for example:core',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'treats a symlinked .mvn/maven.config as unreadable instead of hanging on it',
+    () => {
+      // The isFile() gate: a symlink to a character device reports size 0
+      // and passes any size cap — readFileSync would block forever.
+      writeReactor();
+      mkdirSync(join(root, '.mvn'));
+      symlinkSync('/dev/zero', join(root, '.mvn', 'maven.config'));
+
+      const report = runAdapter(['core/src/Main.java']);
+
+      expect(report.ok).toBe(true);
+    },
+  );
+
+  it('exercises the wrapper-skip arm through the platform parameter', () => {
+    // The arm that skips the OTHER platform's wrapper, reachable without
+    // depending on the host's process.platform.
+    writeReactor();
+    expect(detectMavenOwnership(root, ['mvnw'], 'win32')).toEqual({
+      reactorWide: false,
+      modules: [],
+    });
+    expect(detectMavenOwnership(root, ['mvnw.cmd'], 'linux')).toEqual({
+      reactorWide: false,
+      modules: [],
+    });
+    // The SAME platform's wrapper is still reactor-wide evidence.
+    expect(detectMavenOwnership(root, ['mvnw'], 'linux').reactorWide).toBe(
+      true,
+    );
+  });
+
+  it('decodes XML entities in failing case identities', () => {
+    // Parameterized Surefire names escape `<` / `&`; the decoded identity is
+    // what Agent 7 correlates against the changed files.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="example.T" name="a &amp; b &lt; c"><failure/></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    expect(report.test[0]?.output).toContain(
+      '[maven-test-failure] core/target/surefire-reports/TEST-Core.xml: example.T#a & b < c',
+    );
+  });
+
+  it('pins the Scala and Groovy source-failure alternants', () => {
+    // For Scala/Groovy repos these alternants are the ONLY source-failure
+    // signal; a regex rewrite breaking just them must not ship green.
+    expect(
+      isSourceFailureLine(
+        '[ERROR] /tmp/x/core/src/main/scala/Main.scala:12: not found: value foo',
+      ),
+    ).toBe(true);
+    expect(
+      isSourceFailureLine(
+        '[ERROR] /tmp/x/core/src/main/groovy/Main.groovy: 3: unable to resolve class',
+      ),
+    ).toBe(true);
+  });
+
+  it('keys the entry disk floor on the install flag', () => {
+    // 2 GiB free sits inside the [1 GiB build, 3 GiB install) window: the
+    // install floor skips a warm-cache run it should admit.
+    writeReactor();
+    statfsSyncMock.mockReturnValue({ bavail: 2 * 1024 ** 3, bsize: 1 });
+
+    const installing = runAdapter(['core/src/Main.java'], { install: true });
+    expect(installing.ok).toBe(false);
+    expect(installing.note).toContain('Insufficient disk space');
+
+    const warmCache = runAdapter(['core/src/Main.java'], { install: false });
+    expect(warmCache.ok).toBe(true);
+    expect(warmCache.note).not.toContain('Insufficient disk space');
+  });
+
+  it('does not blame the warm-up in the second preflight note when none ran', () => {
+    // A --no-install run passes the first preflight, then free space falls
+    // below the build floor: the note must not assert a download that never
+    // happened.
+    writeReactor();
+    statfsSyncMock.mockReturnValueOnce({ bavail: 16 * 1024 ** 3, bsize: 1 });
+    statfsSyncMock.mockReturnValue({ bavail: 0.5 * 1024 ** 3, bsize: 1 });
+
+    const report = runAdapter(['core/src/Main.java'], { install: false });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain(
+      'free space fell below the build floor between the preflight and the lifecycle command',
+    );
+    expect(report.note).not.toContain('warm-up consumed');
+  });
+
+  it('keeps a wrapper-config-only diff from withdrawing the mvn launch carve-out', () => {
+    // `.mvn/wrapper/**` feeds the wrapper scripts — which never ran here (no
+    // wrapper in the tree; the system `mvn` launch died). The config cannot
+    // have caused that death, so the outage stays infrastructure.
+    writeReactor();
+    const report = runAdapter(['.mvn/wrapper/maven-wrapper.properties'], {
+      exec: (command) =>
+        result(command, { exitCode: 127, output: 'sh: 1: mvn: not found' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+  });
+
+  it('attributes a timed-out reactor-wide run to the selector the diff made unexpressible', () => {
+    // The timedOut note must carry the TRUE widening cause: a selectorUnsafe
+    // widening is not "inputs every module inherits".
+    writeProject('.', ['od,d']);
+    writeProject('od,d');
+
+    const report = runAdapter(['od,d/src/main/java/Main.java'], {
+      exec: (command) => result(command, { exitCode: null, timedOut: true }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('ran out of time');
+    expect(report.note).toContain('cannot express');
+    expect(report.note).not.toContain('inputs every module inherits');
+  });
+
+  it('fails closed when the report sweep exceeds the scanned-directory cap', () => {
+    // The scan-count cap is the same fail-closed state as the fan-out bound;
+    // the cap is a parameter so the test reaches it without building 20,000
+    // directories.
+    writeReactor();
+    for (let i = 0; i < 10; i++) {
+      mkdirSync(join(root, `d${i}`, 'nested'), { recursive: true });
+    }
+
+    expect(reportPaths(root, 5).truncated).toBe(true);
+    expect(reportPaths(root, 100).truncated).toBe(false);
   });
 });

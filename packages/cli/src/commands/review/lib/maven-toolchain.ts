@@ -57,9 +57,9 @@ const REPORT_DIRS = ['surefire-reports', 'failsafe-reports'];
 
 /**
  * Surefire writes one XML per test class, so a green full-reactor run yields
- * thousands of reports. Clean reports therefore roll up per project dir, and
- * the per-report evidence lines are capped: this block is appended AFTER the
- * command output was trimmed, so it carries its own bound.
+ * thousands of reports. Clean AND failing reports therefore roll up per
+ * project dir, and the rollup lines are capped: this block is appended AFTER
+ * the command output was trimmed, so it carries its own bound.
  */
 const MAX_FAILING_REPORT_LINES = 100;
 const MAX_FAILURE_CASE_LINES = 200;
@@ -203,17 +203,16 @@ function isRepoMetadataPath(path: string): boolean {
  * The Maven project directory that owns a path: the nearest ancestor holding a
  * `pom.xml`.
  *
- * Directories strictly beneath a `src/` tree are skipped. A POM there is test
- * data — maven-invoker ITs, archetype fixtures,
- * `src/test/resources/projects/*` — never a reactor member, so the file stays
- * owned by the enclosing real project.
- *
- * The skip fails closed at the ROOT: when every POM beneath the path's `src/`
- * chain was skipped and the walk would collapse to the root project, the
- * nested POM may instead be a REAL module (a reactor can aggregate
- * `<module>src/core</module>`), and `-pl .` compiles only the root — the
- * changed module would go untested under a green verdict. Returning null
- * escalates the path to a reactor-wide run instead.
+ * Directories strictly beneath a `src/` tree are skipped. A POM there is OFTEN
+ * test data — maven-invoker ITs, archetype fixtures,
+ * `src/test/resources/projects/*` — but a reactor can also aggregate a real
+ * module there (`<module>src/core</module>`). The skip is principled only
+ * for the test-data shapes (`src/test/`, `src/it/`); when the walk collapses
+ * onto a POM it skipped, it fails closed — to the ROOT always (`-pl .`
+ * compiles only the root), and elsewhere unless every skipped POM was a
+ * test-data shape — because `-pl <target> -am` adds only UPSTREAM projects,
+ * so a mis-collapsed target leaves the changed module untested under a green
+ * verdict. Returning null escalates the path to a reactor-wide run instead.
  *
  * Whether the project this returns is ACTIVE under the current profiles, JDK,
  * and `<modules>` inheritance is deliberately NOT decided here: Maven decides
@@ -225,14 +224,31 @@ function isRepoMetadataPath(path: string): boolean {
 function owningProject(root: string, path: string): string | null {
   let dir = dirname(join(root, path));
   let skippedPomBeneathSrc = false;
+  let skippedTestDataOnly = true;
   while (isInside(root, dir)) {
     const rel = toPosix(relative(root, dir)) || '.';
     // Strictly BENEATH `src/`: a real project located exactly AT a `src` path
     // is not test data.
     if (/(?:^|\/)src\//.test(rel)) {
-      if (existsSync(join(dir, 'pom.xml'))) skippedPomBeneathSrc = true;
+      if (existsSync(join(dir, 'pom.xml'))) {
+        skippedPomBeneathSrc = true;
+        // `src/test/` and `src/it/` trees are the principled fixture shapes
+        // (invoker ITs, archetype test projects); any OTHER src/-nested POM
+        // can be a real module a reactor aggregates (`<module>src/core</module>`).
+        if (!/(?:^|\/)src\/(?:test|it)\//.test(rel)) {
+          skippedTestDataOnly = false;
+        }
+      }
     } else if (existsSync(join(dir, 'pom.xml'))) {
-      if (rel === '.' && skippedPomBeneathSrc) return null;
+      // Fail closed when the collapse cannot be trusted: at the ROOT a
+      // skipped POM may be a real `<module>src/…</module>` and `-pl .`
+      // would compile only the root, and anywhere else a skipped POM that
+      // is not a test-data shape is the same risk — `-pl <target> -am`
+      // adds only UPSTREAM projects, so the changed module would go
+      // untested under a green verdict. Null escalates to reactor-wide.
+      if (skippedPomBeneathSrc && (rel === '.' || !skippedTestDataOnly)) {
+        return null;
+      }
       return rel;
     }
     if (dir === root) break;
@@ -365,20 +381,28 @@ function readDirBounded(
  * neither the descent nor the direct listing can escape the worktree.
  *
  * `truncated` reports that the sweep stopped early — the scanned-directory
- * cap, the per-directory fan-out bound, or a queue that outgrew the scan
- * budget. A truncated sweep can miss failure evidence, so the caller fails
- * closed on it exactly like the fresh-report cap.
+ * cap, the per-directory fan-out bound, an unreadable directory, or a queue
+ * that outgrew the scan budget. A truncated sweep can miss failure evidence,
+ * so the caller fails closed on it exactly like the fresh-report cap.
  */
-function reportPaths(root: string): { paths: string[]; truncated: boolean } {
+export function reportPaths(
+  root: string,
+  maxScannedDirs: number = MAX_SCANNED_DIRS,
+): { paths: string[]; truncated: boolean } {
   const paths: string[] = [];
   const queue: string[] = [root];
   let scanned = 0;
   let truncated = false;
-  while (queue.length > 0 && scanned < MAX_SCANNED_DIRS) {
+  while (queue.length > 0 && scanned < maxScannedDirs) {
     const dir = queue.pop() as string;
     scanned += 1;
     const listing = readDirBounded(dir);
-    if (listing === null) continue;
+    // An unreadable directory is the same epistemic state as the caps: the
+    // sweep did not see everything, so it fails closed instead of skipping on.
+    if (listing === null) {
+      truncated = true;
+      continue;
+    }
     if (listing.truncated) truncated = true;
     for (const entry of listing.entries) {
       if (!entry.isDirectory()) continue;
@@ -388,7 +412,7 @@ function reportPaths(root: string): { paths: string[]; truncated: boolean } {
         // A wide fan-out can enqueue far more directories than the scan
         // budget will ever pop; the backlog itself is the memory cost, so
         // stop enqueuing and count it as truncation.
-        if (queue.length >= MAX_SCANNED_DIRS) {
+        if (queue.length >= maxScannedDirs) {
           truncated = true;
           continue;
         }
@@ -408,7 +432,10 @@ function reportPaths(root: string): { paths: string[]; truncated: boolean } {
           continue;
         }
         const files = readDirBounded(reports);
-        if (files === null) continue;
+        if (files === null) {
+          truncated = true;
+          continue;
+        }
         if (files.truncated) truncated = true;
         for (const file of files.entries) {
           if (file.isFile() && file.name.endsWith('.xml')) {
@@ -553,6 +580,8 @@ function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
 
 const TESTCASE_CLOSE_RE = /<\/testcase\s*>/gi;
 
+const XML_NAME_CHAR = /[A-Za-z0-9:_.-]/;
+
 /**
  * Drop terminated `<![CDATA[ … ]]>` sections and `<!-- … -->` comments in
  * one linear pass: both are opaque text, never markup, and scanning a
@@ -561,37 +590,117 @@ const TESTCASE_CLOSE_RE = /<\/testcase\s*>/gi;
  * earlier marker wins — a marker inside the other kind is literal content,
  * consumed with it. An unterminated section stays verbatim: its content
  * then fails closed exactly as it did before this handling existed.
+ *
+ * The pass tracks tag/quote state so markers are honored only in genuine
+ * markup position. A malformed aggregate-writer report can carry a RAW `<!--`
+ * inside unescaped `<system-out>` text whose matching `-->` sits inside a
+ * LATER suite — honoring it swallows that suite's failing header and reads a
+ * failed run green. Two COMMENT shapes therefore reject the report (null),
+ * joining the parser's other fail-closed rejections: a marker inside a tag
+ * or quoted attribute is never markup, and a comment whose interior closes
+ * an element still open where the comment started spanned across that
+ * element's boundary — the swallowing shape — rather than commenting out
+ * self-contained phantom markup, whose open/close pairs both sit inside the
+ * comment. CDATA carries no such check on purpose: surefire's own writer
+ * wraps `<system-out>` test stdout in CDATA, and that stdout routinely
+ * contains XML samples closing the very elements open around the section.
  */
-function stripOpaqueSections(xml: string): string {
+function stripOpaqueSections(xml: string): string | null {
   if (!xml.includes('<![CDATA[') && !xml.includes('<!--')) return xml;
   const chunks: string[] = [];
   let i = 0;
   let chunkStart = 0;
-  while (i < xml.length) {
-    let closer: string | null = null;
-    let markerLength = 0;
-    if (xml.startsWith('<!--', i)) {
-      closer = '-->';
-      markerLength = 4;
-    } else if (xml.startsWith('<![CDATA[', i)) {
-      closer = ']]>';
-      markerLength = 9;
+  const openElements: string[] = [];
+  // The tag currently being scanned (`-1` = content position), its name, and
+  // whether it is a closing tag.
+  let tagStart = -1;
+  let tagName = '';
+  let tagClosing = false;
+  let quote: '"' | "'" | null = null;
+  const closeTag = (selfClosing: boolean): void => {
+    if (tagClosing) {
+      for (let stack = openElements.length - 1; stack >= 0; stack -= 1) {
+        if (openElements[stack].toLowerCase() === tagName.toLowerCase()) {
+          openElements.length = stack;
+          break;
+        }
+      }
+    } else if (!selfClosing && tagName !== '') {
+      openElements.push(tagName);
     }
-    if (closer === null) {
+    tagStart = -1;
+    tagName = '';
+    tagClosing = false;
+  };
+  while (i < xml.length) {
+    if (tagStart === -1) {
+      if (xml.startsWith('<!--', i) || xml.startsWith('<![CDATA[', i)) {
+        // `<![CDATA[` also starts with `<!` — the comment test must anchor
+        // the FULL marker, or CDATA inherits the comment-only checks.
+        const comment = xml.startsWith('<!--', i);
+        const closer = comment ? '-->' : ']]>';
+        const end = xml.indexOf(closer, i + (comment ? 4 : 9));
+        if (end === -1) break;
+        if (comment) {
+          const interior = xml.slice(i + 4, end);
+          const interiorClose = /<\/\s*([A-Za-z0-9:_.-]+)/gi;
+          let match: RegExpExecArray | null;
+          while ((match = interiorClose.exec(interior)) !== null) {
+            const name = match[1].toLowerCase();
+            if (openElements.some((open) => open.toLowerCase() === name)) {
+              return null;
+            }
+          }
+        }
+        chunks.push(xml.slice(chunkStart, i));
+        i = end + closer.length;
+        chunkStart = i;
+        continue;
+      }
+      if (xml[i] === '<') {
+        tagStart = i;
+        tagClosing = xml[i + 1] === '/';
+        tagName = '';
+        let nameEnd = i + (tagClosing ? 2 : 1);
+        while (nameEnd < xml.length && XML_NAME_CHAR.test(xml[nameEnd])) {
+          tagName += xml[nameEnd];
+          nameEnd += 1;
+        }
+        i = nameEnd;
+        continue;
+      }
       i += 1;
       continue;
     }
-    const end = xml.indexOf(closer, i + markerLength);
-    if (end === -1) break;
-    chunks.push(xml.slice(chunkStart, i));
-    i = end + closer.length;
-    chunkStart = i;
+    const char = xml[i];
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      i += 1;
+      continue;
+    }
+    if (xml.startsWith('<!--', i) || xml.startsWith('<![CDATA[', i)) {
+      return null;
+    }
+    if (char === '>') {
+      closeTag(xml[i - 1] === '/');
+      i += 1;
+      continue;
+    }
+    i += 1;
   }
   chunks.push(xml.slice(chunkStart));
   return chunks.join('');
 }
 
-function parseTestReport(root: string, path: string): MavenTestSummary | null {
+function parseTestReport(
+  root: string,
+  path: string,
+): MavenTestSummary | 'no-suites' | null {
   try {
     if (statSync(path).size > MAX_REPORT_BYTES) return null;
   } catch {
@@ -608,7 +717,9 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
   // aggregate writers also emit commented-out markup; scanning either as
   // real fabricated phantom suites and failure evidence. Drop terminated
   // sections; an unterminated one stays as-is and fails closed as before.
-  xml = stripOpaqueSections(xml);
+  const stripped = stripOpaqueSections(xml);
+  if (stripped === null) return null;
+  xml = stripped;
   // Aggregate counts across EVERY suite in the file: aggregate JUnit writers
   // (jest-junit, karma reporters aimed at target/surefire-reports/ for
   // SonarQube) emit several `<testsuite>` elements, and reading only the
@@ -626,7 +737,10 @@ function parseTestReport(root: string, path: string): MavenTestSummary | null {
     errors += numberAttribute(attributes, 'errors');
     skipped += numberAttribute(attributes, 'skipped');
   }
-  if (suites === 0) return null;
+  // A file read IN FULL that carries zero <testsuite> elements contributes
+  // no evidence and no gap — its failure status is provably known-empty,
+  // unlike the oversized/unreadable rejections the caller counts.
+  if (suites === 0) return 'no-suites';
   const failedCases: string[] = [];
   let droppedCases = 0;
   let consumedUntil = 0;
@@ -700,15 +814,16 @@ function freshTestSummaries(
   // the same root prefix, so absolute and relative order agree.
   fresh.sort();
   const summaries: MavenTestSummary[] = [];
-  // Fresh reports the parser REFUSED (oversized, unreadable, zero suites)
-  // are unknown evidence too: the count cap fails closed by design, and a
-  // parse rejection must not fail open where the cap fails closed — a
-  // masked exit 0 over one oversized failing report would otherwise read
-  // green.
+  // Fresh reports the parser REFUSED (oversized or unreadable) are
+  // unknown evidence too: the count cap fails closed by design, and a parse
+  // rejection must not fail open where the cap fails closed — a masked exit
+  // 0 over one oversized failing report would otherwise read green. A
+  // zero-suite file read in full is the opposite — known-empty, no gap.
   let rejected = 0;
   for (const path of fresh.slice(0, MAX_FRESH_REPORTS)) {
-    const summary = parseTestReport(root, path);
-    if (summary) summaries.push(summary);
+    const parsed = parseTestReport(root, path);
+    if (parsed === 'no-suites') continue;
+    if (parsed) summaries.push(parsed);
     else rejected += 1;
   }
   return {
@@ -758,7 +873,7 @@ function appendTestSummaries(
   const clean = new Map<string, MavenTestSummary[]>();
   const failing: MavenTestSummary[] = [];
   for (const summary of summaries) {
-    if (summary.failures > 0 || summary.errors > 0) {
+    if (summaryIsFailing(summary)) {
       failing.push(summary);
     } else {
       const project = projectDirOf(summary.report);
@@ -813,24 +928,53 @@ function appendTestSummaries(
   }
   lines.push(...cleanLines);
 
-  const reportLines = failing.map(
-    (summary) =>
-      `[maven-test-report] ${summary.report}: tests=${summary.tests}, ` +
-      `failures=${summary.failures}, errors=${summary.errors}, skipped=${summary.skipped}`,
+  // One line per PROJECT dir, like the clean rollup: per-report lines
+  // collapsed into a byte-order slice that lost ALL module attribution past
+  // the cap — an upstream module's hundred failing reports pushed the claimed
+  // module's one past the bound, its failure vanished from every line
+  // test-plan attributes with, and the `-am` carve-out discarded the run.
+  // The rollup keeps attribution to the module count, and the failure count
+  // is floored at the body evidence like the failing bucket itself.
+  const failedCount = (summary: MavenTestSummary): number =>
+    Math.max(
+      summary.failures + summary.errors,
+      summary.failedCases.length + summary.droppedCases,
+    );
+  const failingByProject = new Map<string, MavenTestSummary[]>();
+  for (const summary of failing) {
+    const project = projectDirOf(summary.report);
+    const group = failingByProject.get(project);
+    if (group) group.push(summary);
+    else failingByProject.set(project, [summary]);
+  }
+  const reportLines = [...failingByProject.entries()].map(
+    ([project, group]) => {
+      const failures = group.reduce((sum, item) => sum + failedCount(item), 0);
+      const skipped = group.reduce((sum, item) => sum + item.skipped, 0);
+      const tests = group.reduce((sum, item) => sum + item.tests, 0);
+      return (
+        `[maven-test-report] ${project} (${group.length} failing report(s)): ` +
+        `tests=${tests}, failures=${failures}, errors=0, skipped=${skipped}`
+      );
+    },
   );
   if (reportLines.length > MAX_FAILING_REPORT_LINES) {
-    const omittedSummaries = failing.slice(MAX_FAILING_REPORT_LINES);
+    const omittedProjects = [...failingByProject.entries()].slice(
+      MAX_FAILING_REPORT_LINES,
+    );
     reportLines.length = MAX_FAILING_REPORT_LINES;
-    // Per-report clamped passed totals, for the same reason as the clean
-    // marker above.
+    const omittedSummaries = omittedProjects.flatMap(([, group]) => group);
+    // Per-report clamped passed totals and zeroed failure fields, for the
+    // same count-preservation reason as the clean marker above; the
+    // per-module `[maven-test-failure]` case lines below carry the failure
+    // attribution this marker does not.
     const passed = omittedSummaries.reduce(
       (sum, item) =>
-        sum +
-        Math.max(0, item.tests - item.failures - item.errors - item.skipped),
+        sum + Math.max(0, item.tests - failedCount(item) - item.skipped),
       0,
     );
     reportLines.push(
-      `[maven-test-report] ${omittedSummaries.length} more failing report(s) omitted: ` +
+      `[maven-test-report] ${omittedProjects.length} more failing project rollup(s) omitted: ` +
         `tests=${passed}, failures=0, errors=0, skipped=0`,
     );
   }
@@ -878,8 +1022,7 @@ function appendTestSummaries(
   if (gaps.rejected > 0) {
     lines.push(
       `[maven-test-report] ${gaps.rejected} fresh report(s) could not be parsed ` +
-        '(oversized, unreadable, or carrying no test suites): their failure ' +
-        'status is unknown',
+        '(oversized or unreadable): their failure status is unknown',
     );
   }
   if (gaps.truncated) {
@@ -982,10 +1125,17 @@ function isLaunchFailure(output: string): boolean {
         // Wrapper bootstrap failures: the distribution download dies before
         // Maven's JVM starts, so these wordings can only appear in the
         // unframed prelude — the canonical cold-worktree acquisition
-        // failure, and every review worktree is cold.
+        // failure, and every review worktree is cold. The wordings are the
+        // ones the real wrappers emit (apache/maven-wrapper and takari both
+        // try wget BEFORE curl): apache prints the SHA-256 message verbatim
+        // on a checksum mismatch, and downloader errors carry curl's
+        // `curl: (N)` or wget's `wget: …` shapes.
+        /Failed to validate Maven distribution/i.test(line) ||
+        /Maven distribution.*(?:checksum|corrupt|compromised|invalid)/i.test(
+          line,
+        ) ||
         /Failed to download Maven distribution/i.test(line) ||
-        /Maven distribution.*(?:checksum|corrupt|invalid)/i.test(line) ||
-        /^(?:curl|wget): \(\d+\)/.test(line),
+        /^(?:curl: \(\d+\)|wget: )/.test(line),
     ) || lines.some(isDiskFailureLine)
   );
 }
@@ -1062,10 +1212,56 @@ function isGoalFailure(output: string): boolean {
  */
 const TESTS_SKIPPED_LINE_RE = /^\[INFO\] Tests are skipped\./;
 
-function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
-  return summaries.some(
-    (summary) => summary.failures > 0 || summary.errors > 0,
+export function isTestsSkippedLine(line: string): boolean {
+  return TESTS_SKIPPED_LINE_RE.test(line);
+}
+
+/**
+ * Maven-framed framing predicate shared by the never-ran and bootstrap
+ * checks: once any `[INFO]`/`[WARNING]`/`[ERROR]`/`[FATAL]` line exists,
+ * Maven's JVM ran.
+ */
+const MAVEN_FRAMED_LINE_RE = /^\[(?:INFO|WARNING|ERROR|FATAL)\]/;
+
+function hasMavenFramedLine(output: string): boolean {
+  return output.split('\n').some((line) => MAVEN_FRAMED_LINE_RE.test(line));
+}
+
+/**
+ * Surefire prints a framed `Tests run: N, Failures: M, Errors: K` summary
+ * per module (and again under `Results:`) even under `testFailureIgnore`,
+ * when the exit code is 0. The report sweep can miss reports written to a
+ * non-default `<reportsDirectory>`, so the stdout summary is the cross-check
+ * that keeps a relocated failing report from certifying green.
+ */
+const SUREFIRE_SUMMARY_LINE_RE =
+  /^\[INFO\] Tests run: \d+, Failures: (\d+), Errors: (\d+)/;
+
+function hasStdoutTestFailure(output: string): boolean {
+  return output.split('\n').some((line) => {
+    const match = SUREFIRE_SUMMARY_LINE_RE.exec(line);
+    return match !== null && (Number(match[1]) > 0 || Number(match[2]) > 0);
+  });
+}
+
+/**
+ * A report is failing on its header counts OR its body evidence: a report
+ * whose `failures="0" errors="0"` attributes contradict its `<failure>`/
+ * `<error>` testcase bodies (a green-wash the file's threat model admits —
+ * PR-writable reports rewritten after the run) is failing, and the parsed
+ * proof of failure is not discarded.
+ */
+function summaryIsFailing(summary: MavenTestSummary): boolean {
+  return (
+    summary.failures > 0 ||
+    summary.errors > 0 ||
+    summary.failedCases.length > 0 ||
+    summary.droppedCases > 0
   );
+}
+
+function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
+  return summaries.some(summaryIsFailing);
 }
 
 /**
@@ -1076,7 +1272,7 @@ function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
  * here already evaluated.
  */
 const SELECTOR_REJECTED_RE =
-  /Could not find the selected project in the reactor:\s*([^\n]*)/;
+  /^\[(?:ERROR|FATAL)\] Could not find the selected project in the reactor:\s*([^\n]*)/m;
 
 /**
  * Shell diagnostics for a wrapper that cannot start. `Permission denied` is
@@ -1088,17 +1284,48 @@ const SELECTOR_REJECTED_RE =
  * Win32 is known-uncovered: a broken `mvnw.cmd` (missing, CRLF, ACL) matches
  * none of these POSIX shapes and stays attributed to the diff.
  */
-const WRAPPER_LAUNCH_FAILURE_RE =
-  /(?:^|\n)(?:.*\.\/mvnw[^\n]*(?:Permission denied|bad interpreter|No such file or directory|cannot execute: required file not found|not found)|\/usr\/bin\/env:[^\n]*No such file or directory)(?:\n|$)/i;
+function isWrapperLaunchFailure(output: string): boolean {
+  for (const line of output.split('\n')) {
+    if (
+      line.includes('/usr/bin/env:') &&
+      line.includes('No such file or directory')
+    ) {
+      return true;
+    }
+    const wrapper = line.indexOf('./mvnw');
+    if (wrapper === -1) continue;
+    // indexOf-based wording match after the first `./mvnw`: the regex this
+    // replaces nested unbounded quantifiers over attacker-influenced build
+    // output and went quadratic on a non-matching line with many `./mvnw`
+    // occurrences — a denial of service through the very output it reads.
+    const rest = line.slice(wrapper).toLowerCase();
+    if (
+      rest.includes('permission denied') ||
+      rest.includes('bad interpreter') ||
+      rest.includes('no such file or directory') ||
+      rest.includes('not found')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function summaryTotals(summaries: MavenTestSummary[]) {
   return summaries.reduce(
-    (sum, item) => ({
-      tests: sum.tests + item.tests,
-      failures: sum.failures + item.failures,
-      errors: sum.errors + item.errors,
-      skipped: sum.skipped + item.skipped,
-    }),
+    (sum, item) => {
+      const headerFailed = item.failures + item.errors;
+      const bodyFailed = item.failedCases.length + item.droppedCases;
+      return {
+        tests: sum.tests + item.tests,
+        // Body evidence is authoritative like the failing bucket's: a
+        // zeroed header over failing bodies still reports a non-zero total.
+        failures:
+          sum.failures + item.failures + Math.max(0, bodyFailed - headerFailed),
+        errors: sum.errors + item.errors,
+        skipped: sum.skipped + item.skipped,
+      };
+    },
     { tests: 0, failures: 0, errors: 0, skipped: 0 },
   );
 }
@@ -1154,7 +1381,10 @@ export function mavenExecutable(
 ): string {
   if (platform === 'win32') {
     try {
-      if (statSync(join(root, 'mvnw.cmd')).size > 0) return 'mvnw.cmd';
+      const stats = statSync(join(root, 'mvnw.cmd'));
+      // isFile() matters like its size gate: a DIRECTORY named `mvnw.cmd`
+      // passes existence and size checks but cannot execute.
+      if (stats.isFile() && stats.size > 0) return 'mvnw.cmd';
     } catch {
       // absent
     }
@@ -1163,10 +1393,14 @@ export function mavenExecutable(
   const wrapper = join(root, 'mvnw');
   try {
     accessSync(wrapper, constants.X_OK);
+    const stats = statSync(wrapper);
     // An EMPTY wrapper passes the existence/exec-bit gates, exits 0, and
     // the run would certify a build that never started — fall back to
-    // system `mvn` exactly like the missing-bit case.
-    if (statSync(wrapper).size === 0) return 'mvn';
+    // system `mvn` exactly like the missing-bit case. A DIRECTORY named
+    // `mvnw` is searchable (passes X_OK) but dies exit 126 on execution —
+    // same fallback, same reason as the isFile() gate in
+    // mavenConfigDependencyInputs.
+    if (!stats.isFile() || stats.size === 0) return 'mvn';
     return './mvnw';
   } catch {
     return 'mvn';
@@ -1194,7 +1428,16 @@ function mavenConfigDependencyInputs(root: string): string[] {
     return [];
   }
   const inputs: string[] = [];
-  const tokens = config.split(/\s+/);
+  // Maven reads maven.config line-by-line — each non-empty, non-`#` line is
+  // ONE argument (MavenCli: `Files.lines(...).filter(arg -> !arg.isEmpty() &&
+  // !arg.startsWith("#"))`), no whitespace splitting: an argument can carry a
+  // space (`ci/my settings.xml`), and a `#` line is a comment even when its
+  // text names flags. Mirror that reader; whitespace tokenizing recorded a
+  // truncated path for spaced arguments and tokenized comments into inputs.
+  const tokens = config
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
   const pairedFlags = new Set(['-s', '--settings', '-gs', '--global-settings']);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -1222,8 +1465,12 @@ function mavenConfigDependencyInputs(root: string): string[] {
       value = token.slice('-Dmaven.repo.local='.length);
     // commons-cli also accepts the attached short forms (`-s<path>`): the
     // remainder of a token whose option bears an argument becomes the value.
-    else if (/^-s.+/.test(token)) value = token.slice('-s'.length);
-    else if (/^-gs.+/.test(token)) value = token.slice('-gs'.length);
+    // The `=` of an attached `-s=<path>` spelling is part of the separator,
+    // not the value: commons-cli strips it for single-char short options.
+    else if (/^-s.+/.test(token))
+      value = token.slice('-s'.length).replace(/^=/, '');
+    else if (/^-gs.+/.test(token))
+      value = token.slice('-gs'.length).replace(/^=/, '');
     if (!value) continue;
     const path = normalizedChangedPath(root, value);
     if (path !== null) inputs.push(path);
@@ -1348,15 +1595,21 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     ) {
       return true;
     }
-    // ANY POM outside a `src/` fixture tree, whether or not Maven ends up
+    // ANY POM outside test-data shapes, whether or not Maven ends up
     // treating it as a reactor member. Which POMs feed resolution is the
     // effective model's answer — a `<parent>` file, an aggregator the diff
     // just activated, a POM the diff deleted — and guessing it here is the
     // approximation this adapter no longer makes. Over-counting only
     // withdraws an infrastructure carve-out, which files a failure against
     // the PR instead of the environment; under-counting ships the PR's own
-    // breakage as someone else's outage.
-    return /(?:^|\/)pom\.xml$/.test(path) && !/(?:^|\/)src\//.test(path);
+    // breakage as someone else's outage. The exclusion therefore covers only
+    // the fixture locations (`src/test/`, `src/it/` — invoker ITs, archetype
+    // projects): a reactor CAN aggregate a real module under a bare `src/`
+    // path (`<module>src/core</module>` — the same premise the ownership
+    // walk fails closed on), and that POM feeds resolution like any other.
+    return (
+      /(?:^|\/)pom\.xml$/.test(path) && !/(?:^|\/)src\/(?:test|it)\//.test(path)
+    );
   });
   const lifecycle = args.buildOnly ? 'test-compile' : 'test';
   // `-am` builds the changed modules plus their upstream closure. `-amd`
@@ -1393,8 +1646,15 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // Disk preflight, mirroring the npm adapter: Maven resolves plugins and
   // dependencies inside the lifecycle command, and a run that dies on ENOSPC
   // leaves a full disk that fails every agent scheduled after this one.
+  // The 3 GiB install floor applies to the warm-up that downloads; a
+  // --no-install run's contract in this file is "assume warm, fetch
+  // nothing", so it gets the lifecycle's own 1 GiB build floor instead —
+  // the second preflight below already admits the same command at it.
+  const entryFloorBytes = args.install
+    ? INSTALL_MIN_FREE_BYTES
+    : BUILD_MIN_FREE_BYTES;
   const free = freeDiskBytes(args.root);
-  if (free !== null && free < INSTALL_MIN_FREE_BYTES) {
+  if (free !== null && free < entryFloorBytes) {
     return mavenReport({
       affected,
       buildSet,
@@ -1405,7 +1665,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       ok: false,
       timedOut: [],
       note:
-        `Insufficient disk space (${gib(free)}G free, need ~${gib(INSTALL_MIN_FREE_BYTES)}G): ` +
+        `Insufficient disk space (${gib(free)}G free, need ~${gib(entryFloorBytes)}G): ` +
         `skipped \`${command}\`. Maven resolves dependencies inside the lifecycle ` +
         'command, so nothing could be built or tested. This is an environment ' +
         'issue, not a code finding — report it as informational.',
@@ -1480,9 +1740,11 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       timedOut: [],
       note:
         `Insufficient disk space (${gib(freeForLifecycle)}G free, need ~${gib(BUILD_MIN_FREE_BYTES)}G): ` +
-        `skipped \`${command}\` — the dependency warm-up consumed the headroom the ` +
-        'preflight before it passed. This is an environment issue, not a code ' +
-        'finding — report it as informational.',
+        `skipped \`${command}\` — ` +
+        (install
+          ? 'the dependency warm-up consumed the headroom the preflight before it passed.'
+          : 'free space fell below the build floor between the preflight and the lifecycle command.') +
+        ' This is an environment issue, not a code finding — report it as informational.',
     });
   }
   // A build-only run never reads the evidence, so it skips the snapshot too
@@ -1549,7 +1811,26 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // become uncontradictable. The marker covers all three spellings.
   const testsSuppressed =
     summaries.length === 0 &&
-    result.output.split('\n').some((line) => TESTS_SKIPPED_LINE_RE.test(line));
+    result.output.split('\n').some((line) => isTestsSkippedLine(line));
+  // Surefire's framed `Tests run: …, Failures: N` summary lines survive a
+  // relocated `<reportsDirectory>` the sweep cannot see, and are printed
+  // even under `testFailureIgnore`: when they record failures the zero exit
+  // did not fail on, the run is not clean even with zero reports on disk.
+  const stdoutTestFailures =
+    result.exitCode === 0 &&
+    !result.timedOut &&
+    hasStdoutTestFailure(result.output);
+  // A NON-EMPTY wrapper can still exit 0 without launching Maven (a stub
+  // `#!/bin/sh` edit keeps the exec bit): zero fresh reports AND zero
+  // Maven-framed output means the build never started — "never ran", not
+  // "tested nothing". Enumerating wrapper shapes misses the next spelling;
+  // classifying the run does not.
+  const neverRan =
+    result.exitCode === 0 &&
+    !result.timedOut &&
+    summaries.length === 0 &&
+    !testsSuppressed &&
+    !hasMavenFramedLine(result.output);
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -1561,6 +1842,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !result.timedOut &&
     !freshFailures &&
     (testsSuppressed ||
+      stdoutTestFailures ||
       isSourceFailure(result.output) ||
       isDependencyFailure(result.output) ||
       isLaunchFailure(result.output) ||
@@ -1570,7 +1852,8 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !result.timedOut &&
     !freshFailures &&
     !swallowedFailure &&
-    !evidenceCapped;
+    !evidenceCapped &&
+    !neverRan;
   // Every carve-out carries a diff-inputs exception: when the PR changed
   // the wrapper or the dependency inputs, the failure may be the diff's own
   // doing and must not be laundered into an environmental result.
@@ -1581,16 +1864,21 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     result.exitCode !== null &&
     ((isLaunchFailure(result.output) &&
       !executedWrapperChanged &&
-      // maven-wrapper.properties feeds mvnw.cmd exactly as it feeds ./mvnw:
-      // when the executed wrapper fell back to system `mvn` (no win32
-      // wrapper in the tree), a config the diff changed is still suspect.
-      !wrapperConfigChanged &&
       !(executable === 'mvn' && platformWrapperChanged)) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
       (executable === './mvnw' &&
         !executedWrapperChanged &&
         (result.exitCode === 126 || result.exitCode === 127) &&
-        WRAPPER_LAUNCH_FAILURE_RE.test(result.output)));
+        isWrapperLaunchFailure(result.output)) ||
+      // Wrapper bootstrap download deaths with NO wording to match: wget
+      // (both wrapper generations try it before curl) runs `--quiet` in the
+      // distribution download, so a DNS failure exits 4 and a server error
+      // exits 8 with an EMPTY unframed output. If Maven's JVM had started,
+      // framed output would exist — its absence pins the death to bootstrap.
+      (executedWrapper !== null &&
+        !executedWrapperChanged &&
+        (result.exitCode === 4 || result.exitCode === 8) &&
+        !hasMavenFramedLine(result.output)));
   const recorded = {
     ...result,
     // These flags are how test-plan sees the adapter's exit-0 ok:false
@@ -1600,6 +1888,8 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     ...(acquisitionFailure ? { infrastructure: true } : {}),
     ...(swallowedFailure ? { swallowedFailure: true } : {}),
     ...(evidenceCapped ? { evidenceCapped: true } : {}),
+    ...(testsSuppressed ? { testsSuppressed: true } : {}),
+    ...(neverRan ? { neverRan: true } : {}),
   };
   const report = mavenReport({
     affected,
@@ -1636,7 +1926,13 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         `${MAX_SELECTOR_CHARS} characters; on large reactors that scope usually cannot finish ` +
         'within this deadline, so re-running it at the same scope will spend the same budget ' +
         'for the same result.';
-    } else if (reactorWide) {
+    } else if (selectorUnsafe) {
+      report.note +=
+        ' The scope widened to reactor-wide because a changed module directory carries a ' +
+        'character a `-pl` selector cannot express; on large reactors that scope usually cannot ' +
+        'finish within this deadline, so re-running it at the same scope will spend the same ' +
+        'budget for the same result.';
+    } else if (ownership.reactorWide) {
       report.note +=
         ' The scope is reactor-wide because the diff changes inputs every module inherits; ' +
         'on large reactors that scope usually cannot finish within this deadline, so re-running ' +
@@ -1677,8 +1973,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     }
     if (fresh.rejected > 0) {
       gapReasons.push(
-        `${fresh.rejected} fresh report(s) could not be parsed (oversized, ` +
-          'unreadable, or carrying no test suites)',
+        `${fresh.rejected} fresh report(s) could not be parsed (oversized or unreadable)`,
       );
     }
     if (fresh.truncated) {
@@ -1692,6 +1987,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       (swallowedFailure
         ? ' The output also records failures Maven did not fail on.'
         : '');
+  } else if (!ok && result.exitCode === 0 && neverRan) {
+    report.note =
+      `\`${result.command}\` exited 0 without starting Maven — no fresh reports and no ` +
+      'Maven output at all, so the build never ran and nothing was verified (an empty or ' +
+      'stub wrapper passes the launch gates and exits 0). Treat this as an unverified run, ' +
+      'not a pass.';
   } else if (!ok && result.exitCode === 0) {
     report.note =
       `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +

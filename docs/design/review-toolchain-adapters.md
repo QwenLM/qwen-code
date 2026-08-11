@@ -207,13 +207,15 @@ Focused tests must prove:
 6. The serialized report shape remains unchanged.
 
 P1 adds the Maven oracle set, pinned by `lib/maven-toolchain.test.ts` plus
-the Maven branches of the `test-plan`, `base-tree`, and `build-test` suites:
+the Maven branches of the `test-plan`, `base-tree`, `build-test`, and
+`agent-prompt` suites:
 
-1. Selector safety: a directory name carrying `,`, `:`, or `%` cannot reach a
-   `-pl` selector and widens the run to the full reactor; any other name is
-   quoted for the platform shell (POSIX single-quote wrap, win32 `"…"` under
-   the `%`-rejection and filename gates) rather than interpolated bare into a
-   `shell: true` command line.
+1. Selector safety: a directory name carrying `,`, `:`, `%`, or a leading
+   `-`/`!` cannot reach a `-pl` selector and widens the run to the full
+   reactor; any other name passes as a safe bare token when its characters
+   allow, or is quoted for the platform shell (POSIX single-quote wrap,
+   win32 `"…"` under the `%`-rejection and filename gates) — never
+   interpolated bare into a `shell: true` command line when unsafe.
 2. Ownership: changed paths map to the nearest ancestor project, skipping
    `src/` fixture trees; a changed POM is reactor-wide; documentation (doc
    extensions in doc-shaped locations only) and repository metadata are
@@ -258,8 +260,12 @@ Fastjson2 and Druid establish these requirements:
   `./mvnw` without the executable bit (a `core.fileMode=false` checkout) also
   falls back to the system `mvn`, because running it would die with exit 126
   and turn the whole run into an infrastructure handoff that verifies
-  nothing. Druid's older wrapper depends on the process cwd and fails when
-  invoked by absolute path from another repository. When no wrapper exists,
+  nothing. A checked-in wrapper that is empty (0 bytes) — or a directory
+  carrying the wrapper name — also falls back to the system `mvn` on both
+  platforms: it passes the existence and exec-bit gates, exits 0, and would
+  otherwise certify a build that never started. Druid's older wrapper depends
+  on the process cwd and fails when invoked by absolute path from another
+  repository. When no wrapper exists,
   use the system `mvn`.
 - Module directory and artifactId are not interchangeable. Druid's `core`
   directory produces artifactId `druid`; report paths use module directories,
@@ -382,7 +388,7 @@ Existing fields are generalized without changing their JSON shape:
 - `test`: contains the Maven `test` command in normal mode.
 - `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
 
-Command results carry three optional classification flags consumed by
+Command results carry five optional classification flags consumed by
 `test-plan`:
 
 - `CommandResult.infrastructure`: the adapter classified the failure as
@@ -396,6 +402,19 @@ Command results carry three optional classification flags consumed by
   report evidence was never read (past the parse cap, rejected by the parser,
   or unseen past a truncated sweep), so the adapter refused to certify the
   run and a Test Plan claim must not be settled against it.
+- `CommandResult.testsSuppressed`: a skip setting suppressed the entire test
+  phase (`Tests are skipped.`) — zero tests ran, so count claims must not
+  adjudicate against the run and a contradiction is worded as suppression,
+  not recorded failures.
+- `CommandResult.neverRan`: the command exited 0 but never started the
+  toolchain (no fresh reports and no toolchain output — a stub wrapper), so
+  the run verified nothing and a Test Plan claim must not be ruled
+  reproduced against it.
+
+Command results additionally carry `maven` — the lifecycle phase, `-pl`
+module set, and `-am` flag the adapter rendered the command from — so
+`test-plan` settles scope claims against structured values instead of
+parsing the command line back.
 
 Dependency/plugin resolution failures and unavailable wrapper/runtime are
 infrastructure outcomes, except when the diff changed the inputs that could
@@ -511,16 +530,22 @@ specifying this before two real adapters demonstrate the common boundary.
   `package.json` can scope something — workspaces or a root build/test script.
   A package.json with neither workspaces nor build/test scripts (husky, a lint
   config, a script-less docs site) does not apply, so the Maven adapter owns
-  such a root alone. A docs manifest that DOES define a build/test script makes
-  both adapters apply and deliberately fails closed as a mixed root under the
-  P1 selection rule — all finer-grained support decisions remain in the one
-  execution path whose existing tests already fail closed to a structured
-  handoff.
+  such a root alone. npm applies only when a declared `workspaces` field is
+  fully modeled and resolves to at least one package, or — with no workspaces
+  declared — the root defines a build/test script (the shape that makes both
+  adapters apply and deliberately fails closed as a mixed root under the P1
+  selection rule). A root whose workspaces gate refuses npm (an unmodeled or
+  zero-package glob) falls to the Maven adapter ALONE with the mixed-root
+  disclosure note, not the fail-closed handoff — all finer-grained support
+  decisions remain in the one execution path whose existing tests already
+  fail closed to a structured handoff.
 
 ## Open questions
 
 None. P1 settled the report-schema widening it introduced (`toolchain`
 discriminant, `CommandResult.infrastructure`,
-`CommandResult.swallowedFailure`, `CommandResult.evidenceCapped`);
+`CommandResult.swallowedFailure`, `CommandResult.evidenceCapped`,
+`CommandResult.testsSuppressed`, `CommandResult.neverRan`,
+`CommandResult.maven`);
 multi-toolchain aggregation remains a decision for the phase that introduces
 that behavior.

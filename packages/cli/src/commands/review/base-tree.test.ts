@@ -27,7 +27,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runBaseTree, type BaseTreeReport } from './base-tree.js';
+import type { Argv } from 'yargs';
+import {
+  baseTreeCommand,
+  runBaseTree,
+  type BaseTreeReport,
+} from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
 import type { BuildTestReport } from './build-test.js';
 
@@ -478,6 +483,37 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('suppresses the nested-pom probe for OBJECT-form workspaces too', () => {
+    // npm accepts `{ workspaces: { packages: [...] } }` as well as the
+    // array form; the gate's blobIsNpmProject must too, or a base declaring
+    // the object form reads npm-inapplicable beside a nested pom — a false
+    // Maven handoff that permanently disables A/B attribution there while
+    // the on-disk twin accepts the same repo.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ name: '@x/app', scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: { packages: ['packages/*'] } }),
+    );
+    git(repo, 'add', 'packages', 'java', 'package.json');
+    git(repo, 'commit', '-qam', 'object workspaces + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
   it('models ./-prefixed workspace globs like their bare form', () => {
     // The on-disk twin strips a leading `./` from each glob; without it
     // here, `workspaceDirFor` never matched the expanded dirs and an npm
@@ -522,6 +558,37 @@ describe('runBaseTree', () => {
     );
     git(repo, 'add', 'packages', 'java', 'package.json');
     git(repo, 'commit', '-qam', 'broken member manifest + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(r.available).toBe(false);
+    expect(builds).toEqual([]);
+    expect(r.note).toContain('Maven');
+  });
+
+  it('does NOT count a member whose manifest parses to no usable name', () => {
+    // hasUsableManifestAt mirrors readWorkspacePackages' skip rule: a
+    // manifest without a non-empty string `name` is not a package. A base
+    // whose only members lack names must stay npm-inapplicable, or the
+    // nested-pom probe is suppressed for a base the disk side rejects.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    git(repo, 'add', 'packages', 'java', 'package.json');
+    git(repo, 'commit', '-qam', 'nameless member + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 
     const builds: string[] = [];
@@ -703,6 +770,12 @@ describe('runBaseTree', () => {
     expect(
       existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-ok')),
     ).toBe(false);
+    // The sibling handoff pin's twin: a later verifier shard must not repay
+    // the cold checkout plus a full Maven build to relearn the same
+    // "unavailable".
+    expect(
+      existsSync(join(baseWorktreePath(worktree), '.qwen-review-base-failed')),
+    ).toBe(true);
   });
 
   it('is NOT available when npm scoped nothing to compile', () => {
@@ -753,5 +826,22 @@ describe('runBaseTree', () => {
     const r = run({ plan: { mergeBaseSha: '0'.repeat(40) } });
     expect(r.available).toBe(false);
     expect(r.note).toMatch(/base worktree could not be created/);
+  });
+});
+
+describe('the base-tree CLI option contract', () => {
+  it("says the --install step is the npm toolchain's alone", () => {
+    // The help text is the reviewer's only window into the flag; without the
+    // caveat it implies an npm-ci-style install runs for every toolchain,
+    // and Maven never runs one (it resolves inside the lifecycle command).
+    const options: Record<string, { describe?: string }> = {};
+    const recorder = {
+      option: (name: string, spec: { describe?: string }) => {
+        options[name] = spec;
+        return recorder;
+      },
+    } as unknown as Argv;
+    (baseTreeCommand.builder as (y: Argv) => Argv)(recorder);
+    expect(options['install']?.describe).toContain('npm toolchain only');
   });
 });

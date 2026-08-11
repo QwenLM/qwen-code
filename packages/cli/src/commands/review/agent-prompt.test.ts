@@ -2092,8 +2092,20 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // fallback below it is the sanctioned hand-run path, and the wording
     // must not forbid it.
     expect(p).toContain(
-      'Do **not** substitute hand-written npm or Maven commands for what `build-test` runs',
+      'Do **not** substitute hand-written npm or Maven commands ' +
+        'for what `build-test` runs — the `toolchain: "unsupported"` fallback ' +
+        'below is the only sanctioned hand-run path',
     );
+    // The unsupported bullet's three steering rules: a fail-closed adapter
+    // result must not be replaced by an ad hoc command, a mixed root runs
+    // neither toolchain ad hoc, and a CI-named command lifts neither rule.
+    // Reverting the bullet to the old precedence list left all tests green
+    // before these pins.
+    expect(p).toContain(
+      'do not replace that fail-closed result with an ad hoc Maven command',
+    );
+    expect(p).toContain('do not run either toolchain ad hoc');
+    expect(p).toContain('does **not** lift the two rules above');
   });
 
   it('pins Agent 7 to the PR worktree and hands it the test-efficacy probe', () => {

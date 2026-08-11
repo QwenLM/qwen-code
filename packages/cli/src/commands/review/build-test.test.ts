@@ -1043,6 +1043,27 @@ describe('runBuildTest', () => {
     expect(trimmed).toContain('disk failures');
   });
 
+  it('rescues the Maven skipped-tests marker from a trimmed middle', () => {
+    // The adapter's testsSuppressed guard reads the skip marker from the
+    // trimmed output: a large reactor's trailing Reactor Summary pushes every
+    // `Tests are skipped.` line into the omitted middle, and losing the marker
+    // certified a run that tested zero.
+    const line = '[INFO] Tests are skipped.';
+    const trimmed = trimOutput(
+      'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+    );
+    expect(trimmed).toContain(line);
+    expect(trimmed).toContain('skipped-test markers');
+    // The colored form too — the rescue strips SGR before the predicate and
+    // keeps the original bytes.
+    const colored = '\x1b[1;34m[INFO]\x1b[m Tests are skipped.';
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
+  });
+
   it('caps the rescue so hostile prose cannot void the trim', () => {
     // 40k lines matching the summary shape made the trim a no-op (1.6MB in,
     // 1.6MB out) — the rescue saves a handful of lines, never the middle.

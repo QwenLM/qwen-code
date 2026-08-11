@@ -200,7 +200,7 @@ export function extractTestPlanSection(
 // levels deep) — are command claims exactly like the bare runner; without
 // the deeper hops such claims are silently never extracted and never ruled.
 const MAVEN_RUNNER_SOURCE =
-  'mvn(?:\\.cmd)?|mvnw(?:\\.cmd)?' +
+  'mvn(?:\\.cmd)?|mvnd|mvnDebug|mvnw(?:\\.cmd)?' +
   '|(?:\\.\\.[/\\\\])*\\.[/\\\\]mvnw(?:\\.cmd)?' +
   '|(?:\\.\\.[/\\\\])+mvnw(?:\\.cmd)?';
 
@@ -460,7 +460,9 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
       cmd.exitCode === null ||
       cmd.infrastructure ||
       cmd.swallowedFailure ||
-      cmd.evidenceCapped
+      cmd.evidenceCapped ||
+      cmd.testsSuppressed ||
+      cmd.neverRan
     )
       continue;
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
@@ -481,15 +483,21 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // eslint-disable-next-line no-control-regex -- ESC is the character under test
     const text = (cmd.output ?? '').replace(/\x1b\[[0-9;]*m/g, '');
     let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      total += Number(m[1]);
-      saw = true;
+    // Runner-gated in BOTH directions: the JS console-summary regex is
+    // skipped on Maven runs because surefire echoes test stdout — a Maven
+    // run's own test printing `Tests 499 passed (499)` is not the run's
+    // count — and the `[maven-test-report]` markers are only evidence a
+    // MAVEN run prints. The same text mined from the other toolchain's
+    // stdout is a fabricated count in either direction; each shape is gated
+    // behind its own runner.
+    const isMavenCommand = MAVEN_RUNNER_RE.test(cmd.command);
+    if (!isMavenCommand) {
+      while ((m = re.exec(text))) {
+        total += Number(m[1]);
+        saw = true;
+      }
     }
-    // Runner-gated: the markers are only evidence a MAVEN run prints. The
-    // same text mined from a non-Maven command's stdout is a fabricated
-    // count — the npm console-summary above stays ungated (no runner to
-    // gate on), but this shape can be gated, so it is.
-    if (MAVEN_RUNNER_RE.test(cmd.command)) {
+    if (isMavenCommand) {
       while ((m = mavenRe.exec(text))) {
         // Surefire does not guarantee tests >= failures + errors + skipped
         // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
@@ -643,7 +651,8 @@ const MAVEN_PHASE_RE =
  * must be disclosed rather than read as if the whole claim ran. Trailing
  * out-of-vocabulary work is refused separately by claimFinalWork.
  */
-const MAVEN_UNRUN_WORK_RE = /^(?:deploy|site|pre-site|post-site)$/;
+const MAVEN_UNRUN_WORK_RE =
+  /^(?:deploy|site|pre-site|post-site|pre-clean|post-clean|prepare-package|pre-integration-test|integration-test|post-integration-test)$/;
 
 /**
  * Flags whose space-separated form consumes the NEXT token as their value
@@ -769,12 +778,30 @@ function mavenHasAlsoMake(command: string): boolean {
   return false;
 }
 
+/** Strip one layer of matching surrounding quotes from a claim token. */
+function unquoteToken(token: string): string {
+  if (
+    token.length >= 2 &&
+    (token.startsWith("'") || token.startsWith('"')) &&
+    token.endsWith(token[0])
+  ) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
 /** The module set of a command's `-pl`/`--projects` selector, sorted. */
 function mavenPlModules(command: string): string[] | null {
   const tokens = command.trim().split(/\s+/);
-  let value: string | undefined;
+  // Maven ACCUMULATES repeated `-pl` (commons-cli `getOptionValues`):
+  // `mvn -pl m1 -pl m2` builds both modules, so every occurrence joins the
+  // set — keeping only the last read a claim that covered m1 as scoped to
+  // m2 alone.
+  const values: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
+    // A quoted flag token (`mvn "-pl" core`) is the same flag once its quote
+    // layer is stripped.
+    const token = unquoteToken(tokens[i]);
     let raw: string | undefined;
     // Advance BEFORE reading, like the sibling token walkers: reading
     // tokens[i + 1] here made the rejoin loop below push that same token
@@ -802,6 +829,7 @@ function mavenPlModules(command: string): string[] | null {
       }
       raw = parts.join(' ');
     }
+    let value: string;
     if (quote !== null && raw.length > 1 && raw.endsWith(quote)) {
       value = raw.slice(1, -1);
       // Undo shellQuotePath's `'\''` dance for dirs with an apostrophe.
@@ -809,17 +837,24 @@ function mavenPlModules(command: string): string[] | null {
     } else {
       value = raw;
     }
+    values.push(value);
   }
-  if (!value) return null;
+  if (values.length === 0) return null;
   const modules = [
     ...new Set(
-      value
-        .split(',')
+      values
+        .flatMap((value) => value.split(','))
         .map((module) => {
           const trimmed = module.trim();
           // Quoted and unquoted spellings compare equal.
           const quoted = /^(['"])(.*)\1$/.exec(trimmed);
-          const unquoted = quoted ? quoted[2] : trimmed;
+          // Windows backslash selectors (`.\core`) and trailing-slash
+          // spellings (`core/`) name the same module dir as their POSIX
+          // twins; normalize them so the claim can settle against the
+          // recorded dir instead of silently discarding its evidence.
+          const unquoted = (quoted ? quoted[2] : trimmed)
+            .replace(/\\/g, '/')
+            .replace(/\/+$/, '');
           // A `[groupId]:artifactId` coordinate selector names a different
           // NAMESPACE than the recorded module directories: artifactId and
           // dir name can disagree, and two dirs can share one artifactId,
@@ -921,8 +956,34 @@ function ruleCommand(
     token === '-b' ||
     token.startsWith('-b=') ||
     token === '--builder' ||
-    token.startsWith('--builder=');
-  const claimTokens = claimed.split(/\s+/);
+    token.startsWith('--builder=') ||
+    // Parallelism changes outcomes (modules racing shared state), and the
+    // review only ever runs serial: a `-T` claim cannot settle on a serial
+    // run. `-l`/`--log-file` is the one value flag left out on purpose —
+    // log redirection changes no outcomes.
+    token.startsWith('-T') ||
+    token === '--threads' ||
+    token.startsWith('--threads=') ||
+    // commons-cli also accepts separator-less ATTACHED short forms
+    // (`-fother/pom.xml`, `-rf:core`, `-ssettings.xml`, `-plcore`); the
+    // exact-token and `=`-attached matches alone let them bypass the
+    // conservative treatment. The attached `-pl` form cannot be reduced to
+    // a module set here, so it keeps the same treatment as the other scopes.
+    (token.startsWith('-rf') && token !== '-rf') ||
+    (token.startsWith('-f') && token !== '-f') ||
+    (token.startsWith('-s') && token !== '-s') ||
+    (token.startsWith('-gs') && token !== '-gs') ||
+    (token.startsWith('-t') && token !== '-t') ||
+    (token.startsWith('-gt') && token !== '-gt') ||
+    (token.startsWith('-b') && token !== '-b') ||
+    (token.startsWith('-amd') && token !== '-amd') ||
+    // The `-pl=` spelling is still reducible to a module set (the value is
+    // in-token); only separator-less attached forms (`-plcore`) are not.
+    (token.startsWith('-pl') && token !== '-pl' && !token.startsWith('-pl='));
+  // One layer of surrounding quotes is stripped before the scope checks:
+  // `mvn "-pl" core test` carries the same scoping as the unquoted spelling,
+  // and comparing raw tokens let a quoted flag bypass every guard here.
+  const claimTokens = claimed.split(/\s+/).map(unquoteToken);
   // Lifecycle phases the claim names, in order: a multi-phase claim
   // (`clean test`) runs phases the recorded single-phase run never did.
   // Flag values are excluded: a module dir named `test` handed to `-pl` is
@@ -1010,7 +1071,8 @@ function ruleCommand(
     c.exitCode !== 0 ||
     freshTestFailures(c) ||
     c.swallowedFailure === true ||
-    c.evidenceCapped === true;
+    c.evidenceCapped === true ||
+    c.neverRan === true;
   // A run's `[maven-test-failure]` markers attribute each failure to its
   // report path `<module>/target/...`: when one resolves inside the claimed
   // `-pl` set the failure is provably inside the claim's scope, and the
@@ -1018,8 +1080,8 @@ function ruleCommand(
   // output, so it carries the same tamper surface as freshTestFailures.
   // The 200-line case cap can drop EVERY `[maven-test-failure]` line of the
   // claimed module when an upstream module fails first in path order, so a
-  // surviving `[maven-test-report]` line with non-zero failures/errors for
-  // a report INSIDE the claim is in-scope failure evidence too.
+  // surviving `[maven-test-report]` PROJECT rollup line with non-zero
+  // failures for the claimed module is in-scope failure evidence too.
   const failureInsideClaim = (c: CommandResult): boolean => {
     if (claimPlModules === null) return false;
     const output = c.output ?? '';
@@ -1031,7 +1093,7 @@ function ruleCommand(
       }
       return lines.some(
         (line) =>
-          line.startsWith(`[maven-test-report] ${prefix}target/`) &&
+          line.startsWith(`[maven-test-report] ${module} (`) &&
           (/ failures=[1-9]/.test(line) || / errors=[1-9]/.test(line)),
       );
     });
@@ -1160,18 +1222,32 @@ function ruleCommand(
     const form = runForm(ran);
     const howItRan = form.howItRan;
     if (ran.exitCode === 0 && ranFailed(ran)) {
+      // The wording splits on what the zero exit actually swallowed: a skip
+      // setting suppressed the phase (nothing was tested — there are no
+      // failures to hunt), a wrapper never started Maven (same), or the
+      // output records failures the exit code did not fail on.
+      const observed = freshTestFailures(ran)
+        ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
+        : ran.testsSuppressed
+          ? 'exit 0, but a skip setting suppressed the test phase — nothing was tested'
+          : ran.neverRan
+            ? 'exit 0, but Maven never started — nothing was built or tested'
+            : 'exit 0, but the output records failures the exit code did not fail on';
+      const note =
+        `${howItRan}, but ` +
+        (freshTestFailures(ran)
+          ? 'fresh test reports record failures despite the zero exit'
+          : ran.testsSuppressed
+            ? 'a skip setting suppressed the test phase — nothing was tested'
+            : ran.neverRan
+              ? 'the wrapper exited 0 without starting Maven — nothing was built or tested'
+              : 'the run recorded failures despite the zero exit');
       return {
         kind: 'command',
         text,
         verdict: 'contradicted',
-        observed: freshTestFailures(ran)
-          ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
-          : 'exit 0, but the output records failures the exit code did not fail on',
-        note:
-          `${howItRan}, but ` +
-          (freshTestFailures(ran)
-            ? 'fresh test reports record failures despite the zero exit'
-            : 'the run recorded failures despite the zero exit'),
+        observed,
+        note,
       };
     }
     return ran.exitCode === 0
@@ -1230,6 +1306,23 @@ function ruleCommand(
     // "not run" wording, which would misstate what happened.
     const capped = matches.find((c) => c.evidenceCapped);
     if (capped) {
+      // A NON-ZERO exit is a definitive failure even when part of the fresh
+      // report evidence went unread — the cap withholds certification of a
+      // PASS, it does not retroactively excuse a failure, exactly like the
+      // interrupted-with-failures policy above. Only exit 0 is genuinely
+      // unknown.
+      if (capped.exitCode !== null && capped.exitCode !== 0) {
+        return {
+          kind: 'command',
+          text,
+          verdict: 'contradicted',
+          observed: `exit ${capped.exitCode}`,
+          note:
+            `${runForm(capped).howItRan}, and it failed — part of its fresh ` +
+            'report evidence was never read (cap, parse rejection, or a truncated ' +
+            'sweep), but the non-zero exit is definitive',
+        };
+      }
       return {
         kind: 'command',
         text,

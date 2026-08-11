@@ -504,7 +504,7 @@ describe('runTestDelta', () => {
         cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
       ]),
       baseline,
-      timeout: 60.123,
+      timeout: 60.1234,
     });
     // The rerun executed (npm fails fast in the empty base dir) instead
     // of throwing out of the whole call.
@@ -515,14 +515,16 @@ describe('runTestDelta', () => {
   it('hands spawnSync an integral, positive timeout for a fractional budget', () => {
     // The outcome-level probe above cannot see a reverted coercion — the
     // ERR_OUT_OF_RANGE throw lands in the same report shape as a real run —
-    // so pin the spawn OPTIONS directly.
+    // so pin the spawn OPTIONS directly. The input is genuinely fractional
+    // (60.1234 * 1000 is not integral): 60.123 used to pass even with the
+    // coercion reverted, because its deadline is exact in JS.
     spawnSpy.mockClear();
     runTestDelta({
       report: writeReport([
         cmd({ command: 'npm test', output: 'FAIL src/a.test.ts' }),
       ]),
       baseline,
-      timeout: 60.123,
+      timeout: 60.1234,
     });
     const opts = spawnSpy.mock.calls[0]?.[1] as { timeout?: number };
     expect(Number.isInteger(opts.timeout)).toBe(true);

@@ -110,6 +110,19 @@ function git(cwd: string, ...args: string[]): void {
   }
 }
 
+/**
+ * Accepted symlink carve-out for all three git probes below: they are
+ * symlink-blind where the disk-side twins follow links. `gitBlob` reads a
+ * symlinked manifest as the link-target PATH text (JSON.parse fails, the
+ * manifest reads as absent), `gitHasPath` accepts a symlinked `pom.xml`
+ * blob, and `gitTreeChildDirs` keeps only mode-040000 entries (a symlinked
+ * workspace member is dropped). Every outcome is conservative — lost A/B
+ * attribution for a symlink-shaped base, never a wrong verdict — and the
+ * repository shapes this gate screens for (root reactors, workspace
+ * monorepos) do not hang their manifests on symlinks. Resolving
+ * mode-120000 entries (bounded hop count, entry-mode gates) is left out
+ * until a real base needs it.
+ */
 function gitHasPath(cwd: string, sha: string, path: string): boolean {
   // A BLOB, not mere existence: `cat-file -e` exits 0 for a DIRECTORY
   // too, and a dir named `pom.xml` is not a Maven project — reading one

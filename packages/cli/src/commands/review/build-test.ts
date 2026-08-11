@@ -48,6 +48,7 @@ import {
   isDiskFailureLine,
   isGoalFailureLine,
   isSourceFailureLine,
+  isTestsSkippedLine,
   mavenToolchainAdapter,
 } from './lib/maven-toolchain.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
@@ -109,6 +110,18 @@ export interface CommandResult {
    * `test-plan` must not settle a Test Plan claim against it.
    */
   evidenceCapped?: boolean;
+  /**
+   * A skip setting suppressed the entire test phase (`Tests are skipped.`):
+   * zero tests ran, and `test-plan` must word the contradiction as
+   * suppression rather than recorded failures.
+   */
+  testsSuppressed?: boolean;
+  /**
+   * The command exited 0 but never started the toolchain at all — no fresh
+   * reports and no toolchain output (a stub wrapper): the run verified
+   * nothing, and `test-plan` must not rule a claim reproduced against it.
+   */
+  neverRan?: boolean;
   /**
    * Present on a Maven LIFECYCLE command (not the dependency warm-up): what
    * it scopes, as the adapter knew it when it built the command line.
@@ -237,12 +250,17 @@ export function trimOutput(s: string): string {
         isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
         isSourceFailureLine(l.replace(ANSI_SGR_RE, '')) ||
         isGoalFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-        isDiskFailureLine(l.replace(ANSI_SGR_RE, '')),
+        isDiskFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+        // The adapter's testsSuppressed guard reads the skip marker from
+        // this trimmed output; a large reactor's trailing Reactor Summary
+        // pushes every `Tests are skipped.` line into the omitted middle,
+        // and losing it certifies a run that tested zero.
+        isTestsSkippedLine(l.replace(ANSI_SGR_RE, '')),
     )
     .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
