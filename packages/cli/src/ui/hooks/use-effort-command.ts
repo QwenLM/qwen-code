@@ -46,9 +46,11 @@ export const useEffortCommand = (
         }
         // Apply at runtime (next turn) and persist for future sessions; provider
         // adapters clamp the tier to what the active model supports.
+        const model = config.getModel();
         const registration = config.getActiveRuntimeModelSnapshot?.()
           ? undefined
-          : getModelReasoningControls(config.getModel());
+          : getModelReasoningControls(model);
+        const persistedRegistration = getModelReasoningControls(model);
         const effectiveEffort = registration?.effort
           ? normalizeModelReasoningEffort(registration, effort)!
           : effort;
@@ -59,13 +61,13 @@ export const useEffortCommand = (
         const scope =
           getOwnKeyScope(loadedSettings, 'model') ??
           getPersistScopeForModelSelection(loadedSettings);
-        if (registration?.effort) {
+        if (persistedRegistration?.effort) {
           loadedSettings.setValue(
             scope,
             'model.reasoningPreferences',
             mergeModelReasoningPreference(
               loadedSettings.forScope(scope).settings,
-              config.getModel(),
+              model,
               { effort: effectiveEffort },
             ),
           );

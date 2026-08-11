@@ -135,12 +135,12 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).toHaveBeenCalledWith('high');
     expect(setValue).toHaveBeenCalledWith(
       expect.anything(),
-      'model.reasoningEffort',
-      'high',
+      'model.reasoningPreferences',
+      { 'qwen3.8-max': { effort: 'high' } },
     );
     expect(setValue).not.toHaveBeenCalledWith(
       expect.anything(),
-      'model.reasoningPreferences',
+      'model.reasoningEffort',
       expect.anything(),
     );
   });

@@ -4453,6 +4453,33 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('does not carry an unregistered effort into a registered auth-refresh target', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'unregistered-source',
+          reasoning: { effort: 'low' },
+        },
+      });
+      const authType = AuthType.USE_GEMINI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3.8-max',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      const setReasoningEffort = vi.spyOn(config, 'setReasoningEffort');
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'xhigh',
+      });
+      expect(setReasoningEffort).not.toHaveBeenCalled();
+    });
+
     it('does not apply registered defaults to a same-id runtime snapshot', async () => {
       const config = new Config({
         ...baseParams,
@@ -4523,7 +4550,7 @@ describe('Server Config (config.ts)', () => {
       ).toBe('high');
     });
 
-    it('restores the global effort when switching to a same-id runtime snapshot', async () => {
+    it('restores the global effort unless a runtime snapshot defines reasoning', async () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.QWEN_OAUTH,
@@ -4609,6 +4636,23 @@ describe('Server Config (config.ts)', () => {
       await modelsConfig.switchToRuntimeModel(disabledSnapshotId);
 
       expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+
+      const configuredSnapshotId = '$runtime|qwen-oauth|snapshot-model';
+      runtimeModelSnapshots.set(configuredSnapshotId, {
+        id: configuredSnapshotId,
+        authType: AuthType.QWEN_OAUTH,
+        modelId: 'snapshot-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        generationConfig: { reasoning: { effort: 'low' } },
+        sources: {},
+        createdAt: Date.now(),
+      });
+
+      await modelsConfig.switchToRuntimeModel(configuredSnapshotId);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'low',
+      });
     });
 
     it('keeps an effort selection as a preference before auth initializes', () => {

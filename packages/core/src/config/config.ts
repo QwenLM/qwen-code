@@ -3713,10 +3713,11 @@ export class Config {
       !this.modelsConfig.getActiveRuntimeModelSnapshot() &&
         getModelReasoningControls(newContentGeneratorConfig.model),
     );
+    const modelUnchanged = newContentGeneratorConfig.model === modelId;
     const reasoningEffortToRestore =
       priorReasoningEffort &&
-      (!priorModelHasReasoningControls ||
-        newContentGeneratorConfig.model === modelId)
+      (modelUnchanged ||
+        (!priorModelHasReasoningControls && !targetHasReasoningControls))
         ? priorReasoningEffort
         : targetHasReasoningControls
           ? undefined
@@ -4607,13 +4608,17 @@ export class Config {
             this.modelsConfig.isStrictModelProviderSelection(),
         },
       );
+      const activeRuntimeModelSnapshot = this.getActiveRuntimeModelSnapshot();
       const targetHasReasoningControls =
-        !this.getActiveRuntimeModelSnapshot() &&
+        !activeRuntimeModelSnapshot &&
         Boolean(getModelReasoningControls(config.model));
+      const targetHasRuntimeReasoning = Boolean(
+        activeRuntimeModelSnapshot && config.reasoning !== undefined,
+      );
       const modelScopedReasoningSwitch =
         previousModelHasReasoningControls ||
         targetHasReasoningControls ||
-        config.reasoning === false;
+        targetHasRuntimeReasoning;
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
       // The global preference is captured above and re-applied below. When the
@@ -4682,7 +4687,7 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (targetHasReasoningControls === false) {
+      if (!targetHasReasoningControls && !targetHasRuntimeReasoning) {
         const globalEffort =
           priorReasoningEffort ?? this.globalReasoningEffortPreference;
         if (globalEffort && this.contentGeneratorConfig.reasoning !== false) {
