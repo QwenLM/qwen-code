@@ -811,7 +811,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         | Awaited<ReturnType<DaemonClient['capabilities']>>
         | undefined;
       let reconnectSessionId = restoreSessionId;
-      let shouldCreateFreshSession = !restoreSessionId && newSessionNonce > 0;
+      let shouldCreateFreshSession =
+        !manualSessionClearRef.current &&
+        !restoreSessionId &&
+        newSessionNonce > 0;
       let reconnectAttempt = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
       let skipMetadataRefresh = false;
@@ -2372,10 +2375,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad?.sessionId === restoreSessionId &&
             error instanceof DaemonHttpError &&
             error.status === 404 &&
-            typeof errorBody?.['error'] === 'string' &&
-            errorBody['error'].endsWith(
-              'The session is closing; retry after close completes',
-            )
+            errorBody?.['code'] === 'session_closing'
           ) {
             reconnectAttempt += 1;
             const reconnectConfig = reconnectConfigRef.current;

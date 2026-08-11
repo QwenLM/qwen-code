@@ -331,6 +331,7 @@ export function VoiceButton({
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (voiceGate.mode === 'hold') ignoreNextClickRef.current = false;
     if (
       voiceGate.mode !== 'hold' ||
       event.button !== 0 ||
