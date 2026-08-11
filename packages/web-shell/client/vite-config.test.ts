@@ -5,18 +5,23 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { ConfigEnv, UserConfig } from 'vite';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, { QUALIFIED_VOICE_STREAM_PROXY } from '../vite.config';
+
+function loadConfig(): UserConfig {
+  const factory = viteConfig as (env: ConfigEnv) => UserConfig;
+  return factory({
+    command: 'serve',
+    mode: 'test',
+    isSsrBuild: false,
+    isPreview: false,
+  });
+}
 
 describe('Web Shell Voice development proxy', () => {
   it('proxies only qualified Voice stream upgrades', () => {
-    const factory = viteConfig as (env: ConfigEnv) => UserConfig;
-    const config = factory({
-      command: 'serve',
-      mode: 'test',
-      isSsrBuild: false,
-      isPreview: false,
-    });
+    const config = loadConfig();
     const proxy = config.server?.proxy;
     const qualified = proxy?.[QUALIFIED_VOICE_STREAM_PROXY];
 
@@ -47,5 +52,23 @@ describe('Web Shell Voice development proxy', () => {
     expect(terminal && typeof terminal !== 'string' ? terminal.ws : false).toBe(
       true,
     );
+  });
+});
+
+describe('Web Shell client source proxy bypass', () => {
+  it('serves session catalog source modules instead of proxying them', () => {
+    const sessionProxy = loadConfig().server?.proxy?.['/session'];
+    expect(sessionProxy).not.toBeTypeOf('string');
+    expect(sessionProxy).toBeDefined();
+    const options = sessionProxy as ProxyOptions;
+    const request = {
+      method: 'GET',
+      url: '/session-catalog/session-catalog-hooks.ts',
+      headers: { 'sec-fetch-dest': 'script' },
+    } as unknown as IncomingMessage;
+
+    expect(
+      options.bypass?.(request, {} as unknown as ServerResponse, options),
+    ).toBe(request.url);
   });
 });

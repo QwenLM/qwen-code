@@ -31,7 +31,10 @@ export function DeleteSessionDialog({
     error: sessionsError,
     deleteSession,
     deleteSessions,
-  } = useScopedSessions(workspaceCwd, { autoLoad: true });
+  } = useScopedSessions(workspaceCwd, {
+    autoLoad: true,
+    maxAgeMs: 1_000,
+  });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
   // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
