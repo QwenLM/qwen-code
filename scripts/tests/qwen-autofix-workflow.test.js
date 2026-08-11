@@ -283,6 +283,16 @@ function writeWorkdirStub(dir, lines) {
   ]);
 }
 
+function qwenResultLine({ result, errorMessage, isError = false }) {
+  return `${JSON.stringify({
+    type: 'result',
+    subtype: isError ? 'error_during_execution' : 'success',
+    is_error: isError,
+    ...(result === undefined ? {} : { result }),
+    ...(errorMessage === undefined ? {} : { error: { message: errorMessage } }),
+  })}\n`;
+}
+
 function runAutofixRunner(args) {
   return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
     encoding: 'utf8',
@@ -10712,7 +10722,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'turn_tool_call_cap: too many tool calls',
+            isError: true,
+          }),
+        )});`,
         'process.exit(1);',
       ]);
 
@@ -10740,11 +10755,17 @@ exit 1
     );
   });
 
-  it('detects loop guard output before it falls out of the log tail', () => {
+  it('detects the terminal loop result despite later log output', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
+        // Trailing output must not replace the already parsed terminal result.
         "process.stdout.write('x'.repeat(21_000));",
         'process.exit(1);',
       ]);
@@ -10828,6 +10849,210 @@ exit 1
     });
   });
 
+  it('flags a recoverable stream-json API error even when qwen exits zero', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        '[API Error: 429 quota exceeded]',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'recoverable API error without an agent verdict',
+      );
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+      expect(
+        readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+      ).toBe('transient');
+    });
+  });
+
+  it('classifies split and unterminated stream-json result lines', () => {
+    for (const [name, writes] of [
+      [
+        'split',
+        [
+          "const line = qwenResultLine({ result: '[API Error: 429 quota exceeded]' });",
+          'process.stdout.write(line.slice(0, 20));',
+          'process.stdout.write(line.slice(20));',
+        ],
+      ],
+      [
+        'unterminated',
+        [
+          "process.stdout.write(qwenResultLine({ result: '[API Error: 429 quota exceeded]' }).trimEnd());",
+        ],
+      ],
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeWorkdirStub(dir, [
+          "const qwenResultLine = (value) => `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, ...value })}\\n`;",
+          ...writes,
+          'process.exit(0);',
+        ]);
+
+        const result = runAddressReview(dir, stub);
+
+        expect(result.status, name).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error')), name).toBe(true);
+      });
+    }
+  });
+
+  it('ignores API-error markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: '[API Error: 429 quota exceeded]',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'finished without required output file(s)',
+      );
+    });
+  });
+
+  it('drops oversized stdout lines from API-error diagnostics', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const oversizedToolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content:
+                'x'.repeat(1_045_000) +
+                '[API Error: 429 quota exceeded]' +
+                'x'.repeat(55_000),
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(oversizedToolResult)}, () => process.exit(1));`,
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'status 1',
+      );
+      expect(result.stdout).toContain(
+        'dropped oversized stream-json line; full bytes in agent.log',
+      );
+    });
+  });
+
+  it('resumes parsing after a terminated oversized stdout line', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const loopResult = qwenResultLine({
+        errorMessage: 'Loop detection halted the run',
+        isError: true,
+      });
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write('x'.repeat(1_100_000) + '\\n' + ${JSON.stringify(
+          loopResult,
+        )});`,
+        'process.exitCode = 1;',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+      expect(
+        result.stdout.match(/dropped oversized stream-json line/g),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('ignores loop-guard markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: 'turn_tool_call_cap Loop detection halted the run',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: '[API Error: 429 quota exceeded]',
+            isError: true,
+          }),
+        )});`,
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+    });
+  });
+
+  it('keeps a recovered exit-zero run with a verdict out of the API-error retry path', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
   it('does not flag a non-API subprocess failure for retry', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -10863,7 +11088,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
         "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
         'process.exit(1);',
       ]);
@@ -11824,10 +12054,9 @@ describe('run-agent idle watchdog', () => {
   // last byte at docker container entry and then sat SILENT for the whole
   // 2-hour absolute budget — four different runners, two image versions, so
   // the watchdog lives in the runner script, not the environment. A wedged
-  // sandbox produces nothing; a legitimate run is never silent for 20
-  // minutes (the fleet's longest tolerated quiet is the review pipeline's
-  // 10-minute stream-idle window). These tests execute the REAL script with
-  // a stub agent whose only difference is whether it keeps talking.
+  // sandbox produces nothing; stream-json makes active headless work emit
+  // progress before its final result. These tests execute the REAL script
+  // with a stub agent whose only difference is whether it keeps talking.
   const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
     try {
@@ -11865,8 +12094,12 @@ describe('run-agent idle watchdog', () => {
       );
       return {
         status: res.status,
+        stdout: res.stdout,
         failure: existsSync(join(workdir, 'failure.md'))
           ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        agentLog: existsSync(join(workdir, 'agent.log'))
+          ? readFileSync(join(workdir, 'agent.log'), 'utf8')
           : '',
         timeoutSentinel: existsSync(join(workdir, 'agent-timeout'))
           ? readFileSync(join(workdir, 'agent-timeout'), 'utf8')
@@ -11894,17 +12127,16 @@ describe('run-agent idle watchdog', () => {
     expect(r.timeoutSentinel).toContain('idle-timeout (no output for 1200ms');
   });
 
-  it('never fires while the agent keeps talking, however slowly', () => {
+  it('never fires while the agent emits protocol events, however slowly', () => {
     // Output every 400ms with a 1500ms idle window: an absolute-timer
     // regression disguised as an idle watchdog would kill this run.
     const r = runAgent({
       stub: [
         '#!/bin/bash',
-        'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+        'for i in $(seq 1 8); do echo "{\\"type\\":\\"progress\\",\\"step\\":$i}"; sleep 0.4; done',
         // The mode's output contract: a real run ends by writing its
         // summary, and the script fails a run that produced neither output.
         'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
-        'echo done',
         'exit 0',
       ].join('\n'),
       idleMs: 1500,
@@ -11929,6 +12161,78 @@ describe('run-agent idle watchdog', () => {
     });
     expect(r.status).toBe(0);
     expect(r.failure).toBe('');
+  });
+
+  it('does not treat an unterminated stdout byte stream as progress', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 20); do printf x; sleep 0.2; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 700,
+      timeoutMs: 2400,
+    });
+
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 700ms');
+    expect(r.failure).not.toContain('timeout (2400ms)');
+  });
+
+  it('requests streamed partial progress so active headless work refreshes the watchdog', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'if [[ " $* " == *" --output-format stream-json "* && " $* " == *" --include-partial-messages "* ]]; then',
+        '    for i in $(seq 1 8); do echo "{\\"type\\":\\"stream_event\\",\\"event\\":{\\"type\\":\\"input_json_delta\\",\\"partial_json\\":\\"x\\"}}"; sleep 0.4; done',
+        'else',
+        '    sleep 4',
+        'fi',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('keeps partial events in the artifact without flooding step output', () => {
+    const payload = 'x'.repeat(10_000);
+    const streamEvent = JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'input_json_delta', partial_json: payload },
+    });
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        `printf '%s\\n' '${streamEvent}'`,
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(payload);
+    expect(r.agentLog).toContain(payload);
+  });
+
+  it('bounds an unterminated stdout line while retaining the artifact', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        "head -c 2097152 /dev/zero | tr '\\0' x",
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout.length).toBeLessThan(10_000);
+    expect(r.agentLog.length).toBe(2_097_152);
   });
 
   it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
