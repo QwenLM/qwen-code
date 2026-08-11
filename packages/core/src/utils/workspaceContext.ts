@@ -303,6 +303,9 @@ export function resolveWorkspacePath(pathToCheck: string): string {
       // non-existent files.
       !isFileSymlink(error.path)
     ) {
+      // error.path is the canonical prefix up to the first missing component;
+      // when it is an un-rewritten prefix of the input, keep the full path so
+      // trailing non-existent components are preserved.
       if (
         error.path !== pathToCheck &&
         pathToCheck.startsWith(`${error.path}${path.sep}`)
