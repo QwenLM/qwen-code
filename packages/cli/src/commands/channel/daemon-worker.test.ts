@@ -1094,7 +1094,11 @@ describe('runChannelDaemonWorker', () => {
     mockParseConfiguredChannels.mockResolvedValueOnce([
       {
         ...parsedTelegram,
-        config: { ...parsedTelegram.config, approvalMode: 'yolo' },
+        config: {
+          ...parsedTelegram.config,
+          approvalMode: 'yolo',
+          sessionRotation: { maxTurns: 200 },
+        },
       },
       parsedFeishu,
     ]);
@@ -1117,6 +1121,13 @@ describe('runChannelDaemonWorker', () => {
       'thread',
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('feishu', 'single');
+    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith('telegram', {
+      maxTurns: 200,
+    });
+    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith(
+      'feishu',
+      undefined,
+    );
     expect(mockRouterSetChannelApprovalMode).not.toHaveBeenCalled();
   });
 

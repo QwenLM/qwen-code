@@ -640,6 +640,31 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('registers session rotation bounds for a named channel', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockParseChannelConfig.mockResolvedValue({
+      ...mockParsedChannelConfig,
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith('telegram', {
+      maxTurns: 200,
+      maxAgeHours: 24,
+    });
+  });
+
   it('removes router sessions when the bridge reports session death', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -1072,6 +1097,7 @@ describe('startCommand.handler', () => {
       cwd: `/tmp/${name}`,
       model: 'shared-model',
       sessionScope: name === 'first' ? 'thread' : 'single',
+      sessionRotation: name === 'first' ? { maxTurns: 200 } : undefined,
     }));
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit: ${String(code)}`);
@@ -1099,6 +1125,13 @@ describe('startCommand.handler', () => {
     );
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('first', 'thread');
     expect(mockRouterSetChannelScope).toHaveBeenCalledWith('second', 'single');
+    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith('first', {
+      maxTurns: 200,
+    });
+    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith(
+      'second',
+      undefined,
+    );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(
       1,
       'first',

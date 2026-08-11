@@ -251,6 +251,12 @@ export class QQChannel extends ChannelBase {
     const router =
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
+    // ChannelBase only self-registers rotation when it creates the router
+    // itself; QQChannel always passes one in, so its standalone path
+    // registers here.
+    if (!options?.router) {
+      router.setChannelRotation(name, config.sessionRotation);
+    }
 
     super(name, config, bridge, {
       ...options,

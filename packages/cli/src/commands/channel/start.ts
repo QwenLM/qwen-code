@@ -358,6 +358,7 @@ async function startSingle(
     config.sessionScope,
     sessionsPath(),
   );
+  router.setChannelRotation(name, config.sessionRotation);
   const loopStore = cronEnabled
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;

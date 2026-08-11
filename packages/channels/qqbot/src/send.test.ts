@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import type {
   ChannelAgentBridge,
+  ChannelConfig,
   ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 import { isValidChatId, DeliveryError } from './QQChannel.js';
@@ -10,6 +11,7 @@ const {
   mockSendQQMessage,
   mockFetchAccessToken,
   mockFetchGatewayUrl,
+  mockRouterSetChannelRotation,
   MockWebSocket,
   mockWebSockets,
 } = vi.hoisted(() => {
@@ -47,6 +49,7 @@ const {
     mockSendQQMessage: vi.fn(),
     mockFetchAccessToken: vi.fn(),
     mockFetchGatewayUrl: vi.fn(),
+    mockRouterSetChannelRotation: vi.fn(),
     MockWebSocket,
     mockWebSockets,
   };
@@ -111,6 +114,7 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected onTaskLifecycle(_event: unknown): void {}
     },
     SessionRouter: class {
+      setChannelRotation = mockRouterSetChannelRotation;
       restoreSessions(): Promise<void> {
         return Promise.resolve();
       }
@@ -191,6 +195,7 @@ describe('session persistence paths', () => {
   function makeChannel(
     name: string,
     options?: QQChannelOptions,
+    configOverrides: Partial<ChannelConfig> = {},
   ): QQChannelInstance {
     return new QQChannel(
       name,
@@ -206,6 +211,7 @@ describe('session persistence paths', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        ...configOverrides,
       },
       {} as unknown as ChannelAgentBridge,
       options,
@@ -228,6 +234,16 @@ describe('session persistence paths', () => {
     expect(getGlobalSessionsPath(makeChannel('bot/two'))).toBe(
       join('/tmp/test-qwen', 'channels', 'bot_two-sessions.json'),
     );
+  });
+
+  it('registers its own session rotation when QQChannel owns the router', () => {
+    makeChannel('bot-one', undefined, {
+      sessionRotation: { maxTurns: 100 },
+    });
+
+    expect(mockRouterSetChannelRotation).toHaveBeenCalledWith('bot-one', {
+      maxTurns: 100,
+    });
   });
 
   it('keeps the shared sessions file when start.ts provides the router', () => {
