@@ -55,6 +55,7 @@ import {
   buildRoleBrief,
   buildRoleLaunchPrompt,
   findingsSection,
+  rosterLabel,
   agentPromptCommand,
 } from './agent-prompt.js';
 import { BRIEFS } from './lib/agent-briefs.js';
@@ -4226,5 +4227,59 @@ describe('the verify gate — compose survives a budget stop', () => {
     const plan = verifyCall();
     expect(process.exitCode).toBeUndefined();
     expect(readRecordedPrompts(plan).size).toBe(1);
+  });
+});
+
+describe('rosterLabel — the identity line, pinned by literal output', () => {
+  // Pinned by literal expected strings, independent of the emitted payload:
+  // a cross-file wiring assertion can only prove emit-workflow CALLS this
+  // function, not that the function produces the right text.
+
+  it('labels a chunk agent by its territory', () => {
+    expect(rosterLabel({ key: 'chunk-3', role: 'chunk', chunk: 3 })).toBe(
+      'chunk 3',
+    );
+  });
+
+  it("labels a dimension role with the brief's reader-facing name", () => {
+    expect(rosterLabel({ key: '1a', role: '1a' })).toBe(
+      'Agent 1a: Line-by-line correctness',
+    );
+  });
+
+  it('appends the owned file for an invariant agent', () => {
+    expect(
+      rosterLabel({
+        key: 'invariant-a--src/x.ts',
+        role: 'invariant-a',
+        file: 'src/x.ts',
+      }),
+    ).toBe('Invariant agent A: state, timers, collections — src/x.ts');
+  });
+
+  it('flattens control characters in a PR-controlled path', () => {
+    // A git path may legally contain newlines and tabs; in the label they
+    // would open a forged line (or a forged block boundary) in output an
+    // orchestrator pastes onward.
+    expect(
+      rosterLabel({
+        key: 'invariant-a--src/a\nb\tc.ts',
+        role: 'invariant-a',
+        file: 'src/a\nb\tc.ts',
+      }),
+    ).toBe('Invariant agent A: state, timers, collections — src/a b c.ts');
+  });
+
+  it('strips the roster separator glyph and backticks from the path', () => {
+    // The U+2500 glyph is the block separator; a filename carrying it could
+    // imitate a block boundary. A backtick would close the Markdown code
+    // span the label renders inside.
+    expect(
+      rosterLabel({
+        key: 'invariant-a--src/a\u2500b`c.ts',
+        role: 'invariant-a',
+        file: 'src/a\u2500b`c.ts',
+      }),
+    ).toBe('Invariant agent A: state, timers, collections — src/a b c.ts');
   });
 });

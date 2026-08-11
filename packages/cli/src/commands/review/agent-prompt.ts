@@ -85,6 +85,7 @@ import {
   type RequiredAgent,
   type RosterPlan,
 } from './lib/roster.js';
+import { readPlanFile, readRulesFile } from './lib/plan-file.js';
 
 interface AgentPromptArgs {
   plan: string;
@@ -1638,7 +1639,8 @@ export function buildLaunch(
 export function buildRosterLaunches(
   report: PlanReport,
   planPath: string,
-  rules?: string,
+  rules: string | undefined,
+  command: string,
 ): Array<{ req: RequiredAgent; key: string; prompt: string }> {
   const roster = requiredAgents(report as RosterPlan);
   return roster.map((req) => {
@@ -1652,9 +1654,9 @@ export function buildRosterLaunches(
     );
     if (key !== req.key) {
       throw new Error(
-        `built "${key}" where the roster requires "${req.key}" — the ` +
-          'record could never be matched to the requirement. This is a bug ' +
-          'in the CLI, not in the call.',
+        `${command} built "${key}" where the roster requires "${req.key}" ` +
+          '— the record could never be matched to the requirement. This is ' +
+          'a bug in the CLI, not in the call.',
       );
     }
     return { req, key, prompt };
@@ -1779,7 +1781,12 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
   // `check-coverage` holds the run to that same set from the same field.
-  const launches = buildRosterLaunches(report, planPath, rules);
+  const launches = buildRosterLaunches(
+    report,
+    planPath,
+    rules,
+    'agent-prompt: --roster',
+  );
   const blocks = launches.map(({ req, key, prompt }, i) => {
     recordPrompt(planPath, key, prompt);
     return `───── agent ${i + 1} of ${launches.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
@@ -2316,33 +2323,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     );
   }
 
-  let report: PlanReport;
-  try {
-    report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
-  } catch (err) {
-    throw new Error(
-      `agent-prompt: cannot read the plan ${args.plan}: ${(err as Error).message}`,
-    );
-  }
+  const report: PlanReport = readPlanFile(args.plan, 'agent-prompt');
 
   // The project rules Step 2 loaded. They belong in the agent's prompt — the
   // skill now says this command builds it and to pass what it prints verbatim, so
   // there is no longer a later step in which the orchestrator would staple them
   // on. Without this flag they were loaded, written to a file, and silently
   // dropped: the review would enforce no project rule at all and say nothing.
-  let rules: string | undefined;
-  if (args.rules) {
-    try {
-      rules = readFileSync(args.rules, 'utf8');
-    } catch (err) {
-      throw new Error(
-        `agent-prompt: cannot read the rules ${args.rules}: ` +
-          `${(err as Error).message}. Omit --rules if this review has none; ` +
-          'passing a path that does not resolve would silently review without ' +
-          'the project rules it was told to enforce.',
-      );
-    }
-  }
+  const rules = args.rules
+    ? readRulesFile(args.rules, 'agent-prompt')
+    : undefined;
 
   // Write down what was handed out, at a path derived from the plan. The caller is
   // never told this path and is never asked to write to it: it is the CLI's record

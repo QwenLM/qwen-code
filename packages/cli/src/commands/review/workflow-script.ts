@@ -17,8 +17,8 @@
 // a stub dispatch and asserted on — which is what `workflow-script.test.ts`
 // does. It is also the point at which "the orchestrator must not author the
 // fan-out" stops being a convention and becomes a fact about the binary. The
-// model does not write this, cannot edit it, and never sees a prompt: it makes
-// one tool call naming a path.
+// model does not write this and cannot edit it; it makes one tool call, and
+// what the fan-out dispatches is what the CLI built.
 //
 // Sandbox constraints this must respect (workflow-sandbox.ts):
 //   - `meta` must be a pure literal — no variables, calls, or interpolation.
@@ -36,18 +36,35 @@ export const REVIEW_STEP_3A_WORKFLOW_SCRIPT = `export const meta = {
   phases: [{ title: 'Review', detail: 'one agent per required role' }],
 };
 
-phase('Review');
-
-// Fail closed on a payload this script cannot dispatch: a missing, stale or
-// mis-bound args file would otherwise die inside the vm as a bare TypeError
-// that names nothing about emit-workflow or the args file.
+// Fail closed on a payload this script cannot dispatch — BEFORE phase()
+// advances the run's state, so a corrupt args file never leaves a Review
+// phase that dispatched nothing. Without these guards a missing, stale or
+// mis-bound args file would die inside the vm as a bare TypeError that names
+// nothing about emit-workflow or the args file.
 if (!args || !Array.isArray(args.agents)) {
-  throw new Error('review-step-3a: args.agents is missing or not an array - pass the args.json that qwen review emit-workflow wrote');
+  throw new Error('review-step-3a: args.agents is missing or not an array - args must be the PARSED CONTENTS of the args.json that qwen review emit-workflow wrote: read that file and pass its JSON value inline (the sandbox has no filesystem, and the Workflow tool has no path form of args)');
 }
 if (args.version !== 1) {
   throw new Error('review-step-3a: args version ' + args.version + ' does not match this script - re-run qwen review emit-workflow to regenerate both files together');
 }
 const agents = args.agents;
+// An empty roster is a corrupted or truncated args file: a Step 3A review
+// always requires several agents, and parallel([]) would otherwise settle
+// into a zero-agent result shaped exactly like a completed review.
+if (agents.length === 0) {
+  throw new Error('review-step-3a: args.agents is empty - a Step 3A review always requires several agents; re-run qwen review emit-workflow to rewrite the args file');
+}
+// Validate the elements before dispatching any of them: a null or truncated
+// entry otherwise dies mid-fan-out, after earlier agents already ran, as a
+// bare vm TypeError.
+for (let i = 0; i < agents.length; i++) {
+  const a = agents[i];
+  if (a === null || typeof a !== 'object' || typeof a.key !== 'string' || typeof a.label !== 'string' || typeof a.prompt !== 'string' || a.prompt.length === 0) {
+    throw new Error('review-step-3a: args.agents[' + i + '] is not a dispatchable agent entry (needs string key, label and a non-empty prompt) - re-run qwen review emit-workflow to rewrite the args file');
+  }
+}
+
+phase('Review');
 log(agents.length + ' agents required by the plan');
 
 // One thunk per required agent, dispatched together. The roster is data the
@@ -58,24 +75,32 @@ const returns = await parallel(
   agents.map((a) => () => agent(a.prompt, { label: a.label, phase: 'Review' })),
 );
 
-// parallel() reports a failed dispatch as a null element rather than throwing,
-// so a role that died is indistinguishable from one that returned nothing
-// unless the script looks. Collect them by name: an agent silently missing
-// from the fan-out is the one regression this path must not introduce, and the
-// coverage gate needs it named to fail closed on it.
+// parallel() reports a failed dispatch as a null element rather than
+// throwing, and an agent can also terminate with no visible text at all.
+// Either way there is nothing to show for the dimension, so all of
+// null/undefined/non-string/blank count as missing: a role silently absent
+// from the fan-out is the one regression this path must not introduce, and
+// the coverage gate needs it named to fail closed on it.
 const delivered = [];
 const missingRoles = [];
 for (let i = 0; i < agents.length; i++) {
   const value = returns[i];
-  if (value === null || value === undefined) {
-    missingRoles.push(agents[i].key);
-  } else {
+  if (typeof value === 'string' && value.trim().length > 0) {
     delivered.push({ key: agents[i].key, text: value });
+  } else {
+    missingRoles.push(agents[i].key);
   }
 }
 
 if (missingRoles.length > 0) {
   log(missingRoles.length + ' agent(s) returned nothing: ' + missingRoles.join(', '));
+}
+
+// A fan-out where NO agent returned anything is a failed dispatch, not a
+// completed review that reviewed nothing. Throw so the run is reported as
+// failed instead of returning a result whose shape reads "complete".
+if (delivered.length === 0) {
+  throw new Error('review-step-3a: none of the ' + agents.length + ' dispatched agents returned anything - the fan-out delivered nothing. Re-run the workflow; if it fails again, fall back to qwen review agent-prompt --roster');
 }
 
 return {
