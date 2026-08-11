@@ -343,10 +343,17 @@ function createRemoteExitTracker(
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
     resolveExit = resolve;
   });
+  let consecutiveFailures = 0;
   const interval = setInterval(() => {
-    void callAgentViewPtyHost(socketPath, authToken, 'status').catch(() => {
-      resolveExitOnce({ exitCode: 1 });
-    });
+    void callAgentViewPtyHost(socketPath, authToken, 'status')
+      .then(() => {
+        consecutiveFailures = 0;
+      })
+      .catch(() => {
+        if (++consecutiveFailures >= 2) {
+          resolveExitOnce({ exitCode: 1 });
+        }
+      });
   }, REMOTE_HOST_EXIT_POLL_MS);
   interval.unref?.();
 
@@ -675,6 +682,7 @@ async function respondToHostLine(
     }
 
     attachState.activeAttachSocket = socket;
+    host.resetInput?.();
     const clearActiveAttach = () => {
       if (attachState.activeAttachSocket === socket) {
         attachState.activeAttachSocket = undefined;
@@ -895,6 +903,7 @@ function defaultSpawnPtyHost(
   try {
     return spawn(argv[0]!, argv.slice(1), {
       detached: true,
+      windowsHide: true,
       stdio: ['ignore', 'ignore', stderrFd ?? 'ignore'],
       env: {
         ...process.env,

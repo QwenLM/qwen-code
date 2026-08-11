@@ -105,4 +105,26 @@ describe('detachCurrentSessionToAgentView', () => {
       }),
     );
   });
+
+  it('JSON-stringifies an object sandbox config', async () => {
+    const adopt = vi.fn(async () => ({ sessionId, adopted: true }));
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const config = {
+      getSessionId: () => sessionId,
+      getProjectRoot: () => '/project',
+      getTargetDir: () => '/project',
+      getApprovalMode: () => undefined,
+      getSandbox: () => ({ command: 'docker', image: 'qwen-sandbox' }),
+    };
+
+    await detachCurrentSessionToAgentView(config, {
+      ensureSupervisor: async () => ({ adopt }),
+    });
+
+    expect(adopt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sandbox: '{"command":"docker","image":"qwen-sandbox"}',
+      }),
+    );
+  });
 });

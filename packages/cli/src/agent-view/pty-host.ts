@@ -91,6 +91,7 @@ export interface AgentViewPtyHostHandle {
   exited: Promise<AgentViewPtyHostExit>;
   getOutput?(): Promise<string>;
   write(data: Buffer): void;
+  resetInput?(): void;
   onData(callback: (data: string) => void): AgentViewPtyDisposable | void;
   resize(size: { columns: number; rows: number }): void;
   kill(signal?: string): void;
@@ -337,7 +338,7 @@ export async function launchAgentViewPtyHost(
     env: workerEnv,
     handleFlowControl: false,
   });
-  const inputDecoder = new StringDecoder('utf8');
+  let inputDecoder = new StringDecoder('utf8');
 
   const disposables: AgentViewPtyDisposable[] = [];
   let settled = false;
@@ -380,7 +381,9 @@ export async function launchAgentViewPtyHost(
       ptyProcess.resize(size.columns, size.rows);
     },
     kill(signal?: string): void {
-      ptyProcess.kill(signal);
+      // WindowsTerminal.kill throws for any signal string; the argument-less
+      // kill terminates the conpty process tree instead.
+      ptyProcess.kill(process.platform === 'win32' ? undefined : signal);
     },
     pause(): void {
       ptyProcess.pause?.();
@@ -389,7 +392,10 @@ export async function launchAgentViewPtyHost(
       ptyProcess.resume?.();
     },
     shutdown(): void {
-      ptyProcess.kill('SIGTERM');
+      ptyProcess.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
+    },
+    resetInput(): void {
+      inputDecoder = new StringDecoder('utf8');
     },
     dispose(): void {
       ptyProcess.kill();

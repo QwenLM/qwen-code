@@ -229,6 +229,41 @@ describe('launchAgentViewPtyHost', () => {
     expect(data).toEqual(['output']);
   });
 
+  it('passes no signal to the pty on Windows', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      handle.kill('SIGKILL');
+      handle.shutdown?.();
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+
+    expect(pty.process.killCalls).toEqual([undefined, undefined]);
+  });
+
+  it('resets the input decoder between attach sessions', async () => {
+    const pty = createFakePty();
+    const handle = await launchAgentViewPtyHost(createLaunch(), { pty });
+
+    // 0xE4 0xBD are the first two bytes of U+4F60 (你); without a reset
+    // they would leak into the next session as a replacement character.
+    handle.write(Buffer.from([0xe4, 0xbd]));
+    handle.resetInput?.();
+    handle.write(Buffer.from('A'));
+
+    expect(pty.process.input).toBe('A');
+  });
+
   it('passes worker env while stripping host-only secrets', async () => {
     const pty = createFakePty();
     const previousToken = process.env[PTY_HOST_AUTH_TOKEN_ENV];

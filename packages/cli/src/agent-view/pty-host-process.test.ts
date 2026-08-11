@@ -276,6 +276,24 @@ describe('Agent View PTY host process server', () => {
     expect(host.killedWith).toBeUndefined();
   });
 
+  it('falls back to kill(SIGTERM) when the host has no shutdown method', async () => {
+    const host = fakeHost();
+    delete (host as Partial<typeof host>).shutdown;
+    host.exited = Promise.resolve({ exitCode: 0 });
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      shutdownGraceMs: 20,
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
+      shuttingDown: true,
+    });
+
+    expect(host.killedWith).toBe('SIGTERM');
+  });
+
   it('requires auth when the host server has a token', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -634,7 +652,7 @@ describe('Agent View PTY host process server', () => {
       );
 
       await server.close();
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(10000);
 
       await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
     } finally {
