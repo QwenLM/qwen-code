@@ -76,6 +76,31 @@ describe('createMockWorkspaceContext', () => {
     }
   });
 
+  it('does not collapse missing paths below a symlinked ancestor', () => {
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
+    const aliasDir = path.join(
+      os.tmpdir(),
+      `qwen-workspace-alias-${Date.now()}`,
+    );
+    symlinkSync(rootDir, aliasDir);
+
+    try {
+      const workspaceRoot = path.join(aliasDir, 'ghost', 'workspace');
+      const siblingPath = path.join(
+        aliasDir,
+        'ghost',
+        'completely-different',
+        'file.txt',
+      );
+      const workspace = createMockWorkspaceContext(workspaceRoot);
+
+      expect(workspace.isPathWithinWorkspace(siblingPath)).toBe(false);
+    } finally {
+      rmSync(aliasDir, { recursive: true, force: true });
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects dangling leaf symlinks', () => {
     const rootDir = mkdtempSync(path.join(os.tmpdir(), 'qwen-workspace-'));
     const danglingPath = path.join(rootDir, 'dangling');

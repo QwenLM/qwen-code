@@ -303,16 +303,38 @@ export function resolveWorkspacePath(pathToCheck: string): string {
       // non-existent files.
       !isFileSymlink(error.path)
     ) {
-      if (
-        error.path !== pathToCheck &&
-        pathToCheck.startsWith(`${error.path}${path.sep}`)
-      ) {
-        return pathToCheck;
-      }
-      return error.path;
+      return resolveMissingPath(pathToCheck);
     }
 
     throw error;
+  }
+}
+
+function resolveMissingPath(pathToCheck: string): string {
+  const missingTail: string[] = [];
+  let ancestor = pathToCheck;
+
+  while (true) {
+    try {
+      const resolvedAncestor = fs.realpathSync(ancestor);
+      return path.join(resolvedAncestor, ...missingTail);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        error.code !== 'ENOENT' ||
+        !error.path ||
+        isFileSymlink(error.path)
+      ) {
+        throw error;
+      }
+
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) {
+        return pathToCheck;
+      }
+      missingTail.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
   }
 }
 
