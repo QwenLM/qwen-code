@@ -225,7 +225,7 @@ describe('GitDiffDialog', () => {
     await flush();
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'branch',
-      ref: 'topic',
+      ref: 'refs/heads/topic',
     });
   });
 
@@ -323,7 +323,7 @@ describe('GitDiffDialog', () => {
     expect(workspaceGitBranches).toHaveBeenCalledWith(undefined);
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'branch',
-      ref: 'topic',
+      ref: 'refs/heads/topic',
     });
 
     const branchTrigger = document.body.querySelector(
@@ -355,7 +355,7 @@ describe('GitDiffDialog', () => {
     await flush();
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'branch',
-      ref: 'origin/search-target',
+      ref: 'refs/remotes/origin/search-target',
     });
 
     workspaceGitDiffFile.mockResolvedValue({ hunks: [], truncated: false });
@@ -370,7 +370,7 @@ describe('GitDiffDialog', () => {
       'src/a.ts',
       undefined,
       undefined,
-      { mode: 'branch', ref: 'origin/search-target' },
+      { mode: 'branch', ref: 'refs/remotes/origin/search-target' },
     );
   });
 
@@ -723,7 +723,7 @@ describe('GitDiffDialog', () => {
     await flush();
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'branch',
-      ref: 'bugfix/x',
+      ref: 'refs/heads/bugfix/x',
     });
 
     act(() => {
@@ -739,7 +739,7 @@ describe('GitDiffDialog', () => {
     expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'branch',
-      ref: 'bugfix/x',
+      ref: 'refs/heads/bugfix/x',
     });
   });
 

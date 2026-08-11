@@ -16,7 +16,12 @@ import { execFile } from 'node:child_process';
 import * as nodeFs from 'node:fs';
 import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
-import { structuredPatch, type Hunk, type ParsedDiff } from 'diff';
+import {
+  structuredPatch,
+  type Hunk,
+  type ParsedDiff,
+  type PatchOptions,
+} from 'diff';
 import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
@@ -112,6 +117,12 @@ const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
 const UNTRACKED_READ_CHUNK_BYTES = 64 * 1024;
 /** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
 const BINARY_SNIFF_BYTES = 8 * 1024;
+/** Wall-clock budget for one in-process collision diff. jsdiff's Myers walk
+ *  is quadratic in the edit distance: two fully dissimilar near-cap inputs
+ *  otherwise block the daemon's event loop for minutes. On timeout
+ *  `structuredPatch` returns `undefined`, which the caller treats like the
+ *  throwing path (one opaque row). */
+const COLLISION_PATCH_TIMEOUT_MS = 500;
 /** Memoized open flags for line counting. `O_NOFOLLOW` closes the TOCTOU
  *  window between the `lstat` symlink check and `open` — if the path is
  *  replaced with a symlink in that gap, `open` rejects with `ELOOP` instead
@@ -180,7 +191,7 @@ export async function fetchGitDiff(
   // mechanism, but pinning both flags everywhere is defense-in-depth —
   // git's behavior around these drivers has shifted between versions
   // before.
-  const [shortstatOut, untrackedOut] = await Promise.all([
+  const [shortstatOut, untrackedOut, ignoredUntrackedOut] = await Promise.all([
     runGit(
       [
         '--no-optional-locks',
@@ -204,9 +215,21 @@ export async function fetchGitDiff(
           gitRoot,
         )
       : Promise.resolve(null),
+    // Branch-mode collision classification needs the ignore-INCLUSIVE
+    // listing: a baseline-tracked path that was untracked-and-ignored (the
+    // common `git rm --cached` + .gitignore recipe) is absent from the
+    // exclude-standard list and would survive as the exact phantom deletion
+    // the classification exists to remove. All-added rows below stay
+    // exclude-standard-driven — an ignored file is not an addition.
+    comparison.untrackedBaseRef
+      ? runGit(['--no-optional-locks', 'ls-files', '-z', '--others'], gitRoot)
+      : Promise.resolve(null),
   ]);
   const rawUntrackedPaths = comparison.includeUntracked
     ? splitNulDelimited(untrackedOut)
+    : [];
+  const classifiablePaths = comparison.untrackedBaseRef
+    ? splitNulDelimited(ignoredUntrackedOut)
     : [];
 
   // Branch mode compares the worktree against the baseline tree, but
@@ -226,20 +249,20 @@ export async function fetchGitDiff(
   let trackedAtBase: Map<string, string> | null = null;
   if (
     comparison.untrackedBaseRef &&
-    rawUntrackedPaths.length > 0 &&
-    quickStats.filesCount + rawUntrackedPaths.length <= MAX_FILES_FOR_DETAILS
+    classifiablePaths.length > 0 &&
+    quickStats.filesCount + classifiablePaths.length <= MAX_FILES_FOR_DETAILS
   ) {
     trackedAtBase = await classifyPathsTrackedAtBase(
       gitRoot,
       comparison.untrackedBaseRef,
-      rawUntrackedPaths,
+      classifiablePaths,
     );
     if (trackedAtBase === null) return null;
     const tracked = trackedAtBase;
     filteredUntrackedPaths = rawUntrackedPaths.filter(
       (filePath) => !tracked.has(filePath),
     );
-    collisionPaths = rawUntrackedPaths.filter((filePath) =>
+    collisionPaths = classifiablePaths.filter((filePath) =>
       tracked.has(filePath),
     );
   }
@@ -473,7 +496,7 @@ export async function fetchGitDiffHunksForFile(
     // blob against the on-disk content.
     if (
       comparison.untrackedBaseRef &&
-      (await isUntrackedWorktreePath(gitRoot, relPath))
+      (await isUntrackedWorktreePath(gitRoot, relPath, true))
     ) {
       return await branchModeUntrackedHunks(
         gitRoot,
@@ -498,7 +521,7 @@ export async function fetchGitDiffHunksForFile(
     // worktree content instead of returning nothing. `branchModeUntrackedHunks`
     // falls back to the plain all-added synthesis when the baseline does not
     // track the path.
-    if (await isUntrackedWorktreePath(gitRoot, relPath)) {
+    if (await isUntrackedWorktreePath(gitRoot, relPath, true)) {
       return branchModeUntrackedHunks(
         gitRoot,
         comparison.untrackedBaseRef,
@@ -620,11 +643,15 @@ function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
  * regular files only (`ls-files --others` can list FIFOs whose open() blocks
  * forever waiting on a writer), `O_NOFOLLOW`, the `MAX_DIFF_SIZE_BYTES` read
  * cap, and the NUL sniff that rejects binary content (the same 8 KB window git
- * uses). `truncated` reports when the byte cap cut content.
+ * uses). `truncated` reports when the byte cap cut content. With `strict`,
+ * invalid UTF-8 is rejected instead of lossily decoded to U+FFFD — the
+ * collision comparison needs byte-faithful text so two byte-distinct files
+ * cannot decode to identical strings and drop the row.
  */
 async function readWorktreeTextFile(
   gitRoot: string,
   filePath: string,
+  strict = false,
 ): Promise<{ text: string; truncated: boolean } | null> {
   const absPath = path.join(gitRoot, filePath);
   try {
@@ -654,6 +681,7 @@ async function readWorktreeTextFile(
     for (let i = 0; i < sniffEnd; i++) {
       if (buf[i] === 0) return null;
     }
+    if (strict && !isUtf8(buf.subarray(0, offset))) return null;
     return {
       text: buf.toString('utf8', 0, offset),
       truncated: st.size > MAX_DIFF_SIZE_BYTES,
@@ -773,10 +801,14 @@ async function isBlobTrackedAtBase(
   return tracked.has(relPath);
 }
 
-/** Whether git lists the path as an untracked (and not ignored) worktree file. */
+/** Whether git lists the path as an untracked worktree file. Ignored paths
+ *  are excluded unless `includeIgnored` is set: branch-mode reroutes pass it
+ *  because a baseline-tracked path can be untracked AND ignored (the
+ *  `git rm --cached` + .gitignore recipe) and still collide. */
 async function isUntrackedWorktreePath(
   gitRoot: string,
   relPath: string,
+  includeIgnored = false,
 ): Promise<boolean> {
   const out = await runGit(
     [
@@ -784,7 +816,7 @@ async function isUntrackedWorktreePath(
       'ls-files',
       '-z',
       '--others',
-      '--exclude-standard',
+      ...(includeIgnored ? [] : ['--exclude-standard']),
       '--',
       `:(literal)${relPath}`,
     ],
@@ -857,7 +889,7 @@ async function diffBaseBlobAgainstWorktree(
   // Strict UTF-8 validation — invalid text is treated as binary instead of
   // being lossily decoded (see the baseRaw read above).
   if (!isUtf8(baseRaw)) return null;
-  const worktree = await readWorktreeTextFile(gitRoot, relPath);
+  const worktree = await readWorktreeTextFile(gitRoot, relPath, true);
   if (worktree === null) return null;
   // Cap the baseline side in BYTES, mirroring `readWorktreeTextFile` on the
   // worktree side. Slicing a decoded string would count UTF-16 code units
@@ -868,14 +900,27 @@ async function diffBaseBlobAgainstWorktree(
   const baseText = (
     baseTruncated ? baseRaw.subarray(0, MAX_DIFF_SIZE_BYTES) : baseRaw
   ).toString('utf8');
-  let patch: ParsedDiff;
+  // @types/diff does not declare the runtime-supported `timeout` option yet.
+  const patchOptions: PatchOptions & { timeout: number } = {
+    context: 3,
+    timeout: COLLISION_PATCH_TIMEOUT_MS,
+  };
+  let patch: ParsedDiff | undefined;
   try {
-    patch = structuredPatch(relPath, relPath, baseText, worktree.text, '', '', {
-      context: 3,
-    });
+    patch = structuredPatch(
+      relPath,
+      relPath,
+      baseText,
+      worktree.text,
+      '',
+      '',
+      patchOptions,
+    );
   } catch {
     return null;
   }
+  // With `timeout`, an aborted diff yields `undefined` instead of throwing.
+  if (!patch) return null;
   let added = 0;
   let removed = 0;
   for (const hunk of patch.hunks) {
@@ -905,7 +950,13 @@ async function branchModeUntrackedHunks(
 ): Promise<GitDiffFileHunks | null> {
   const trackedAtBase = await isBlobTrackedAtBase(gitRoot, baseRef, relPath);
   if (trackedAtBase === null) return null;
-  if (!trackedAtBase) return synthesizeUntrackedHunk(gitRoot, relPath);
+  if (!trackedAtBase) {
+    // All-added synthesis is for visible new files: an ignored path the
+    // baseline does not track appears in no comparison row, so it must not
+    // grow hunks here even though the ignore-inclusive reroute can reach it.
+    if (!(await isUntrackedWorktreePath(gitRoot, relPath))) return null;
+    return synthesizeUntrackedHunk(gitRoot, relPath);
+  }
   const row = await diffBaseBlobAgainstWorktree(gitRoot, baseRef, relPath);
   if (row === null) return null;
   return { hunks: row.hunks, truncated: row.truncated };
@@ -930,15 +981,19 @@ async function applyBaselineCollisions(
   perFileStats: Map<string, PerFileStats>,
 ): Promise<void> {
   const collisionSet = new Set(collisionPaths);
-  // A rename row entangling a collision path stays as-is; adding a collision
-  // row beside it would double-count the file.
+  // A collision path entangled with a rename is the rename's OLD path — the
+  // source was renamed away and recreated as an untracked file. That copy is
+  // a separate change on a separate path, so it is re-accounted below beside
+  // the rename row instead of being suppressed (suppressing it dropped the
+  // file from the list AND the totals). A rename's NEW path can never be a
+  // collision (rename targets are index entries, never untracked); guard it
+  // anyway so an unexpected row shape cannot count one path twice.
   const renameEntangled = new Set<string>();
   const phantom = new Map<string, { added: number; removed: number }>();
   forEachNumstatEntry(numstatOut, (entry) => {
     if (entry.oldPath) {
-      if (collisionSet.has(entry.path) || collisionSet.has(entry.oldPath)) {
+      if (collisionSet.has(entry.path)) {
         renameEntangled.add(entry.path);
-        renameEntangled.add(entry.oldPath);
       }
       return;
     }
@@ -1008,7 +1063,9 @@ async function worktreeModeMatchesBase(
   try {
     const st = await lstat(path.join(gitRoot, relPath));
     if (!st.isFile()) return false;
-    return (st.mode & 0o111 ? '100755' : '100644') === baseMode;
+    // Git canonicalizes modes from the owner-exec bit only (0o100); group or
+    // other exec bits never reach a tracked mode.
+    return (st.mode & 0o100 ? '100755' : '100644') === baseMode;
   } catch {
     return false;
   }

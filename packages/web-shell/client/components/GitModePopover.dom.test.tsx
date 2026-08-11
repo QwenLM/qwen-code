@@ -248,7 +248,9 @@ describe('GitModePopover existing branches', () => {
     clickButton('origin/develop');
     await flush();
 
-    expect(workspaceGitCheckout).toHaveBeenCalledWith('origin/develop');
+    expect(workspaceGitCheckout).toHaveBeenCalledWith(
+      'refs/remotes/origin/develop',
+    );
     expect(onIntentChange).toHaveBeenCalledWith({ mode: 'current' });
     expect(onBranchChanged).toHaveBeenCalledTimes(1);
   });
@@ -429,7 +431,7 @@ describe('GitModePopover existing branches', () => {
     expect(inFlight.every((option) => option.disabled)).toBe(true);
     act(() => inFlight[1]?.click());
     expect(workspaceGitCheckout).toHaveBeenCalledTimes(1);
-    expect(workspaceGitCheckout).toHaveBeenCalledWith('topic');
+    expect(workspaceGitCheckout).toHaveBeenCalledWith('refs/heads/topic');
     // The mode radios stay disabled while the checkout is in flight too: a
     // slow checkout must not be able to overwrite an intent the user
     // confirms in another mode while it runs.

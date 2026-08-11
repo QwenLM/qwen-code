@@ -143,7 +143,7 @@ export async function fetchGitBranches(
       ],
       env,
     ).catch(() => ''),
-    runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env).catch(() => ''),
+    readHeadBranchName(cwd, env),
     runGit(
       cwd,
       ['reflog', 'show', '--format=%gs', `-${MAX_REFLOG_ENTRIES}`],
@@ -267,6 +267,25 @@ async function getDetachedHead(
 }
 
 /**
+ * The branch HEAD points at, or '' when detached. Reads the full symbolic
+ * ref and strips the prefix: unlike `symbolic-ref --short`, which shortens
+ * to the shortest unambiguous name and reports `heads/<branch>` when a tag
+ * of the same name exists, the full form always yields the real branch
+ * name. Every checkout-internal decision (landing checks, rollback
+ * targets, reported results) must use this form, or a colliding-ref repo
+ * resolves the wrong ref.
+ */
+async function readHeadBranchName(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  const raw = (
+    await runGit(cwd, ['symbolic-ref', '--quiet', 'HEAD'], env).catch(() => '')
+  ).trim();
+  return raw.startsWith('refs/heads/') ? raw.slice('refs/heads/'.length) : raw;
+}
+
+/**
  * Whether `value` is safe to pass to git as a checkout target or branch start
  * point: a plausible ref name (branch, tag, or short/full SHA) that cannot be
  * mistaken for a git option (`-f`, `--patch`, `--output=…`) or a pathspec (`.`)
@@ -314,17 +333,56 @@ async function runCheckoutStep(
     return;
   } catch (err) {
     if (await checkoutLanded(cwd, landing, env)) return;
-    if (original.ref) {
-      await runGit(cwd, ['checkout', original.ref, '--'], env).catch(() => {});
-    } else if (original.commit) {
-      await runGit(
-        cwd,
-        ['checkout', '--detach', original.commit, '--'],
-        env,
-      ).catch(() => {});
+    // Roll back only when HEAD's reflog records this step's checkout as the
+    // most recent checkout move — the evidence that the step moved HEAD
+    // before failing (a failing post-checkout hook can move it away again).
+    // Without that proof a merely refused checkout would restore its stale
+    // snapshot over a concurrent checkout that legitimately landed HEAD
+    // elsewhere in the meantime, undoing a successful switch.
+    if (await checkoutMovedHead(cwd, landing, env)) {
+      if (original.ref) {
+        await runGit(cwd, ['checkout', original.ref, '--'], env).catch(
+          () => {},
+        );
+      } else if (original.commit) {
+        await runGit(
+          cwd,
+          ['checkout', '--detach', original.commit, '--'],
+          env,
+        ).catch(() => {});
+      }
     }
     throw err;
   }
+}
+
+/**
+ * Whether HEAD's most recent checkout entry in the reflog records a move to
+ * `landing` — the trace this step's `git checkout` leaves when it moves HEAD
+ * before failing. Entries a failing hook adds afterwards (an empty-message
+ * `symbolic-ref` entry, or `update-ref -m` ones) are skipped, bounded so a
+ * long trail degrades to `false` instead of matching something stale. A
+ * concurrent actor's successful checkout leaves its own destination in the
+ * reflog, which does not match. With reflogging disabled there is no
+ * evidence the step moved HEAD, so this stays `false`.
+ */
+async function checkoutMovedHead(
+  cwd: string,
+  landing: CheckoutLanding,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  if (!landing.branch) return false;
+  const out = await runGit(
+    cwd,
+    ['reflog', '--format=%gs', '-5', 'HEAD'],
+    env,
+  ).catch(() => '');
+  const suffix = ` to ${landing.branch}`;
+  for (const line of out.split('\n')) {
+    if (!line.startsWith('checkout: moving from ')) continue;
+    return line.endsWith(suffix);
+  }
+  return false;
 }
 
 async function checkoutLanded(
@@ -333,9 +391,7 @@ async function checkoutLanded(
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
   const [nowBranchRaw, nowCommitRaw, targetCommitRaw] = await Promise.all([
-    runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env).catch(
-      () => '',
-    ),
+    readHeadBranchName(cwd, env),
     runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => ''),
     landing.commitRef
       ? runGit(
@@ -351,6 +407,12 @@ async function checkoutLanded(
       : Promise.resolve(''),
   ]);
   if (landing.branch && nowBranchRaw.trim() === landing.branch) return true;
+  // Commit equality only proves HEAD sits on the target commit, not that the
+  // requested switch happened. That is sufficient for detached landings
+  // (tag/SHA targets expect no branch); while HEAD is still attached to a
+  // branch the same equality held before the step ran, so absorbing it would
+  // report a refused switch as a success.
+  if (nowBranchRaw.trim() !== '') return false;
   const nowCommit = nowCommitRaw.trim();
   const targetCommit = targetCommitRaw.trim();
   return targetCommit !== '' && nowCommit === targetCommit;
@@ -368,15 +430,23 @@ export async function gitCheckout(
   if (!isValidCheckoutRef(ref)) {
     throw new Error(`invalid checkout ref: ${ref}`);
   }
+  // Fully qualified refs (what the Web Shell pickers submit) name the exact
+  // namespace of the row the user selected; a bare `git checkout <name>`
+  // re-resolves the short name and can land on a colliding ref instead.
+  // Normalize each namespace to the form the disambiguation below handles
+  // explicitly. `refs/tags/` stays qualified: git resolves it unambiguously
+  // and detaches, which is the tag semantic.
+  if (ref.startsWith('refs/heads/')) {
+    ref = ref.slice('refs/heads/'.length);
+  } else if (ref.startsWith('refs/remotes/')) {
+    ref = ref.slice('refs/remotes/'.length);
+  }
+  if (!isValidCheckoutRef(ref)) {
+    throw new Error(`invalid checkout ref: ${ref}`);
+  }
   // Snapshot HEAD before switching: `runCheckoutStep` needs it both to
   // verify a hook-failed landing and to roll back a genuinely failed one.
-  const originalRef = (
-    await runGit(
-      cwd,
-      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-      env,
-    ).catch(() => '')
-  ).trim();
+  const originalRef = await readHeadBranchName(cwd, env);
   const original = {
     ref: originalRef,
     commit: originalRef
@@ -429,9 +499,7 @@ export async function gitCheckout(
         env,
       );
     }
-    const head = (
-      await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
-    ).trim();
+    const head = await readHeadBranchName(cwd, env);
     return { branch: head, detached: false };
   }
   // `--` terminates options/pathspecs so a validated ref can never be
@@ -443,14 +511,9 @@ export async function gitCheckout(
     original,
     env,
   );
-  const headRaw = await runGit(
-    cwd,
-    ['symbolic-ref', '--short', 'HEAD'],
-    env,
-  ).catch(() => '');
-  const trimmed = headRaw.trim();
-  if (trimmed) {
-    return { branch: trimmed, detached: false };
+  const head = await readHeadBranchName(cwd, env);
+  if (head) {
+    return { branch: head, detached: false };
   }
   const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env);
   return { branch: sha.trim(), detached: true };
@@ -481,26 +544,14 @@ export async function gitCreateBranch(
   // post-checkout hook. If that hook fails the call throws even though the
   // workspace is already on the new branch; capture the previous HEAD so we
   // can roll the half-created branch back instead of leaving it in place.
-  const originalRef = (
-    await runGit(
-      cwd,
-      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-      env,
-    ).catch(() => '')
-  ).trim();
+  const originalRef = await readHeadBranchName(cwd, env);
   const originalCommit = originalRef
     ? ''
     : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim();
   try {
     await runGit(cwd, args, env);
   } catch (err) {
-    const nowOn = (
-      await runGit(
-        cwd,
-        ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-        env,
-      ).catch(() => '')
-    ).trim();
+    const nowOn = await readHeadBranchName(cwd, env);
     if (nowOn === name) {
       if (originalRef) {
         await runGit(cwd, ['checkout', originalRef, '--'], env).catch(() => {});
@@ -541,14 +592,13 @@ export async function gitPush(
   if (opts?.setUpstream) {
     let branch: string;
     try {
-      branch = (
-        await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
-      ).trim();
+      branch = (await runGit(cwd, ['symbolic-ref', 'HEAD'], env)).trim();
     } catch {
       throw new Error(
         'cannot push with --set-upstream in detached HEAD state; check out a branch first',
       );
     }
+    branch = branch.replace(/^refs\/heads\//, '');
     // If the branch already tracks an upstream, push without rewriting it.
     const hasUpstream = await runGit(
       cwd,

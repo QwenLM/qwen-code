@@ -589,15 +589,17 @@ export function GitDiffContent({
         }
         setBranches(result);
         setBranchRef((current) => {
-          const names = [
-            ...result.local.map((branch) => branch.name),
-            ...result.remote.map((branch) => branch.name),
+          // Fully qualified values name the exact ref of the selected row,
+          // so a colliding short name resolves to the chosen target.
+          const qualified = [
+            ...result.local.map((branch) => `refs/heads/${branch.name}`),
+            ...result.remote.map((branch) => `refs/remotes/${branch.name}`),
           ];
-          return current && names.includes(current)
-            ? current
-            : (result.local.find((branch) => !branch.isHead)?.name ??
-                result.remote[0]?.name ??
-                '');
+          if (current && qualified.includes(current)) return current;
+          const fallback = result.local.find((branch) => !branch.isHead);
+          if (fallback) return `refs/heads/${fallback.name}`;
+          const remote = result.remote[0];
+          return remote ? `refs/remotes/${remote.name}` : '';
         });
       })
       .catch(() => {
@@ -635,11 +637,11 @@ export function GitDiffContent({
       ...(branches?.local ?? [])
         .filter((branch) => !branch.isHead)
         .map((branch) => ({
-          value: branch.name,
+          value: `refs/heads/${branch.name}`,
           label: sanitizeControlChars(branch.name),
         })),
       ...(branches?.remote ?? []).map((branch) => ({
-        value: branch.name,
+        value: `refs/remotes/${branch.name}`,
         label: sanitizeControlChars(branch.name),
       })),
     ],

@@ -274,6 +274,44 @@ describe('gitCheckout', () => {
       'local edit\n',
     );
   });
+
+  it('restores the original branch when a failing hook moved HEAD away', async () => {
+    // A post-checkout hook can move HEAD (`symbolic-ref` needs no index
+    // lock, which the parent checkout holds) and then fail the checkout.
+    // The rollback must restore the original branch — it fires because
+    // HEAD's reflog records this step's checkout move. The hook removes
+    // itself so the rollback checkout is not re-sabotaged by a second run.
+    const dir = makeRepo();
+    git(dir, 'branch', 'target');
+    git(dir, 'branch', 'elsewhere');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      '#!/bin/sh\nrm -f "$0"\ngit symbolic-ref HEAD refs/heads/elsewhere\nexit 1\n',
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+    await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('rejects a failed checkout whose target commit already matches HEAD', async () => {
+    // origin/feature points at the same commit as master. With the index
+    // locked, the tracking checkout fails BEFORE moving HEAD; the
+    // commit-match fallback must not absorb that as a successful landing
+    // while HEAD is still attached to a branch.
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git(dir, 'fetch', '-q', 'origin');
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+    try {
+      await expect(gitCheckout(dir, 'origin/feature')).rejects.toThrow();
+    } finally {
+      fs.rmSync(path.join(dir, '.git', 'index.lock'));
+    }
+    expect(currentBranch(dir)).toBe('master');
+  });
 });
 
 describe('gitCreateBranch', () => {
@@ -750,6 +788,52 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
     // commit) rather than detaching HEAD on the remote-tracking ref.
     expect(result).toEqual({ branch, detached: false });
     expect(headSha(dir)).toBe(localHead);
+  });
+});
+
+describe('gitCheckout fully qualified refs (R6-19)', () => {
+  it('lands on the branch, not a same-named tag, via refs/heads/', async () => {
+    const dir = makeRepo();
+    // Tag the initial commit, then advance the branch and create a
+    // same-named branch: the qualified value must land on the branch.
+    git(dir, 'tag', 'release');
+    const tagCommit = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+    git(dir, 'branch', 'release');
+
+    const result = await gitCheckout(dir, 'refs/heads/release');
+
+    expect(result).toEqual({ branch: 'release', detached: false });
+    expect(headSha(dir)).not.toBe(tagCommit);
+  });
+
+  it('rejects a refs/heads/ value whose remainder is an option', async () => {
+    const dir = makeRepo();
+    await expect(gitCheckout(dir, 'refs/heads/-f')).rejects.toThrow(
+      'invalid checkout ref',
+    );
+  });
+
+  it('tracks the exact remote ref via refs/remotes/', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+    git(dir, 'fetch', '-q', 'origin');
+
+    const result = await gitCheckout(dir, 'refs/remotes/origin/feature');
+
+    expect(result).toEqual({ branch: 'feature', detached: false });
+    expect(currentBranch(dir)).toBe('feature');
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      'feature@{u}',
+    ).trim();
+    expect(tracking).toBe('origin/feature');
   });
 });
 

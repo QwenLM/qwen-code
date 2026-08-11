@@ -169,18 +169,26 @@ export function GitModePopover({
     const query = existingSearch.trim().toLowerCase();
     const groups = new Map<string, Array<{ name: string; ref: string }>>();
     const add = (group: string, name: string, ref = name) => {
-      if (query && !ref.toLowerCase().includes(query)) return;
+      if (query && !name.toLowerCase().includes(query)) return;
       const items = groups.get(group) ?? [];
       items.push({ name, ref });
       groups.set(group, items);
     };
+    // Values are fully qualified so the daemon checks out the exact ref
+    // namespace of the clicked row; a colliding short name (a tag or
+    // same-named branch) cannot resolve to a different target.
     for (const item of existingBranches?.local ?? []) {
-      if (!item.isHead) add(t('gitMode.existingLocal'), item.name);
+      if (!item.isHead)
+        add(t('gitMode.existingLocal'), item.name, `refs/heads/${item.name}`);
     }
     for (const item of existingBranches?.remote ?? []) {
       const slash = item.name.indexOf('/');
       const remote = slash > 0 ? item.name.slice(0, slash) : 'remote';
-      add(t('gitMode.existingRemote', { remote }), item.name);
+      add(
+        t('gitMode.existingRemote', { remote }),
+        item.name,
+        `refs/remotes/${item.name}`,
+      );
     }
     return groups;
   }, [existingBranches, existingSearch, t]);
