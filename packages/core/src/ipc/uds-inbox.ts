@@ -30,6 +30,7 @@ import {
 } from './peer-frames.js';
 import { isPidAlive } from '../utils/process-liveness.js';
 import { isLocalIpcPath, resolvePeerSocketPath } from './socket-path.js';
+import { probePeerSocket } from './uds-client.js';
 
 const debugLogger = createDebugLogger('PEER_IPC');
 
@@ -218,9 +219,14 @@ export async function startPeerInbox(
   }
 
   // A socket file left behind by a crashed session would make bind() fail
-  // with EADDRINUSE forever. Unlinking is safe because the path is keyed
-  // by our own PID: if a live process were listening there, it would be
-  // this one.
+  // with EADDRINUSE forever. A different PID namespace can reuse our numeric
+  // PID while sharing this directory, so never unlink a live listener.
+  if (await probePeerSocket(socketPath)) {
+    debugLogger.error(
+      `peer inbox path already has a live listener, refusing to replace it: ${socketPath}`,
+    );
+    return null;
+  }
   try {
     await fs.unlink(socketPath);
   } catch {

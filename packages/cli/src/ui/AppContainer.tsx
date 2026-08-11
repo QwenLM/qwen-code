@@ -440,6 +440,16 @@ export function useQueuedSubmissionDrain({
 
     queueDrainingRef.current = true;
     let admissionFailed = false;
+    let submissionRestored = false;
+    const restoreSubmission = () => {
+      if (submission.kind === 'goal' || submissionRestored) return;
+      submissionRestored = true;
+      restoreMessages(
+        [submission.modelText],
+        submission.submittedPrompt,
+        submission.origin,
+      );
+    };
     const markAdmissionFailed = () => {
       admissionFailed = true;
       admissionFailureRef.current = {
@@ -486,13 +496,12 @@ export function useQueuedSubmissionDrain({
                 ? { notificationDisplayText: submission.submittedPrompt }
                 : {}),
               onAdmissionFailed: () => {
-                restoreMessages(
-                  [submission.modelText],
-                  submission.submittedPrompt,
-                  submission.origin,
-                );
+                restoreSubmission();
                 markAdmissionFailed();
               },
+              ...(submission.origin === 'peer'
+                ? { onDeliveryFailed: restoreSubmission }
+                : {}),
             },
           );
     void Promise.resolve(request)
@@ -2586,7 +2595,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // are unquestionably what is being submitted — and a peer envelope
       // popped into the composer would drain as `UserQuery` and reach the
       // shell. The flag already tracks composer contents on its own.
-      const submitsPeerContent = composerHoldsPeerContentRef.current;
+      const submissionConsumesComposer =
+        consumesComposerState || submittedValue === buffer.text;
+      const submitsPeerContent =
+        composerHoldsPeerContentRef.current && submissionConsumesComposer;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
         submittedPromptProvenanceUnavailableRef.current = false;
@@ -2594,7 +2606,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Cleared here rather than inside the block above for the same
       // reason: the vim path consumes the composer without saying so, and
       // a flag left set would tag the *next* submission `'peer'` too.
-      composerHoldsPeerContentRef.current = false;
+      if (submissionConsumesComposer) {
+        composerHoldsPeerContentRef.current = false;
+      }
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
@@ -2874,6 +2888,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       addMessage,
       agentViewState,
+      buffer.text,
       streamingState,
       isProcessing,
       submitQuery,

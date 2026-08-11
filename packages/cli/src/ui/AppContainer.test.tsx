@@ -1949,6 +1949,61 @@ describe('AppContainer State Management', () => {
       });
     });
 
+    it('restores a cancelled peer turn exactly once', async () => {
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue({
+        getSnapshot: () => ({ goal: undefined }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>);
+
+      const restoreMessages = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]): Promise<void> => {
+        const metadata = args[3] as
+          | { onDeliveryFailed?: () => void }
+          | undefined;
+        metadata?.onDeliveryFailed?.();
+      }) as unknown as Parameters<
+        typeof useQueuedSubmissionDrain
+      >[0]['submitQuery'];
+      let popped = false;
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission: () => {
+            if (popped) return null;
+            popped = true;
+            return {
+              kind: 'user',
+              modelText: 'peer envelope',
+              submittedPrompt: 'message from peer',
+              origin: 'peer',
+              turnKey: 'message-queue:peer-cancel',
+            };
+          },
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(restoreMessages).toHaveBeenCalledOnce();
+        expect(restoreMessages).toHaveBeenCalledWith(
+          ['peer envelope'],
+          'message from peer',
+          'peer',
+        );
+      });
+    });
+
     it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
       const mockQueueMessage = vi.fn();
       const mockSubmitQuery = vi.fn();
@@ -2378,10 +2433,18 @@ describe('AppContainer State Management', () => {
       const renderWithPoppedPeer = (modelText: string = envelope) => {
         const mockQueueMessage = vi.fn();
         const handleSlashCommand = vi.fn();
+        let currentText = '';
         let onBufferChange: ((text: string) => void) | undefined;
         mockedUseTextBuffer.mockImplementation((options) => {
           onBufferChange = options.onChange;
-          return { text: '', setText: vi.fn() };
+          return {
+            get text() {
+              return currentText;
+            },
+            setText: vi.fn((text: string) => {
+              currentText = text;
+            }),
+          };
         });
         mockedUseSlashCommandProcessor.mockReturnValue({
           handleSlashCommand,
@@ -2418,11 +2481,13 @@ describe('AppContainer State Management', () => {
         );
 
         expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+        currentText = modelText;
         return {
           mockQueueMessage,
           handleSlashCommand,
           changeBuffer: (text: string) => {
             act(() => {
+              currentText = text;
               onBufferChange?.(text);
             });
           },
@@ -2870,6 +2935,55 @@ describe('AppContainer State Management', () => {
       expect(setText).toHaveBeenCalledWith('', {
         clearUndoHistory: true,
       });
+    });
+
+    it('does not let a stashed peer envelope tag the initial prompt', () => {
+      const stashedText =
+        '<cross_session_message from="/tmp/peer.sock">\npeer text\n</cross_session_message>';
+      const addMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({ text: '', setText: vi.fn() });
+      mockedRestorePromptStash.mockImplementation(
+        (_targetDir, _currentText, onRestore) => {
+          onRestore(stashedText);
+          return true;
+        },
+      );
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('configured initial prompt');
+      expect(addMessage).toHaveBeenCalledWith(
+        'configured initial prompt',
+        false,
+        undefined,
+      );
+
+      capturedUIActions.handleFinalSubmit(stashedText, {
+        submittedPrompt: stashedText,
+      });
+      expect(addMessage).toHaveBeenLastCalledWith(
+        stashedText,
+        false,
+        undefined,
+        'peer',
+      );
     });
 
     it('omits provenance while Vim mode is enabled', () => {

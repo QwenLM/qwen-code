@@ -191,6 +191,24 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     expect(received).toHaveLength(1);
   });
 
+  it('refuses to replace a live listener at the same socket path', async () => {
+    const first = await listen();
+    const second = await startPeerInbox({
+      socketPath: first.socketPath,
+      onFrame: () => {},
+    });
+    await second?.close();
+
+    expect(second).toBeNull();
+    expect(await probePeerSocket(first.socketPath)).toBe(true);
+    await sendPeerFrame(
+      first.socketPath,
+      buildUserFrame({ content: 'still reaches the first listener' }),
+    );
+    await settle();
+    expect(received).toHaveLength(1);
+  });
+
   it('refuses a non-local path', async () => {
     const started = await startPeerInbox({
       socketPath: 'relative.sock',
