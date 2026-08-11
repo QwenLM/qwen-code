@@ -350,6 +350,89 @@ describe('useProviderUpdates', () => {
     );
   });
 
+  it('preserves the stored global base URL when updating', async () => {
+    const globalTemplate = buildProviderTemplate(
+      codingPlanProvider,
+      CODING_PLAN_GLOBAL_BASE_URL,
+    );
+    const globalVersion = computeModelListVersion(globalTemplate);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: globalTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.baseUrl`,
+      CODING_PLAN_GLOBAL_BASE_URL,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      globalVersion,
+    );
+  });
+
+  it('updates both provider metadata keys from a batched prompt', async () => {
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest?.entries).toHaveLength(2);
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
+      chinaVersion,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.version`,
+      tokenVersion,
+    );
+  });
+
   it.each([
     {
       name: 'on the same protocol',
