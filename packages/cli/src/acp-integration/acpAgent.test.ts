@@ -1888,6 +1888,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        getRetainedTurnResultPromptIds: ReturnType<typeof vi.fn>;
+        isTurnResultPromptIdRetained: ReturnType<typeof vi.fn>;
+        registerExternalTurnResultPromptId: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
@@ -3621,6 +3624,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: vi
           .fn()
           .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+        getRetainedTurnResultPromptIds: vi
+          .fn()
+          .mockReturnValue(['daemon-prompt-a']),
+        isTurnResultPromptIdRetained: vi.fn().mockReturnValue(true),
+        registerExternalTurnResultPromptId: vi.fn(),
         getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
         clearActiveTodoPlanRevision: vi.fn(),
         clearTodoStopGuardTrust: vi.fn(),
@@ -9095,6 +9103,60 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('does not return a turn_result from an abandoned rewind branch', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const abandoned = {
+      promptId: 'prompt-abandoned',
+      state: 'completed',
+      stopReason: 'end_turn',
+      endedAt: 2000,
+      resultText: 'abandoned answer',
+    };
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [
+        { type: 'system', subtype: 'turn_result', systemPayload: abandoned },
+      ],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock?.isTurnResultPromptIdRetained.mockReturnValue(false);
+    const response = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.sessionTurnStatus,
+      {
+        sessionId,
+        promptId: 'prompt-abandoned',
+      },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(response).toEqual({ v: 1, sessionId, turnResult: null });
+  });
+
   it('paginates bounded turn_result scans until the promptId matches', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);
@@ -13019,6 +13081,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       historyBeforeRewind: [{ role: 'user', parts: [{ text: 'before' }] }],
       targetTurnIndex: 1,
       apiTruncateIndex: 2,
+      retainedTurnResultPromptIds: ['daemon-prompt-a'],
       filesChanged: [],
       filesFailed: [],
       artifactSnapshot,
@@ -17090,6 +17153,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     // the SSE stream stays clean for clients that already have the
     // history rendered.
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+    expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
+      messages,
+    );
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
     expect(

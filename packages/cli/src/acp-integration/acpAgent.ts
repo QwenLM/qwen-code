@@ -400,6 +400,7 @@ async function findSettledTurnResult(
   sessionId: string,
   promptId: string | undefined,
   workspaceCwd: string,
+  isRetained: (promptId: string) => boolean,
 ): Promise<TurnResultRecordPayload | undefined> {
   let cursor: string | undefined;
   for (let page = 0; page < TURN_STATUS_SCAN_MAX_PAGES; page++) {
@@ -419,7 +420,10 @@ async function findSettledTurnResult(
       }
       const payload = record.systemPayload;
       if (!isTurnResultRecordPayload(payload)) continue;
-      if (promptId === undefined || payload.promptId === promptId) {
+      if (
+        isRetained(payload.promptId) &&
+        (promptId === undefined || payload.promptId === promptId)
+      ) {
         return payload;
       }
     }
@@ -5062,7 +5066,6 @@ class QwenAgent implements Agent {
                 const records = sessionData?.conversation.messages;
                 let replayUpdates: SessionUpdate[] = [];
                 if (records) {
-                  createdSession.primeTurnFromHistory(records);
                   const visibleRecords = selectVisibleHistoryRecords(
                     records,
                     shouldHideInheritedHistory(params),
@@ -10622,6 +10625,7 @@ class QwenAgent implements Agent {
           );
         }
         await recorder.recordTurnResultStrict(turnResult);
+        session.registerExternalTurnResultPromptId(turnResult.promptId);
         return { v: 1, sessionId };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionTurnStatus: {
@@ -10666,6 +10670,7 @@ class QwenAgent implements Agent {
               sessionId,
               typeof rawPromptId === 'string' ? rawPromptId : undefined,
               cwd,
+              (promptId) => session.isTurnResultPromptIdRetained(promptId),
             );
             return {
               v: 1,
@@ -11119,6 +11124,7 @@ class QwenAgent implements Agent {
           success: true,
           historyBeforeRewind,
           ...rewindResult,
+          retainedTurnResultPromptIds: session.getRetainedTurnResultPromptIds(),
           filesChanged,
           filesFailed,
           ...(artifactSnapshot ? { artifactSnapshot } : {}),
@@ -12325,6 +12331,9 @@ class QwenAgent implements Agent {
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+        if (options.replayHistory === false) {
+          session.primeTurnFromHistory(sessionData.conversation.messages);
+        }
       }
 
       if (

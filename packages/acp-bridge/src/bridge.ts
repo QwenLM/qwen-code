@@ -613,6 +613,8 @@ interface SessionEntry {
    * transient terminal-to-404 regression.
    */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
+  /** Maximum time to wait for a queued turn's best-effort transcript write. */
+  terminalPersistenceTimeoutMs: number;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -1365,6 +1367,18 @@ function terminalStatusRecord(
   };
 }
 
+/** Reuse one channel-exit rejection instead of adding a listener per call. */
+function getTransportClosedReject(entry: SessionEntry): Promise<never> {
+  if (!entry.transportClosedReject) {
+    entry.transportClosedReject = entry.channel.exited.then(() => {
+      throw new BridgeChannelClosedError(
+        `mid-request (session ${entry.sessionId})`,
+      );
+    });
+  }
+  return entry.transportClosedReject;
+}
+
 /**
  * Publish the formal terminal event for an accepted prompt exactly once.
  * All terminal paths (agent settle, queued removal, deadline, session
@@ -1395,13 +1409,27 @@ function publishPromptTerminal(
     !pendingEntry.dispatched &&
     pendingEntry.terminalPersistence === undefined
   ) {
-    pendingEntry.terminalPersistence = entry.connection
-      .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord, {
-        sessionId: entry.sessionId,
-        turnResult: terminalStatusRecord(status),
-      })
-      .then(() => undefined);
-    pendingEntry.terminalPersistence.catch(() => {});
+    pendingEntry.terminalPersistence = Promise.race([
+      withTimeout(
+        entry.connection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+          {
+            sessionId: entry.sessionId,
+            turnResult: terminalStatusRecord(status),
+          },
+        ),
+        entry.terminalPersistenceTimeoutMs,
+        SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+      ),
+      getTransportClosedReject(entry),
+    ]).then(
+      () => undefined,
+      (error: unknown) => {
+        writeStderrLine(
+          `[turn-result] session=${entry.sessionId} promptId=${pendingEntry.promptId} action=persist_failed error=${extractErrorMessage(error)}`,
+        );
+      },
+    );
   }
   const originatorClientId = pendingEntry.originatorClientId;
   if (terminal.kind === 'complete') {
@@ -4071,28 +4099,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     byId.get(sessionId)?.pendingInteractions.clear();
   };
 
-  /**
-   * Lazy-init the per-session `transportClosedReject` promise that
-   * `sendPrompt` / `setSessionModel` / `applyModelServiceId` race their
-   * ACP calls against. ONE listener is attached to `channel.exited`
-   * over the session's lifetime (the first caller "wins" and creates
-   * the promise; subsequent callers reuse it) — a per-call attach
-   * would grow Node's listener list linearly with prompt count on
-   * chatty sessions. The rejection message names the FIRST caller,
-   * which can be misleading if a later method observes the failure;
-   * the cost-benefit favors the single-listener invariant.
-   */
-  const getTransportClosedReject = (entry: SessionEntry): Promise<never> => {
-    if (!entry.transportClosedReject) {
-      entry.transportClosedReject = entry.channel.exited.then(() => {
-        throw new BridgeChannelClosedError(
-          `mid-request (session ${entry.sessionId})`,
-        );
-      });
-    }
-    return entry.transportClosedReject;
-  };
-
   const resolveWorkspaceKey = (rawWorkspaceCwd: string): string => {
     // #7139: host-shaped Windows paths reach the in-container bridge via
     // clients and persisted registrations; the shared helper maps them to
@@ -4781,6 +4787,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingAgentNotificationCount: 0,
       pendingPromptList: [],
       terminalTurnStatuses: new Map(),
+      terminalPersistenceTimeoutMs: initTimeoutMs,
       midTurnMessageQueue: [],
       modelChangeQueue: Promise.resolve(),
       approvalModeQueue: Promise.resolve(),
@@ -9607,7 +9614,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
-      entry.terminalTurnStatuses.clear();
+      const retainedTurnResultPromptIds =
+        response['retainedTurnResultPromptIds'];
+      if (
+        Array.isArray(retainedTurnResultPromptIds) &&
+        retainedTurnResultPromptIds.every(
+          (promptId): promptId is string => typeof promptId === 'string',
+        )
+      ) {
+        const retained = new Set(retainedTurnResultPromptIds);
+        for (const promptId of entry.terminalTurnStatuses.keys()) {
+          if (!retained.has(promptId)) {
+            entry.terminalTurnStatuses.delete(promptId);
+          }
+        }
+      } else {
+        entry.terminalTurnStatuses.clear();
+      }
       const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
       const filesChanged = (response['filesChanged'] as string[]) ?? [];
       const filesFailed = (response['filesFailed'] as string[]) ?? [];

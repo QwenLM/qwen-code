@@ -100,6 +100,14 @@ export class MessageRewriteMiddleware {
       | undefined;
     const text = content?.['text'] ?? '';
     const ownerPromptId = this.getOwnerPromptId();
+    const meta = updateRecord['_meta'] as Record<string, unknown> | undefined;
+
+    if (
+      updateType === 'agent_message_chunk' &&
+      meta?.['qwenDiscreteMessage'] === true
+    ) {
+      await this.flushTurn(signal);
+    }
 
     // Always send original message as-is
     await this.sendUpdate(update, {
@@ -113,9 +121,7 @@ export class MessageRewriteMiddleware {
 
     if (
       updateType === 'agent_message_chunk' &&
-      (updateRecord['_meta'] as Record<string, unknown> | undefined)?.[
-        'source'
-      ] === 'slash_command'
+      meta?.['source'] === 'slash_command'
     ) {
       return;
     }

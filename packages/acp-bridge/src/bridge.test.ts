@@ -3593,7 +3593,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('clears terminal overlays after a successful transcript rewind', async () => {
+  it('keeps terminal overlays retained by a successful transcript rewind', async () => {
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
@@ -3604,9 +3604,13 @@ describe('createAcpSessionBridge', () => {
             }
             if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
               return {
-                targetTurnIndex: 0,
+                targetTurnIndex: 2,
                 filesChanged: [],
                 filesFailed: [],
+                retainedTurnResultPromptIds: [
+                  'prompt-before-rewind-a',
+                  'prompt-before-rewind-b',
+                ],
               };
             }
             return {};
@@ -3614,30 +3618,43 @@ describe('createAcpSessionBridge', () => {
         }).channel,
     });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    await bridge.sendPrompt(
-      session.sessionId,
-      {
-        sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'abandoned answer' }],
-      },
-      undefined,
-      { promptId: 'prompt-before-rewind' },
-    );
+    for (const promptId of [
+      'prompt-before-rewind-a',
+      'prompt-before-rewind-b',
+      'prompt-before-rewind-c',
+    ]) {
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: promptId }],
+        },
+        undefined,
+        { promptId },
+      );
+    }
+
+    await bridge.rewindSession(session.sessionId, { promptId: 'turn-2' });
+
     await expect(
       bridge.getSessionTurnStatus(
         session.sessionId,
         undefined,
-        'prompt-before-rewind',
+        'prompt-before-rewind-a',
       ),
     ).resolves.toMatchObject({ state: 'completed' });
-
-    await bridge.rewindSession(session.sessionId, { promptId: 'turn-0' });
-
     await expect(
       bridge.getSessionTurnStatus(
         session.sessionId,
         undefined,
-        'prompt-before-rewind',
+        'prompt-before-rewind-b',
+      ),
+    ).resolves.toMatchObject({ state: 'completed' });
+    await expect(
+      bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-before-rewind-c',
       ),
     ).resolves.toBeUndefined();
     await bridge.shutdown();
@@ -10784,6 +10801,185 @@ describe('createAcpSessionBridge', () => {
       await running;
       await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
       await bridge.shutdown();
+    });
+
+    it('keeps queued removal authoritative when terminal persistence fails', async () => {
+      let releaseRunning!: () => void;
+      const runningGate = new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          if ((request.prompt[0] as { text?: string }).text === 'running') {
+            await runningGate;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+            throw new Error('session writer unavailable');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'running' }],
+      });
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-write-failure' },
+      );
+      void queued.catch(() => undefined);
+      await vi.waitFor(() =>
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2),
+      );
+
+      const removalOutcome = await bridge
+        .removePendingPrompt(session.sessionId, 'prompt-write-failure')
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+      releaseRunning();
+      await running;
+      const queuedOutcome = await queued.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      await bridge.shutdown();
+
+      expect(removalOutcome).toEqual({ value: { removed: true } });
+      expect(queuedOutcome).toMatchObject({ error: { name: 'AbortError' } });
+    });
+
+    it('bounds queued terminal persistence before removal resolves', async () => {
+      let releaseRunning!: () => void;
+      const runningGate = new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      });
+      let releasePersistence!: () => void;
+      const persistenceGate = new Promise<void>((resolve) => {
+        releasePersistence = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          if ((request.prompt[0] as { text?: string }).text === 'running') {
+            await runningGate;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+            await persistenceGate;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'running' }],
+      });
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-hung-write' },
+      );
+      void queued.catch(() => undefined);
+      await vi.waitFor(() =>
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2),
+      );
+
+      const removal = bridge.removePendingPrompt(
+        session.sessionId,
+        'prompt-hung-write',
+      );
+      const observed = await Promise.race([
+        removal.then(
+          () => 'settled',
+          () => 'rejected',
+        ),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('still-pending'), 150),
+        ),
+      ]);
+      releasePersistence();
+      await removal.catch(() => undefined);
+      releaseRunning();
+      await running;
+      await queued.catch(() => undefined);
+      await bridge.shutdown();
+
+      expect(observed).toBe('settled');
+    });
+
+    it('keeps a queued deadline authoritative when persistence fails', async () => {
+      let releaseRunning!: () => void;
+      const runningGate = new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await runningGate;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+            throw new Error('session writer unavailable');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'running' }],
+      });
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-deadline-write-failure', deadlineMs: 20 },
+      );
+      const queuedOutcomePromise = queued.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      releaseRunning();
+      await running;
+      const queuedOutcome = await queuedOutcomePromise;
+      await bridge.shutdown();
+
+      expect(queuedOutcome).toHaveProperty('error');
+      if (!('error' in queuedOutcome)) {
+        throw new Error('Expected queued prompt to reject');
+      }
+      expect(queuedOutcome.error).toBeInstanceOf(PromptDeadlineExceededError);
     });
 
     it('preserves a deadline error while enriching it from persistence', async () => {

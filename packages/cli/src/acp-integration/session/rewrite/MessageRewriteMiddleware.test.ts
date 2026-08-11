@@ -520,6 +520,69 @@ describe('MessageRewriteMiddleware', () => {
         turnIndex: 1,
       });
     });
+
+    it('isolates a discrete diagnostic from buffered model output', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      rewriter.rewrite
+        .mockResolvedValueOnce('rewritten answer')
+        .mockResolvedValueOnce('rewritten diagnostic');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'genuine model answer' },
+      } as unknown as SessionUpdate);
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'diagnostic notice' },
+        _meta: { source: 'diagnostic', qwenDiscreteMessage: true },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(rewriter.rewrite).toHaveBeenNthCalledWith(
+        1,
+        {
+          thoughts: [],
+          messages: ['genuine model answer'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+      expect(rewriter.rewrite).toHaveBeenNthCalledWith(
+        2,
+        {
+          thoughts: [],
+          messages: ['diagnostic notice'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+      const rewrittenUpdates = mockSendUpdate.mock.calls
+        .map(([update]) => update as Record<string, unknown>)
+        .filter(
+          (update) =>
+            (update['_meta'] as Record<string, unknown> | undefined)?.[
+              'rewritten'
+            ] === true,
+        );
+      expect(rewrittenUpdates).toEqual([
+        expect.objectContaining({
+          _meta: { rewritten: true, turnIndex: 1 },
+        }),
+        expect.objectContaining({
+          _meta: {
+            source: 'diagnostic',
+            qwenDiscreteMessage: true,
+            rewritten: true,
+            turnIndex: 2,
+          },
+        }),
+      ]);
+    });
   });
 
   describe('timeoutMs config', () => {

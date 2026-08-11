@@ -1426,6 +1426,55 @@ describePOSIX('qwen serve — turn result blocker regressions', () => {
     }
   }, 90_000);
 
+  it('keeps retained prompt results and hides the rewound turn', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    const promptIds: string[] = [];
+
+    try {
+      for (const marker of ['rewind-a', 'rewind-b', 'rewind-c']) {
+        const accepted = asAccepted(
+          await client.promptNonBlocking(session.sessionId, {
+            prompt: [{ type: 'text', text: marker }],
+          }),
+        );
+        expect(accepted).toBeDefined();
+        if (!accepted) return;
+        promptIds.push(accepted.promptId);
+        await expect
+          .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+            timeout: 30_000,
+          })
+          .toMatchObject({ state: 'completed' });
+      }
+
+      const { snapshots } = await client.getRewindSnapshots(session.sessionId);
+      const thirdTurn = snapshots.find((snapshot) => snapshot.turnIndex === 2);
+      expect(thirdTurn).toBeDefined();
+      if (!thirdTurn) return;
+
+      await expect(
+        client.rewindSession(session.sessionId, thirdTurn.promptId, {
+          rewindFiles: false,
+        }),
+      ).resolves.toMatchObject({ rewound: true, targetTurnIndex: 2 });
+      await expect(
+        turnStatus(session.sessionId, promptIds[0]!),
+      ).resolves.toMatchObject({ state: 'completed' });
+      await expect(
+        turnStatus(session.sessionId, promptIds[1]!),
+      ).resolves.toMatchObject({ state: 'completed' });
+      await expect(
+        turnStatus(session.sessionId, promptIds[2]!),
+      ).resolves.toEqual({ status: 404 });
+    } finally {
+      await client.cancel(session.sessionId).catch(() => undefined);
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 90_000);
+
   it('rewrites repeated-tool diagnostics without recording them as the answer', async () => {
     repeatedFailureMarker = `repeated-failure-${Date.now()}`;
     repeatedFailureRequestCount = 0;

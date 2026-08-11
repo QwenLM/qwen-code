@@ -2584,6 +2584,79 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
+    it('restores an admission result recorded before the first user turn', () => {
+      session.primeTurnFromHistory([
+        {
+          uuid: 'turn-result-1',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/tmp',
+          version: 'test',
+          systemPayload: {
+            promptId: 'admission-error-prompt',
+            state: 'error',
+            endedAt: 1,
+            error: { message: 'writer unavailable' },
+          },
+        },
+      ]);
+
+      expect(session.getRetainedTurnResultPromptIds()).toEqual([
+        'admission-error-prompt',
+      ]);
+    });
+
+    it('retains daemon prompt ids for user turns kept by rewind', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const countSpy = vi
+        .spyOn(session, 'getRewindableUserTurnCount')
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1);
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'daemon-prompt-a',
+        },
+      );
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'daemon-prompt-b',
+        },
+      );
+      countSpy.mockRestore();
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      session.rewindToTurn(1);
+
+      expect(session.getRetainedTurnResultPromptIds()).toEqual([
+        'daemon-prompt-a',
+      ]);
+    });
+
     it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
