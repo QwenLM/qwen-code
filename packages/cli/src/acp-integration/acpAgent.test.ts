@@ -31,6 +31,9 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return { ...actual, existsSync: mockExistsSync };
 });
+const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
+  mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
+}));
 const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
   mockMcpPoolDrainAll: vi
     .fn()
@@ -38,6 +41,10 @@ const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+}));
+vi.mock('../utils/housekeeping/scheduler.js', () => ({
+  startNonInteractiveOpenAILogHousekeeping:
+    mockStartNonInteractiveOpenAILogHousekeeping,
 }));
 
 // Mock the ACP SDK
@@ -2974,6 +2981,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       );
     }
     expect(attributes['session.id']).toBe('test-session-id');
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
+      innerConfig,
+      expect.any(Object),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
