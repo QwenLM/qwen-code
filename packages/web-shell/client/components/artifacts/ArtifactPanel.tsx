@@ -273,6 +273,7 @@ interface ArtifactPanelProps {
     sessionId?: string,
   ) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  deferSubagentMount?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
   fullscreen?: boolean;
@@ -309,6 +310,7 @@ export function ArtifactPanel({
   sessionWorkflowEnabled,
   onOpenTerminal,
   onImageIngestionNotice,
+  deferSubagentMount = false,
   onClose,
   variant = 'docked',
   fullscreen = false,
@@ -488,7 +490,7 @@ export function ArtifactPanel({
           {onToggleFullscreen && (
             <button
               type="button"
-              className={`${styles.iconButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              className={`${styles.iconButton} ${styles.fullscreenButton} ${fullscreen ? styles.iconButtonActive : ''}`}
               onClick={onToggleFullscreen}
               aria-label={t(
                 fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
@@ -704,15 +706,17 @@ export function ArtifactPanel({
             error={error}
           />
         ) : activeTab.kind === 'subagent' ? (
-          <SubagentDetail
-            sessionId={activeTab.sessionId}
-            rootToolCallId={activeTab.rootToolCallId}
-            initialRootTool={activeTab.rootTool}
-            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
-            onRightPanelOpen={onNestedRightPanelOpen}
-            onArtifactsChange={onNestedArtifactsChange}
-            onError={onError}
-          />
+          deferSubagentMount ? null : (
+            <SubagentDetail
+              sessionId={activeTab.sessionId}
+              rootToolCallId={activeTab.rootToolCallId}
+              initialRootTool={activeTab.rootTool}
+              workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+              onRightPanelOpen={onNestedRightPanelOpen}
+              onArtifactsChange={onNestedArtifactsChange}
+              onError={onError}
+            />
+          )
         ) : activeTab.kind === 'monitor' ? (
           <MonitorTaskDetail
             key={activeTab.id}
