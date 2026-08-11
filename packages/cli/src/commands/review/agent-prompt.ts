@@ -44,6 +44,7 @@ import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
+  clearBudgetStop,
   expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
@@ -1890,8 +1891,14 @@ function admitReverseAuditRound(
         `not rebuild or retry. A marker has been recorded and compose-review ` +
         `will cap the verdict; still add \`${roundCapStopEntry(cap)}\` to ` +
         `unreviewedDimensions so the terminal report agrees. If the cap ` +
-        `round reported findings whose verdicts have not landed, launch ` +
-        `their verifiers alone and wait, then proceed to Step 6.`,
+        `round reported findings whose verdicts have not landed, verify them ` +
+        `ONLY through \`agent-prompt --role verify\` (never a hand-rolled ` +
+        `agent) — it is gated on the compose floor and will refuse once too ` +
+        `little time remains; when the deadline is within that floor, stop ` +
+        `waiting on any verifier batch still out and compose with the tags ` +
+        `in hand. Do NOT re-verify findings already confirmed in earlier ` +
+        `rounds, and do NOT invent a fresh re-verification pass. Then ` +
+        `proceed to Step 6.`,
     );
     process.exitCode = 4;
     return false;
@@ -1914,13 +1921,27 @@ function admitReverseAuditRound(
  * twice over, so another round would audit nothing the history has not
  * already answered. Not an error and not a gap — no record, no stamp, no
  * disclosure owed; a round that builds nothing was never admitted.
+ *
+ * Clears any same-run stop marker first: a converged exit can follow an
+ * over-cap round the gate already refused (round 4 refused under cap 3,
+ * then round 5's schedule is converged — the convergence check runs before
+ * the cap gate), and that stale round-cap marker would otherwise cap a
+ * verdict the audit legitimately converged. The message also recalls the
+ * relay channel: the earlier refusal told the orchestrator to add its stop
+ * entry to unreviewedDimensions, and once the marker is gone the
+ * compose-review splice that dedups it no longer runs — only this
+ * instruction removes it.
  */
-function refuseConverged(): void {
+function refuseConverged(planPath: string): void {
+  clearBudgetStop(planPath);
   writeStderrLine(
     'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
-      'unreviewedDimensions entry is owed.',
+      'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
+      'budget refusal told you to add its stop entry to ' +
+      'unreviewedDimensions, remove it now — this convergence supersedes ' +
+      'it.',
   );
   process.exitCode = 5;
 }
@@ -1973,7 +1994,7 @@ function runAllChunks(
   }
 
   if (schedule !== null && schedule.converged) {
-    refuseConverged();
+    refuseConverged(planPath);
     return;
   }
 
@@ -2482,7 +2503,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         schedule = null;
       }
       if (schedule !== null && schedule.converged) {
-        refuseConverged();
+        refuseConverged(args.plan);
         return;
       }
     }

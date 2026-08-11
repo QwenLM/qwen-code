@@ -101,6 +101,8 @@ function mount(
       sessionId: activeSessionId,
       clientId: 'client-1',
       canMutateMidTurn,
+      // This suite pins the legacy local-fallback lifecycle.
+      canQueryMidTurn: false,
       streamingState: state,
       sessionActions,
       store,
