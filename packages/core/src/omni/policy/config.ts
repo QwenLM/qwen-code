@@ -177,9 +177,13 @@ function mergePolicyMaps(
   where: string,
   { allowTombstones }: { allowTombstones: boolean },
 ): Record<string, Record<string, unknown>> {
-  const merged: Record<string, Record<string, unknown> | null> = {
-    ...defaults,
-  };
+  // Null prototype: a raw "__proto__" key must become an ordinary own key
+  // (handed to normalizePolicy, whose id pattern rejects it) instead of
+  // silently re-prototyping the map through the __proto__ setter.
+  const merged: Record<string, Record<string, unknown> | null> = Object.assign(
+    Object.create(null),
+    defaults,
+  );
   if (raw === undefined) {
     return merged as Record<string, Record<string, unknown>>;
   }

@@ -138,6 +138,20 @@ describe('normalizeOmniProcessingConfig', () => {
   });
 
   describe('id-merge semantics', () => {
+    it('rejects a "__proto__" policy id instead of silently dropping it', () => {
+      // JSON.parse produces "__proto__" as an ordinary own key; a plain
+      // object-spread merge would route it through the prototype setter and
+      // the entry would vanish without a diagnostic. The null-prototype
+      // merge map keeps it as a real key so the id pattern rejects it.
+      expect(() =>
+        normalize({
+          fixedPolicies: JSON.parse(
+            '{"__proto__": {"mediaTypes": ["image"], "toolName": "omni_downsample_image"}}',
+          ),
+        }),
+      ).toThrow(/__proto__: policy id must match/);
+    });
+
     it('accepts a null tombstone with no matching entry (no fixed defaults exist)', () => {
       const config = normalize({
         fixedPolicies: { 'image-downsample': null },
