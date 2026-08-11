@@ -22,10 +22,11 @@ const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 // Idle watchdog: a wedged sandbox produces NOTHING — four observed hangs
 // (#8663 x2, #8761 r3, #8763 r4) each printed their last byte at docker
 // container entry and then sat silent for the whole absolute budget,
-// burning 2 hours per round for zero work. Legitimate runs are never that
-// quiet: the longest silence the fleet tolerates elsewhere is the review
-// pipeline's 10-minute stream-idle window for thinking phases on ~1M-token
-// contexts, so twice that is the default. Distinct from QWEN_TIMEOUT_MS so
+// burning 2 hours per round for zero work. Streamed agent events keep active
+// runs observable; the longest silence the fleet tolerates elsewhere is the
+// review pipeline's 10-minute stream-idle window for thinking phases on
+// ~1M-token contexts, so twice that is the default. Distinct from
+// QWEN_TIMEOUT_MS so
 // the failure comment says which limit fired; a leg whose absolute budget is
 // shorter than this window (the review workflow's 18-minute repair pass)
 // always reaches the absolute timer first.
@@ -37,6 +38,9 @@ const QWEN_IDLE_TIMEOUT_MS =
   Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
     ? parsedIdleTimeoutMs
     : 20 * 60 * 1000;
+const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
+const OVERSIZED_STREAM_JSON_LINE_NOTICE =
+  '[run-agent] dropped oversized stream-json line; full bytes in agent.log\n';
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -176,6 +180,19 @@ function isLoopGuardOutput(output) {
   );
 }
 
+function streamResultOutput(event) {
+  if (!event || event.type !== 'result') return '';
+  return [event.error?.message, event.result]
+    .filter((value) => typeof value === 'string')
+    .join('\n');
+}
+
+function isLoopGuardResult(event) {
+  return (
+    event?.is_error === true && isLoopGuardOutput(streamResultOutput(event))
+  );
+}
+
 function killQwen(child, signal) {
   try {
     process.kill(-child.pid, signal);
@@ -190,8 +207,10 @@ function runQwen(options, prompt) {
     flags: 'w',
   });
   log.on('error', () => {});
-  let outputTail = '';
-  let loopDetected = false;
+  let diagnosticTail = '';
+  let stdoutCarry = '';
+  let discardingOversizedStdoutLine = false;
+  let terminalResult;
   let settled = false;
   let timedOut = false;
   let idleTimedOut = false;
@@ -207,10 +226,74 @@ function runQwen(options, prompt) {
   let sandboxRemoval = null;
 
   return new Promise((resolve) => {
-    const child = spawn(options.qwenBin, ['--yolo', '--prompt', prompt], {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      detached: true,
-    });
+    const child = spawn(
+      options.qwenBin,
+      [
+        '--yolo',
+        '--output-format',
+        'stream-json',
+        '--include-partial-messages',
+        '--prompt',
+        prompt,
+      ],
+      {
+        stdio: ['inherit', 'pipe', 'pipe'],
+        detached: true,
+      },
+    );
+
+    const appendDiagnostic = (text) => {
+      diagnosticTail = (diagnosticTail + text).slice(-20_000);
+    };
+
+    const consumeStreamJsonLine = (line, terminated) => {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        lastOutputAt = Date.now();
+        if (event?.type === 'result') terminalResult = event;
+        if (event?.type !== 'stream_event') {
+          process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+        }
+      } catch {
+        appendDiagnostic(`${line}${terminated ? '\n' : ''}`);
+        process.stdout.write(`${line}${terminated ? '\n' : ''}`);
+      }
+    };
+
+    const consumeStreamJson = (text, final = false) => {
+      const parts = text.split('\n');
+      for (const [index, part] of parts.entries()) {
+        const terminated = index < parts.length - 1;
+        if (!discardingOversizedStdoutLine) {
+          const remaining = MAX_STREAM_JSON_LINE_LENGTH - stdoutCarry.length;
+          if (part.length <= remaining) {
+            stdoutCarry += part;
+          } else {
+            stdoutCarry = '';
+            discardingOversizedStdoutLine = true;
+          }
+        }
+        if (terminated) {
+          if (discardingOversizedStdoutLine) {
+            process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+          } else {
+            consumeStreamJsonLine(stdoutCarry, true);
+          }
+          stdoutCarry = '';
+          discardingOversizedStdoutLine = false;
+        }
+      }
+      if (final) {
+        if (discardingOversizedStdoutLine) {
+          process.stdout.write(OVERSIZED_STREAM_JSON_LINE_NOTICE);
+        } else {
+          consumeStreamJsonLine(stdoutCarry, false);
+        }
+        stdoutCarry = '';
+        discardingOversizedStdoutLine = false;
+      }
+    };
 
     const finish = (result) => {
       if (settled) return;
@@ -218,12 +301,18 @@ function runQwen(options, prompt) {
       clearTimeout(timer);
       clearTimeout(killTimer);
       clearInterval(idleTimer);
-      const apiErrorInfo = recoverableApiError(outputTail);
+      consumeStreamJson('', true);
+      const terminalOutput = streamResultOutput(terminalResult);
+      const apiErrorInfo = recoverableApiError(
+        result.status === 0
+          ? terminalOutput
+          : `${diagnosticTail}\n${terminalOutput}`,
+      );
       const payload = {
         ...result,
         timedOut,
         idleTimedOut,
-        loopDetected: loopDetected || isLoopGuardOutput(outputTail),
+        loopDetected: isLoopGuardResult(terminalResult),
         // A RECOVERABLE model error means qwen never evaluated the feedback —
         // the workflow retries it rather than advancing the watermark.
         apiError: apiErrorInfo.error,
@@ -237,8 +326,7 @@ function runQwen(options, prompt) {
       }
     };
 
-    const record = (chunk, stream) => {
-      lastOutputAt = Date.now();
+    const record = (chunk, stream, source) => {
       const text = chunk.toString('utf8');
       if (!sandboxName) {
         lineCarry += text;
@@ -256,14 +344,18 @@ function runQwen(options, prompt) {
           }
         }
       }
-      outputTail = (outputTail + text).slice(-20_000);
-      if (!loopDetected && isLoopGuardOutput(outputTail)) loopDetected = true;
+      if (source === 'stdout') {
+        consumeStreamJson(text);
+      } else {
+        lastOutputAt = Date.now();
+        appendDiagnostic(text);
+        stream.write(chunk);
+      }
       log.write(chunk);
-      stream.write(chunk);
     };
 
-    child.stdout.on('data', (chunk) => record(chunk, process.stdout));
-    child.stderr.on('data', (chunk) => record(chunk, process.stderr));
+    child.stdout.on('data', (chunk) => record(chunk, process.stdout, 'stdout'));
+    child.stderr.on('data', (chunk) => record(chunk, process.stderr, 'stderr'));
     child.on('error', (error) => finish({ error, status: null, signal: null }));
     child.on('close', (status, signal) =>
       finish({ error: null, status, signal }),
@@ -394,7 +486,24 @@ const result = await runQwen(options, prompt);
 // timeout) so the leak warning and the removal itself settle before this
 // process exits and the next step inspects the host.
 if (result.sandboxRemoval) await result.sandboxRemoval;
-if (result.error || result.signal || result.status !== 0) {
+const missingOutputs = missing(options.workdir, spec.outputs);
+const presentOutputs = spec.outputs.filter(
+  (name) => !missingOutputs.includes(name),
+);
+const hasOutputVerdict = spec.anyOutput
+  ? presentOutputs.length > 0
+  : missingOutputs.length === 0;
+const apiErrorWithoutVerdict =
+  result.status === 0 &&
+  result.apiError &&
+  !hasOutputVerdict &&
+  !existsSync(file(options.workdir, 'failure.md'));
+if (
+  result.error ||
+  result.signal ||
+  result.status !== 0 ||
+  apiErrorWithoutVerdict
+) {
   const detail = result.error
     ? result.error.message
     : result.idleTimedOut
@@ -403,7 +512,9 @@ if (result.error || result.signal || result.status !== 0) {
         ? `timeout (${QWEN_TIMEOUT_MS}ms)`
         : result.signal
           ? `signal ${result.signal}`
-          : `status ${String(result.status)}`;
+          : apiErrorWithoutVerdict
+            ? 'recoverable API error without an agent verdict'
+            : `status ${String(result.status)}`;
   if (!existsSync(file(options.workdir, 'failure.md'))) {
     if (result.loopDetected) {
       writeFailure(
@@ -462,7 +573,7 @@ if (result.error || result.signal || result.status !== 0) {
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
     );
   }
-  process.exit(result.status ?? 1);
+  process.exit(result.status === 0 ? 1 : (result.status ?? 1));
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
@@ -475,18 +586,12 @@ if (existsSync(file(options.workdir, 'failure.md'))) {
   process.exit(0);
 }
 
-const missingOutputs = missing(options.workdir, spec.outputs);
-const presentOutputs = spec.outputs.filter(
-  (name) => !missingOutputs.includes(name),
-);
 if (spec.exclusiveOutput && presentOutputs.length > 1) {
   const message = `Autofix agent wrote mutually exclusive output files: ${presentOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
   fail(message);
 }
-const ok = spec.anyOutput
-  ? missingOutputs.length < spec.outputs.length
-  : missingOutputs.length === 0;
+const ok = hasOutputVerdict;
 if (!ok) {
   const message = `Autofix agent finished without required output file(s): ${missingOutputs.join(', ')}.`;
   writeFailure(options.workdir, message);
