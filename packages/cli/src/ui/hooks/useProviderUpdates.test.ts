@@ -15,7 +15,7 @@ import {
   TOKEN_PLAN_ENV_KEY,
   tokenPlanProvider,
   buildProviderTemplate,
-  computeModelListVersion,
+  computeProviderTemplateVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
@@ -35,13 +35,19 @@ const chinaTemplate = buildProviderTemplate(
   codingPlanProvider,
   CODING_PLAN_CHINA_BASE_URL,
 );
-const chinaVersion = computeModelListVersion(chinaTemplate);
+const chinaVersion = computeProviderTemplateVersion(
+  codingPlanProvider,
+  CODING_PLAN_CHINA_BASE_URL,
+);
 
 const tokenTemplate = buildProviderTemplate(
   tokenPlanProvider,
   TOKEN_PLAN_BASE_URL,
 );
-const tokenVersion = computeModelListVersion(tokenTemplate);
+const tokenVersion = computeProviderTemplateVersion(
+  tokenPlanProvider,
+  TOKEN_PLAN_BASE_URL,
+);
 
 const METADATA_KEY = 'coding-plan';
 const TOKEN_METADATA_KEY = 'token-plan';

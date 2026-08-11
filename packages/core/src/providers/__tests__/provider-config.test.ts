@@ -10,7 +10,6 @@ import {
   buildInstallPlan,
   buildProviderTemplate,
   computeModelListVersion,
-  computeProviderTemplateVersion,
   findExistingProviderModels,
   findProviderByCredentials,
   getDefaultModelIds,
@@ -88,7 +87,7 @@ describe('buildInstallPlan', () => {
     // the built-in template only — not the final model list that includes
     // custom/unknown IDs.
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
-      computeProviderTemplateVersion(config, 'https://api.test.com/v1'),
+      computeProviderTemplateVersionSrc(config, 'https://api.test.com/v1'),
     );
   });
 
