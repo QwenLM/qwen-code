@@ -59,7 +59,7 @@ export {
   stringifyJson,
   stripOscSequences,
 } from './utils.js';
-export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+export { DAEMON_PLAN_TOOL_CALL_ID, DAEMON_UI_DEBUG_REASONS } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
@@ -83,6 +83,7 @@ export type {
   DaemonTranscriptStore,
   // Chat-stream events
   DaemonUiAssistantDoneEvent,
+  DaemonUiDebugReason,
   DaemonUiErrorEvent,
   DaemonUiEvent,
   DaemonUiEventBase,

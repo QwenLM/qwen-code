@@ -26,6 +26,10 @@ export function sessionTools(state: BridgeState): any[] {
           .string()
           .optional()
           .describe('Model service to use.'),
+        session_id: z
+          .string()
+          .optional()
+          .describe('UUID v1-v5 to assign to the new session.'),
         session_scope: z
           .enum(['single', 'thread'])
           .optional()
@@ -34,6 +38,7 @@ export function sessionTools(state: BridgeState): any[] {
       handler(async (args) => {
         const session = await state.client.createOrAttachSession({
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
+          sessionId: args.session_id,
           modelServiceId: args.model_service_id,
           sessionScope: args.session_scope,
         });
