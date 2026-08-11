@@ -1322,15 +1322,34 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
   // <Static> content from the viewport just like the wake path; pair it with
-  // the same remount bump so keyed statics (agent tab history) re-emit.
+  // the same remount bump so keyed statics (agent tab history) re-emit. The
+  // window's CLEAR_VIEWPORT substitutes wipe the just-re-emitted statics on
+  // every in-window redraw, so bump again once the window closes.
   const prevTerminalWidthRef = useRef(terminalWidth);
+  const shrinkRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   useEffect(() => {
     const prev = prevTerminalWidthRef.current;
     prevTerminalWidthRef.current = terminalWidth;
     if (useTerminalBuffer && terminalWidth < prev) {
       remountStaticHistory();
+      if (shrinkRemountTimerRef.current) {
+        clearTimeout(shrinkRemountTimerRef.current);
+      }
+      // Slightly past CLEAR_WINDOW_MS (600) so the last window clear lands
+      // before the re-emit.
+      shrinkRemountTimerRef.current = setTimeout(remountStaticHistory, 650);
     }
   }, [terminalWidth, useTerminalBuffer, remountStaticHistory]);
+  useEffect(
+    () => () => {
+      if (shrinkRemountTimerRef.current) {
+        clearTimeout(shrinkRemountTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {

@@ -264,6 +264,50 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
+  it('stray bare writes after the live frame cannot clobber the model', () => {
+    const stdout = new FakeStdout();
+    const { restore } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+    );
+    try {
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.write(eraseLines(10)); // arms the handoff
+      stdout.write(frame(60, 12)); // static append
+      stdout.write(frame(30, 20)); // live frame: consumed, handoff disarms
+      stdout.write('\x07'); // notification bell during idle: ignored
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(6));
+      expect(stdout.written.at(-1)).toBe(eraseLines(40));
+    } finally {
+      restore();
+    }
+  });
+
+  it('bare writes arriving after the handoff window are ignored', () => {
+    vi.useFakeTimers();
+    try {
+      const stdout = new FakeStdout();
+      const { restore } = installTerminalResizeReflow(
+        stdout as unknown as NodeJS.WriteStream,
+      );
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.write(eraseLines(10)); // arms the handoff
+      vi.advanceTimersByTime(60); // past HANDOFF_WINDOW_MS
+      stdout.write('\x07'); // stray bell: disarms, not modeled
+      stdout.write(frame(20, 10)); // late bare write: also ignored
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(6));
+      // Model is still the original frame (40 rows at 15 cols); a wrongly
+      // modeled late write would target 20.
+      expect(stdout.written.at(-1)).toBe(eraseLines(40));
+      restore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('the VP clear window expires', () => {
     vi.useFakeTimers();
     try {

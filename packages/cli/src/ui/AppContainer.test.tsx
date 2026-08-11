@@ -4,13 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { writeTerminalTitleSpy, useWakeRepaintMock } = vi.hoisted(() => ({
-  writeTerminalTitleSpy: vi.fn(),
-  useWakeRepaintMock: vi.fn(),
-}));
+const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
+  vi.hoisted(() => ({
+    writeTerminalTitleSpy: vi.fn(),
+    useWakeRepaintMock: vi.fn(),
+    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+      vi.fn(() => deps),
+    ),
+  }));
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
+}));
+
+vi.mock('./utils/terminal-resize-reflow.js', () => ({
+  buildWakeRepaint: buildWakeRepaintSpy,
 }));
 
 vi.mock('../utils/windowTitle.js', async (importOriginal) => {
@@ -1004,6 +1012,7 @@ describe('AppContainer State Management', () => {
     // (repaintViewport + remount), not refreshStatic or a mis-wired memo.
     it('wires the wake repaint (not refreshStatic) into useWakeRepaint', async () => {
       useWakeRepaintMock.mockClear();
+      buildWakeRepaintSpy.mockClear();
       const repaintSpy = vi.fn();
       const vpSettings = {
         merged: {
@@ -1030,17 +1039,16 @@ describe('AppContainer State Management', () => {
 
       // Let ink-testing-library's scheduled initial render flush.
       await Promise.resolve();
+      // The call site must build the wake callback via buildWakeRepaint with
+      // the repaint prop AND the static remount bump in its deps; inline
+      // repaint-only wrappers (the shape that drops the agent-tab <Static>
+      // re-emit) fail these.
+      const deps = buildWakeRepaintSpy.mock.calls.at(-1)?.[0];
+      expect(deps?.['isVP']).toBe(true);
+      expect(deps?.['repaintViewport']).toBe(repaintSpy);
+      expect(typeof deps?.['remountStaticHistory']).toBe('function');
       const wakeCallback = useWakeRepaintMock.mock.calls.at(-1)?.[0];
-      expect(typeof wakeCallback).toBe('function');
-      act(() => {
-        wakeCallback();
-      });
-      // A revert to useWakeRepaint(refreshStatic) would leave the spy
-      // uncalled (VP refreshStatic is write-free) and fail here.
-      expect(repaintSpy).toHaveBeenCalledTimes(1);
-      // A repaint-only wiring (dropping the static remount bump) must not
-      // masquerade as the wake repaint.
-      expect(wakeCallback).not.toBe(repaintSpy);
+      expect(wakeCallback).toBe(buildWakeRepaintSpy.mock.results.at(-1)?.value);
     });
 
     it('defaults to VP mode when useTerminalBuffer is unset', () => {

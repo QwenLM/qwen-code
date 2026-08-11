@@ -27,7 +27,12 @@ const CLEAR_TERMINAL = ansiEscapes.clearTerminal;
 const CURSOR_DOWN_PATTERN = /\x1b\[(\d+)B/;
 
 // How long after a shrink every VP redraw starts from a clean viewport.
-const CLEAR_WINDOW_MS = 600;
+export const CLEAR_WINDOW_MS = 600;
+
+// The post-clear bare-write handoff (static append + live frame) happens
+// within one synchronous Ink render; stray bare writes (notification bell,
+// kitty APC images) arrive later and must not reach the model.
+const HANDOFF_WINDOW_MS = 50;
 
 const ERASE_LINES_PATTERN = createEraseLinesPattern();
 
@@ -188,6 +193,9 @@ export function installTerminalResizeReflow(
   // Printable bare writes seen in the current armed burst; the second one is
   // the live frame following a static append and bypasses MIN_FRAME_LINES.
   let barePrintableCount = 0;
+  // The handoff closes shortly after arming: the commit's bare writes land in
+  // one synchronous render; later stray bare writes are ignored.
+  let handoffUntil = 0;
   // After a shrink, every redraw (not just Ink's clear) erases with a stale
   // row count against the reflowed on-screen frame, re-stranding the frame
   // top each time. For this window, start every VP redraw from a clean
@@ -259,6 +267,7 @@ export function installTerminalResizeReflow(
           // Clear-only write (Ink's log.clear): the redraw follows bare.
           expectFrame = true;
           barePrintableCount = 0;
+          handoffUntil = Date.now() + HANDOFF_WINDOW_MS;
         }
         debugLogger.debug('match', { printable });
         if (isVP && Date.now() < clearUntil) {
@@ -301,14 +310,20 @@ export function installTerminalResizeReflow(
         barePrintableCount = 0;
         model.content = '';
       } else if (expectFrame) {
-        if (stripAnsi(chunk).trim() !== '') {
+        if (Date.now() >= handoffUntil) {
+          // The commit's bare writes land in one synchronous render; a bare
+          // write this late is a stray (notification bell, kitty APC image,
+          // tmux DCS), not the handoff.
+          expectFrame = false;
+        } else if (stripAnsi(chunk).trim() !== '') {
           // Bare redraw (or static append preceding it): model each printable
           // bare write, last one wins; the second printable bare write of a
           // commit is the live frame and replaces the model even below
-          // MIN_FRAME_LINES. Stay armed until an erase-prefixed write closes
-          // the commit.
+          // MIN_FRAME_LINES. Once the live frame is consumed, disarm so later
+          // strays cannot clobber the model during idle.
           barePrintableCount++;
           modelFrame(chunk, barePrintableCount > 1);
+          if (barePrintableCount > 1) expectFrame = false;
         }
       }
     }
