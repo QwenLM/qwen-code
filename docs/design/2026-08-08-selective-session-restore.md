@@ -565,7 +565,9 @@ normalized session and workspace identity. Exactly identical target and replay
 shapes may share one public intent. A newer non-identical shape follows #8882's
 supersede-and-serialize lifecycle and permanently fences the obsolete raw result,
 even if a later intent returns to its shape; a timed-out raw request that has not
-been superseded by a different shape may still satisfy an exact-shape retry.
+been superseded by a different shape may still satisfy an exact-shape retry
+within the same lifecycle. An explicit lifecycle cancellation fences the old raw
+result even if a later intent requests the same shape.
 Selective restore must consume this completed boundary rather than add a second
 coordinator or caller-owned shape matrix.
 
@@ -1194,8 +1196,9 @@ behavior rather than inventing a new fallback.
   pre-construction response slot leave no map entry. Failures in its currently
   guarded setup sequence use the stored-session rollback and leave no stale Goal
   hook/observer, MCP ownership, Config, or map entry.
-- Envelope overflow and later prepare failure do not hydrate or validate the
-  runtime FileHistoryService and cannot append a missing-backup snapshot.
+- Envelope overflow and a new pre-construction response-preparation failure do
+  not hydrate or validate the runtime FileHistoryService and cannot append a
+  missing-backup snapshot.
   Successful creation restores state once and starts validation once from the
   narrow finalizer.
 - Pending Goal checkpoints use only the projected bounded evidence window: the
@@ -1448,7 +1451,11 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
   the same activation transaction.
 - **PR scope becomes a core refactor.** Reuse `SessionTranscriptReader`, existing
   reducers, error classes, and wire fields. Do not generalize TUI or export
-  loading in this PR.
+  loading in this PR. Before implementation, report the production-logic line
+  count and cross-package/core ownership to maintainers. Keep the delivery
+  classified as the requested feature; if the work instead becomes a 500+
+  production-line core `refactor`, the repository's maintainer-only gate applies
+  and the change must not proceed as an external refactor PR.
 - **The 256 MiB limit rejects a transcript the old loader attempted.** Keep the
   error request-scoped and observable, document it in the PR as an intentional
   daemon-only compatibility change, and require maintainer sign-off rather than

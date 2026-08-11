@@ -36,6 +36,12 @@ longer calls `SessionService.loadSession()`, constructs one fresh transcript
 index in the correct startup-frozen writer mode, restores every named runtime
 consumer, and returns the requested replay semantics.
 
+This is a feature spanning core, CLI, ACP bridge, and daemon consumers. Before
+implementation, report its production-logic line count and cross-package/core
+ownership to maintainers and obtain an explicit scope review. Do not disguise a
+large refactor as this feature: if the implementation becomes a 500+
+production-line core `refactor`, the repository's maintainer-only gate applies.
+
 ## Phase 1: Shared selective projection
 
 - Extend the existing `SessionTranscriptReader` index with separate runtime and
@@ -191,7 +197,9 @@ consumer, and returns the requested replay semantics.
   page are captured with the intent, `load/all`, `load/recent(limit)`, or
   `resume/none` participates in its normalized key, and a non-identical shape
   permanently fences the obsolete raw result while retaining same-shape timeout
-  retry. Selective implementation must not add another coordinator.
+  retry within the same lifecycle. Explicit lifecycle cancellation also fences
+  an old raw result when a later intent returns to the same shape. Selective
+  implementation must not add another coordinator.
 - Preserve #8933's bridge ingress validation before live lookup, admission, or
   coalescing. Meaningful response-load `historyPageSize` uses the REST/ACP integer
   range; streamed load and resume ignore the unused field for warm and cold
@@ -519,7 +527,9 @@ consumer, and returns the requested replay semantics.
       policy; only identical shapes share a restore and its typed result.
 - [x] #8933's WebUI coordinator snapshots and keys the effective replay shape:
       identical target/mode/page requests coalesce, while load versus resume and
-      unequal page sizes remain distinct and never reuse a superseded result.
+      unequal page sizes remain distinct and never reuse a superseded result;
+      explicit lifecycle cancellation also fences a later same-shape retry from
+      adopting the cancelled raw result.
 - [x] #8933 bridge ingress rejects invalid/non-finite/out-of-range page sizes
       before live lookup or coalescing when meaningful. Streamed load and resume
       ignore the field consistently for warm and cold Sessions. The bridge type
@@ -531,6 +541,9 @@ consumer, and returns the requested replay semantics.
       replay.
 - [ ] Both intentional caps (256 MiB transcript index and 32 MiB transformed
       explicit-page replay) have maintainer sign-off.
+- [ ] Maintainers have reviewed the core/cross-package scope and production-logic
+      line count. The implementation remains a feature; it has not expanded into
+      an externally authored 500+ production-line core refactor.
 - [ ] The fixed 32 MiB explicit-replay policy has no configuration, transformed
       update trimming, or server-side auto-paging path. Exact serialized-envelope
       boundary tests accept values within the cap and reject the first value
