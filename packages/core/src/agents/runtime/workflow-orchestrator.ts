@@ -404,19 +404,23 @@ export function createProductionDispatch(
       async (attemptSignal, emitter) => {
         // Minted here rather than inside the dispatch so this attempt's
         // transcript is named for the same id the dispatch reports in its
-        // terminal error — when the stall wrapper abandons, its error names
-        // every attempt's id — and so the writer is attached to the emitter
-        // BEFORE any agent event can fire on it.
+        // terminal errors — and so the writer is attached to the emitter
+        // BEFORE any agent event can fire on it. Terminal errors name this
+        // id directly except the two upstream-verbatim schema content
+        // failures, which log it instead (see runOverridePath); when the
+        // run ends after multiple attempts, the error names every attempt's
+        // id.
         const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
         attemptIds.push(workflowAgentId);
         const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
-        const detachTranscript = await attachDispatchTranscript(
-          config,
-          workflowAgentId,
-          prompt,
-          opts,
-          emitter,
-        );
+        const { detach: detachTranscript, resolvedSubagent } =
+          await attachDispatchTranscript(
+            config,
+            workflowAgentId,
+            prompt,
+            opts,
+            emitter,
+          );
         try {
           return await runSingleDispatch(
             config,
@@ -425,6 +429,7 @@ export function createProductionDispatch(
             attemptSignal,
             emitter,
             workflowAgentId,
+            resolvedSubagent,
             onTokens,
           );
         } finally {
@@ -471,8 +476,9 @@ export function createProductionDispatch(
  * Best-effort by construction. A transcript is audit metadata; an unwritable
  * or full disk must not fail a dispatch that would otherwise have succeeded,
  * so both the attach and the returned cleanup swallow their errors. The
- * writer itself opens its fd lazily, so a dispatch that produces no record
- * materializes no file.
+ * writer itself opens its fd lazily, but the seeded launch-prompt record is
+ * written at attach time, so every dispatched prompt materializes its file
+ * immediately — including dispatches that fail before the agent launches.
  */
 async function attachDispatchTranscript(
   config: Config,
@@ -480,8 +486,20 @@ async function attachDispatchTranscript(
   prompt: string,
   opts: WorkflowAgentOpts,
   emitter: AgentEventEmitter,
-): Promise<() => void> {
+): Promise<{
+  detach: () => void;
+  /**
+   * The definition resolved for `agentName`, when the attach resolved one —
+   * threaded into the override path so one attempt pays one definition-
+   * directory scan instead of two. `undefined` means the override path must
+   * resolve itself: a label-only attach skips resolution, and a failed
+   * best-effort resolution must still surface the authoritative not-found
+   * throw there.
+   */
+  resolvedSubagent: SubagentConfig | undefined;
+}> {
   let cleanup: (() => void) | undefined;
+  let resolvedSubagent: SubagentConfig | undefined;
   try {
     const sessionId = config.getSessionId();
     const projectRoot = config.getProjectRoot();
@@ -492,11 +510,16 @@ async function attachDispatchTranscript(
     const label = typeof opts.label === 'string' ? opts.label.trim() : '';
     const agentType =
       typeof opts.agentType === 'string' ? opts.agentType.trim() : '';
-    const agentName = label
-      ? label
-      : agentType
-        ? await canonicalSubagentName(config, agentType)
-        : 'workflow-agent';
+    let agentName: string;
+    if (label) {
+      agentName = label;
+    } else if (agentType) {
+      resolvedSubagent =
+        (await resolveSubagentForTranscript(config, agentType)) ?? undefined;
+      agentName = resolvedSubagent?.name || agentType;
+    } else {
+      agentName = 'workflow-agent';
+    }
     ({ cleanup } = attachJsonlTranscriptWriter(
       emitter,
       getAgentJsonlPath(
@@ -521,17 +544,20 @@ async function attachDispatchTranscript(
     debugLogger.warn(
       `[workflow] transcript attach failed for ${workflowAgentId}: ${error}`,
     );
-    return () => {};
+    return { detach: () => {}, resolvedSubagent };
   }
   const detach = cleanup;
-  return () => {
-    try {
-      detach();
-    } catch (error) {
-      debugLogger.warn(
-        `[workflow] transcript cleanup failed for ${workflowAgentId}: ${error}`,
-      );
-    }
+  return {
+    detach: () => {
+      try {
+        detach();
+      } catch (error) {
+        debugLogger.warn(
+          `[workflow] transcript cleanup failed for ${workflowAgentId}: ${error}`,
+        );
+      }
+    },
+    resolvedSubagent,
   };
 }
 
@@ -539,24 +565,22 @@ async function attachDispatchTranscript(
  * Subagent resolution is case-insensitive, so a model-authored `agentType`
  * can differ in case from the canonical `SubagentConfig.name` the Agent tool
  * records for the same definition. Resolve so transcripts from both launch
- * paths join on `agentName`; fall back to the raw string when resolution is
- * unavailable — the name is best-effort audit metadata.
+ * paths join on `agentName`. Best-effort: errors are swallowed and the
+ * caller falls back to the raw string — the name is audit metadata, and the
+ * override path's authoritative lookup still runs when this yields nothing.
  */
-async function canonicalSubagentName(
+async function resolveSubagentForTranscript(
   config: Config,
   agentType: string,
-): Promise<string> {
+): Promise<SubagentConfig | null> {
   try {
-    const resolved = await config
-      .getSubagentManager()
-      .findSubagentByName(agentType);
-    return resolved?.name || agentType;
+    return await config.getSubagentManager().findSubagentByName(agentType);
   } catch (error) {
     debugLogger.warn(
       `[workflow] transcript agentName resolution failed for ` +
         `${sanitizeForErrorMessage(agentType)}: ${error}`,
     );
-    return agentType;
+    return null;
   }
 }
 
@@ -580,6 +604,12 @@ async function runSingleDispatch(
    * function names in its non-GOAL terminal error.
    */
   workflowAgentId: string,
+  /**
+   * The subagent definition the transcript attach already resolved for this
+   * attempt, when it resolved one — forwarded to the override path so the
+   * attempt's definition lookup runs once, not twice.
+   */
+  resolvedSubagent: SubagentConfig | undefined,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
@@ -655,6 +685,7 @@ async function runSingleDispatch(
     opts,
     attemptSignal,
     workflowAgentId,
+    resolvedSubagent,
     onTokens,
     emitter,
   );
@@ -729,6 +760,13 @@ async function runOverridePath(
   signal: AbortSignal | undefined,
   workflowAgentId: string,
   /**
+   * The subagent definition the transcript attach already resolved for this
+   * attempt, when it resolved one (see `attachDispatchTranscript`). Reused
+   * here so an unlabeled-agentType dispatch scans the definition directories
+   * once per attempt instead of twice; `undefined` resolves now.
+   */
+  resolvedSubagent: SubagentConfig | undefined,
+  /**
    * P5: forwarded from createProductionDispatch. The override path
    * builds its own AgentHeadless and runs subagent.execute(); the
    * stats are on the same `core.stats` accessor as the fast path,
@@ -756,19 +794,25 @@ async function runOverridePath(
   let baseConfig: SubagentConfig;
 
   if (opts.agentType !== undefined) {
-    const resolved = await subagentMgr.findSubagentByName(opts.agentType);
+    // Trim to match the transcript attach's resolution: a padded
+    // model-authored agentType must resolve the same definition in both
+    // places, or the transcript records a canonical launch that the raw
+    // string then fails to find.
+    const agentType = opts.agentType.trim();
+    const resolved =
+      resolvedSubagent ?? (await subagentMgr.findSubagentByName(agentType));
     if (!resolved) {
       // Error message verbatim from upstream Claude Code 2.1.168 strings:
       // "agent({agentType}): agent type '{name}' not found". Match for
       // user-visible parity so scripts authored against either runtime see
       // the same error text.
       //
-      // SECURITY (P3 R2 self-review): sanitize opts.agentType before
+      // SECURITY (P3 R2 self-review): sanitize the agentType before
       // interpolation. The string is model-authored; an attacker model
       // could embed CRLF / control characters that fragment the error
       // message in logs / display / OTLP traces. Replace control chars
       // with a single space so the error stays single-line.
-      const safeAgentType = sanitizeForErrorMessage(opts.agentType);
+      const safeAgentType = sanitizeForErrorMessage(agentType);
       throw new Error(
         `agent({agentType}): agent type '${safeAgentType}' not found.`,
       );
@@ -1010,10 +1054,12 @@ async function runOverridePath(
         // factually correct only for (b).
         if (schemaState.attempts > 2) {
           // Error message verbatim from upstream Claude Code 2.1.168 strings.
+          warnSchemaContentFailure(config, workflowAgentId);
           throw new Error(
             'subagent completed without calling StructuredOutput (after 2 in-conversation nudges).',
           );
         }
+        warnSchemaContentFailure(config, workflowAgentId);
         throw new Error(
           'subagent completed without calling structured_output ' +
             '(no validation attempt — model produced plain-text content).',
@@ -1083,6 +1129,33 @@ async function runOverridePath(
       }
     }
   }
+}
+
+/**
+ * The two schema content failures keep upstream-verbatim error text for
+ * user-visible parity, so they cannot carry the attempt's id in the message
+ * itself. Log the pairing instead — the transcript file is named for the id,
+ * so this is what lets an operator match the failure to its record.
+ */
+function warnSchemaContentFailure(
+  config: Config,
+  workflowAgentId: string,
+): void {
+  let transcript = '(path unavailable)';
+  try {
+    transcript = getAgentJsonlPath(
+      config.storage.getProjectDir(),
+      config.getSessionId(),
+      workflowAgentId,
+    );
+  } catch {
+    // Best-effort pairing — a storage accessor failure must not replace the
+    // terminal error this warn accompanies.
+  }
+  debugLogger.warn(
+    `[workflow] schema content failure for ${workflowAgentId}; ` +
+      `transcript: ${transcript}`,
+  );
 }
 
 /**

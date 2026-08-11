@@ -7,6 +7,7 @@
 // T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -2080,9 +2081,65 @@ describe('createProductionDispatch', () => {
       expect(recordsOf(files[0])[0]['agentName']).toBe('Explore');
     });
 
-    // The stall-abandoned outcome is the one failure mode that leaves
-    // multiple transcripts behind; the terminal error must name every
-    // attempt's id or the files cannot be paired with the failure.
+    // Resolution fallbacks: an unregistered agentType (a model typo or a
+    // custom name) must still record the raw string, and an unavailable
+    // manager must lose only the name resolution — never the transcript.
+    it('records the raw agentType when it is not a registered subagent', async () => {
+      const config = overrideTranscriptConfig(() => null);
+      const dispatch = createProductionDispatch(config);
+      await expect(
+        dispatch('find foo', { agentType: 'NoSuchAgent' }),
+      ).rejects.toThrow(/agent type 'NoSuchAgent' not found/);
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['agentName']).toBe('NoSuchAgent');
+    });
+
+    it('still writes the transcript when subagent resolution is unavailable', async () => {
+      // transcriptConfig() has no getSubagentManager: the attach's
+      // best-effort resolution swallows the throw and falls back to the raw
+      // name; the override path's authoritative lookup then rejects.
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await expect(
+        dispatch('find foo', { agentType: 'Explore' }),
+      ).rejects.toThrow();
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['agentName']).toBe('Explore');
+    });
+
+    // R2-4: detach is the only path that removes the writer's listeners —
+    // if it regresses, events emitted on the attempt emitter after the
+    // dispatch settles still grow the transcript, and nothing fails.
+    it('detaches the transcript writer when the dispatch settles', async () => {
+      let captured: AgentEventEmitter | undefined;
+      nextExecuteHook.value = async (emitter) => {
+        captured = emitter;
+      };
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('settle', { label: 'd' });
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      const before = recordsOf(files[0]).length;
+      captured!.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        callId: 'call-post-detach',
+        name: 'glob',
+        args: { pattern: '**/*.ts' },
+        description: 'emitted after detach',
+        timestamp: Date.now(),
+      });
+      expect(recordsOf(files[0])).toHaveLength(before);
+    });
+
+    // All three attempts stalled, so three transcripts are on disk; the
+    // terminal error must name every attempt's id or the files cannot be
+    // paired with the failure.
     it('names every attempt id in the stall-abandoned error', async () => {
       nextExecuteHook.value = async (emitter, signal) => {
         nextTerminateMode.value = 'CANCELLED';
@@ -2116,6 +2173,77 @@ describe('createProductionDispatch', () => {
         const id = path.basename(file, '.jsonl').slice('agent-'.length);
         expect(String(caught)).toContain(id);
       }
+    });
+
+    // A mixed retry (stall, then a deterministic failure) also leaves one
+    // transcript per attempt; the terminal error must name every attempt's
+    // id, not just the last attempt's.
+    it('names every attempt id when a retry ends in a non-stall failure', async () => {
+      let attempt = 0;
+      nextExecuteHook.value = async (emitter, signal) => {
+        attempt += 1;
+        if (attempt > 1) {
+          nextTerminateMode.value = 'MAX_TURNS';
+          return;
+        }
+        nextTerminateMode.value = 'CANCELLED';
+        emitter.emit(AgentEventType.ROUND_START, {
+          subagentId: 'workflow-agent',
+          round: 1,
+          promptId: 'prompt-1',
+          timestamp: Date.now(),
+        });
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+      };
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      let caught: unknown;
+      try {
+        await dispatch('stall then burn out', {
+          label: 'staller',
+          stallMs: 20,
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(2);
+      expect(String(caught)).toContain('MAX_TURNS');
+      for (const file of files) {
+        const id = path.basename(file, '.jsonl').slice('agent-'.length);
+        expect(String(caught)).toContain(id);
+      }
+    });
+
+    // Every other transcript test runs in a non-git tmp dir, so
+    // getCachedGitBranch returns undefined and JSON.stringify omits the key —
+    // the gitBranch option line could be dropped with no red test. Real
+    // dispatches run inside git checkouts, so pin the annotation against a
+    // real repo (one commit: rev-parse fails on an unborn HEAD).
+    it('records the git branch of the project root', async () => {
+      const gitCmd = (...args: string[]): string =>
+        execFileSync('git', args, { cwd: projectDir, encoding: 'utf8' });
+      gitCmd('init', '-q', '-b', 'wf-fixture-branch');
+      gitCmd('config', 'user.email', 'test@example.com');
+      gitCmd('config', 'user.name', 'Test');
+      gitCmd('config', 'commit.gpgsign', 'false');
+      fsSync.writeFileSync(path.join(projectDir, 'a.txt'), 'seed\n');
+      gitCmd('add', '.');
+      gitCmd('commit', '-q', '-m', 'init');
+
+      const dispatch = createProductionDispatch(transcriptConfig());
+      await dispatch('branch run', { label: 'b' });
+
+      const files = transcriptFiles();
+      expect(files).toHaveLength(1);
+      expect(recordsOf(files[0])[0]['gitBranch']).toBe('wf-fixture-branch');
     });
   });
 
