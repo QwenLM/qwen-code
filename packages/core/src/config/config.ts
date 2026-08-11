@@ -673,7 +673,12 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   };
 }
 
-export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini' | 'Qoder';
+export type ExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
 export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
@@ -844,6 +849,7 @@ export class MCPServerConfig {
      */
     readonly scope?: McpServerScope,
     readonly alwaysLoadTools?: boolean,
+    readonly agentPluginV1?: boolean,
   ) {}
 }
 
