@@ -108,6 +108,7 @@ import {
   deleteBranch,
 } from '../server/git-branch-ops.js';
 import {
+  MAX_VIRTUAL_SESSION_ID_PART_LENGTH,
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
@@ -2405,7 +2406,7 @@ export function registerSessionRoutes(
       return;
     }
     const toolCallId = req.params['toolCallId'];
-    if (!toolCallId || toolCallId.length > 500) {
+    if (!toolCallId || toolCallId.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH) {
       res.status(400).json({
         error: '`toolCallId` must be a non-empty tool call id',
         code: 'invalid_tool_call_id',
@@ -2457,7 +2458,10 @@ export function registerSessionRoutes(
         return;
       }
       const toolCallId = req.params['toolCallId'];
-      if (!toolCallId || toolCallId.length > 500) {
+      if (
+        !toolCallId ||
+        toolCallId.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+      ) {
         res.status(400).json({
           error: '`toolCallId` must be a non-empty tool call id',
           code: 'invalid_tool_call_id',

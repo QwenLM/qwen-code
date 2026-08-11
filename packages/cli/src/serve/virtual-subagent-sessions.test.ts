@@ -92,6 +92,12 @@ describe('VirtualSubagentSessions', () => {
     expect(() =>
       createVirtualSubagentSessionId('parent.session', 'agent-1'),
     ).toThrow('valid id parts');
+    expect(() => createVirtualSubagentSessionId('', 'agent-1')).toThrow(
+      'valid id parts',
+    );
+    expect(() =>
+      createVirtualSubagentSessionId('a'.repeat(501), 'agent-1'),
+    ).toThrow('valid id parts');
     expect(() => createVirtualSubagentSessionId('parent-session', '')).toThrow(
       'valid id parts',
     );

@@ -27,7 +27,7 @@ import { replayTranscriptRecordPage } from '../acp-integration/session/history-r
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
 const PREFIX = 'subagent.';
-const MAX_VIRTUAL_SESSION_ID_PART_LENGTH = 500;
+export const MAX_VIRTUAL_SESSION_ID_PART_LENGTH = 500;
 const MAX_VIRTUAL_SESSION_ID_LENGTH = 2_000;
 const POLL_INTERVAL_MS = 250;
 const TARGET_RETENTION_MS = 60_000;
@@ -218,6 +218,8 @@ function isValidVirtualAgentId(value: string): boolean {
   return (
     value.length > 0 &&
     value.length <= MAX_VIRTUAL_SESSION_ID_PART_LENGTH &&
+    // Round-trip rejects lone surrogates: UTF-8 maps them to U+FFFD, so two
+    // distinct agent ids would otherwise encode to the same session id.
     decodePart(encodePart(value)) === value
   );
 }
@@ -234,7 +236,9 @@ export function createVirtualSubagentSessionId(
   }
   const sessionId = `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
   if (sessionId.length > MAX_VIRTUAL_SESSION_ID_LENGTH) {
-    throw new Error('Virtual subagent session id exceeds 2000 characters');
+    throw new Error(
+      `Virtual subagent session id exceeds ${MAX_VIRTUAL_SESSION_ID_LENGTH} characters`,
+    );
   }
   return sessionId;
 }
