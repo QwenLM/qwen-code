@@ -63,11 +63,15 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
-    // Per-PR metadata still rides the ONE list call — the sole gh pr view
-    // is the labels-only live-skip recheck immediately before a mutation.
+    // Per-PR metadata still rides the list calls — the sole gh pr view is
+    // live_skip's labels-only recheck immediately before a mutation, whose
+    // exported payload the auto-release scope check rides (no second read).
     expect(workflow.split('gh pr view').length - 1).toBe(1);
     expect(workflow).toContain(
       'gh pr view "${pr}" --repo "${REPO}" --json labels',
+    );
+    expect(workflow).toContain(
+      'index($a) != null) and ([.labels[]?.name] | index($b) != null)\' <<< "${LIVE_LABELS_JSON}"',
     );
     // autofix/skip is the maintainer opt-out honored at every engagement
     // path: a skip-labeled PR gets no shepherd levers and no dashboard row.
@@ -574,5 +578,321 @@ exit 1`;
     expect(
       execFileSync('bash', ['-c', dryScript], { encoding: 'utf8' }),
     ).toContain('DRY-OK');
+  });
+
+  it('covers the takeover pool: enumeration, dashboard rows, and a bounded auto-release', () => {
+    // Label contract, mirroring qwen-autofix.yml.
+    expect(workflow).toContain("TAKEOVER_LABEL: 'autofix/takeover'");
+    expect(workflow).toContain("NEEDS_HUMAN_LABEL: 'autofix/needs-human'");
+    expect(workflow).toContain(
+      'AUTO_RELEASE_DAYS: "${{ vars.QWEN_SHEPHERD_AUTO_RELEASE_DAYS || \'3\' }}"',
+    );
+    expect(workflow).toContain("MAX_RELEASES_PER_TICK: '3'");
+    // One list call carries the takeover row payload — forks INCLUDED (no
+    // isCrossRepository filter: visibility covers fork takeovers, and the
+    // release lever needs no push access). sort:updated-asc keeps the STALE
+    // tail (the release lever's target population) inside the limit window,
+    // and the saturation warning keeps truncation loud.
+    expect(workflow).toContain('--state open --label "${TAKEOVER_LABEL}"');
+    expect(workflow).toContain(
+      '--limit 50 --json number,author,updatedAt,mergeable,statusCheckRollup,labels',
+    );
+    expect(workflow).toContain("--search 'sort:updated-asc'");
+    expect(workflow).toContain('takeover pool at the 50-PR enumeration limit');
+    const takeoverEnum = workflow.match(
+      /--label "\$\{TAKEOVER_LABEL\}"[\s\S]*?\/tmp\/takeover-raw\.json/,
+    )?.[0];
+    expect(takeoverEnum).toBeTruthy();
+    expect(takeoverEnum).not.toContain('isCrossRepository');
+    // A failed pool read keeps the previous dashboard body — an unreadable
+    // snapshot never masquerades as an empty pool. The exit is what keeps
+    // the dashboard unwritten; pin them together.
+    expect(workflow).toMatch(
+      /takeover enumeration failed; skipping the takeover table, auto-release, and dashboard update this tick"\n\s+exit 0/,
+    );
+    // The released-but-unresolved tail (needs-human WITHOUT takeover) gets
+    // its own read-only enumeration and dashboard section — released PRs
+    // must not vanish from every surface.
+    expect(workflow).toContain('--state open --label "${NEEDS_HUMAN_LABEL}"');
+    expect(workflow).toContain("'## Awaiting human'");
+    expect(workflow).toContain('takeover released — needs a human decision');
+    // autofix/skip wins in the pool too — replay the filter VERBATIM. The
+    // program-prefix anchor keeps this from capturing the bot-fleet filter
+    // (same jq shape, different file and a leading isCrossRepository leg).
+    const takeoverFilter = workflow.match(
+      /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'(\[\.\[\] \| select\(\[\.labels[\s\S]*?)' \\\n\s+\/tmp\/takeover-raw\.json/,
+    )?.[1];
+    expect(takeoverFilter).toBeTruthy();
+    const kept = JSON.parse(
+      execFileSync('jq', ['--arg', 'skip', 'autofix/skip', takeoverFilter], {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          { number: 1, labels: [] },
+          { number: 2, labels: [{ name: 'autofix/skip' }] },
+          { number: 3, labels: [{ name: 'unrelated' }] },
+        ]),
+      }),
+    ).map((r) => r.number);
+    expect(kept).toEqual([1, 3]);
+    // Dashboard: the takeover table is rendered (edited in place with the
+    // bot-fleet table), and the header line reports releases.
+    expect(workflow).toContain("'## Takeover pool'");
+    expect(workflow).toContain("'| PR | Author | Updated | State | Note |'");
+    expect(workflow).toContain('releases: ${RELEASES}');
+    // needs-human bot PRs surface on the bot-fleet table too.
+    expect(workflow).toContain("NH_PREFIX='🛑 '");
+  });
+
+  it('behaviorally proves pause detection, the re-arm guard, and the release age gate', () => {
+    // Extract the three pause-detection jq programs VERBATIM (drift fails
+    // the test) and replay them against comment-stream fixtures.
+    const termJq = workflow.match(
+      /TERM_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    )?.[1];
+    const resumeJq = workflow.match(
+      /RESUME_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    )?.[1];
+    const reasonJq = workflow.match(
+      /REASON="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    )?.[1];
+    expect(termJq).toBeTruthy();
+    expect(resumeJq).toBeTruthy();
+    expect(reasonJq).toBeTruthy();
+    const run = (program, comments) =>
+      execFileSync('jq', ['-r', '--arg', 'ab', 'qwen-code-dev-bot', program], {
+        encoding: 'utf8',
+        input: JSON.stringify(comments),
+      }).trim();
+    const bot = (created_at, body) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at,
+      body,
+    });
+    const human = (created_at, body) => ({
+      user: { login: 'wenshao' },
+      created_at,
+      body,
+    });
+    // TERM_TS: latest bot cap notice only — a human forging the marker text
+    // does not move the pause clock.
+    expect(
+      run(termJq, [
+        bot('2026-08-01T00:00:00Z', '⏸️ … <!-- takeover-cap-reached -->'),
+        bot('2026-08-05T00:00:00Z', '⏸️ … <!-- takeover-cap-reached -->'),
+        human('2026-08-06T00:00:00Z', '<!-- takeover-cap-reached -->'),
+      ]),
+    ).toBe('2026-08-05T00:00:00Z');
+    expect(run(termJq, [human('2026-08-06T00:00:00Z', 'x')])).toBe('');
+    // RESUME_TS: re-arm markers and engage acks both count as a resume.
+    expect(
+      run(resumeJq, [
+        bot('2026-08-02T00:00:00Z', '🔄 … <!-- autofix-rearm -->'),
+        bot('2026-08-03T00:00:00Z', '🤝 … <!-- takeover-ack engaged -->'),
+      ]),
+    ).toBe('2026-08-03T00:00:00Z');
+    expect(run(resumeJq, [bot('2026-08-02T00:00:00Z', '⏸️ unrelated')])).toBe(
+      '',
+    );
+    // …and a TRUSTED human's re-arm command counts at COMMENT time (the
+    // ack rides a queued job — without this a tick could release a PR
+    // minutes after the human re-armed it), while an outsider's identical
+    // command does not move the clock.
+    const trusted = (created_at, body) => ({
+      user: { login: 'wenshao' },
+      author_association: 'MEMBER',
+      created_at,
+      body,
+    });
+    expect(
+      run(resumeJq, [trusted('2026-08-06T00:00:00Z', '@qwen-code /takeover')]),
+    ).toBe('2026-08-06T00:00:00Z');
+    expect(
+      run(resumeJq, [trusted('2026-08-06T00:00:00Z', '  @qwen-code /retry  ')]),
+    ).toBe('2026-08-06T00:00:00Z');
+    expect(
+      run(resumeJq, [human('2026-08-06T00:00:00Z', '@qwen-code /takeover')]),
+    ).toBe('');
+    // A fresh `labeled` event is resume evidence too (UI re-apply).
+    const eventJq = workflow.match(
+      /EVENT_TS="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
+    )?.[1];
+    expect(eventJq).toBeTruthy();
+    const runEvent = (events) =>
+      execFileSync('jq', ['-r', '--arg', 'tl', 'autofix/takeover', eventJq], {
+        encoding: 'utf8',
+        input: JSON.stringify(events),
+      }).trim();
+    expect(
+      runEvent([
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-06T00:00:00Z',
+        },
+        {
+          event: 'labeled',
+          label: { name: 'other' },
+          created_at: '2026-08-07T00:00:00Z',
+        },
+      ]),
+    ).toBe('2026-08-06T00:00:00Z');
+    expect(runEvent([{ event: 'closed' }])).toBe('');
+    // The event read fails closed, like the comment read.
+    expect(workflow).toContain(
+      'event read failed — release deferred this tick (fail closed)',
+    );
+    // REASON: the terminal round's own headline beats the scan-side notice,
+    // which always says "round cap" even when a breaker fired first.
+    const reason = run(reasonJq, [
+      bot(
+        '2026-08-04T00:00:00Z',
+        '🤖 AutoFix stopped: this counting window now contains 3 time-budget exhaustions …\ndetails',
+      ),
+    ]);
+    expect(reason).toContain('time-budget exhaustions');
+    expect(reason).not.toContain('details');
+    // Only TERMINAL headlines count: the transient setup-failure variant
+    // retries on the next scan and says nothing about why the loop stopped.
+    expect(
+      run(reasonJq, [
+        bot(
+          '2026-08-04T00:00:00Z',
+          '🤖 AutoFix could not start — a setup step failed …',
+        ),
+      ]),
+    ).toBe('');
+    // The re-arm guard: a resume NEWER than the latest cap notice means the
+    // label is stale and the release must never fire. Replay the gate
+    // VERBATIM so a dropped comparison fails the test.
+    const rearmGuard = workflow.match(
+      /(elif \[\[ -n "\$\{RESUME_TS\}" && "\$\{RESUME_TS\}" > "\$\{TERM_TS\}" \]\]; then\n {18}STATE='managed \(re-armed\)')/,
+    )?.[1];
+    expect(rearmGuard).toBeTruthy();
+    const guard = (resume, term) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `if [[ -z "${'$'}{TERM_TS}" ]]; then echo UNREADABLE\n${rearmGuard.replace(/\n {18}/g, '\n')}\necho REARMED\nelse\nfi`.replace(
+            'else\nfi',
+            'else echo RELEASE-ELIGIBLE\nfi',
+          ),
+        ],
+        {
+          env: { ...process.env, RESUME_TS: resume, TERM_TS: term },
+          encoding: 'utf8',
+        },
+      ).trim();
+    expect(guard('2026-08-06T00:00:00Z', '2026-08-05T00:00:00Z')).toBe(
+      'REARMED',
+    );
+    expect(guard('2026-08-04T00:00:00Z', '2026-08-05T00:00:00Z')).toBe(
+      'RELEASE-ELIGIBLE',
+    );
+    expect(guard('', '2026-08-05T00:00:00Z')).toBe('RELEASE-ELIGIBLE');
+    // The release gates run in blast-radius order: per-tick budget BEFORE
+    // the PAT-backed live read, then the shared live_skip veto (fail closed
+    // on an unreadable read; skip wins — both worded by skip_note), then the
+    // both-labels scope condition riding live_skip's exported payload — and
+    // the writes are act()-wrapped so dry-run makes no mutation.
+    expect(workflow).toMatch(
+      /RELEASES\}" -ge "\$\{MAX_RELEASES_PER_TICK\}" \]\]; then[\s\S]{0,200}elif live_skip "\$\{PR\}"; then\n\s+NOTE="\$\(skip_note release\)"[\s\S]{0,400}labels changed since the snapshot — deferring release/,
+    );
+    expect(workflow).toMatch(
+      /if act "#\$\{PR\}: auto-release takeover[\s\S]{0,700}if act "#\$\{PR\}: post auto-release summary"/,
+    );
+    // The release counts against the per-tick budget even when the summary
+    // comment fails — the increment precedes the summary act (mirrors the
+    // conflict-dispatch counting rule pinned above).
+    expect(workflow).toMatch(
+      /RELEASES=\$\(\( RELEASES \+ 1 \)\)[\s\S]{0,400}if act "#\$\{PR\}: post auto-release summary"/,
+    );
+    // The fail-closed deferral guards are load-bearing (a missing one runs
+    // `date -d ""` under set -e and kills the tick) — pin their wording.
+    expect(workflow).toContain(
+      'pause timestamp unreadable — release deferred (fail closed)',
+    );
+    expect(workflow).toContain(
+      'comment read failed — release deferred this tick',
+    );
+    // The release is idempotent WITHOUT a marker: the scope condition (both
+    // labels) is false once the takeover label lands off.
+    expect(workflow).toContain(
+      'index($a) != null) and ([.labels[]?.name] | index($b) != null)',
+    );
+    expect(workflow).toContain('<!-- fleet-shepherd auto-release -->');
+    // The age gate compares whole days against the tunable.
+    expect(workflow).toContain('"${PAUSE_D}" -ge "${AUTO_RELEASE_DAYS}"');
+    // The tunable is operator-breakable — a non-numeric repo variable falls
+    // back to the default instead of dying mid-tick under set -e.
+    expect(workflow).toContain('=~ ^[0-9]+$');
+    expect(workflow).toContain('is not numeric; using 3');
+    // Dynamic note text is sanitized before it reaches the printf '%b'
+    // table: backslashes first (else %b expands them), then pipes.
+    expect(workflow).toContain('SAFE_NOTE="${NOTE//\\\\/\\\\\\\\}"');
+    expect(workflow).toContain('${SAFE_NOTE//|/\\\\|}');
+  });
+
+  it('pins the marker/headline contracts against qwen-autofix.yml — drift fails here, not in production', () => {
+    // The resume-marker set, the trusted re-arm commands, and the terminal
+    // headline formats are all PRODUCED by qwen-autofix.yml and CONSUMED by
+    // the shepherd. Each side's own suite pins its own file; only a
+    // cross-file assertion fails when one side moves without the other.
+    const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+    // 1. Resume markers: the scan's REARM_KEY (the write side's own idea of
+    //    "management resumed") and the shepherd's RESUME_TS must name the
+    //    same markers — a new resume path added to only one file must fail
+    //    here, never as a wrongful auto-release.
+    const rearmKey = autofix.match(
+      /REARM_KEY="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)'/,
+    )?.[1];
+    expect(rearmKey).toBeTruthy();
+    const resumeTs = workflow.match(
+      /RESUME_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    )?.[1];
+    expect(resumeTs).toBeTruthy();
+    for (const marker of [
+      '<!-- autofix-rearm -->',
+      '<!-- takeover-ack engaged -->',
+    ]) {
+      expect(rearmKey).toContain(marker);
+      expect(resumeTs).toContain(marker);
+    }
+    // 2. The trusted re-arm commands the shepherd greps for are the same
+    //    strings qwen-autofix.yml routes on.
+    expect(autofix).toContain("TAKEOVER_COMMAND: '@qwen-code /takeover'");
+    expect(autofix).toContain("RETRY_COMMAND: '@qwen-code /retry'");
+    expect(resumeTs).toContain('"@qwen-code /takeover"');
+    expect(resumeTs).toContain('"@qwen-code /retry"');
+    // 3. Every TERMINAL headline the address leg can print matches the
+    //    shepherd's REASON regex, and the transient setup-failure headline
+    //    does not. Templates are extracted from the producer and exercised
+    //    against the consumer's verbatim regex — a reworded headline on
+    //    either side fails this test.
+    const reasonRe = workflow.match(/\| test\("([^"]+)"\)\)/)?.[1];
+    expect(reasonRe).toBeTruthy();
+    const headlines = [...autofix.matchAll(/HEADLINE="(🤖 [^"]+)"/g)].map(
+      (m) => m[1],
+    );
+    expect(headlines.length).toBeGreaterThanOrEqual(5);
+    const terminal = headlines.filter(
+      (h) =>
+        h.includes('stopped after') ||
+        h.includes('stopped: this counting window') ||
+        h.includes('could not start evaluation') ||
+        h.includes('reached the round cap') ||
+        h.includes('this was the last automatic attempt'),
+    );
+    const transient = headlines.filter((h) =>
+      h.includes('a setup step failed'),
+    );
+    expect(terminal.length).toBeGreaterThanOrEqual(4);
+    expect(transient).toHaveLength(1);
+    const matches = (h) =>
+      execFileSync('jq', ['-rn', '--arg', 'b', h, `$b | test("${reasonRe}")`], {
+        encoding: 'utf8',
+      }).trim();
+    for (const h of terminal) expect(matches(h)).toBe('true');
+    for (const h of transient) expect(matches(h)).toBe('false');
   });
 });

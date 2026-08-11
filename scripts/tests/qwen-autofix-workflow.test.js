@@ -3142,6 +3142,58 @@ describe('qwen-autofix workflow', () => {
     expect(loopHead).not.toContain('INSPECTED=');
   });
 
+  it('applies the needs-human escalation label at the cap and removes it on resume/release', () => {
+    // The label contract: one env definition, one idempotent create with a
+    // fixed color (a REST add of a missing label would mint a random one).
+    expect(workflow).toContain("NEEDS_HUMAN_LABEL: 'autofix/needs-human'");
+    expect(reviewScanJob).toContain(
+      'gh label create "${NEEDS_HUMAN_LABEL}" --repo "${REPO}" --color',
+    );
+    expect(reviewScanJob).toContain('-f "labels[]=${NEEDS_HUMAN_LABEL}"');
+    // The label write sits OUTSIDE the once-per-window comment dedup —
+    // that is the bootstrap property: already-noticed PRs (paused before
+    // this shipped) get labeled on the first scan after deploy. Assert on
+    // ordering inside the cap branch: the label POST precedes the
+    // CAP_NOTICED gate that guards only the comment.
+    const labelPost = reviewScanJob.indexOf(
+      '-f "labels[]=${NEEDS_HUMAN_LABEL}"',
+    );
+    const commentGate = reviewScanJob.indexOf('"${CAP_NOTICED}" == "0"');
+    expect(labelPost).toBeGreaterThan(-1);
+    expect(commentGate).toBeGreaterThan(-1);
+    expect(labelPost).toBeLessThan(commentGate);
+    // …but never BEFORE the live-consent recheck: a takeover label pulled
+    // moments ago gets neither the notice nor the escalation label.
+    const consentRecheck = reviewScanJob.indexOf(
+      'cap notice skipped: consent changed since the snapshot',
+    );
+    expect(consentRecheck).toBeGreaterThan(-1);
+    expect(consentRecheck).toBeLessThan(labelPost);
+    // The dry-run line covers both writes.
+    expect(reviewScanJob).toContain(
+      'DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL}',
+    );
+    // Removal at every resume/release point — the URI-encoded REST DELETE
+    // with 404 tolerance, same shape as the TAKEOVER_LABEL removal. Six
+    // sites: takeover-command re-arm, fresh engage, and stop; the ack
+    // job's engage/release; the /retry marker; the scan's first-pickup ack.
+    const removals =
+      workflow.match(
+        /gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}"/g,
+      ) ?? [];
+    expect(removals).toHaveLength(6);
+    // Every removal tolerates the common 404 (never-paused PR).
+    expect(
+      workflow.match(/\$\{NEEDS_HUMAN_LABEL\} removal failed/g)?.length,
+    ).toBe(6);
+    // The ack job removes on a real engage or any release — but NOT on
+    // base-refused (nothing changed) or skip-blocked (management never
+    // resumed).
+    expect(workflow).toContain(
+      '"${ACK}" == \'released\' || ( "${ACK}" == \'engaged\' && "${HAS_SKIP}" != \'true\' )',
+    );
+  });
+
   it('backs off idle candidates without spending inspection budget', () => {
     // Measured 2026-07-29: 28 open takeover PRs, 8 idle in "nothing new"
     // state for 10+ hours. Every idle inspection costs a unit of the
@@ -3354,6 +3406,7 @@ describe('qwen-autofix workflow', () => {
               REPO: 'QwenLM/qwen-code',
               TAKEOVER_LABEL: 'autofix/takeover',
               SKIP_LABEL: 'autofix/skip',
+              NEEDS_HUMAN_LABEL: 'autofix/needs-human',
               TAKEOVER_COMMAND: '@qwen-code /takeover',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
@@ -3398,10 +3451,14 @@ describe('qwen-autofix workflow', () => {
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
-    // add + present → re-arm ack, label untouched.
+    // add + present → re-arm ack, takeover label untouched — the only API
+    // write is the stale needs-human cleanup (404-tolerant; this PR was
+    // never paused, so the stub's silent success stands in for the 404).
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
-    expect(rearm.writes).not.toContain('API');
+    expect(rearm.writes).not.toContain('labels[]=autofix/takeover');
+    expect(rearm.writes).not.toContain('labels/autofix%2Ftakeover');
+    expect(rearm.writes).toContain('labels/autofix%2Fneeds-human');
     expect(rearm.log).toContain('re-armed');
     // remove + present → label removed, through the URI-encoded path segment
     // (real jq runs in the substitution, so the %2F is the executed truth).
