@@ -357,6 +357,40 @@ describe('AddWorkspaceDialog', () => {
       expect(listbox()).toBeNull();
     });
 
+    it('opens suggestions on the first edit after a re-blur within the blur window', async () => {
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={onSuggest}
+        />,
+      );
+
+      act(() => input().blur());
+      act(() => input().focus());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      // Second blur while the first blur timer is still pending: it must
+      // cancel that timer rather than stack a second one on top of it.
+      act(() => input().blur());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20);
+      });
+      act(() => input().focus());
+      // Cross the first timer's original deadline: an uncancelled timer
+      // would have set the suppress flag by now.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(40);
+      });
+
+      type('/home/me/co');
+      await settle();
+
+      expect(listbox()).not.toBeNull();
+    });
+
     it('opens suggestions for a focused input in a shadow-DOM portal root', async () => {
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       const host = document.createElement('div');
