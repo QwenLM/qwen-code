@@ -471,14 +471,11 @@ describe('useProviderUpdates', () => {
     expect(process.env[CODING_PLAN_ENV_KEY]).toBe('sk-sp-existing-key');
   });
 
-  it('switches model when previous model is no longer available', async () => {
-    let activeModel = 'removed-model';
-    mockConfig.getModel.mockImplementation(() => activeModel);
-    mockModelsConfig.syncAfterAuthRefresh.mockImplementation(
-      (_authType, modelId) => {
-        activeModel = modelId;
-      },
-    );
+  it('leaves the model selection alone when the previous model is gone', async () => {
+    // Template updates do not carry a model-selection intent; even when the
+    // current model is absent from the refreshed list the update must not
+    // adopt the provider's default or touch model.name / model.baseUrl.
+    mockConfig.getModel.mockReturnValue('removed-model');
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -505,18 +502,24 @@ describe('useProviderUpdates', () => {
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     await waitFor(() => {
-      expect(mockSettings.setValue).toHaveBeenCalled();
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     });
 
-    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'qwen3.5-plus',
-      undefined,
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       {
         type: 'info',
-        text: 'Coding Plan configuration updated successfully. Model switched to "qwen3.5-plus".',
+        text: 'Coding Plan configuration updated successfully.',
       },
       expect.any(Number),
     );
