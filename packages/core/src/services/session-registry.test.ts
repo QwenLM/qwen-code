@@ -671,6 +671,26 @@ describe('registerSession', () => {
     },
   );
 
+  it('clears a directory planted at its record path and registers', async () => {
+    const recordPath = getSessionRecordPath();
+    await fs.mkdir(recordPath, { recursive: true });
+    await fs.writeFile(path.join(recordPath, 'obstruction'), 'planted');
+
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    expect((await fs.lstat(recordPath)).isFile()).toBe(true);
+    expect(JSON.parse(await fs.readFile(recordPath, 'utf8'))).toMatchObject({
+      sessionId: 's1',
+      cwd: '/w/app',
+    });
+  });
+
   // Windows synthesizes st_mode from file attributes (a writable dir reads
   // 0o777, a file 0o666) and chmod there can only toggle the read-only bit,
   // so POSIX permission bits are not assertable on the test_windows gate.

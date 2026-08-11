@@ -572,6 +572,24 @@ export async function registerSession(
               reportConflict();
               return false;
             }
+            if (unusable.origin === null && unusable.entry !== null) {
+              try {
+                const stat = await fs.lstat(filePath);
+                if (stat.isDirectory()) {
+                  // `rename(2)` cannot replace a directory with the staged
+                  // record. It cannot carry a JSON origin claim either, so
+                  // clear it and re-decide about the now-free name. Pin the
+                  // entry immediately before removal for the same reason as
+                  // every other mutation in this module.
+                  assertSameEntry(filePath, unusable.entry, false);
+                  await fs.rm(filePath, { recursive: true });
+                  continue;
+                }
+              } catch (error) {
+                if (isEntryRace(error)) continue;
+                throw error;
+              }
+            }
             // An entry that cannot be attributed at all — unparseable, or
             // past the read cap, so not something this code ever wrote —
             // stays replaceable. Refusing it instead would strand
