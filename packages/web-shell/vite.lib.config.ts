@@ -156,6 +156,13 @@ export default defineConfig({
         'react/jsx-dev-runtime',
         'react-dom',
         'react-dom/client',
+        // xterm is a regular dependency of this package; keeping it external
+        // (instead of inlining ~400 KiB into the single-file artifact) lets
+        // the host bundler share one instance. The host resolves the
+        // '@xterm/xterm/css/xterm.css' import the same way.
+        '@xterm/xterm',
+        /^@xterm\/xterm\//,
+        '@xterm/addon-fit',
         'radix-ui',
         'lucide-react',
         'class-variance-authority',

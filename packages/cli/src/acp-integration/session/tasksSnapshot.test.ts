@@ -5,9 +5,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { AgentTask, Config, MonitorTask } from '@qwen-code/qwen-code-core';
+import type {
+  AgentTask,
+  Config,
+  MonitorTask,
+  ShellTask,
+} from '@qwen-code/qwen-code-core';
 import { buildSessionTasksStatus } from './tasksSnapshot.js';
-import type { ServeSessionAgentTaskStatus } from '@qwen-code/acp-bridge/status';
+import type {
+  ServeSessionAgentTaskStatus,
+  ServeSessionShellTaskStatus,
+} from '@qwen-code/acp-bridge/status';
 
 function agentTask(overrides: Partial<AgentTask> = {}): AgentTask {
   return {
@@ -104,6 +112,52 @@ describe('buildSessionTasksStatus agent lineage', () => {
   it('exposes the parent tool call that launched an agent', () => {
     const [task] = serializedAgents([agentTask({ toolUseId: 'call-1' })]);
     expect(task.toolUseId).toBe('call-1');
+  });
+});
+
+function shellTask(overrides: Partial<ShellTask> = {}): ShellTask {
+  return {
+    kind: 'shell',
+    id: 'bg_0123456789abcdef',
+    shellId: 'bg_0123456789abcdef',
+    command: 'python3 app.py',
+    description: 'python3 app.py',
+    status: 'running',
+    startTime: 1_000,
+    outputFile: '/tmp/shell-bg.output',
+    cwd: '/work',
+    abortController: new AbortController(),
+    ...overrides,
+  } as unknown as ShellTask;
+}
+
+function serializedShell(shell: ShellTask): ServeSessionShellTaskStatus {
+  const config = {
+    getBackgroundTaskRegistry: () => ({ getAll: () => [] }),
+    getBackgroundShellRegistry: () => ({ getAll: () => [shell] }),
+    getMonitorRegistry: () => ({ getAll: () => [] }),
+  } as unknown as Config;
+  return buildSessionTasksStatus('session-1', config, 2_000).tasks.find(
+    (task) => task.kind === 'shell',
+  ) as ServeSessionShellTaskStatus;
+}
+
+describe('buildSessionTasksStatus shell tasks', () => {
+  it('passes terminal metadata through for tmux-backed tasks', () => {
+    const task = serializedShell(
+      shellTask({
+        terminal: { socket: 'qwen-serve', tmuxSession: 'qsh-bg_x' },
+      }),
+    );
+    expect(task.terminal).toEqual({
+      socket: 'qwen-serve',
+      tmuxSession: 'qsh-bg_x',
+    });
+  });
+
+  it('omits terminal for plain shell tasks', () => {
+    const task = serializedShell(shellTask());
+    expect('terminal' in task).toBe(false);
   });
 });
 

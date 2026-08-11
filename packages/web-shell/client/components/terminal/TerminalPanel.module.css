@@ -25,6 +25,9 @@
   color: var(--muted-foreground, #888);
   background: color-mix(in srgb, var(--background, #1e1e1e) 80%, transparent);
   font-size: 13px;
+  /* Let scrollback scrolling and text selection pass through to the xterm
+     viewport underneath; only the status column is interactive. */
+  pointer-events: none;
 }
 
 .terminalOverlayColumn {
@@ -32,6 +35,7 @@
   flex-direction: column;
   align-items: center;
   gap: 8px;
+  pointer-events: auto;
 }
 
 .terminalOverlayDetail {

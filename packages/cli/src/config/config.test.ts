@@ -2494,6 +2494,7 @@ describe('mergeExcludeTools', () => {
   const defaultExcludes = [
     ToolNames.SHELL,
     ToolNames.MONITOR,
+    ToolNames.TMUX,
     ToolNames.EDIT,
     ToolNames.WRITE_FILE,
   ];
@@ -2655,6 +2656,7 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.TMUX);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -2675,6 +2677,7 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.TMUX);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -2696,6 +2699,26 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.TMUX);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude tmux when explicitly allowed in tools.allowed', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: [ToolNames.TMUX],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).not.toContain(ToolNames.TMUX);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });

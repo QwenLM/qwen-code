@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
 } from '@qwen-code/sdk/daemon';
@@ -25,7 +26,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
 }));
 
-const { TasksStatusMessage } = await import('./TasksStatusMessage');
+const { TasksStatusMessage, ShellTaskDetail } = await import(
+  './TasksStatusMessage'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -337,6 +340,86 @@ describe('TasksStatusMessage nested-agent tree', () => {
     // not the user; must NOT be tagged.
     expect(text).not.toContain('[blocking] label-fg-child');
     expect(text).not.toContain('[blocking] label-bg-parent');
+  });
+
+  function shellTask(
+    overrides: Partial<DaemonSessionShellTaskStatus> = {},
+  ): DaemonSessionShellTaskStatus {
+    return {
+      kind: 'shell',
+      id: 'bg_0123456789abcdef',
+      label: 'python3 app.py',
+      description: 'python3 app.py',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'python3 app.py',
+      cwd: '/work',
+      ...overrides,
+    };
+  }
+
+  function renderShellDetail(
+    task: DaemonSessionShellTaskStatus,
+    onOpenTerminal?: (task: DaemonSessionShellTaskStatus) => void,
+  ): HTMLElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ShellTaskDetail
+            task={task}
+            {...(onOpenTerminal ? { onOpenTerminal } : {})}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  it('shows Open terminal only when a handler is wired', () => {
+    const tmuxTask = shellTask({
+      terminal: { socket: 'qwen-serve', tmuxSession: 'qsh-bg_x' },
+    });
+    const wired = renderShellDetail(tmuxTask, () => {});
+    expect(wired.textContent).toContain('Open terminal');
+    const unwired = renderShellDetail(tmuxTask);
+    expect(unwired.textContent).not.toContain('Open terminal');
+  });
+
+  it('hides Open terminal for settled tmux tasks and plain shells', () => {
+    const onOpenTerminal = vi.fn();
+    const settled = renderShellDetail(
+      shellTask({
+        status: 'completed',
+        terminal: { socket: 'qwen-serve', tmuxSession: 'qsh-bg_x' },
+      }),
+      onOpenTerminal,
+    );
+    expect(settled.textContent).not.toContain('Open terminal');
+    const plain = renderShellDetail(shellTask(), onOpenTerminal);
+    expect(plain.textContent).not.toContain('Open terminal');
+  });
+
+  it('invokes the open-terminal handler with the task', () => {
+    const onOpenTerminal = vi.fn();
+    const task = shellTask({
+      terminal: { socket: 'qwen-serve', tmuxSession: 'qsh-bg_x' },
+    });
+    const container = renderShellDetail(task, onOpenTerminal);
+    const button = Array.from(container.querySelectorAll('button')).find(
+      (el) => el.textContent === 'Open terminal',
+    );
+    expect(button).toBeDefined();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'bg_0123456789abcdef' }),
+    );
   });
 
   it('caps the detail progress list at the newest MAX_DISPLAYED_ACTIVITIES rows', async () => {

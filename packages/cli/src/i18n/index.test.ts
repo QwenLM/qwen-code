@@ -208,4 +208,19 @@ describe('localizeToolDisplayName', () => {
     );
     expect(untranslated).toEqual([]);
   });
+
+  it('has a zh-TW translation for every core tool display name', async () => {
+    const { setLanguageAsync, localizeToolDisplayName } = await import(
+      './index.js'
+    );
+    const { ToolDisplayNames } = await import('@qwen-code/qwen-code-core');
+    await setLanguageAsync('zh-TW');
+
+    const KEEP_ENGLISH = new Set(['Agent', 'Grep', 'Glob']);
+    const untranslated = Object.values(ToolDisplayNames).filter(
+      (name) =>
+        !KEEP_ENGLISH.has(name) && localizeToolDisplayName(name) === name,
+    );
+    expect(untranslated).toEqual([]);
+  });
 });

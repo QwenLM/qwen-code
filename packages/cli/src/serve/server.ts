@@ -2731,12 +2731,16 @@ export function createServeApp(
       // Browser live-terminal attach for tmux-backed shell tasks (the core
       // tmux tool). Shares the upgrade listener's loopback/CSRF/bearer
       // checks; the handler validates the task against the live registry
-      // before attaching.
+      // before attaching. It resolves the owning runtime per session, so a
+      // primary-runtime drain must not gate it (healthy secondary workspaces
+      // stay attachable); hence bypassMountDrainGate.
       {
         path: '/terminal',
+        bypassMountDrainGate: true,
         onConnection: createTerminalWsConnectionHandler({
           workspaceRegistry,
           daemonLog,
+          resolveAttachEnv: (runtime) => getRuntimeEffectiveEnv(runtime.env),
         }),
       },
     ],

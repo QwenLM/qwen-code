@@ -30,7 +30,6 @@ export function TerminalPanel({ taskId, sessionId }: TerminalPanelProps) {
   const connection = useConnection();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
 
   const resolvedSessionId = sessionId ?? connection.sessionId ?? '';
 
@@ -59,16 +58,28 @@ export function TerminalPanel({ taskId, sessionId }: TerminalPanelProps) {
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
+    // xterm captures keystrokes only through its focused hidden textarea.
+    term.focus();
     termRef.current = term;
-    fitAddonRef.current = fitAddon;
 
     const inputDisposable = term.onData((data) => {
       sendInputRef.current(data);
     });
+    // Binary-encoded input (legacy encodings) arrives on onBinary, not onData.
+    const binaryDisposable = term.onBinary((data) => {
+      sendInputRef.current(data);
+    });
 
+    let lastCols = 0;
+    let lastRows = 0;
     const reportSize = (): void => {
       try {
         fitAddon.fit();
+        // ResizeObserver fires on sub-cell-width changes too; skip
+        // identical dimensions instead of re-resizing the shared pty.
+        if (term.cols === lastCols && term.rows === lastRows) return;
+        lastCols = term.cols;
+        lastRows = term.rows;
         resizeRef.current(term.cols, term.rows);
       } catch {
         // Container hidden or zero-sized; the next observer tick retries.
@@ -81,11 +92,23 @@ export function TerminalPanel({ taskId, sessionId }: TerminalPanelProps) {
     return () => {
       observer.disconnect();
       inputDisposable.dispose();
+      binaryDisposable.dispose();
       termRef.current = null;
-      fitAddonRef.current = null;
       term.dispose();
     };
   }, [taskId]);
+
+  // Re-attach redraws the full visible screen; on a reconnect (any ready
+  // after the first) reset the buffer so the fresh copy replaces the stale
+  // pre-disconnect content instead of stacking below it.
+  const readyCountRef = useRef(0);
+  useEffect(() => {
+    if (status !== 'ready') return;
+    readyCountRef.current += 1;
+    if (readyCountRef.current > 1) {
+      termRef.current?.reset();
+    }
+  }, [status]);
 
   // Latest-callback refs keep the one-time xterm wiring stable while the
   // socket hook re-renders.
@@ -119,7 +142,12 @@ export function TerminalPanel({ taskId, sessionId }: TerminalPanelProps) {
           )}
           {status === 'error' && (
             <div className={styles.terminalOverlayColumn}>
-              <span>{errorMessage ?? t('terminal.error')}</span>
+              <span>{t('terminal.error')}</span>
+              {errorMessage && (
+                <span className={styles.terminalOverlayDetail}>
+                  {errorMessage}
+                </span>
+              )}
               <button
                 type="button"
                 className={styles.terminalOverlayButton}

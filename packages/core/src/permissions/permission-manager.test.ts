@@ -138,6 +138,10 @@ describe('toolMatchesRuleToolName', () => {
 
   it('monitor rules do not cover run_shell_command', async () => {
     expect(toolMatchesRuleToolName('monitor', 'run_shell_command')).toBe(false);
+    // Shell rules cover tmux too — its create action runs an arbitrary
+    // command, so `Shell(...)` rules must not be bypassable via tmux.
+    expect(toolMatchesRuleToolName('run_shell_command', 'tmux')).toBe(true);
+    expect(toolMatchesRuleToolName('monitor', 'tmux')).toBe(false);
   });
 
   it('does not cross categories', async () => {
@@ -1734,6 +1738,33 @@ describe('PermissionManager', () => {
     });
   });
 
+  describe('tmux per-action rules', () => {
+    it('matches tmux(action:<action>) rules against the call params', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: ['tmux(action:capture)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'tmux',
+          toolParams: { action: 'capture', session_id: 'bg_1' },
+        }),
+      ).toBe('allow');
+      expect(
+        await pm2.evaluate({
+          toolName: 'tmux',
+          toolParams: { action: 'send', session_id: 'bg_1', keys: 'x' },
+        }),
+      ).toBe('default');
+    });
+
+    it('resolves Tmux/TmuxTool aliases to tmux', () => {
+      expect(resolveToolName('Tmux')).toBe('tmux');
+      expect(resolveToolName('TmuxTool')).toBe('tmux');
+      expect(resolveToolName('tmux')).toBe('tmux');
+    });
+  });
+
   describe('command-level evaluation', () => {
     beforeEach(() => {
       pm = new PermissionManager(
@@ -1761,6 +1792,25 @@ describe('PermissionManager', () => {
           command: 'rm -rf /',
         }),
       ).toBe('deny');
+    });
+
+    it('applies Shell rules to the tmux tool via the bridge', async () => {
+      // tmux create runs an arbitrary command; Shell(...) allow/deny rules
+      // must evaluate it so they cannot be bypassed by switching tools.
+      expect(
+        await pm.evaluate({
+          toolName: 'tmux',
+          command: 'rm -rf /',
+          toolParams: { action: 'create', command: 'rm -rf /' },
+        }),
+      ).toBe('deny');
+      expect(
+        await pm.evaluate({
+          toolName: 'tmux',
+          command: 'git status',
+          toolParams: { action: 'create', command: 'git status' },
+        }),
+      ).toBe('allow');
     });
 
     it('resolves default to allow for readonly commands, ask for others', async () => {
@@ -2500,6 +2550,16 @@ describe('PermissionManager', () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['loop_wakeup'] }));
       pm.initialize();
       expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
+    });
+
+    it('coreTools allowlist gates tmux as a core tool', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('tmux')).toBe(false);
+
+      pm = new PermissionManager(makeConfig({ coreTools: ['tmux'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('tmux')).toBe(true);
     });
 
     it('coreTools with specifier: tool-level check strips specifier', async () => {

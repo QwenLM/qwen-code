@@ -33,4 +33,19 @@ describe('Web Shell Voice development proxy', () => {
       new RegExp(QUALIFIED_VOICE_STREAM_PROXY).test('/voice/voiceModels.ts'),
     ).toBe(false);
   });
+
+  it('proxies the terminal attach WebSocket with upgrade support', () => {
+    const factory = viteConfig as (env: ConfigEnv) => UserConfig;
+    const config = factory({
+      command: 'serve',
+      mode: 'test',
+      isSsrBuild: false,
+      isPreview: false,
+    });
+    const terminal = config.server?.proxy?.['/terminal'];
+    expect(terminal).not.toBeTypeOf('string');
+    expect(terminal && typeof terminal !== 'string' ? terminal.ws : false).toBe(
+      true,
+    );
+  });
 });

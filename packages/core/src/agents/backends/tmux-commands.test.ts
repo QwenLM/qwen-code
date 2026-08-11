@@ -20,6 +20,7 @@ import {
   parseTmuxListPanes,
   tmuxCapturePaneContent,
   tmuxPipePane,
+  tmuxSendKeys,
 } from './tmux-commands.js';
 
 describe('parseTmuxListPanes', () => {
@@ -60,11 +61,16 @@ describe('parseTmuxListPanes', () => {
     expect(result).toEqual([{ paneId: '%1', dead: true, deadStatus: 0 }]);
   });
 
-  it('defaults deadStatus to 0 when missing', () => {
-    // tmux might omit the third field when pane is alive
-    const output = '%0 0\n';
-    const result = parseTmuxListPanes(output);
-    expect(result).toEqual([{ paneId: '%0', dead: false, deadStatus: 0 }]);
+  it('reports an undefined deadStatus when tmux omits the field', () => {
+    // tmux expands #{pane_dead_status} to an empty string for panes whose
+    // command never started (and always on tmux < 3.2); that must stay
+    // distinguishable from a real exit 0.
+    expect(parseTmuxListPanes('%0 0\n')).toEqual([
+      { paneId: '%0', dead: false, deadStatus: undefined },
+    ]);
+    expect(parseTmuxListPanes('%1 1\n')).toEqual([
+      { paneId: '%1', dead: true, deadStatus: undefined },
+    ]);
   });
 
   it('handles extra whitespace gracefully', () => {
@@ -107,6 +113,45 @@ describe('tmux argv construction', () => {
       'tmux',
       ['-L', 'sock', 'pipe-pane', '-o', '-t', '%1', "cat >> '/tmp/out'"],
       expect.objectContaining({ preserveOutputOnError: true }),
+    );
+  });
+
+  it('send-keys terminates options with -- so keys cannot inject flags', async () => {
+    await tmuxSendKeys('%1', '--version', {}, 'sock');
+    expect(mockExecCommand).toHaveBeenCalledWith(
+      'tmux',
+      ['-L', 'sock', 'send-keys', '-t', '%1', '--', '--version'],
+      expect.objectContaining({ preserveOutputOnError: true }),
+    );
+  });
+
+  it('send-keys escapes a bare semicolon (tmux command separator)', async () => {
+    await tmuxSendKeys('%1', ';', {}, 'sock');
+    expect(mockExecCommand).toHaveBeenCalledWith(
+      'tmux',
+      ['-L', 'sock', 'send-keys', '-t', '%1', '--', '\\;'],
+      expect.objectContaining({ preserveOutputOnError: true }),
+    );
+  });
+
+  it('send-keys keeps literal mode and appends Enter after --', async () => {
+    await tmuxSendKeys('%1', 'hello', { literal: true, enter: true }, 'sock');
+    expect(mockExecCommand).toHaveBeenCalledWith(
+      'tmux',
+      ['-L', 'sock', 'send-keys', '-t', '%1', '-l', '--', 'hello', 'Enter'],
+      expect.objectContaining({ preserveOutputOnError: true }),
+    );
+  });
+
+  it('capture-pane raises maxBuffer for large scrollback captures', async () => {
+    await tmuxCapturePaneContent('%1', 'sock', { scrollbackLines: 2000 });
+    expect(mockExecCommand).toHaveBeenCalledWith(
+      'tmux',
+      expect.any(Array),
+      expect.objectContaining({
+        preserveOutputOnError: true,
+        maxBuffer: 16 * 1024 * 1024,
+      }),
     );
   });
 });

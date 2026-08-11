@@ -476,6 +476,13 @@ export interface MountAcpHttpOptions {
 export interface ExtraWsRoute {
   path: string;
   onConnection: (ws: WebSocket, req: IncomingMessage) => void;
+  /**
+   * Dispatch before the ACP-mount drain gate. For routes that own their own
+   * protocol and resolve their own scope (the handler validates the target
+   * itself) — otherwise a primary-runtime drain 503s connections that the
+   * handler would have resolved to a healthy runtime.
+   */
+  bypassMountDrainGate?: boolean;
 }
 
 /**
@@ -1759,6 +1766,17 @@ export function mountAcpHttp(
           return;
         }
         activeMount = resolvedMount;
+      }
+
+      if (extraRoute?.bypassMountDrainGate) {
+        wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          if (disposed) {
+            ws.close(1012, 'Server shutting down');
+            return;
+          }
+          extraRoute.onConnection(ws, req);
+        });
+        return;
       }
 
       if (activeMount.draining) {

@@ -1869,6 +1869,7 @@ export async function loadCliConfig(
         // Deny all write/execute tools unless explicitly allowed.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.TMUX as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
         denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
@@ -1880,6 +1881,7 @@ export async function loadCliConfig(
         // toward YOLO behavior).
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.TMUX as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
         denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
@@ -1887,6 +1889,7 @@ export async function loadCliConfig(
         // Shell-like execute tools still require a prompt in auto-edit mode.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.TMUX as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra denials for YOLO mode.

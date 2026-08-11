@@ -111,6 +111,9 @@ const PROTECTED_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
 const SHELL_LIKE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.SHELL,
   ToolNames.MONITOR,
+  // tmux create runs arbitrary shell commands, so the deterministic
+  // destructive-command block must apply to its payloads too.
+  ToolNames.TMUX,
 ]);
 
 /**

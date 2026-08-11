@@ -16,7 +16,8 @@
  *   `/terminal?sessionId=<id>&taskId=<bg_xxx>`
  *
  * Protocol — client → server:
- *   - text  `{"type":"hello","cols":N,"rows":N}`  initial size (first frame)
+ *   - text  `{"type":"hello","cols":N,"rows":N}`  fitted size, sent once
+ *     after receiving `ready` (applied as a resize)
  *   - text  `{"type":"resize","cols":N,"rows":N}` resize the pty
  *   - binary  raw keystroke bytes → pty stdin
  *
@@ -48,10 +49,17 @@ const MAX_TERMINAL_SOCKETS_PER_SESSION = 4;
 const MAX_CONNECTION_MS = 60 * 60_000;
 /** Backpressure bound on unsent pty output buffered in the socket. */
 const MAX_BUFFERED_OUTPUT_BYTES = 16 * 1024 * 1024;
+/**
+ * Inbound frames are keystrokes; bound them so a stalled pty cannot be fed
+ * unbounded input (node-pty queues writes in userspace without limit).
+ */
+const MAX_INBOUND_FRAME_BYTES = 1024 * 1024;
 
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 const MAX_DIMENSION = 500;
+/** ws validates close reasons at 123 BYTES; keep a margin under it. */
+const MAX_CLOSE_REASON_BYTES = 120;
 
 /** Minimal pty surface this handler needs (subset of @lydell/node-pty). */
 export interface TerminalAttachProcess {
@@ -66,11 +74,21 @@ export interface TerminalAttachProcess {
 export interface TerminalWsDeps {
   workspaceRegistry: WorkspaceRegistry;
   daemonLog?: DaemonLogger;
+  /**
+   * Resolves the effective env of the runtime owning the attached session.
+   * The attach pty must run under the same workspace-overlaid env as the
+   * tmux server it connects to (e.g. a workspace-set TMUX_TMPDIR changes
+   * the socket directory). Falls back to the daemon's process.env.
+   */
+  resolveAttachEnv?: (
+    runtime: WorkspaceRuntime,
+  ) => Readonly<Record<string, string | undefined>> | undefined;
   spawnAttach?: (
     socket: string,
     tmuxSession: string,
     cols: number,
     rows: number,
+    env?: Readonly<Record<string, string | undefined>>,
   ) => Promise<TerminalAttachProcess>;
 }
 
@@ -79,6 +97,7 @@ function defaultSpawnAttach(
   tmuxSession: string,
   cols: number,
   rows: number,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<TerminalAttachProcess> {
   return (async () => {
     const pty = await getPty();
@@ -92,7 +111,7 @@ function defaultSpawnAttach(
         name: 'xterm-256color',
         cols,
         rows,
-        env: { ...process.env, TERM: 'xterm-256color' },
+        env: { ...(env ?? process.env), TERM: 'xterm-256color' },
       },
     ) as TerminalAttachProcess;
     return proc;
@@ -112,12 +131,10 @@ interface ControlMessage {
 }
 
 function clampDimension(value: unknown, fallback: number): number {
-  return typeof value === 'number' &&
-    Number.isInteger(value) &&
-    value > 0 &&
-    value <= MAX_DIMENSION
-    ? value
-    : fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.min(value, MAX_DIMENSION);
 }
 
 function parseControl(text: string): ControlMessage | undefined {
@@ -138,6 +155,21 @@ function parseControl(text: string): ControlMessage | undefined {
     DEFAULT_ROWS,
   );
   return { type, cols, rows };
+}
+
+/**
+ * Close reasons are bounded in BYTES (ws validates at 123 bytes); a
+ * character slice can still overflow on multibyte input, and the RangeError
+ * thrown inside close() would leave the socket stuck in CLOSING forever.
+ */
+function truncateCloseReason(message: string): string {
+  if (Buffer.byteLength(message, 'utf8') <= MAX_CLOSE_REASON_BYTES) {
+    return message;
+  }
+  return Buffer.from(message, 'utf8')
+    .subarray(0, MAX_CLOSE_REASON_BYTES)
+    .toString('utf8')
+    .replace(/\uFFFD+$/, '');
 }
 
 /**
@@ -177,7 +209,7 @@ export function createTerminalWsConnectionHandler(
       deps.daemonLog?.warn('terminal websocket rejected', { message });
       sendJson({ type: 'error', message });
       try {
-        ws.close(code, message.slice(0, 120));
+        ws.close(code, truncateCloseReason(message));
       } catch {
         // ignore
       }
@@ -191,6 +223,8 @@ export function createTerminalWsConnectionHandler(
       return;
     }
 
+    // Reserve the slot synchronously, before any await, so concurrent
+    // connects can never bypass the cap via a stale count snapshot.
     const activeCount = activePerSession.get(sessionId) ?? 0;
     if (activeCount >= MAX_TERMINAL_SOCKETS_PER_SESSION) {
       reject(
@@ -199,6 +233,7 @@ export function createTerminalWsConnectionHandler(
       );
       return;
     }
+    activePerSession.set(sessionId, activeCount + 1);
 
     const hardTimer = setTimeout(() => {
       sendJson({ type: 'error', message: 'Terminal connection timed out.' });
@@ -213,6 +248,10 @@ export function createTerminalWsConnectionHandler(
     let closed = false;
     let proc: TerminalAttachProcess | undefined;
     const cleanup = (): void => {
+      // Idempotent: this runs from the 'close'/'error' listeners AND the
+      // server-initiated close paths that call it before ws.close(); without
+      // the guard every such path would decrement the slot twice.
+      if (closed) return;
       closed = true;
       clearTimeout(hardTimer);
       const count = (activePerSession.get(sessionId) ?? 1) - 1;
@@ -238,7 +277,18 @@ export function createTerminalWsConnectionHandler(
     });
 
     void (async () => {
-      const runtime = resolveRuntime(sessionId);
+      let runtime: WorkspaceRuntime | undefined;
+      try {
+        runtime = resolveRuntime(sessionId);
+      } catch (error) {
+        reject(
+          1011,
+          `Failed to resolve session runtime: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return;
+      }
       if (!runtime) {
         reject(4004, `No live session with id "${sessionId}".`);
         return;
@@ -273,14 +323,13 @@ export function createTerminalWsConnectionHandler(
       }
       if (closed) return;
 
-      activePerSession.set(sessionId, activeCount + 1);
-
       try {
         proc = await spawnAttach(
           attachTarget.socket,
           attachTarget.tmuxSession,
           DEFAULT_COLS,
           DEFAULT_ROWS,
+          deps.resolveAttachEnv?.(runtime),
         );
       } catch (error) {
         cleanup();
@@ -293,7 +342,14 @@ export function createTerminalWsConnectionHandler(
         return;
       }
       if (closed) {
-        cleanup();
+        // cleanup() already ran and released the slot, but proc was only
+        // assigned just now — kill the fresh attach directly.
+        try {
+          proc.kill();
+        } catch {
+          // best effort
+        }
+        proc = undefined;
         return;
       }
 
@@ -318,9 +374,24 @@ export function createTerminalWsConnectionHandler(
         }
       });
 
-      proc.onExit(() => {
+      proc.onExit(({ exitCode }) => {
         if (closed) return;
         cleanup();
+        if (exitCode !== 0) {
+          // A non-zero attach exit means the session died underneath (server
+          // killed, session vanished) — surface it instead of masking it as
+          // a normal end.
+          sendJson({
+            type: 'error',
+            message: `Terminal attach exited unexpectedly (code ${exitCode}).`,
+          });
+          try {
+            ws.close(1011, 'terminal attach failed');
+          } catch {
+            // ignore
+          }
+          return;
+        }
         try {
           ws.close(1000, 'terminal exited');
         } catch {
@@ -331,6 +402,15 @@ export function createTerminalWsConnectionHandler(
       ws.on('message', (data: RawData, isBinary: boolean) => {
         if (closed || !proc) return;
         const buf = toBuffer(data);
+        if (buf.length > MAX_INBOUND_FRAME_BYTES) {
+          cleanup();
+          try {
+            ws.close(1009, 'input frame too large');
+          } catch {
+            // ignore
+          }
+          return;
+        }
         if (isBinary) {
           try {
             proc.write(buf.toString('utf8'));

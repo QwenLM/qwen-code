@@ -2310,7 +2310,7 @@ export interface DaemonSessionShellTaskStatus {
   /**
    * Present when the shell task is backed by an interactive tmux session
    * (created by the tmux tool). Connect a WebSocket to
-   * `/session/:id/terminal/:taskId` to attach to it live.
+   * `/terminal?sessionId=<id>&taskId=<taskId>` to attach to it live.
    */
   terminal?: {
     /** tmux server socket name (`tmux -L <socket>`). */

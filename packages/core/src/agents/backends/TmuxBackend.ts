@@ -787,13 +787,16 @@ export class TmuxBackend implements Backend {
 
       if (info.dead) {
         agent.status = 'exited';
-        agent.exitCode = info.deadStatus;
+        // An empty pane_dead_status (command never started) must not
+        // surface as exit 0 — treat it as failure.
+        const exitCode = info.deadStatus ?? 1;
+        agent.exitCode = exitCode;
 
         debugLogger.info(
-          `[pollPaneStatus] Agent "${agent.agentId}" (pane ${agent.paneId}) detected as DEAD with exit code ${info.deadStatus}`,
+          `[pollPaneStatus] Agent "${agent.agentId}" (pane ${agent.paneId}) detected as DEAD with exit code ${exitCode}`,
         );
 
-        this.onExitCallback?.(agent.agentId, info.deadStatus, null);
+        this.onExitCallback?.(agent.agentId, exitCode, null);
       }
     }
 

@@ -116,6 +116,10 @@ export default defineConfig(({ command }) => ({
       // `client/voice/*` source modules (e.g. `/voice/voiceModels.ts`), which
       // vite must serve, and blanks the page.
       '/voice/stream': { ...daemonProxy, ws: true },
+      // Live terminal attach is a WebSocket too (`/terminal`, the daemon
+      // extra-route); without this entry the dev proxy swallows the upgrade
+      // and the terminal panel hangs on 'Connecting…'.
+      '/terminal': { ...daemonProxy, ws: true },
     },
   },
 }));

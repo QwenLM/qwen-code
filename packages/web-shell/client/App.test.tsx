@@ -1494,6 +1494,33 @@ describe('task activity key', () => {
     );
   });
 
+  it('includes tmux calls, which carry no is_background arg', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'tmux-create',
+            toolName: 'tmux',
+            status: 'in_progress',
+            args: { action: 'create', command: 'python3 app.py' },
+          },
+          {
+            callId: 'tmux-send',
+            toolName: 'Tmux',
+            status: 'completed',
+            args: { action: 'send', session_id: 'bg_x', keys: 'q' },
+          },
+        ],
+      },
+    ] satisfies Message[];
+
+    expect(getTaskActivityKey(messages)).toBe(
+      'tmux-create:in_progress|tmux-send:completed',
+    );
+  });
+
   it('does not regress a terminal monitor to a stale running snapshot', () => {
     const running: DaemonSessionMonitorTaskStatus = {
       kind: 'monitor',

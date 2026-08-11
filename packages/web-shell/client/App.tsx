@@ -1103,6 +1103,9 @@ function parseRenameArgument(
 function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'monitor') return true;
+  // tmux calls always create a background task and carry no is_background
+  // arg, so they must be classified beside monitor, not via the shell family.
+  if (name === 'tmux') return true;
   if (tool.args?.is_background !== true) return false;
   return (
     name === 'shell' ||

@@ -519,6 +519,26 @@ describe('BackgroundShellRegistry', () => {
       expect(modelText).not.toContain('\u202e');
     });
 
+    it('strips whole ANSI sequences from the output tail', () => {
+      // tmux pipe-pane files carry raw ANSI; the tail must drop entire
+      // sequences, not only the control bytes (which would leave the
+      // CSI/OSC parameter text as debris for the model).
+      const reg = new BackgroundShellRegistry();
+      const callback = vi.fn();
+      const outputPath = makeOutputFile(
+        '\u001b[38;5;196mERROR\u001b[0m: \u001b]0;title\u001b\\boom\n',
+      );
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'a', outputPath }));
+
+      reg.complete('a', 0, 2000);
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('ERROR: boom');
+      expect(modelText).not.toContain('[38;5;196m');
+      expect(modelText).not.toContain(']0;title');
+    });
+
     const itNoFollow = fsConstants.O_NOFOLLOW === undefined ? it.skip : it;
 
     itNoFollow('does not follow symlinked output files', () => {

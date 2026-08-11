@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
+import stripAnsi from 'strip-ansi';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import {
@@ -82,8 +83,10 @@ function readOutputTail(outputFile: string): OutputTailResult {
       }
     }
 
+    // tmux pipe-pane output carries raw ANSI; drop whole sequences (not
+    // just control bytes) so the model-facing tail has no parameter debris.
     const text = stripOutputControlChars(
-      buffer.subarray(sliceOffset, bytesRead).toString('utf8'),
+      stripAnsi(buffer.subarray(sliceOffset, bytesRead).toString('utf8')),
     ).trimEnd();
 
     if (!text) return undefined;

@@ -11,6 +11,7 @@
  * avoiding shell injection by passing arguments as arrays (execFile).
  */
 
+import type { ExecFileOptions } from 'node:child_process';
 import { execCommand, isCommandAvailable } from '../../utils/shell-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
@@ -24,8 +25,13 @@ export interface TmuxPaneInfo {
   paneId: string;
   /** Whether the pane's process has exited */
   dead: boolean;
-  /** Exit status of the pane's process (only valid when dead=true) */
-  deadStatus: number;
+  /**
+   * Exit status of the pane's process (only valid when dead=true).
+   * `undefined` when tmux expands `#{pane_dead_status}` to an empty string
+   * (the command never started or tmux has no status to report) — callers
+   * must treat that as a failure, never as exit 0.
+   */
+  deadStatus: number | undefined;
 }
 
 /**
@@ -48,11 +54,13 @@ const MIN_TMUX_VERSION = '3.0';
 async function tmuxResult(
   args: string[],
   serverName?: string,
+  execOptions?: ExecFileOptions,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const fullArgs = serverName ? ['-L', serverName, ...args] : args;
   debugLogger.info(`tmux ${fullArgs.join(' ')}`);
   const result = await execCommand('tmux', fullArgs, {
     preserveOutputOnError: true,
+    ...execOptions,
   });
   if (result.code !== 0 && result.stderr.trim()) {
     debugLogger.error(`tmux error: ${result.stderr.trim()}`);
@@ -60,8 +68,12 @@ async function tmuxResult(
   return result;
 }
 
-async function tmux(args: string[], serverName?: string): Promise<string> {
-  const result = await tmuxResult(args, serverName);
+async function tmux(
+  args: string[],
+  serverName?: string,
+  execOptions?: ExecFileOptions,
+): Promise<string> {
+  const result = await tmuxResult(args, serverName, execOptions);
   if (result.code !== 0) {
     throw new Error(
       `tmux ${args[0]} failed (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim()}`,
@@ -273,7 +285,10 @@ export async function tmuxSendKeys(
   if (opts?.literal) {
     args.push('-l');
   }
-  args.push(keys);
+  // '--' stops dash-prefixed keys being parsed as tmux flags. A bare ';'
+  // is tmux's argv-level command separator even after '--' — escape it so
+  // it is typed literally.
+  args.push('--', keys === ';' ? '\\;' : keys);
   if (opts?.enter) {
     args.push('Enter');
   }
@@ -348,16 +363,21 @@ export async function tmuxCapturePaneContent(
   if (opts?.scrollbackLines !== undefined) {
     args.push('-S', `-${opts.scrollbackLines}`);
   }
-  return await tmux(args, serverName);
+  // Up to MAX_CAPTURE_LINES of dense wide output exceeds execFile's 1 MiB
+  // default maxBuffer; a scrollback capture aborting the tmux client at the
+  // buffer boundary would surface as an opaque capture failure.
+  return await tmux(args, serverName, { maxBuffer: 16 * 1024 * 1024 });
 }
 
 /**
- * Pipe a pane's output to a shell command (`pipe-pane -o`).
+ * Start piping a pane's output to a shell command (`pipe-pane -o`).
  *
- * The pipe follows the pane, not the process: it survives
- * `respawn-pane -k` and keeps streaming until the pane is destroyed or
- * `pipe-pane` is run again without `-o`. Typical use:
- * `tmuxPipePane(paneId, "cat >> '/path/to/output'")`.
+ * The pipe follows the pane, not the process: it survives `respawn-pane -k`
+ * and keeps streaming until the pane is destroyed or `pipe-pane` runs again.
+ * `-o` opens the pipe only when none exists yet (idempotent start). A second
+ * `pipe-pane` on the same pane first closes the existing pipe: with `-o` no
+ * new pipe opens (output lands nowhere), without `-o` the new command
+ * replaces it. Typical use: `tmuxPipePane(paneId, "cat >> '/path/out'")`.
  *
  * @param command - Shell command that receives the pane's output on stdin.
  */
@@ -366,8 +386,6 @@ export async function tmuxPipePane(
   command: string,
   serverName?: string,
 ): Promise<void> {
-  // -o: only pipe new output; without it a second pipe-pane call would
-  // toggle any existing pipe off.
   await tmux(['pipe-pane', '-o', '-t', paneId, command], serverName);
 }
 
@@ -406,7 +424,13 @@ export function parseTmuxListPanes(output: string): TmuxPaneInfo[] {
     panes.push({
       paneId: parts[0]!,
       dead: parts[1] === '1',
-      deadStatus: parts[2] ? parseInt(parts[2], 10) : 0,
+      // tmux expands #{pane_dead_status} to an empty string when the command
+      // never started (or on tmux < 3.2); keep that distinguishable from a
+      // real exit 0.
+      deadStatus:
+        parts.length > 2 && parts[2] !== ''
+          ? parseInt(parts[2]!, 10)
+          : undefined,
     });
   }
   return panes;

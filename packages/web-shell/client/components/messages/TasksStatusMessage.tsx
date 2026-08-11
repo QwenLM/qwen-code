@@ -1024,15 +1024,17 @@ export function ShellTaskDetail({
                 {busy ? t('common.loading') : t('tasks.action.stop')}
               </button>
             )}
-            {currentTask.terminal && currentTask.status === 'running' && (
-              <button
-                type="button"
-                className={styles.monitorStopButton}
-                onClick={() => onOpenTerminal?.(currentTask)}
-              >
-                {t('terminal.open')}
-              </button>
-            )}
+            {onOpenTerminal &&
+              currentTask.terminal &&
+              currentTask.status === 'running' && (
+                <button
+                  type="button"
+                  className={styles.actionButton}
+                  onClick={() => onOpenTerminal(currentTask)}
+                >
+                  {t('terminal.open')}
+                </button>
+              )}
           </div>
         </div>
         <pre className={styles.monitorCommand}>{currentTask.command}</pre>

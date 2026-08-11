@@ -519,7 +519,11 @@ export function ArtifactPanel({
       </div>
       <div
         className={`${styles.body} ${
-          activeTab?.kind === 'side_task' ? styles.bodySideTask : ''
+          activeTab?.kind === 'side_task'
+            ? styles.bodySideTask
+            : activeTab?.kind === 'terminal'
+              ? styles.bodyTerminal
+              : ''
         }`.trim()}
       >
         {!activeTab ? (

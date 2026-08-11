@@ -10,11 +10,6 @@ Web Shell session after the agent created the terminal (`bg_25154e98`):
 
 ![Web Shell session showing the tmux tool call](./assets/web-shell-tmux-terminal/webshell-session.png)
 
-The same terminal attached (`tmux -L qwen-serve attach -t qsh-bg_25154e98`),
-running Claude Code live:
-
-![Attached tmux terminal running Claude Code](./assets/web-shell-tmux-terminal/terminal-claude.png)
-
 ## Problem
 
 A Web Shell session's agent already runs as a full qwen-code process on the
@@ -62,7 +57,7 @@ parameter keeps the declaration count at one:
 | --------- | ----------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------- |
 | `create`  | `command`, `cwd?`, `cols?`, `rows?`       | ask        | Creates a detached tmux session on the dedicated socket running `command`; registers a shell task |
 | `send`    | `sessionId`, `keys`, `enter?`, `literal?` | ask        | `tmux send-keys` to the session's pane                                                            |
-| `capture` | `sessionId`, `lines?`                     | allow      | `capture-pane -p -e -S -<lines>`; returns text to the model                                       |
+| `capture` | `sessionId`, `lines?`                     | allow      | `capture-pane -p` (no escape codes; `-S -<lines>` capped at 2000); plain text to the model        |
 | `list`    | —                                         | allow      | Lists live tmux sessions owned by this registry                                                   |
 | `kill`    | `sessionId`                               | ask        | Kills the tmux session; settles the task as cancelled                                             |
 
@@ -217,18 +212,20 @@ Connection flow:
    live daemon's sessions, and adoption is impossible without a persisted
    registry — both are rejected. Orphans are unreachable from the daemon
    (validation always goes through the in-memory registry) and harmless;
-   cleanup is a documented one-liner (`tmux -L qwen-serve kill-server`).
+   cleanup targets the specific sessions (`tmux -L qwen-serve kill-session -t
+qsh-<id>` per orphan) — avoid `kill-server`, which also terminates every
+   other daemon's terminals sharing the host-wide `qwen-serve` socket.
    Reconciliation can be revisited if a persisted task registry ever lands.
 
 ## Files Affected
 
-| Package                   | Files                                                                                                                                                                                                                                        |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`           | `src/tools/tmux.ts` (+test), `src/tools/tool-names.ts`, `src/config/config.ts`, `src/permissions/permission-manager.ts`, `src/agents/backends/tmux-commands.ts` (+test), `src/services/backgroundShellRegistry.ts`                           |
-| `packages/cli`            | `src/serve/terminal/terminal-ws.ts` (+test), `src/serve/server.ts`, `src/acp-integration/session/tasksSnapshot.ts`, `package.json`                                                                                                           |
-| `packages/acp-bridge`     | `src/status.ts`                                                                                                                                                                                                                              |
-| `packages/sdk-typescript` | `src/daemon/types.ts`                                                                                                                                                                                                                        |
-| `packages/web-shell`      | `client/terminal/useTerminalSocket.ts`, `client/components/terminal/TerminalPanel.tsx` (+module.css), `client/components/artifacts/ArtifactPanel.tsx`, `client/components/messages/TasksStatusMessage.tsx`, `client/App.tsx`, `package.json` |
+| Package                   | Files                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`           | `src/tools/tmux.ts` (+test), `src/tools/tool-names.ts`, `src/config/config.ts`, `src/index.ts`, `src/permissions/permission-manager.ts` (+test), `src/permissions/rule-parser.ts` (+test), `src/permissions/autoMode.ts`, `src/agents/backends/tmux-commands.ts` (+test), `src/agents/backends/TmuxBackend.ts`, `src/services/backgroundShellRegistry.ts`                                                           |
+| `packages/cli`            | `src/serve/terminal/terminal-ws.ts` (+test), `src/serve/server.ts`, `src/serve/acp-http/index.ts`, `src/serve/process-env-guard.test.ts`, `src/config/config.ts`, `src/acp-integration/session/tasksSnapshot.ts` (+test), `src/i18n/locales/en.js` + `zh.js` + `zh-TW.js`, `package.json`                                                                                                                           |
+| `packages/acp-bridge`     | `src/status.ts`                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `packages/sdk-typescript` | `src/daemon/types.ts`                                                                                                                                                                                                                                                                                                                                                                                               |
+| `packages/web-shell`      | `client/terminal/useTerminalSocket.ts` (+test), `client/components/terminal/TerminalPanel.tsx` (+module.css), `client/components/artifacts/ArtifactPanel.tsx` (+module.css), `client/components/messages/TasksStatusMessage.tsx` (+test), `client/components/messages/toolFormatting.ts`, `client/App.tsx`, `client/i18n.tsx`, `client/vite-config.test.ts`, `vite.config.ts`, `vite.lib.config.ts`, `package.json` |
 
 ## Scope Boundaries
 

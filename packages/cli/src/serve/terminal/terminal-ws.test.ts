@@ -88,6 +88,9 @@ function makeRegistry(opts: {
   found?: boolean;
   trusted?: boolean;
   tasks?: unknown[];
+  bridgeThrows?: boolean;
+  resolveThrows?: boolean;
+  primaryState?: string;
 }) {
   const runtime = {
     primary: true,
@@ -95,8 +98,9 @@ function makeRegistry(opts: {
     workspaceId: 'ws-1',
     workspaceCwd: '/work',
     bridge: {
-      getSessionTasksStatus: vi.fn().mockResolvedValue({
-        tasks: opts.tasks ?? [],
+      getSessionTasksStatus: vi.fn().mockImplementation(() => {
+        if (opts.bridgeThrows) throw new Error('bridge unavailable');
+        return Promise.resolve({ tasks: opts.tasks ?? [] });
       }),
     },
   };
@@ -105,16 +109,15 @@ function makeRegistry(opts: {
       .fn()
       .mockReturnValue(opts.single === false ? [{}, {}] : [{}]),
     primaryEntry: {
-      state: 'active',
+      state: opts.primaryState ?? 'active',
       current: { runtime },
     },
-    resolveLiveSessionOwner: vi
-      .fn()
-      .mockReturnValue(
-        opts.found === false
-          ? { kind: 'not_found' }
-          : { kind: 'found', runtime },
-      ),
+    resolveLiveSessionOwner: vi.fn().mockImplementation(() => {
+      if (opts.resolveThrows) throw new Error('registry wedge');
+      return opts.found === false
+        ? { kind: 'not_found' }
+        : { kind: 'found', runtime };
+    }),
   } as unknown as WorkspaceRegistry;
   return { registry, runtime };
 }
@@ -223,6 +226,7 @@ describe('createTerminalWsConnectionHandler', () => {
       'qsh-bg_abc123',
       80,
       24,
+      undefined,
     );
     expect(ws.sentJson()).toContainEqual({ type: 'ready' });
 
@@ -238,9 +242,11 @@ describe('createTerminalWsConnectionHandler', () => {
     ws.receive(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }), false);
     expect(proc.resizes).toEqual([{ cols: 120, rows: 40 }]);
 
-    // invalid dimensions are clamped to defaults
+    // oversized dimensions are capped, invalid ones fall back to defaults
     ws.receive(JSON.stringify({ type: 'resize', cols: 99999 }), false);
-    expect(proc.resizes[1]).toEqual({ cols: 80, rows: 24 });
+    expect(proc.resizes[1]).toEqual({ cols: 500, rows: 24 });
+    ws.receive(JSON.stringify({ type: 'resize', cols: -5, rows: 0 }), false);
+    expect(proc.resizes[2]).toEqual({ cols: 80, rows: 24 });
 
     // pty exit → socket closes 1000
     proc.exitCb!({ exitCode: 0 });
@@ -322,5 +328,334 @@ describe('createTerminalWsConnectionHandler', () => {
     await flush();
     expect(ws.closeCalls[0]?.code).toBe(4004);
     expect(spawnAttach).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown taskId when the session has several tasks', async () => {
+    const { registry } = makeRegistry({
+      tasks: [
+        { kind: 'shell', id: 'bg_other', status: 'running' },
+        TERMINAL_TASK,
+      ],
+    });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_missing'),
+    );
+    await flush();
+    expect(ws.closeCalls[0]?.code).toBe(4004);
+    expect(spawnAttach).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the bridge task lookup throws', async () => {
+    const { registry } = makeRegistry({
+      bridgeThrows: true,
+      tasks: [TERMINAL_TASK],
+    });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(ws.closeCalls[0]?.code).toBe(4004);
+  });
+
+  it('rejects when session-owner resolution throws', async () => {
+    const { registry } = makeRegistry({ single: false, resolveThrows: true });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(ws.closeCalls[0]?.code).toBe(1011);
+    expect(spawnAttach).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the single entry is not active', async () => {
+    const { registry } = makeRegistry({
+      primaryState: 'draining',
+      tasks: [TERMINAL_TASK],
+    });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(ws.closeCalls[0]?.code).toBe(4004);
+    expect(spawnAttach).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the attach spawn fails', async () => {
+    spawnAttach.mockRejectedValue(new Error('no server running'));
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(ws.closeCalls[0]?.code).toBe(1011);
+    expect(ws.sentJson()[0]).toMatchObject({ type: 'error' });
+  });
+
+  it('forwards the sessionId from the URL to session-owner resolution and task lookup', async () => {
+    const { registry, runtime } = makeRegistry({
+      single: false,
+      tasks: [TERMINAL_TASK],
+    });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-42&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(registry.resolveLiveSessionOwner).toHaveBeenCalledWith('sess-42');
+    expect(runtime.bridge.getSessionTasksStatus).toHaveBeenCalledWith(
+      'sess-42',
+    );
+  });
+
+  it('passes the runtime attach env to spawnAttach', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const resolveAttachEnv = vi.fn().mockReturnValue({ FOO: 'bar' });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+      resolveAttachEnv,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(resolveAttachEnv).toHaveBeenCalled();
+    expect(spawnAttach).toHaveBeenCalledWith(
+      'qwen-serve',
+      'qsh-bg_abc123',
+      80,
+      24,
+      { FOO: 'bar' },
+    );
+  });
+
+  it('keeps the per-session cap consistent across rejects and errors', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    // Rejected connections (4004 on unknown task) must not leak slots.
+    for (let i = 0; i < 5; i++) {
+      const ws = new FakeWebSocket();
+      handler(
+        ws as unknown as WebSocket,
+        makeReq('/terminal?sessionId=sess-1&taskId=bg_missing'),
+      );
+      await flush();
+      expect(ws.closeCalls[0]?.code).toBe(4004);
+    }
+    // A socket that errors after attach frees its slot exactly once.
+    const errored = new FakeWebSocket();
+    handler(
+      errored as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    errored.emit('error', new Error('boom'));
+    // Four concurrent attaches still fit afterwards.
+    const sockets: FakeWebSocket[] = [];
+    for (let i = 0; i < 4; i++) {
+      const ws = new FakeWebSocket();
+      sockets.push(ws);
+      handler(
+        ws as unknown as WebSocket,
+        makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+      );
+      await flush();
+      expect(ws.sentJson()).toContainEqual({ type: 'ready' });
+    }
+    const fifth = new FakeWebSocket();
+    handler(
+      fifth as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    expect(fifth.closeCalls[0]?.code).toBe(1013);
+  });
+
+  it('truncates close reasons on a byte boundary without splitting characters', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const longTaskId = '任'.repeat(200);
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq(`/terminal?sessionId=sess-1&taskId=${longTaskId}`),
+    );
+    await flush();
+    expect(ws.closeCalls[0]?.code).toBe(4004);
+    const reason = ws.closeCalls[0]?.reason ?? '';
+    expect(Buffer.byteLength(reason, 'utf8')).toBeLessThanOrEqual(120);
+    expect(reason).not.toContain('\uFFFD');
+  });
+
+  it('closes oversized inbound frames without writing them to the pty', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    ws.receive(Buffer.alloc(1024 * 1024 + 1), true);
+    expect(proc.written).toHaveLength(0);
+    expect(ws.closeCalls[0]?.code).toBe(1009);
+  });
+
+  it('closes with backpressure when the send buffer overflows', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    ws.bufferedAmount = 16 * 1024 * 1024 + 1;
+    proc.dataCb!('more output');
+    expect(ws.closeCalls[0]?.code).toBe(1013);
+  });
+
+  it('resizes the pty when the hello frame arrives', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    ws.receive(JSON.stringify({ type: 'hello', cols: 111, rows: 33 }), false);
+    expect(proc.resizes).toContainEqual({ cols: 111, rows: 33 });
+  });
+
+  it('kills the attach when the socket closes while spawning', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    // The attach spawn resolves only after the client went away.
+    let release!: (proc: FakeAttachProcess) => void;
+    spawnAttach.mockReturnValue(
+      new Promise<FakeAttachProcess>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    ws.close(1000, 'user left');
+    const lateProc = new FakeAttachProcess();
+    release(lateProc);
+    await flush();
+    expect(lateProc.killed).toBe(true);
+    expect(ws.sentJson()).not.toContainEqual({ type: 'ready' });
+  });
+
+  it('isolates the pty of one connection from its siblings', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const procs: FakeAttachProcess[] = [];
+    spawnAttach.mockImplementation(async () => {
+      const p = new FakeAttachProcess();
+      procs.push(p);
+      return p;
+    });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const wsA = new FakeWebSocket();
+    const wsB = new FakeWebSocket();
+    handler(
+      wsA as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    handler(
+      wsB as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    const [procA, procB] = procs;
+    expect(procA).not.toBe(procB);
+    // Detaching one viewer must not kill the other's attach.
+    wsA.close(1000, 'bye');
+    expect(procA.killed).toBe(true);
+    expect(procB.killed).toBe(false);
+    expect(wsB.readyState).toBe(1);
+  });
+
+  it('surfaces a non-zero attach exit instead of a clean close', async () => {
+    const { registry } = makeRegistry({ tasks: [TERMINAL_TASK] });
+    const handler = createTerminalWsConnectionHandler({
+      workspaceRegistry: registry,
+      spawnAttach,
+    });
+    const ws = new FakeWebSocket();
+    handler(
+      ws as unknown as WebSocket,
+      makeReq('/terminal?sessionId=sess-1&taskId=bg_abc123'),
+    );
+    await flush();
+    proc.exitCb!({ exitCode: 1 });
+    expect(ws.sentJson()).toContainEqual(
+      expect.objectContaining({ type: 'error' }),
+    );
+    expect(ws.closeCalls[0]?.code).toBe(1011);
   });
 });

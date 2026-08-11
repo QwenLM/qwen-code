@@ -47,6 +47,13 @@ export interface UseTerminalSocketReturn {
 const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
 const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
 
+/**
+ * A stalled handshake (middlebox holding the socket open without returning
+ * 101) fires no onerror/onclose; without a timeout the panel would hang on
+ * 'Connecting…' until page reload.
+ */
+const CONNECT_TIMEOUT_MS = 10_000;
+
 function bearerSubprotocol(token: string): string {
   const bytes = new TextEncoder().encode(token);
   let binary = '';
@@ -93,6 +100,7 @@ export function useTerminalSocket({
     rows: 24,
   });
   const pendingInputRef = useRef<string[]>([]);
+  const lastTargetRef = useRef<string | undefined>(undefined);
   const onOutputRef = useRef(onOutput);
   onOutputRef.current = onOutput;
 
@@ -106,7 +114,13 @@ export function useTerminalSocket({
 
     applyStatus('connecting');
     setErrorMessage(undefined);
-    pendingInputRef.current = [];
+    // Drop buffered keystrokes only when the target terminal changed; a
+    // reconnect() to the SAME terminal must still deliver them.
+    const targetKey = `${baseUrl}\u0000${sessionId}\u0000${taskId}`;
+    if (lastTargetRef.current !== targetKey) {
+      pendingInputRef.current = [];
+    }
+    lastTargetRef.current = targetKey;
 
     const ws = new WebSocket(
       toTerminalWebSocketUrl(baseUrl, sessionId, taskId),
@@ -115,6 +129,17 @@ export function useTerminalSocket({
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
     let disposed = false;
+
+    const connectTimer = setTimeout(() => {
+      if (disposed || statusRef.current !== 'connecting') return;
+      setErrorMessage('Terminal connection timed out.');
+      applyStatus('error');
+      try {
+        ws.close();
+      } catch {
+        // Best-effort teardown of the stalled handshake.
+      }
+    }, CONNECT_TIMEOUT_MS);
 
     const flushPendingInput = (): void => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -137,14 +162,19 @@ export function useTerminalSocket({
         return;
       }
       if (message.type === 'ready') {
+        clearTimeout(connectTimer);
         applyStatus('ready');
-        ws.send(
-          JSON.stringify({
-            type: 'hello',
-            cols: sizeRef.current.cols,
-            rows: sizeRef.current.rows,
-          }),
-        );
+        try {
+          ws.send(
+            JSON.stringify({
+              type: 'hello',
+              cols: sizeRef.current.cols,
+              rows: sizeRef.current.rows,
+            }),
+          );
+        } catch {
+          // The socket may have closed between the ready frame and here.
+        }
         flushPendingInput();
       } else if (message.type === 'error') {
         setErrorMessage(message.message ?? 'Terminal connection failed.');
@@ -174,6 +204,7 @@ export function useTerminalSocket({
 
     return () => {
       disposed = true;
+      clearTimeout(connectTimer);
       wsRef.current = undefined;
       try {
         ws.onmessage = null;

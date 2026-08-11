@@ -222,6 +222,16 @@
   padding: 0;
 }
 
+/* Terminal body: the xterm grid must fill the panel. .body is a block
+   scroll container, where the terminal panel's flex: 1 is a no-op — make
+   this variant a flex column so the height chain is established. */
+.bodyTerminal {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
 .empty {
   color: var(--muted-foreground);
   font-size: 13px;

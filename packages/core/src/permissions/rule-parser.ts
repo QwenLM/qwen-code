@@ -156,6 +156,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Monitor: 'monitor',
   MonitorTool: 'monitor',
 
+  // Tmux (interactive terminal) tool
+  tmux: 'tmux',
+  Tmux: 'tmux',
+  TmuxTool: 'tmux',
+
   // Legacy edit tool name
   replace: 'edit',
 };
@@ -253,6 +258,14 @@ export function toolMatchesRuleToolName(
   // `Bash(...)` allow rules are not silently bypassed by switching to
   // the monitor tool.  Monitor-only rules do NOT cover shell.
   if (ruleToolName === 'run_shell_command' && contextToolName === 'monitor') {
+    return true;
+  }
+  // Same anti-bypass bridge for the tmux tool: its `create` action runs an
+  // arbitrary shell command, so `Shell(...)` rules must evaluate it. The
+  // command is matched via the create call's `command` param (ctx.command);
+  // actions without a command (send/capture/…) are gated by
+  // `tmux(action:…)` rules instead.
+  if (ruleToolName === 'run_shell_command' && contextToolName === 'tmux') {
     return true;
   }
   return false;

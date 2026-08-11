@@ -40,9 +40,9 @@ import {
   tmuxCapturePaneContent,
   tmuxKillSession,
   tmuxListPanes,
-  tmuxHasSession,
   verifyTmux,
 } from '../agents/backends/tmux-commands.js';
+import type { TmuxPaneInfo } from '../agents/backends/tmux-commands.js';
 import type { ShellTask } from '../services/backgroundShellRegistry.js';
 
 /** Dedicated tmux server socket for all tool-created sessions. */
@@ -52,6 +52,10 @@ const PANE_POLL_INTERVAL_MS = 500;
 const DEFAULT_COLS = 200;
 const DEFAULT_ROWS = 50;
 const MAX_CAPTURE_LINES = 2000;
+/** Matches the daemon terminal endpoint's MAX_DIMENSION. */
+const MAX_CREATE_DIMENSION = 500;
+/** Consecutive failed pane probes before settling as 'ended unexpectedly'. */
+const MAX_FAILED_PROBE_TICKS = 3;
 
 type TmuxAction = 'create' | 'send' | 'capture' | 'list' | 'kill';
 
@@ -76,6 +80,7 @@ function errorResult(message: string): ToolResult {
   return {
     llmContent: message,
     returnDisplay: message,
+    error: { message },
   };
 }
 
@@ -94,8 +99,14 @@ class TmuxToolInvocation extends BaseToolInvocation<
     switch (this.params.action) {
       case 'create':
         return `Tmux create: ${this.params.command ?? ''}`;
-      case 'send':
-        return `Tmux send → ${this.params.session_id ?? ''}`;
+      case 'send': {
+        const keys = this.params.keys ?? '';
+        const shown = keys.length > 80 ? `${keys.slice(0, 80)}…` : keys;
+        return (
+          `Tmux send → ${this.params.session_id ?? ''}: ${shown}` +
+          (this.params.enter ? ' +Enter' : '')
+        );
+      }
       case 'capture':
         return `Tmux capture: ${this.params.session_id ?? ''}`;
       case 'list':
@@ -121,7 +132,9 @@ class TmuxToolInvocation extends BaseToolInvocation<
       title: 'Tmux',
       command: this.getDescription(),
       rootCommand: 'tmux',
-      permissionRules: [`Tmux(${this.params.action})`],
+      // `tmux(action:<action>)` parses into a toolParamMatcher evaluated
+      // against the call's params, so per-action allow rules actually match.
+      permissionRules: [`tmux(action:${this.params.action})`],
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
@@ -148,9 +161,6 @@ class TmuxToolInvocation extends BaseToolInvocation<
   }
 
   private checkAvailability(): ToolResult | null {
-    if (process.platform === 'win32') {
-      return errorResult('The tmux tool is not supported on Windows.');
-    }
     if (this.config.getSandbox()) {
       return errorResult(
         'The tmux tool is unavailable while the tool sandbox is active: tmux does not exist inside the sandbox container.',
@@ -215,8 +225,14 @@ class TmuxToolInvocation extends BaseToolInvocation<
         await tmuxNewSession(
           tmuxSession,
           {
-            cols: this.params.cols ?? DEFAULT_COLS,
-            rows: this.params.rows ?? DEFAULT_ROWS,
+            cols: Math.min(
+              this.params.cols ?? DEFAULT_COLS,
+              MAX_CREATE_DIMENSION,
+            ),
+            rows: Math.min(
+              this.params.rows ?? DEFAULT_ROWS,
+              MAX_CREATE_DIMENSION,
+            ),
           },
           TMUX_SERVER_NAME,
         );
@@ -239,6 +255,11 @@ class TmuxToolInvocation extends BaseToolInvocation<
       }
     })().catch((err: unknown) => err as Error);
     if (paneId instanceof Error) {
+      try {
+        fs.rmSync(outputPath, { force: true });
+      } catch {
+        // best-effort cleanup of the materialized output file
+      }
       return errorResult(
         `Failed to create tmux session: ${getErrorMessage(paneId)}`,
       );
@@ -268,7 +289,14 @@ class TmuxToolInvocation extends BaseToolInvocation<
       terminal: { socket: TMUX_SERVER_NAME, tmuxSession },
     });
 
-    // Settle the registry entry when the pane's process exits.
+    // Settle the registry entry when the pane's process exits. The probe
+    // targets the tracked pane itself — a session target resolves to the
+    // ACTIVE window's panes only, so it would lose sight of the pane after
+    // the user switches windows. list-panes covers the session-gone case
+    // too (it throws), so no separate has-session probe is needed. A single
+    // transient tmux failure must not settle a healthy terminal, so settle
+    // only after several consecutive failed probes.
+    let failedProbes = 0;
     const poll = setInterval(() => {
       void (async () => {
         const current = registry.get(shellId);
@@ -276,7 +304,7 @@ class TmuxToolInvocation extends BaseToolInvocation<
           clearInterval(poll);
           return;
         }
-        const settle = (): void => {
+        const settleUnexpected = (): void => {
           clearInterval(poll);
           if (entryAc.signal.aborted) {
             registry.cancel(shellId, Date.now());
@@ -288,34 +316,48 @@ class TmuxToolInvocation extends BaseToolInvocation<
             );
           }
         };
+        let panes: TmuxPaneInfo[];
         try {
-          if (!(await tmuxHasSession(tmuxSession, TMUX_SERVER_NAME))) {
-            settle();
-            return;
-          }
-          const panes = await tmuxListPanes(tmuxSession, TMUX_SERVER_NAME);
-          const pane = panes.find((p) => p.paneId === paneId) ?? panes[0];
-          if (!pane) {
-            settle();
-            return;
-          }
-          if (pane.dead) {
-            clearInterval(poll);
-            if (entryAc.signal.aborted) {
-              registry.cancel(shellId, Date.now());
-            } else if (pane.deadStatus === 0) {
-              registry.complete(shellId, 0, Date.now());
-            } else {
-              registry.fail(
-                shellId,
-                `Exit code ${pane.deadStatus}`,
-                Date.now(),
-              );
-            }
-          }
+          panes = await tmuxListPanes(paneId, TMUX_SERVER_NAME);
         } catch {
-          settle();
+          // We kill the session ourselves on abort — settle immediately.
+          if (entryAc.signal.aborted) {
+            settleUnexpected();
+            return;
+          }
+          failedProbes += 1;
+          if (failedProbes >= MAX_FAILED_PROBE_TICKS) {
+            settleUnexpected();
+          }
+          return;
         }
+        failedProbes = 0;
+        const pane = panes.find((p) => p.paneId === paneId) ?? panes[0];
+        if (!pane) {
+          settleUnexpected();
+          return;
+        }
+        if (!pane.dead) return;
+        clearInterval(poll);
+        if (entryAc.signal.aborted) {
+          registry.cancel(shellId, Date.now());
+          return;
+        }
+        if (pane.deadStatus === 0) {
+          registry.complete(shellId, 0, Date.now());
+        } else {
+          registry.fail(
+            shellId,
+            pane.deadStatus !== undefined
+              ? `Exit code ${pane.deadStatus}`
+              : 'Command exited without reporting a status',
+            Date.now(),
+          );
+        }
+        // remain-on-exit keeps the dead pane's session alive for the status
+        // read; reclaim it now so naturally exited terminals do not
+        // accumulate on the shared socket.
+        void tmuxKillSession(tmuxSession, TMUX_SERVER_NAME).catch(() => {});
       })();
     }, PANE_POLL_INTERVAL_MS);
     poll.unref?.();
@@ -385,7 +427,8 @@ class TmuxToolInvocation extends BaseToolInvocation<
       });
       const text = content.replace(/\n+$/, '');
       return {
-        llmContent: text.length > 0 ? text : '(terminal screen is empty)',
+        llmContent:
+          text.trim().length > 0 ? text : '(terminal screen is empty)',
         returnDisplay: `Captured terminal ${entry.shellId}`,
       };
     } catch (err) {
@@ -424,9 +467,17 @@ class TmuxToolInvocation extends BaseToolInvocation<
         `Terminal session ${entry.shellId} is already ${entry.status}.`,
       );
     }
-    // requestCancel aborts the entry's AbortController; the abort listener
-    // kills the tmux session and the pane poller settles the entry as
-    // cancelled.
+    const { socket, tmuxSession } = entry.terminal!;
+    try {
+      await tmuxKillSession(tmuxSession, socket);
+    } catch (err) {
+      // Leave the entry running so kill stays retryable.
+      return errorResult(
+        `Failed to kill terminal ${entry.shellId}: ${getErrorMessage(err)}`,
+      );
+    }
+    // requestCancel aborts the entry's AbortController so the pane poller
+    // settles it as cancelled.
     this.config.getBackgroundShellRegistry().requestCancel(entry.shellId);
     return {
       llmContent: `Terminal session ${entry.shellId} killed.`,
@@ -476,7 +527,7 @@ export class TmuxTool extends BaseDeclarativeTool<TmuxToolParams, ToolResult> {
           cwd: {
             type: 'string',
             description:
-              '(OPTIONAL) Working directory for the terminal. Defaults to the project root.',
+              '(OPTIONAL) Working directory for the terminal. Must be an absolute path within the workspace. Defaults to the project root.',
           },
           cols: {
             type: 'integer',
@@ -520,17 +571,32 @@ export class TmuxTool extends BaseDeclarativeTool<TmuxToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: TmuxToolParams,
   ): string | null {
+    if (process.platform === 'win32') {
+      return 'The tmux tool is not supported on Windows. The same terminal workflow runs through WSL2.';
+    }
     switch (params.action) {
       case 'create':
         if (typeof params.command !== 'string' || !params.command.trim()) {
           return 'action=create requires a non-empty command.';
+        }
+        if (params.cwd !== undefined) {
+          if (!path.isAbsolute(params.cwd)) {
+            return 'cwd must be an absolute path.';
+          }
+          const workspaceContext = this.config.getWorkspaceContext();
+          if (!workspaceContext.isPathWithinWorkspace(params.cwd)) {
+            return `cwd '${params.cwd}' is not within any of the registered workspace directories.`;
+          }
         }
         break;
       case 'send':
         if (!params.session_id) {
           return 'action=send requires session_id.';
         }
-        if (params.keys === undefined && !params.enter) {
+        if (
+          (params.keys === undefined || params.keys === '') &&
+          !params.enter
+        ) {
           return 'action=send requires keys (or enter=true).';
         }
         break;
@@ -574,7 +640,8 @@ export class TmuxTool extends BaseDeclarativeTool<TmuxToolParams, ToolResult> {
 
   /**
    * The classifier must see the action plus the actual command being run
-   * (create) or text being typed (send) to catch destructive payloads.
+   * (create), the directory it runs in, and the text being typed (send) to
+   * catch destructive payloads — same safety context the shell tool gives.
    */
   override toAutoClassifierInput(
     params: TmuxToolParams,
@@ -582,6 +649,9 @@ export class TmuxTool extends BaseDeclarativeTool<TmuxToolParams, ToolResult> {
     const out: Record<string, unknown> = { action: params.action };
     if (params.command) out['command'] = params.command;
     if (params.keys) out['keys'] = params.keys;
+    if (params.action === 'create') {
+      out['cwd'] = params.cwd ?? this.config.getTargetDir();
+    }
     return out;
   }
 }
