@@ -8,10 +8,27 @@ import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
+import { CLIENT_METHODS, type AnyMessage } from '@agentclientprotocol/sdk';
+// The SDK does not export its runtime validators from the package root.
+/* eslint-disable import/no-internal-modules */
+import {
+  zCreateTerminalRequest,
+  zKillTerminalCommandRequest,
+  zReadTextFileRequest,
+  zReleaseTerminalRequest,
+  zRequestPermissionRequest,
+  zSessionNotification,
+  zTerminalOutputRequest,
+  zWaitForTerminalExitRequest,
+  zWriteTextFileRequest,
+} from '@agentclientprotocol/sdk/dist/schema/zod.gen.js';
+/* eslint-enable import/no-internal-modules */
 import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
 import {
+  NdJsonQueueLimitError,
   ndJsonStream,
+  type NdJsonMessageObservation,
   type NdJsonStreamHooks,
   type NdJsonStreamLimits,
   validateNdJsonStreamLimits,
@@ -28,6 +45,224 @@ export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
     maxQueuedMessages: 256,
     maxQueuedBytes: 64 * 1024 * 1024,
   });
+
+const daemonClientParamValidators = new Map<
+  string,
+  { safeParse(value: unknown): { success: boolean } }
+>([
+  [CLIENT_METHODS.fs_read_text_file, zReadTextFileRequest],
+  [CLIENT_METHODS.fs_write_text_file, zWriteTextFileRequest],
+  [CLIENT_METHODS.session_request_permission, zRequestPermissionRequest],
+  [CLIENT_METHODS.session_update, zSessionNotification],
+  [CLIENT_METHODS.terminal_create, zCreateTerminalRequest],
+  [CLIENT_METHODS.terminal_kill, zKillTerminalCommandRequest],
+  [CLIENT_METHODS.terminal_output, zTerminalOutputRequest],
+  [CLIENT_METHODS.terminal_release, zReleaseTerminalRequest],
+  [CLIENT_METHODS.terminal_wait_for_exit, zWaitForTerminalExitRequest],
+]);
+
+function validateDaemonInboundMessage(message: AnyMessage): boolean {
+  if (!('method' in message)) return true;
+  const validator = daemonClientParamValidators.get(message.method);
+  return !validator || validator.safeParse(message.params).success;
+}
+
+class PreparedResponseBudget {
+  private objectCharges = new WeakMap<object, number[]>();
+  private readonly primitiveCharges = new Map<unknown, number[]>();
+  private retainedCount = 0;
+  private retainedBytes = 0;
+  private closed = false;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  reserve(value: unknown): void {
+    if (this.closed) return;
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    const envelopeBytes = Math.min(2_048, this.limits.maxQueuedBytes);
+    const charge =
+      envelopeBytes +
+      estimatePreparedResponseBytes(
+        value,
+        Math.max(0, availableBytes - envelopeBytes),
+      );
+    if (
+      this.retainedCount >= this.limits.maxQueuedMessages ||
+      charge > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        charge,
+        availableBytes,
+      );
+    }
+    const charges = this.getCharges(value, true);
+    charges.push(charge);
+    this.retainedCount++;
+    this.retainedBytes += charge;
+  }
+
+  releaseMessage(message: unknown): void {
+    if (
+      !isPlainRecord(message) ||
+      Object.hasOwn(message, 'method') ||
+      !Object.hasOwn(message, 'id')
+    ) {
+      return;
+    }
+    const value = Object.hasOwn(message, 'result')
+      ? message['result']
+      : message['error'];
+    const charges = this.getCharges(value, false);
+    if (!charges) return;
+    const charge = charges.shift();
+    if (charge === undefined) return;
+    if (charges.length === 0 && !isObjectValue(value)) {
+      this.primitiveCharges.delete(value);
+    }
+    this.retainedCount--;
+    this.retainedBytes -= charge;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.objectCharges = new WeakMap<object, number[]>();
+    this.primitiveCharges.clear();
+    this.retainedCount = 0;
+    this.retainedBytes = 0;
+  }
+
+  private getCharges(value: unknown, create: true): number[];
+  private getCharges(value: unknown, create: false): number[] | undefined;
+  private getCharges(value: unknown, create: boolean): number[] | undefined {
+    const charges = isObjectValue(value)
+      ? this.objectCharges.get(value)
+      : this.primitiveCharges.get(value);
+    if (charges || !create) return charges;
+    const created: number[] = [];
+    if (isObjectValue(value)) {
+      this.objectCharges.set(value, created);
+    } else {
+      this.primitiveCharges.set(value, created);
+    }
+    return created;
+  }
+}
+
+class OutboundOperationBudget {
+  private retainedCount = 0;
+  private retainedBytes = 0;
+  private generation = 0;
+  private closed = false;
+
+  constructor(private readonly limits: NdJsonStreamLimits) {}
+
+  reserve(value: unknown): () => void {
+    if (this.closed) return () => {};
+    const availableBytes = Math.max(
+      0,
+      this.limits.maxQueuedBytes - this.retainedBytes,
+    );
+    const envelopeBytes = Math.min(2_048, this.limits.maxQueuedBytes);
+    const charge =
+      envelopeBytes +
+      estimatePreparedResponseBytes(
+        value,
+        Math.max(0, availableBytes - envelopeBytes),
+      );
+    if (
+      this.retainedCount >= this.limits.maxQueuedMessages ||
+      charge > availableBytes
+    ) {
+      throw new NdJsonQueueLimitError(
+        this.limits.maxQueuedMessages,
+        this.limits.maxQueuedBytes,
+        charge,
+        availableBytes,
+      );
+    }
+    this.retainedCount++;
+    this.retainedBytes += charge;
+    const generation = this.generation;
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      if (this.closed || this.generation !== generation) return;
+      this.retainedCount--;
+      this.retainedBytes -= charge;
+    };
+  }
+
+  close(): void {
+    this.closed = true;
+    this.generation++;
+    this.retainedCount = 0;
+    this.retainedBytes = 0;
+  }
+}
+
+function estimatePreparedResponseBytes(value: unknown, limitBytes: number) {
+  let bytes = 0;
+  const stack: unknown[] = [value];
+  const seen = new WeakSet<object>();
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === null) {
+      bytes += 4;
+    } else if (current === undefined) {
+      bytes += 4;
+    } else if (typeof current === 'string') {
+      bytes += Buffer.byteLength(current) + 2;
+    } else if (typeof current === 'number') {
+      bytes += 24;
+    } else if (typeof current === 'boolean') {
+      bytes += 5;
+    } else if (Array.isArray(current)) {
+      if (seen.has(current)) return limitBytes + 1;
+      seen.add(current);
+      bytes += 2 + Math.max(0, current.length - 1);
+      for (let index = current.length - 1; index >= 0; index--) {
+        stack.push(current[index]);
+      }
+    } else if (isPlainRecord(current)) {
+      if (seen.has(current) || hasJsonAccessors(current)) return limitBytes + 1;
+      seen.add(current);
+      const entries = Object.entries(current);
+      bytes += 2 + Math.max(0, entries.length - 1);
+      for (const [key, entryValue] of entries) {
+        bytes += Buffer.byteLength(key) + 3;
+        stack.push(entryValue);
+      }
+    } else {
+      return limitBytes + 1;
+    }
+    if (bytes > limitBytes) return limitBytes + 1;
+  }
+  return Math.max(1, bytes);
+}
+
+function isObjectValue(value: unknown): value is object {
+  return typeof value === 'object' && value !== null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isObjectValue(value) || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasJsonAccessors(value: Record<string, unknown>): boolean {
+  if (Object.hasOwn(value, 'toJSON')) return true;
+  return Object.values(Object.getOwnPropertyDescriptors(value)).some(
+    (descriptor) =>
+      descriptor.get !== undefined || descriptor.set !== undefined,
+  );
+}
 
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
@@ -232,13 +467,43 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+    const preparedResponses = options.pipeLimits
+      ? new PreparedResponseBudget(options.pipeLimits)
+      : undefined;
+    const outboundOperations = options.pipeLimits
+      ? new OutboundOperationBudget(options.pipeLimits)
+      : undefined;
+    let reportTransportFailure: ((error: unknown) => void) | undefined;
+    let transportFailureReported = false;
+    const transportFailed = options.pipeLimits
+      ? new Promise<unknown>((resolve) => {
+          reportTransportFailure = resolve;
+        })
+      : undefined;
+    const failTransport = options.pipeLimits
+      ? (error: unknown) => {
+          if (transportFailureReported) return;
+          transportFailureReported = true;
+          reportTransportFailure?.(error);
+          reportTransportFailure = undefined;
+          preparedResponses?.close();
+          outboundOperations?.close();
+          child.stdout?.destroy();
+          child.stdin?.destroy();
+          void trackedChild.terminate().catch(() => {});
+          options.pipeHooks?.onTransportError?.(error);
+        }
+      : undefined;
     const pipeHooks = options.pipeLimits
       ? {
           ...options.pipeHooks,
-          onTransportError: (error: unknown) => {
-            void trackedChild.terminate().catch(() => {});
-            options.pipeHooks?.onTransportError?.(error);
+          onMessageObserved: (observation: NdJsonMessageObservation) => {
+            if (observation.direction === 'sent') {
+              preparedResponses?.releaseMessage(observation.message);
+            }
+            options.pipeHooks?.onMessageObserved?.(observation);
           },
+          onTransportError: failTransport,
         }
       : options.pipeHooks;
     const stream = ndJsonStream(
@@ -246,10 +511,38 @@ export function createSpawnChannelFactory(
       readable,
       pipeHooks,
       options.pipeLimits,
+      options.pipeLimits ? validateDaemonInboundMessage : undefined,
+      options.pipeLimits !== undefined,
     );
 
     return {
       stream,
+      ...(transportFailed ? { transportFailed } : {}),
+      ...(failTransport && options.pipeLimits
+        ? {
+            transportGuard: {
+              maxActiveHandlers: options.pipeLimits.maxQueuedMessages,
+              maxActiveHandlerBytes: options.pipeLimits.maxQueuedBytes,
+              reserveOutboundOperation: (value) => {
+                try {
+                  return outboundOperations?.reserve(value) ?? (() => {});
+                } catch (error) {
+                  failTransport(error);
+                  throw error;
+                }
+              },
+              reservePreparedResponse: (value) => {
+                try {
+                  preparedResponses?.reserve(value);
+                } catch (error) {
+                  failTransport(error);
+                  throw error;
+                }
+              },
+              fail: failTransport,
+            },
+          }
+        : {}),
       kill: () => trackedChild.terminate(),
       killSync: () => trackedChild.killSync(),
       exited: trackedChild.exited,
