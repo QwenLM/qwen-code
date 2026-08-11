@@ -124,13 +124,14 @@ export const goalCommand: SlashCommand = {
     try {
       runtime = await config.getGoalRuntimeReady();
     } catch (error) {
-      // A session that cannot initialize persistent Goal state has no Goal,
-      // which is an authoritative answer for status and clear. Dispatch
-      // failures are handled below because they can leave an existing Goal
-      // unchanged and must not be reported as a successful clear.
+      // With recording disabled there cannot be persisted Goal state, which
+      // makes an empty status authoritative. If persistence exists, recovery
+      // may instead have failed while an old Goal record remains, so status
+      // and clear must surface that failure rather than report success.
       if (
         error instanceof GoalPersistenceUnavailableError &&
-        (operation.kind === 'status' || operation.kind === 'clear')
+        (operation.kind === 'status' || operation.kind === 'clear') &&
+        config.getChatRecordingService() === undefined
       ) {
         return goalControl(operation, { snapshot: emptyGoalSnapshot() });
       }

@@ -495,6 +495,7 @@ describe('goalCommand', () => {
         );
       const config = {
         getGoalRuntimeReady,
+        getChatRecordingService: () => undefined,
         isTrustedFolder: () => true,
       } as unknown as Config;
       return createMockCommandContext({
@@ -513,6 +514,32 @@ describe('goalCommand', () => {
           operation: parseGoalCommand(args),
           response: { snapshot: emptyGoalSnapshot() },
         });
+      },
+    );
+
+    it.each(['', 'clear'])(
+      'fails %j when recovery fails while persisted Goal state may remain',
+      async (args) => {
+        const getGoalRuntimeReady = vi
+          .fn()
+          .mockRejectedValue(
+            new GoalPersistenceUnavailableError('migration write failed'),
+          );
+        const config = {
+          getGoalRuntimeReady,
+          getChatRecordingService: () => ({}),
+          isTrustedFolder: () => true,
+        } as unknown as Config;
+        const context = createMockCommandContext({ services: { config } });
+
+        const result = await goalCommand.action!(context, args);
+
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'error',
+          content: 'migration write failed',
+        });
+        expect(result).not.toHaveProperty('response');
       },
     );
 
