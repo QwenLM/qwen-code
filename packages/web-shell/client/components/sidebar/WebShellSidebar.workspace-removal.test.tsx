@@ -35,7 +35,7 @@ const {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
     loading: false,
-    error: null,
+    error: null as Error | null,
     reload: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(true),
     archiveSession: vi.fn().mockResolvedValue(true),
@@ -184,9 +184,15 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
       if (options?.enabled === false) {
         return { ...state, sessions: [], data: undefined, catalogQuery };
       }
+      // A useSessions implementation may model an unsettled catalog page with
+      // an explicit `data` key (undefined until the fetch settles), matching
+      // the real store's empty snapshot on a query-key change.
       return {
         ...state,
-        data: state.sessions,
+        data:
+          'data' in state
+            ? (state as { data?: DaemonSessionSummary[] }).data
+            : state.sessions,
         catalogQuery,
       };
     },
@@ -512,6 +518,81 @@ async function switchSessionSource(
   return tab!;
 }
 
+function enableChannelOrganization(): void {
+  const channelCapabilities = {
+    ...capabilities,
+    features: [
+      ...capabilities.features,
+      'channel_management',
+      'session_organization',
+    ],
+  };
+  connection.capabilities = channelCapabilities;
+  workspace.capabilities = channelCapabilities;
+  workspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: [],
+  });
+}
+
+function setChannelCatalog(): void {
+  channelState.catalog = [
+    {
+      type: 'dingtalk',
+      displayName: 'DingTalk',
+      manageable: true,
+      fields: [],
+    },
+    {
+      type: 'feishu',
+      displayName: 'Feishu',
+      manageable: true,
+      fields: [],
+    },
+  ];
+  channelState.channels = {
+    'ding-one': {
+      name: 'ding-one',
+      config: { type: 'dingtalk' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'connected' },
+    },
+    'feishu-one': {
+      name: 'feishu-one',
+      config: { type: 'feishu' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'connected' },
+    },
+  };
+  channelState.data = {
+    catalog: channelState.catalog,
+    snapshot: { revision: '1', instances: channelState.channels },
+  };
+}
+
+async function settleGroupsCatalog(): Promise<void> {
+  await act(async () => {
+    await workspaceActions.listSessionGroups.mock.results.at(-1)?.value;
+    await Promise.resolve();
+  });
+}
+
+async function openSessionSearch(): Promise<HTMLInputElement> {
+  const searchButton = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((button) => button.getAttribute('aria-label') === 'Search sessions');
+  expect(searchButton).toBeDefined();
+  await act(async () => {
+    click(searchButton!);
+    await Promise.resolve();
+  });
+  const input = container.querySelector<HTMLInputElement>('input');
+  expect(input).not.toBeNull();
+  return input!;
+}
+
 function sessionAction(label: string): HTMLButtonElement | undefined {
   return Array.from(
     container.querySelectorAll<HTMLButtonElement>(
@@ -615,6 +696,7 @@ function dialogButton(label: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -688,6 +770,8 @@ beforeEach(() => {
   );
   useChannels.mockClear();
   active.sessions.length = 0;
+  active.loading = false;
+  active.error = null;
   archived.sessions.length = 0;
   channelState.data = undefined;
   channelState.catalog = [];
@@ -3582,6 +3666,280 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
     ).not.toContain('channel-type:');
+  });
+
+  it('keeps channel sections expanded when the catalog settles before the sessions page', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    let channelPage: DaemonSessionSummary[] | undefined = undefined;
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          // The new source's catalog entry starts unsettled: no page until
+          // its fetch resolves, while the channel catalog is already loaded.
+          return {
+            ...active,
+            sessions: channelPage ?? [],
+            data: channelPage,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    await switchSessionSource('Channels');
+
+    // The channel catalog settled before the channel sessions page; no
+    // section may be registered or persisted yet.
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+
+    channelPage = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    expect(
+      dingTalkGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+
+  it('starts the first channel section expanded when it arrives after an empty settle', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    let channelSessions: DaemonSessionSummary[] = [];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    await switchSessionSource('Channels');
+
+    // The first Channels visit settles a defined empty catalog; the latch
+    // must stay set because channel sessions are externally driven.
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).toBeNull();
+
+    // The first incoming message creates the first channel session while the
+    // tab is open (the 2s poll picks it up).
+    channelSessions = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(
+      dingTalkGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+
+  it('does not register the first channel catalog against a search filter', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+      {
+        sessionId: 'feishu-one-session',
+        displayName: 'Feishu one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'feishu-one',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    expect(container.textContent).toContain('Task session');
+
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'ding');
+      await Promise.resolve();
+    });
+    await switchSessionSource('Channels');
+
+    // Only the DingTalk section matches the search; the first-catalog latch
+    // must wait for an unfiltered settle instead of registering only it.
+    await act(async () => {
+      setInputValue(searchInput, '');
+      await Promise.resolve();
+    });
+
+    const feishuGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="Feishu"]',
+    );
+    expect(feishuGroup).not.toBeNull();
+    expect(
+      feishuGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+});
+
+describe('WebShellSidebar session list notices', () => {
+  it('keeps a settled filtered-empty view while a refresh is in flight', async () => {
+    active.sessions = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    active.loading = true;
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'no-match');
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Loading sessions...');
+  });
+
+  it('keeps a settled filtered-empty view when a refresh failed', async () => {
+    active.sessions = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    active.error = new Error('daemon restarted');
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'no-match');
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Failed to load sessions');
+  });
+
+  it('shows the loading notice until the first page settles', async () => {
+    active.sessions = [];
+    active.loading = true;
+    useSessions.mockImplementation((options?: { archiveState?: string }) => {
+      const state = options?.archiveState === 'archived' ? archived : active;
+      return { ...state, data: undefined };
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Loading sessions...');
   });
 });
 

@@ -670,14 +670,16 @@ export function WebShellSidebar({
     !organizationEnabled ||
     !includePrimaryWorkspaceSessions ||
     sessionsPage !== undefined;
-  // Which source the settled sessions page belongs to. The resource retains
-  // the previous source's page while a source-switch refetch is in flight, so
-  // section reconciliation must not run against a stale page of the other
-  // source (its sections would be consumed as the wrong source's initial
-  // catalog). A page identity change marks a successful fetch settling.
+  // Which source the settled sessions page belongs to. Switching the source
+  // changes the catalog query key, whose entry starts without a page
+  // (undefined), so reconciliation must not run until a page fetched for the
+  // new source settles — otherwise the other source's sections would be
+  // consumed as the new source's initial catalog.
   const lastSettledSessionsPageRef = useRef(sessionsPage);
   const settledSessionsSourceRef = useRef<SidebarSessionSource>(sessionSource);
   useEffect(() => {
+    // An undefined page is the empty pre-settle snapshot, not a settled fetch.
+    if (sessionsPage === undefined) return;
     if (lastSettledSessionsPageRef.current !== sessionsPage) {
       lastSettledSessionsPageRef.current = sessionsPage;
       settledSessionsSourceRef.current = sessionSource;
@@ -2789,16 +2791,19 @@ export function WebShellSidebar({
       if (!organizationEnabled) return;
       if (!groupsCatalogReady || !sessionsCatalogReady) return;
     }
-    // Wait for both independent catalog sources. Flipping the latch on the
-    // first non-empty derived sections would treat later initial recent/color
-    // ids as brand-new and auto-collapse them; leaving the latch set when the
-    // first ready catalog is empty would leave the first real section expanded.
     const unseenIds = activeSections
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
     const isInitialCatalog =
       awaitingInitialSessionCatalogBySourceRef.current[sessionSource];
     if (isInitialCatalog) {
+      // First-sync registration must reflect the full unfiltered catalog:
+      // sections hidden by an active search would never register and would
+      // later auto-collapse as mid-session additions. An empty first catalog
+      // keeps the latch so the first real sections still register as initial
+      // — channel sessions are externally driven and can arrive while the
+      // tab is open on an empty settle.
+      if (searchQuery.trim() || activeSections.length === 0) return;
       awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = false;
       for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
       return;
@@ -2816,6 +2821,7 @@ export function WebShellSidebar({
     channelCatalogLoaded,
     channelSessionSections,
     organizationEnabled,
+    searchQuery,
     selectedSessionSource,
     sessionSections,
     sessionSource,
@@ -3560,12 +3566,15 @@ export function WebShellSidebar({
   );
 
   const body = useMemo(() => {
-    if (loading && filteredSessions.length === 0) {
+    // Gate notices on the resource, not the filtered view: background
+    // refreshes set loading/error while retaining the settled page, so a
+    // filter-empty or empty-but-settled view must not flash or swap to retry.
+    if (loading && sessionsPage === undefined) {
       return (
         <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
       );
     }
-    if (error && filteredSessions.length === 0) {
+    if (error && sessionsPage === undefined) {
       return (
         <button className={styles.retry} type="button" onClick={reload}>
           {t('sidebar.loadFailed')}
@@ -3652,6 +3661,7 @@ export function WebShellSidebar({
     searchQuery,
     selectedSessionSource,
     sessionSections,
+    sessionsPage,
     t,
     toggleSessionSection,
   ]);
