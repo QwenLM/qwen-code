@@ -81,6 +81,13 @@ export async function startInteractiveUI(
     './render/dispatch.js'
   );
   if (isExperimentalRenderer(pickRenderer())) {
+    // Fail-closed preflight: runtimes without FFI (e.g. Node v24, no
+    // node:ffi) exit nonzero with a verified Bun command before the
+    // native-dependent renderer is imported.
+    const { ensureOpenTuiRuntimeSupported } = await import(
+      './render/runtime-gate.js'
+    );
+    ensureOpenTuiRuntimeSupported();
     const { startOpenTuiUI } = await import('./render/opentui-entry.js');
     await startOpenTuiUI({ config });
     return;
