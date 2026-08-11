@@ -296,6 +296,7 @@ function makeHarness() {
   return {
     service,
     bridge,
+    projectBridge,
     runtime,
     summaries,
     resident,
@@ -380,7 +381,7 @@ describe('LiveTaskService', () => {
     );
     expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
       2,
-      expect.anything(),
+      harness.projectBridge,
       '/project',
       expect.objectContaining({ view: 'organized', group: 'all' }),
       { runtimeBaseDir: '/runtime/project' },

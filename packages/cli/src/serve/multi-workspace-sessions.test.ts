@@ -5137,6 +5137,19 @@ describe('multi-workspace session dispatch', () => {
       const { app, primaryBridge, secondaryBridge } = makeHarness({
         secondarySummaries: [],
       });
+      const list = (archiveState: 'active' | 'archived') =>
+        request(app)
+          .get(
+            `/workspaces/secondary-id/sessions?view=organized&archiveState=${archiveState}&group=all`,
+          )
+          .set('Host', host());
+      const listedIds = async (archiveState: 'active' | 'archived') =>
+        (await list(archiveState)).body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        );
+
+      expect(await listedIds('active')).toEqual([deleteId, archiveId]);
+      expect(await listedIds('archived')).toEqual([]);
 
       const archived = await request(app)
         .post('/workspaces/secondary-id/sessions/archive')
@@ -5149,6 +5162,8 @@ describe('multi-workspace session dispatch', () => {
         notFound: [],
         errors: [],
       });
+      expect(await listedIds('active')).toEqual([deleteId]);
+      expect(await listedIds('archived')).toEqual([archiveId]);
 
       const unarchived = await request(app)
         .post('/workspaces/secondary-id/sessions/unarchive')
@@ -5161,6 +5176,8 @@ describe('multi-workspace session dispatch', () => {
         notFound: [],
         errors: [],
       });
+      expect(await listedIds('active')).toEqual([deleteId, archiveId]);
+      expect(await listedIds('archived')).toEqual([]);
 
       const deleted = await request(app)
         .post('/workspaces/secondary-id/sessions/delete')
@@ -5172,6 +5189,8 @@ describe('multi-workspace session dispatch', () => {
         notFound: [],
         errors: [],
       });
+      expect(await listedIds('active')).toEqual([archiveId]);
+      expect(await listedIds('archived')).toEqual([]);
       expect(primaryBridge.closeCalls).toEqual([]);
       expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
     });

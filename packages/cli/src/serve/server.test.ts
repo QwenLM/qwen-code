@@ -13555,6 +13555,30 @@ describe('createServeApp', () => {
           'qwen-code.daemon.session_list.cache_age_ms',
           expect.any(Number),
         );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.archive_state',
+          'active',
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.query_kind',
+          'metadata',
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.persisted_sessions',
+          0,
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.scan_pages',
+          1,
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.truncated',
+          false,
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.scan_duration_ms',
+          expect.any(Number),
+        );
       } finally {
         getSpanSpy.mockRestore();
         listSessionsSpy.mockRestore();
@@ -21121,6 +21145,16 @@ describe('createServeApp', () => {
       ]);
       expect((await list('archived')).body.sessions).toHaveLength(0);
 
+      const reArchived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(reArchived.status).toBe(200);
+      expect((await list('active')).body.sessions).toHaveLength(0);
+      expect((await list('archived')).body.sessions).toEqual([
+        expect.objectContaining({ sessionId: sid, isArchived: true }),
+      ]);
+
       const deleted = await request(app)
         .post('/sessions/delete')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -21128,6 +21162,56 @@ describe('createServeApp', () => {
       expect(deleted.status).toBe(200);
       expect((await list('active')).body.sessions).toHaveLength(0);
       expect((await list('archived')).body.sessions).toHaveLength(0);
+    });
+
+    it('invalidates catalogs only after an archive mutation settles', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeed';
+      await writeSession(sid);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          closeStarted();
+          await closeReleasedPromise;
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const list = (archiveState: 'active' | 'archived') =>
+        request(app)
+          .get(
+            `/workspace/${encodeURIComponent(wsDir)}/sessions?view=organized&archiveState=${archiveState}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      await list('active');
+      await list('archived');
+      const archivePromise = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((response) => response);
+      try {
+        await closeStartedPromise;
+        expect((await list('active')).body.sessions).toHaveLength(1);
+        expect((await list('archived')).body.sessions).toHaveLength(0);
+
+        releaseClose();
+        await expect(archivePromise).resolves.toMatchObject({ status: 200 });
+        expect((await list('active')).body.sessions).toHaveLength(0);
+        expect((await list('archived')).body.sessions).toEqual([
+          expect.objectContaining({ sessionId: sid, isArchived: true }),
+        ]);
+      } finally {
+        releaseClose();
+        await Promise.allSettled([archivePromise]);
+      }
     });
 
     it('invalidates both catalogs after a partial archive result', async () => {

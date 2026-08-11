@@ -117,6 +117,21 @@ describe('PersistedSessionListCache', () => {
     cache.clear();
   });
 
+  it('rejects an installed value when its read-path age reaches the TTL', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    await cache.lookup(SCOPE, async () => snapshot()).promise;
+
+    now.mockReturnValue(3_000);
+    const reload = deferred<PersistedSessionListSnapshot>();
+    const lookup = cache.lookup(SCOPE, () => reload.promise);
+    expect(lookup.status).toBe('scan');
+
+    reload.resolve(snapshot());
+    await lookup.promise;
+    cache.clear();
+  });
+
   it('isolates archive state, runtime root, and workspace', async () => {
     const cache = new PersistedSessionListCache(2_000, 50_000);
     const loader = vi.fn(async () => snapshot());
@@ -189,8 +204,33 @@ describe('PersistedSessionListCache', () => {
     const secondScope = { ...SCOPE, workspaceCwd: '/workspace/two' };
     await cache.lookup(secondScope, secondLoader).promise;
 
-    expect(cache.lookup(SCOPE, firstLoader).status).toBe('scan');
+    const reload = deferred<PersistedSessionListSnapshot>();
+    const evictedLookup = cache.lookup(SCOPE, () => reload.promise);
+    expect(evictedLookup.status).toBe('scan');
     expect(cache.lookup(secondScope, secondLoader).status).toBe('cache_hit');
+    cache.clear();
+    reload.resolve(snapshot(2));
+    await evictedLookup.promise;
+  });
+
+  it('reclaims retained-summary capacity when evicting a snapshot', async () => {
+    vi.useFakeTimers();
+    const cache = new PersistedSessionListCache(10_000, 3);
+    const firstScope = { ...SCOPE, workspaceCwd: '/workspace/first' };
+    const secondScope = { ...SCOPE, workspaceCwd: '/workspace/second' };
+    const thirdScope = { ...SCOPE, workspaceCwd: '/workspace/third' };
+
+    await cache.lookup(firstScope, async () => snapshot(2)).promise;
+    await vi.advanceTimersByTimeAsync(1);
+    await cache.lookup(secondScope, async () => snapshot(2)).promise;
+    await cache.lookup(thirdScope, async () => snapshot(1)).promise;
+
+    expect(cache.lookup(secondScope, async () => snapshot(2)).status).toBe(
+      'cache_hit',
+    );
+    expect(cache.lookup(thirdScope, async () => snapshot(1)).status).toBe(
+      'cache_hit',
+    );
     cache.clear();
   });
 
