@@ -1112,7 +1112,8 @@ describe('loadModelMetadataCatalog', () => {
       ([, delay]) => delay === 60 * 60 * 1000,
     );
     const refreshTimer = timeoutSpy.mock.results[refreshIndex]?.value as
-      ReturnType<typeof setTimeout> | undefined;
+      | ReturnType<typeof setTimeout>
+      | undefined;
     expect(refreshTimer).toBeDefined();
     expect(refreshTimer?.hasRef()).toBe(false);
     if (refreshTimer) clearTimeout(refreshTimer);
@@ -1138,7 +1139,8 @@ describe('loadModelMetadataCatalog', () => {
     );
     expect(refreshIndex).toBeGreaterThanOrEqual(0);
     const refreshTimer = timeoutSpy.mock.results[refreshIndex]?.value as
-      ReturnType<typeof setTimeout> | undefined;
+      | ReturnType<typeof setTimeout>
+      | undefined;
     if (refreshTimer) clearTimeout(refreshTimer);
     const refresh = timeoutSpy.mock.calls[refreshIndex]?.[0];
     expect(refresh).toBeTypeOf('function');
