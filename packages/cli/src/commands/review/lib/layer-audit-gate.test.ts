@@ -76,9 +76,26 @@ describe('layerAuditGate', () => {
     expect(out.some((e) => e.includes('toctou'))).toBe(true);
     // Walked layers are not owed.
     expect(out.some((e) => e.includes('lexing'))).toBe(false);
-    // Every entry is a self-explained reverse-audit cap line.
+    // Every entry is a self-explained cap line, prefixed so compose-review's
+    // caller-echo dedup cannot shadow it behind a `reverse audit` coverage entry.
     for (const e of out)
-      expect(e).toMatch(/^reverse audit — the .+ was never walked$/);
+      expect(e).toMatch(
+        /^reverse-audit layer coverage — the .+ was never walked$/,
+      );
+  });
+
+  it('fails open (default reader) when the transcript dir is missing — finding 1', () => {
+    // Every other test injects readReturns; this one exercises the REAL reader, so
+    // a regression that lets readTranscripts throw out of the gate — taking compose
+    // down on a manifest-marked diff in a transcript-less environment — fails here.
+    // An empty env makes transcriptPaths throw TranscriptsUnavailableError.
+    writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
+    expect(() =>
+      layerAuditGate(planPath(), {} as NodeJS.ProcessEnv),
+    ).not.toThrow();
+    expect(
+      layerAuditGate(planPath(), {} as NodeJS.ProcessEnv).unreviewed,
+    ).toEqual([]);
   });
 
   it('owes nothing when every layer was walked', () => {

@@ -60,15 +60,23 @@ function readReverseAuditReturns(
   planPath: string,
   env: NodeJS.ProcessEnv,
 ): string[] {
-  let since: number;
   try {
-    since = statSync(planPath).mtimeMs;
+    const since = statSync(planPath).mtimeMs;
+    return readTranscripts(since, env)
+      .filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_MARKER))
+      .map((t) => t.finalText ?? '');
   } catch {
+    // Fail-open, as this module's header promises — and as every sibling
+    // transcript reader in composeReviewBody already does. A missing transcript
+    // dir makes readTranscripts throw TranscriptsUnavailableError, an unstat-able
+    // plan makes statSync throw, and any other read failure lands here too: each
+    // yields no returns, hence no cap. Without this catch the throw propagated out
+    // of the gate and took compose down with it on a manifest-marked diff in a
+    // transcript-less environment (a sandbox, a read-only HOME, a re-compose on a
+    // clean machine) — posting nothing on exactly the security diffs this feature
+    // exists for. The reverse-audit-ran floor owns "the auditor never ran".
     return [];
   }
-  return readTranscripts(since, env)
-    .filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_MARKER))
-    .map((t) => t.finalText ?? '');
 }
 
 /**

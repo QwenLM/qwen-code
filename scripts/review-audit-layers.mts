@@ -33,7 +33,7 @@
 
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { glob } from 'node:fs/promises';
+import { glob } from 'glob';
 import {
   SHELL_MODEL_LAYERS,
   layerCoverage,
@@ -54,7 +54,7 @@ async function collectPaths(args: string[]): Promise<string[]> {
   const out: string[] = [];
   for (const arg of args) {
     if (/[*?[\]]/.test(arg)) {
-      for await (const p of glob(arg)) out.push(p);
+      out.push(...(await glob(arg)));
     } else {
       out.push(arg);
     }

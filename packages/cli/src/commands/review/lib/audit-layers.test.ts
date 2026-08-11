@@ -161,7 +161,13 @@ describe('owedLayerDimensions', () => {
     expect(owed).toHaveLength(4);
     expect(owed.some((e) => e.includes('scope-propagation'))).toBe(true);
     for (const e of owed)
-      expect(e).toMatch(/^reverse audit — the .+ was never walked$/);
+      expect(e).toMatch(
+        /^reverse-audit layer coverage — the .+ was never walked$/,
+      );
+    // The prefix is deliberately NOT the bare `reverse audit — ` an orchestrator
+    // writes for a whiffed scope: that one would be shadowed by compose-review's
+    // `reverse audit` coverage subject in the caller-echo dedup.
+    for (const e of owed) expect(e.startsWith('reverse audit — ')).toBe(false);
   });
 
   it('owes nothing when every layer was walked', () => {

@@ -58,10 +58,14 @@ export interface DefectLayer {
 /**
  * The shell/git execution model's defect layers, coarsest surface to deepest
  * semantics. This is the built-in taxonomy for the one modeled system the skill
- * has measured (`daemon-git-worktree-guard.ts`); a repository-context manifest
- * may supply an alternate list for another modeled system (a SQL planner, a
- * markdown sanitizer, a wire-protocol codec) whose layers differ — the coverage
- * functions take a taxonomy argument for exactly that reason.
+ * has measured (`daemon-git-worktree-guard.ts`). The coverage functions take a
+ * `taxonomy` argument so a different modeled system (a SQL planner, a markdown
+ * sanitizer, a wire-protocol codec) can be measured by a programmatic caller that
+ * passes its own list — but no manifest channel wires such a list through yet, so
+ * the shipped gate measures `SHELL_MODEL_LAYERS` only. Arming the
+ * `modeled-executable-system` domain on a non-shell diff is out of scope today:
+ * it would owe the shell layers forever. Wiring the taxonomy through the manifest
+ * is the follow-up that lifts that limit.
  */
 export const SHELL_MODEL_LAYERS: readonly DefectLayer[] = [
   {
@@ -304,6 +308,15 @@ export const MODELED_SYSTEM_DOMAIN = 'modeled-executable-system';
  * any `unreviewedDimensions` entry) and discloses the gap; it never ends the
  * loop early, never blocks a Request changes, never touches convergence. An
  * empty return (every layer walked, or nothing to read) caps nothing.
+ *
+ * The entry opens `reverse-audit layer coverage — ` rather than the bare
+ * `reverse audit — ` an orchestrator writes for a whiffed auditor scope: the
+ * latter prefix-matches compose-review's `reverse audit` coverage SUBJECT (a
+ * delivery gap `verificationGaps` can emit), and the caller-echo dedup would
+ * then shadow these per-layer lines out of the rendered "Not reviewed" section
+ * in that narrow window. The distinct prefix keeps each layer's disclosure its
+ * own line; the verdict cap is unaffected either way (it counts the entry before
+ * that filter runs).
  */
 export function owedLayerDimensions(
   finalTexts: readonly string[],
@@ -311,6 +324,6 @@ export function owedLayerDimensions(
 ): string[] {
   return uncoveredLayers(finalTexts, opts).map(
     (id) =>
-      `reverse audit — the ${id} layer of a modeled executable system was never walked`,
+      `reverse-audit layer coverage — the ${id} layer of a modeled executable system was never walked`,
   );
 }
