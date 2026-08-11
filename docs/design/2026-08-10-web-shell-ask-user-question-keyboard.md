@@ -14,15 +14,18 @@ place focus on a different option than the checked answer.
 - Up/Down and j/k move through options. In a single-select question, focus and
   the checked answer move together. Space toggles the focused multi-select
   option.
-- Enter advances to the next question. On the last question, it focuses Submit
-  so submission remains an explicit action.
+- Enter advances to the next question. On the last question, it submits the
+  current answers.
 - Previous and Next move focus into the destination question, preserving its
   checked option or custom-answer trigger.
-- Command/Ctrl+Enter submits when every question has an answer.
+- Left and Right perform the same navigation from any non-editable dialog
+  control.
+- Command/Ctrl+Enter submits the current answers from anywhere in the dialog.
 - Escape while editing a custom answer exits editing, preserves the text, and
   restores focus to the Other trigger. Escape elsewhere cancels the request, so
   pressing Escape a second time after leaving the input cancels.
 - A short contextual hint makes the available keys visible.
+- Action shortcuts are inactive while the dialog is collapsed.
 
 ## Accessibility
 

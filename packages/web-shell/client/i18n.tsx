@@ -572,6 +572,8 @@ const EN: Messages = {
   'askUser.shortcuts.multiFinal':
     '↑↓ move · Space select/deselect · Enter select & submit',
   'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ move · Enter edit',
+  'askUser.shortcuts.inputEmpty': 'Type an answer · Esc stop editing',
   'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
   'askUser.shortcuts.inputNext': 'Enter next · Esc stop editing',
   'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
@@ -3405,6 +3407,8 @@ const ZH: Messages = {
   'askUser.shortcuts.multiFinal':
     '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
   'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ 移动 · Enter 编辑',
+  'askUser.shortcuts.inputEmpty': '输入答案 · Esc 退出编辑',
   'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
   'askUser.shortcuts.inputNext': 'Enter 下一步 · Esc 退出编辑',
   'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',

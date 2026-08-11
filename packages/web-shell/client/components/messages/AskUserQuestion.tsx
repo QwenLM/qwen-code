@@ -40,6 +40,10 @@ interface AskUserQuestionProps {
   keyboardActive?: boolean;
 }
 
+function hasCustomAnswer(value: string | undefined): boolean {
+  return Boolean(value?.trim());
+}
+
 export function AskUserQuestion({
   request,
   onConfirm,
@@ -80,6 +84,7 @@ export function AskUserQuestion({
   const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({});
   const focusAfterQuestionChangeRef = useRef(false);
   const focusCustomTriggerAfterEditRef = useRef(false);
+  const focusCustomTriggerAfterSubmitFailureRef = useRef(false);
   selectedIdxRef.current = selectedIdx;
   const questionTextId = useId();
   const headingId = useId();
@@ -105,6 +110,7 @@ export function AskUserQuestion({
     setCustomInputs({});
     setSelectedMulti({});
     setCustomFocused(false);
+    focusCustomTriggerAfterSubmitFailureRef.current = false;
   }, [questions, request.id]);
 
   const current = questions[currentIdx];
@@ -130,10 +136,12 @@ export function AskUserQuestion({
         if (q.multiSelect) {
           const multi = multiSelections[i] || [];
           const custom = customInputs[i];
-          const all = custom ? [...multi, custom] : multi;
+          const all = hasCustomAnswer(custom) ? [...multi, custom] : multi;
           result[String(i)] = all.join(', ');
         } else {
-          result[String(i)] = answers[i] || customInputs[i] || '';
+          const custom = customInputs[i];
+          result[String(i)] =
+            answers[i] || (hasCustomAnswer(custom) ? custom : '');
         }
       }
       return result;
@@ -329,7 +337,9 @@ export function AskUserQuestion({
       }
       const question = questions[questionIdx];
       if (!question) return null;
-      if (customInputs[questionIdx]) return question.options.length;
+      if (hasCustomAnswer(customInputs[questionIdx])) {
+        return question.options.length;
+      }
       if (!question.multiSelect) {
         const answer = answers[questionIdx];
         const answerIdx = question.options.findIndex(
@@ -356,7 +366,10 @@ export function AskUserQuestion({
 
       if (question.multiSelect) return;
       setAnswers((prev) =>
-        prev[nextIdx] || customInputs[nextIdx] || !question.options[0]
+        prev[nextIdx] ||
+        hasCustomAnswer(customInputs[nextIdx]) ||
+        nextSelectedIdx === question.options.length ||
+        !question.options[0]
           ? prev
           : { ...prev, [nextIdx]: question.options[0].label },
       );
@@ -381,9 +394,19 @@ export function AskUserQuestion({
         selectQuestion(currentIdx + 1);
         return;
       }
+      if (customFocused) {
+        focusCustomTriggerAfterSubmitFailureRef.current = true;
+      }
       if (!submitting) handleSubmit(submittedAnswers);
     },
-    [currentIdx, handleSubmit, questions.length, selectQuestion, submitting],
+    [
+      currentIdx,
+      customFocused,
+      handleSubmit,
+      questions.length,
+      selectQuestion,
+      submitting,
+    ],
   );
 
   useEffect(() => {
@@ -400,6 +423,23 @@ export function AskUserQuestion({
     customRef.current?.focus();
   }, [customFocused]);
 
+  useEffect(() => {
+    if (
+      customFocused ||
+      submitting ||
+      !focusCustomTriggerAfterSubmitFailureRef.current
+    ) {
+      return;
+    }
+    focusCustomTriggerAfterSubmitFailureRef.current = false;
+    if (
+      document.activeElement === document.body ||
+      document.activeElement === document.documentElement
+    ) {
+      customRef.current?.focus();
+    }
+  }, [customFocused, submitting]);
+
   const handleCustomInputKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLInputElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
@@ -409,7 +449,10 @@ export function AskUserQuestion({
         e.stopPropagation();
         focusCustomTriggerAfterEditRef.current = true;
         setCustomFocused(false);
-      } else if (e.key === 'Enter' && (customInputs[currentIdx] || '').trim()) {
+      } else if (
+        e.key === 'Enter' &&
+        hasCustomAnswer(customInputs[currentIdx])
+      ) {
         e.preventDefault();
         e.stopPropagation();
         advanceQuestion();
@@ -423,6 +466,15 @@ export function AskUserQuestion({
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+      if (collapsed) {
+        if (
+          e.key === 'Escape' ||
+          (e.key === 'Enter' && (e.ctrlKey || e.metaKey))
+        ) {
+          e.preventDefault();
+        }
+        return;
+      }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (!submitting) handleSubmit();
@@ -438,11 +490,14 @@ export function AskUserQuestion({
         '[data-web-shell-ask-option]',
       );
       if (!isOptionTarget) {
-        if (
-          !collapsed &&
-          current &&
-          (e.key === 'ArrowDown' || e.key === 'ArrowUp')
-        ) {
+        if (!current) return;
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          handlePrevious();
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          handleNext();
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
           selectIndex(selectedIdxRef.current ?? 0);
         }
@@ -471,7 +526,10 @@ export function AskUserQuestion({
       } else if (e.key === 'Enter') {
         e.preventDefault();
         const idx = selectedIdxRef.current ?? 0;
-        if (idx === current.options.length && !customInputs[currentIdx]) {
+        if (
+          idx === current.options.length &&
+          !hasCustomAnswer(customInputs[currentIdx])
+        ) {
           chooseOption(idx);
         } else {
           if (isMulti && idx < current.options.length) {
@@ -522,55 +580,63 @@ export function AskUserQuestion({
   // ToolApproval's matching effect for the prev-flag reasoning.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  const optionCountRef = useRef(current?.options.length ?? 0);
-  optionCountRef.current = current?.options.length ?? 0;
   useEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
+    if (!keyboardActive || !current) return;
+    const requestChanged = request.id !== prevRequestId;
+    if (requestChanged && currentIdx !== 0) return;
+    if (wasActive && !requestChanged) return;
     prevRequestIdRef.current = request.id;
-    if (!keyboardActive) return;
-    if (wasActive && request.id === prevRequestId) return;
     const idx = selectedIdxRef.current ?? 0;
-    if (idx === optionCountRef.current) customRef.current?.focus();
+    if (idx === current.options.length) customRef.current?.focus();
     else optionRefs.current[idx]?.focus();
-  }, [keyboardActive, request.id]);
+  }, [current, currentIdx, keyboardActive, request.id]);
 
   if (questions.length === 0) return null;
 
   const displayIdx = Math.min(currentIdx, questions.length - 1);
   const isLastQuestion = currentIdx === questions.length - 1;
   const isSingleQuestion = questions.length === 1;
+  const hasCurrentCustomAnswer = hasCustomAnswer(customInputs[currentIdx]);
   const isEmptyCustomTrigger =
     current !== undefined &&
     !customFocused &&
     selectedIdx === current.options.length &&
-    !customInputs[currentIdx];
-  const contextualShortcutHint = isEmptyCustomTrigger
-    ? t('askUser.shortcuts.customTrigger')
-    : customFocused
-      ? t(
-          isSingleQuestion
-            ? 'askUser.shortcuts.inputSingle'
-            : isLastQuestion
-              ? 'askUser.shortcuts.inputFinal'
-              : 'askUser.shortcuts.inputNext',
-        )
-      : isMulti
+    !hasCurrentCustomAnswer;
+  const contextualShortcutHint =
+    customFocused && !hasCurrentCustomAnswer
+      ? t('askUser.shortcuts.inputEmpty')
+      : isEmptyCustomTrigger
         ? t(
-            isSingleQuestion
-              ? 'askUser.shortcuts.multiSingle'
-              : isLastQuestion
-                ? 'askUser.shortcuts.multiFinal'
-                : 'askUser.shortcuts.multiNext',
+            isMulti
+              ? 'askUser.shortcuts.customTriggerMulti'
+              : 'askUser.shortcuts.customTrigger',
           )
-        : t(
-            isSingleQuestion
-              ? 'askUser.shortcuts.optionsSingle'
-              : isLastQuestion
-                ? 'askUser.shortcuts.optionsFinal'
-                : 'askUser.shortcuts.optionsNext',
-          );
+        : customFocused
+          ? t(
+              isSingleQuestion
+                ? 'askUser.shortcuts.inputSingle'
+                : isLastQuestion
+                  ? 'askUser.shortcuts.inputFinal'
+                  : 'askUser.shortcuts.inputNext',
+            )
+          : isMulti
+            ? t(
+                isSingleQuestion
+                  ? 'askUser.shortcuts.multiSingle'
+                  : isLastQuestion
+                    ? 'askUser.shortcuts.multiFinal'
+                    : 'askUser.shortcuts.multiNext',
+              )
+            : t(
+                isSingleQuestion
+                  ? 'askUser.shortcuts.optionsSingle'
+                  : isLastQuestion
+                    ? 'askUser.shortcuts.optionsFinal'
+                    : 'askUser.shortcuts.optionsNext',
+              );
   const shortcutHint =
     currentIdx > 0 && !customFocused
       ? `${t('askUser.shortcuts.previous')} · ${contextualShortcutHint}`
@@ -696,8 +762,8 @@ export function AskUserQuestion({
                         optionRefs.current[i] = el;
                       }}
                       className={`${styles.option} ${
-                        isActive ? styles.optionActive : ''
-                      } ${isSelected ? styles.optionSelected : ''}`}
+                        isSelected ? styles.optionSelected : ''
+                      }`}
                       data-web-shell-ask-option
                       tabIndex={isActive ? 0 : -1}
                       role={isMulti ? undefined : 'radio'}
@@ -729,12 +795,14 @@ export function AskUserQuestion({
                 {/* Other / custom input option */}
                 {(() => {
                   const isCustomActive = selectedIdx === current.options.length;
-                  const hasCustomValue = !!customInputs[currentIdx];
+                  const hasCustomValue = hasCustomAnswer(
+                    customInputs[currentIdx],
+                  );
                   return (
                     <div
                       className={`${styles.option} ${
-                        isCustomActive ? styles.optionActive : ''
-                      } ${hasCustomValue ? styles.optionSelected : ''}`}
+                        hasCustomValue ? styles.optionSelected : ''
+                      }`}
                       // The whole row is clickable (it carries cursor:pointer via
                       // styles.option), so clicks on the padding — not just the
                       // inner trigger/input — activate the "Other" option. The
@@ -742,6 +810,13 @@ export function AskUserQuestion({
                       // native Enter/Space activation) bubbles up to here.
                       onClick={() => {
                         if (!submitting) chooseOption(current.options.length);
+                      }}
+                      onMouseDown={(e) => {
+                        if (!customFocused || isEditableTarget(e.target)) {
+                          return;
+                        }
+                        e.preventDefault();
+                        e.stopPropagation();
                       }}
                     >
                       <span className={styles.pointer} aria-hidden="true">
@@ -788,9 +863,7 @@ export function AskUserQuestion({
                           type="button"
                           ref={customRef}
                           className={`${styles.customTrigger} ${
-                            customInputs[currentIdx]
-                              ? ''
-                              : styles.optionPlaceholder
+                            hasCustomValue ? '' : styles.optionPlaceholder
                           }`}
                           data-web-shell-ask-option
                           tabIndex={isCustomActive ? 0 : -1}
@@ -807,8 +880,9 @@ export function AskUserQuestion({
                             rememberSelectedIndex(current.options.length)
                           }
                         >
-                          {customInputs[currentIdx] ||
-                            t('askUser.typePlaceholder')}
+                          {hasCustomValue
+                            ? customInputs[currentIdx]
+                            : t('askUser.typePlaceholder')}
                         </button>
                       )}
                     </div>
