@@ -283,10 +283,11 @@ Fastjson2 and Druid establish these requirements:
   inert for narrowing (the report discloses when it was changed but not
   exercised).
 - Profile modules must not be treated as unconditionally active. P1 discovers
-  module ownership from POM aggregation paths, but Maven is the authority on
-  whether a selected project belongs to the active reactor under the current
-  JDK and profiles. A rejected selector fails closed and is never reported as a
-  successful partial verification.
+  module ownership from a nearest-ancestor filesystem walk over `pom.xml`
+  locations (never from `<modules>` aggregation lists), and Maven remains the
+  authority on whether a selected project belongs to the active reactor under
+  the current JDK and profiles. A rejected selector fails closed and is never
+  reported as a successful partial verification.
 - External smoke runs must not use `clean`. Existing Surefire/Failsafe reports
   may be stale, so only XML files created or updated by the current invocation
   are evidence.
@@ -313,12 +314,16 @@ it:
    repository metadata; such paths select nothing. The exemption runs BEFORE
    ownership: a README-only or `.github/`-only diff maps to no project.
 2. Assign each changed path to the nearest ancestor directory holding a
-   `pom.xml`, skipping directories strictly beneath a `src/` tree (a POM there
-   is maven-invoker or archetype test data, never a reactor member). If the
-   walk skipped a POM-bearing directory and would collapse to the ROOT
-   project, fail closed to reactor-wide instead: the nested POM may be a real
-   module (a reactor can aggregate `<module>src/core</module>`), and `-pl .`
-   compiles only the root.
+   `pom.xml`, skipping directories strictly beneath a `src/` tree: a POM
+   there is OFTEN maven-invoker or archetype test data, but a reactor can
+   also aggregate a real module under a bare `src/` path
+   (`<module>src/core</module>`). `src/test/` and `src/it/` are the
+   principled fixture shapes. Fail closed to reactor-wide when the walk
+   skipped a src-nested POM that is not one of those fixture shapes, or when
+   it would collapse to the ROOT project: the skipped POM may be a real
+   module, `-pl .` compiles only the root, and `-pl <target> -am` adds only
+   UPSTREAM projects, so a mis-skipped collapse leaves the changed module
+   untested under a green verdict.
 3. Use repository-relative project paths as the `-pl` selectors, and fail
    closed to the full reactor when a directory name cannot be expressed in one
    (`,` and `:` change what a selector means to Maven; `%` expands in cmd.exe;

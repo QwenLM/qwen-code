@@ -1064,6 +1064,36 @@ describe('runBuildTest', () => {
     ).toContain(colored);
   });
 
+  it('rescues Surefire stdout summaries from a trimmed middle', () => {
+    // The adapter's exit-0 stdout cross-check is the ONE defense for
+    // relocated-`<reportsDirectory>` runs, and it reads these summaries
+    // from the trimmed output: a large reactor's trailing Reactor Summary
+    // pushes them into the omitted middle exactly like the skip marker.
+    for (const framing of ['[INFO]', '[ERROR]']) {
+      const line = `${framing} Tests run: 5, Failures: 2, Errors: 0, Skipped: 0`;
+      const trimmed = trimOutput(
+        'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
+      );
+      expect(trimmed).toContain(line);
+    }
+    expect(
+      trimOutput(
+        'head\n' +
+          'x'.repeat(3000) +
+          '\n[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\n' +
+          'y'.repeat(9000),
+      ),
+    ).toContain('Surefire stdout summaries');
+    // The colored form too — the rescue strips SGR before the predicate.
+    const colored =
+      '\x1b[1;31m[ERROR]\x1b[m Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
+    expect(
+      trimOutput(
+        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
+      ),
+    ).toContain(colored);
+  });
+
   it('caps the rescue so hostile prose cannot void the trim', () => {
     // 40k lines matching the summary shape made the trim a no-op (1.6MB in,
     // 1.6MB out) — the rescue saves a handful of lines, never the middle.

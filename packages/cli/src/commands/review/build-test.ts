@@ -48,6 +48,7 @@ import {
   isDiskFailureLine,
   isGoalFailureLine,
   isSourceFailureLine,
+  isSurefireSummaryLine,
   isTestsSkippedLine,
   mavenToolchainAdapter,
 } from './lib/maven-toolchain.js';
@@ -255,12 +256,19 @@ export function trimOutput(s: string): string {
         // this trimmed output; a large reactor's trailing Reactor Summary
         // pushes every `Tests are skipped.` line into the omitted middle,
         // and losing it certifies a run that tested zero.
-        isTestsSkippedLine(l.replace(ANSI_SGR_RE, '')),
+        isTestsSkippedLine(l.replace(ANSI_SGR_RE, '')) ||
+        // The adapter's exit-0 stdout cross-check reads Surefire's framed
+        // `Tests run:` summaries from this trimmed output — the ONE defense
+        // for relocated-`<reportsDirectory>` runs. A large reactor's
+        // trailing Reactor Summary pushes them into the omitted middle
+        // exactly like the skip marker above, and losing them certifies a
+        // failing run green.
+        isSurefireSummaryLine(l.replace(ANSI_SGR_RE, '')),
     )
     .slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }

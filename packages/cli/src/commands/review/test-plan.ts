@@ -47,7 +47,7 @@
 
 import type { CommandModule } from 'yargs';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, normalize, resolve } from 'node:path';
+import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { git } from './lib/git.js';
@@ -58,6 +58,7 @@ import {
   readWorkspacePackages,
 } from './lib/workspaces.js';
 import type { BuildTestReport, CommandResult } from './build-test.js';
+import { isSourceFailureLine } from './lib/maven-toolchain.js';
 import type { FileMetric } from './lib/report.js';
 
 /** What kind of assertion a claim is, which decides how it can be ruled. */
@@ -199,10 +200,12 @@ export function extractTestPlanSection(
 // `../` / `..\` hops (`../../mvnw` is a normal nested-module invocation two
 // levels deep) — are command claims exactly like the bare runner; without
 // the deeper hops such claims are silently never extracted and never ruled.
+// They are modeled for the WHOLE runner vocabulary, not `mvnw` alone:
+// `./mvnd test` is a command claim exactly like `./mvnw test`.
 const MAVEN_RUNNER_SOURCE =
   'mvn(?:\\.cmd)?|mvnd|mvnDebug|mvnw(?:\\.cmd)?' +
-  '|(?:\\.\\.[/\\\\])*\\.[/\\\\]mvnw(?:\\.cmd)?' +
-  '|(?:\\.\\.[/\\\\])+mvnw(?:\\.cmd)?';
+  '|(?:\\.\\.[/\\\\])*\\.[/\\\\](?:mvnw(?:\\.cmd)?|mvnd|mvnDebug)' +
+  '|(?:\\.\\.[/\\\\])+(?:mvnw(?:\\.cmd)?|mvnd|mvnDebug)';
 
 /** Runners whose presence makes a backticked span a command, not prose. */
 const RUNNER_RE = new RegExp(
@@ -687,6 +690,59 @@ const MAVEN_VALUE_FLAGS = new Set([
 ]);
 
 /**
+ * Long options whose single-dash spelling Maven's commons-cli ALSO accepts
+ * (`mvn -projects core` — verified on real Maven 3.8.7). They are
+ * normalized to their `--` spellings before parsing, or they bypass every
+ * scope/value check modeled on the `--` forms. Exact names only: rewriting
+ * arbitrary multi-char `-x` tokens would mangle the separator-less attached
+ * short forms (`-rfcore`), which have their own checks.
+ */
+const MAVEN_SINGLE_DASH_LONGS = new Set([
+  'projects',
+  'also-make',
+  'also-make-dependents',
+  'activate-profiles',
+  'define',
+  'resume-from',
+  'file',
+  'settings',
+  'global-settings',
+  'log-file',
+  'threads',
+  'builder',
+  'toolchains',
+  'global-toolchains',
+  'non-recursive',
+  'offline',
+  'update-snapshots',
+  'fail-never',
+  'fail-fast',
+  'fail-at-end',
+]);
+
+function normalizeMavenSingleDashLongs(command: string): string {
+  return command
+    .split(/\s+/)
+    .map((token) => {
+      // One layer of surrounding quotes hides the flag from the head check
+      // exactly like it hides it from the scope guards below.
+      const inner = unquoteToken(token);
+      const eq = inner.indexOf('=');
+      const head = eq === -1 ? inner : inner.slice(0, eq);
+      if (
+        head.length > 2 &&
+        head.startsWith('-') &&
+        !head.startsWith('--') &&
+        MAVEN_SINGLE_DASH_LONGS.has(head.slice(1))
+      ) {
+        return `-${inner}`;
+      }
+      return token;
+    })
+    .join(' ');
+}
+
+/**
  * The tokens of a Maven command line that are not consumed as flag values —
  * quote-aware like mavenPlModules, so a quoted selector is one value.
  */
@@ -896,7 +952,15 @@ function ruleCommand(
 ): TestPlanClaim {
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
-  const claimed = text.trim();
+  const rawClaimed = text.trim();
+  // Maven's commons-cli accepts single-dash spellings of its long options;
+  // normalize them to the `--` forms so they cannot bypass the grammar
+  // below. Applied to Maven claims only — the comparison against recorded
+  // commands is unaffected, because the adapter never renders those
+  // spellings.
+  const claimed = MAVEN_RUNNER_RE.test(rawClaimed)
+    ? normalizeMavenSingleDashLongs(rawClaimed)
+    : rawClaimed;
   // A workspace-scoped run (`npm run build --workspace=...`) still settles
   // the plan's bare command. Maven scopes before the lifecycle
   // (`./mvnw -pl core -am test`), so compare lifecycle phases there — but the
@@ -964,6 +1028,14 @@ function ruleCommand(
     token.startsWith('-T') ||
     token === '--threads' ||
     token.startsWith('--threads=') ||
+    // Offline mode changes what resolution the run performs (an offline
+    // build can fail where an online one succeeds), and `-U` forces
+    // snapshot re-resolution the review never did: a claim carrying one
+    // cannot settle on a run that never used it.
+    token === '-o' ||
+    token === '--offline' ||
+    token === '-U' ||
+    token === '--update-snapshots' ||
     // commons-cli also accepts separator-less ATTACHED short forms
     // (`-fother/pom.xml`, `-rf:core`, `-ssettings.xml`, `-plcore`); the
     // exact-token and `=`-attached matches alone let them bypass the
@@ -1066,7 +1138,10 @@ function ruleCommand(
   // for ruling purposes: the Maven adapter marks both ok:false, so the
   // claim must not read as reproduced. A run whose evidence was capped is
   // ok:false for the opposite reason — it certified NOTHING — so it counts
-  // as failed here too, never as reproduced.
+  // as failed here too, never as reproduced: the capped cascade arm rules
+  // it unchecked or contradicted (never reproduces), and the `-am`
+  // exclusion reads it as failing so an upstream-only failure still
+  // cannot contradict a narrower claim.
   const ranFailed = (c: CommandResult): boolean =>
     c.exitCode !== 0 ||
     freshTestFailures(c) ||
@@ -1086,6 +1161,25 @@ function ruleCommand(
     if (claimPlModules === null) return false;
     const output = c.output ?? '';
     const lines = output.split('\n');
+    // Compile/goal failures inside a claimed module write no Surefire
+    // reports, so the test-phase markers below cannot attribute them; but a
+    // compiler error line names the file it failed on, worktree-absolute
+    // (`[ERROR] /wt/core/src/…/Foo.java:[10,5] …`). One beneath a claimed
+    // module dir is a failure the claim's own command would share.
+    const worktreePosix = worktree.split(sep).join('/');
+    if (
+      lines.some((line) => {
+        if (!isSourceFailureLine(line)) return false;
+        const linePosix = line.replace(/\\/g, '/');
+        return claimPlModules.some((module) =>
+          module === '.'
+            ? linePosix.includes(`${worktreePosix}/src/`)
+            : linePosix.includes(`${worktreePosix}/${module}/`),
+        );
+      })
+    ) {
+      return true;
+    }
     return claimPlModules.some((module) => {
       const prefix = module === '.' ? '' : `${module}/`;
       if (output.includes(`[maven-test-failure] ${prefix}target/`)) {
@@ -1158,11 +1252,15 @@ function ruleCommand(
     // falsifies an `-am` claim too, so that direction stays settled.) The
     // exclusion yields when the run's own markers attribute a failure to a
     // module INSIDE the claimed set: that failure is in-scope evidence.
+    // Runs whose evidence was capped join the exclusion for the same
+    // reason: the capped arm treats their non-zero exit as definitive,
+    // which would contradict a differently scoped claim off failures in
+    // modules it never tests.
     return !(
       settledBySameScope(c) &&
       c.maven?.alsoMake === true &&
       !mavenHasAlsoMake(claimed) &&
-      finished(c) &&
+      (finished(c) || c.evidenceCapped === true) &&
       ranFailed(c) &&
       !failureInsideClaim(c)
     );
@@ -1321,6 +1419,30 @@ function ruleCommand(
             `${runForm(capped).howItRan}, and it failed — part of its fresh ` +
             'report evidence was never read (cap, parse rejection, or a truncated ' +
             'sweep), but the non-zero exit is definitive',
+        };
+      }
+      // Cap-INDEPENDENT positive failure evidence is definitive the same
+      // way: markers from reports the sweep DID parse (or failures a
+      // fail-never setting swallowed) prove the run failed regardless of
+      // what the unread evidence holds — the finished path's exit-0 arm
+      // rules the identical evidence contradicted, and the verdict must
+      // not flip just because the cap also fired.
+      if (
+        capped.exitCode === 0 &&
+        (freshTestFailures(capped) || capped.swallowedFailure === true)
+      ) {
+        return {
+          kind: 'command',
+          text,
+          verdict: 'contradicted',
+          observed: freshTestFailures(capped)
+            ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
+            : 'exit 0, but the output records failures the exit code did not fail on',
+          note:
+            `${runForm(capped).howItRan}, and the failure evidence it DID ` +
+            'record is definitive — part of its fresh report evidence was never ' +
+            'read (cap, parse rejection, or a truncated sweep), but that ' +
+            'withholds certification of a pass, it does not excuse a recorded failure',
         };
       }
       return {

@@ -126,6 +126,19 @@ const MAX_DIR_ENTRIES = 10_000;
 const MAX_FRESH_REPORTS = 1_000;
 
 /**
+ * Cap the sweep's PATH accumulation itself: every other cap bounds ONE
+ * dimension (scanned dirs, entries per dir, parsed reports, report bytes),
+ * but nothing bounded their product — 20k scanned dirs x both report dirs x
+ * 10k entries each accumulates hundreds of millions of paths, and
+ * snapshotReports + freshTestSummaries statSync and retain every one before
+ * the MAX_FRESH_REPORTS slice ever applies. A PR controls how many
+ * directories and report files exist, so the product is this harness's own
+ * denial-of-service surface. Past the cap the sweep stops collecting and
+ * reports truncation, failing closed like the other caps.
+ */
+const MAX_REPORT_PATHS = 20_000;
+
+/**
  * Cap the failing cases one report accumulates, while building it: the
  * display caps in appendTestSummaries apply after every report was
  * materialized, and one report can carry tens of thousands of failing
@@ -393,7 +406,8 @@ export function reportPaths(
   const queue: string[] = [root];
   let scanned = 0;
   let truncated = false;
-  while (queue.length > 0 && scanned < maxScannedDirs) {
+  let pathsCapped = false;
+  while (queue.length > 0 && scanned < maxScannedDirs && !pathsCapped) {
     const dir = queue.pop() as string;
     scanned += 1;
     const listing = readDirBounded(dir);
@@ -428,7 +442,17 @@ export function reportPaths(
         // fresh evidence.
         try {
           if (!lstatSync(reports).isDirectory()) continue;
-        } catch {
+        } catch (error) {
+          // Absence (ENOENT/ENOTDIR) is 'no reports dir here'; any OTHER
+          // error — EACCES on an unreadable `target`, chmod 000 within the
+          // threat model this file grants — means the sweep did not see
+          // everything and must fail closed like the sibling caps.
+          if (
+            (error as NodeJS.ErrnoException).code !== 'ENOENT' &&
+            (error as NodeJS.ErrnoException).code !== 'ENOTDIR'
+          ) {
+            truncated = true;
+          }
           continue;
         }
         const files = readDirBounded(reports);
@@ -438,13 +462,20 @@ export function reportPaths(
         }
         if (files.truncated) truncated = true;
         for (const file of files.entries) {
+          if (paths.length >= MAX_REPORT_PATHS) {
+            pathsCapped = true;
+            break;
+          }
           if (file.isFile() && file.name.endsWith('.xml')) {
             paths.push(join(reports, file.name));
           }
         }
+        if (pathsCapped) break;
       }
+      if (pathsCapped) break;
     }
   }
+  if (pathsCapped) truncated = true;
   if (queue.length > 0) truncated = true;
   return { paths, truncated };
 }
@@ -611,6 +642,18 @@ function stripOpaqueSections(xml: string): string | null {
   let i = 0;
   let chunkStart = 0;
   const openElements: string[] = [];
+  // Lowercased-name counts alongside the stack: the closeTag match and the
+  // comment-swallow probe both ask membership, and scanning the stack per
+  // question went quadratic on PR-controlled bytes — k never-closed openers
+  // plus k unmatched closers is k full scans. Membership is O(1) here; the
+  // pop loop below runs only when a match EXISTS, so each element is popped
+  // at most once and the whole pass stays linear.
+  const openCounts = new Map<string, number>();
+  const pushOpen = (name: string): void => {
+    openElements.push(name);
+    const lower = name.toLowerCase();
+    openCounts.set(lower, (openCounts.get(lower) ?? 0) + 1);
+  };
   // The tag currently being scanned (`-1` = content position), its name, and
   // whether it is a closing tag.
   let tagStart = -1;
@@ -619,14 +662,21 @@ function stripOpaqueSections(xml: string): string | null {
   let quote: '"' | "'" | null = null;
   const closeTag = (selfClosing: boolean): void => {
     if (tagClosing) {
-      for (let stack = openElements.length - 1; stack >= 0; stack -= 1) {
-        if (openElements[stack].toLowerCase() === tagName.toLowerCase()) {
-          openElements.length = stack;
-          break;
+      const lower = tagName.toLowerCase();
+      if ((openCounts.get(lower) ?? 0) > 0) {
+        for (let stack = openElements.length - 1; stack >= 0; stack -= 1) {
+          const name = openElements[stack].toLowerCase();
+          const count = (openCounts.get(name) ?? 1) - 1;
+          if (count === 0) openCounts.delete(name);
+          else openCounts.set(name, count);
+          if (name === lower) {
+            openElements.length = stack;
+            break;
+          }
         }
       }
     } else if (!selfClosing && tagName !== '') {
-      openElements.push(tagName);
+      pushOpen(tagName);
     }
     tagStart = -1;
     tagName = '';
@@ -647,7 +697,7 @@ function stripOpaqueSections(xml: string): string | null {
           let match: RegExpExecArray | null;
           while ((match = interiorClose.exec(interior)) !== null) {
             const name = match[1].toLowerCase();
-            if (openElements.some((open) => open.toLowerCase() === name)) {
+            if ((openCounts.get(name) ?? 0) > 0) {
               return null;
             }
           }
@@ -950,11 +1000,22 @@ function appendTestSummaries(
   const reportLines = [...failingByProject.entries()].map(
     ([project, group]) => {
       const failures = group.reduce((sum, item) => sum + failedCount(item), 0);
-      const skipped = group.reduce((sum, item) => sum + item.skipped, 0);
-      const tests = group.reduce((sum, item) => sum + item.tests, 0);
+      // Per-report CLAMPED passed totals, for the same count-preservation
+      // reason as the clean rollup: test-plan clamps per parsed LINE, and
+      // Surefire does not guarantee tests >= failures + skipped within one
+      // report (class-level @Disabled, rerunFailingTestsCount reruns), so
+      // raw pre-aggregated totals would let one anomalous report cancel its
+      // batchmates' passed counts. Emitting tests = passed + failures with
+      // skipped zeroed makes the line clamp parse back to `passed` while
+      // `failures` stays non-zero for failureInsideClaim attribution.
+      const passed = group.reduce(
+        (sum, item) =>
+          sum + Math.max(0, item.tests - failedCount(item) - item.skipped),
+        0,
+      );
       return (
         `[maven-test-report] ${project} (${group.length} failing report(s)): ` +
-        `tests=${tests}, failures=${failures}, errors=0, skipped=${skipped}`
+        `tests=${passed + failures}, failures=${failures}, errors=0, skipped=0`
       );
     },
   );
@@ -1230,12 +1291,22 @@ function hasMavenFramedLine(output: string): boolean {
 /**
  * Surefire prints a framed `Tests run: N, Failures: M, Errors: K` summary
  * per module (and again under `Results:`) even under `testFailureIgnore`,
- * when the exit code is 0. The report sweep can miss reports written to a
- * non-default `<reportsDirectory>`, so the stdout summary is the cross-check
- * that keeps a relocated failing report from certifying green.
+ * when the exit code is 0. A FAILING module is `[ERROR]`-framed (verified on
+ * Maven 3.8.7 / Surefire 3.2.5, both the per-test-set and the Results line),
+ * a green one `[INFO]` — anchoring on `[INFO]` alone made the cross-check
+ * dead against real failing output. The report sweep can miss reports
+ * written to a non-default `<reportsDirectory>`, so the stdout summary is
+ * the cross-check that keeps a relocated failing report from certifying
+ * green. The line-level form is exported so `build-test`'s output trim
+ * rescues these from the omitted middle — the classification and the
+ * cross-check both run on that trimmed output.
  */
 const SUREFIRE_SUMMARY_LINE_RE =
-  /^\[INFO\] Tests run: \d+, Failures: (\d+), Errors: (\d+)/;
+  /^\[(?:INFO|ERROR|FATAL)\] Tests run: \d+, Failures: (\d+), Errors: (\d+)/;
+
+export function isSurefireSummaryLine(line: string): boolean {
+  return SUREFIRE_SUMMARY_LINE_RE.test(line);
+}
 
 function hasStdoutTestFailure(output: string): boolean {
   return output.split('\n').some((line) => {
@@ -1412,7 +1483,16 @@ export function mavenExecutable(
  * into the very command this adapter runs, so a settings or local-repository
  * location referenced there is a dependency input the PR can change.
  */
-function mavenConfigDependencyInputs(root: string): string[] {
+/**
+ * The argument tokens of `.mvn/maven.config`. Maven reads it line-by-line —
+ * each non-empty, non-`#` line is ONE argument (MavenCli:
+ * `Files.lines(...).filter(arg -> !arg.isEmpty() && !arg.startsWith("#"))`),
+ * no whitespace splitting: an argument can carry a space (`ci/my
+ * settings.xml`), and a `#` line is a comment even when its text names
+ * flags. Mirror that reader; whitespace tokenizing recorded a truncated path
+ * for spaced arguments and tokenized comments into inputs.
+ */
+function mavenConfigTokens(root: string): string[] {
   const configPath = join(root, '.mvn', 'maven.config');
   let config: string;
   try {
@@ -1427,17 +1507,14 @@ function mavenConfigDependencyInputs(root: string): string[] {
   } catch {
     return [];
   }
-  const inputs: string[] = [];
-  // Maven reads maven.config line-by-line — each non-empty, non-`#` line is
-  // ONE argument (MavenCli: `Files.lines(...).filter(arg -> !arg.isEmpty() &&
-  // !arg.startsWith("#"))`), no whitespace splitting: an argument can carry a
-  // space (`ci/my settings.xml`), and a `#` line is a comment even when its
-  // text names flags. Mirror that reader; whitespace tokenizing recorded a
-  // truncated path for spaced arguments and tokenized comments into inputs.
-  const tokens = config
+  return config
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
+}
+
+function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
+  const inputs: string[] = [];
   const pairedFlags = new Set(['-s', '--settings', '-gs', '--global-settings']);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -1582,7 +1659,16 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // repository locations `.mvn/maven.config` references, or the executed
   // wrapper (which can redirect the local repository or settings), the
   // resolution failure may be the diff's own doing.
-  const settingsInputs = mavenConfigDependencyInputs(args.root);
+  const configTokens = mavenConfigTokens(args.root);
+  const settingsInputs = mavenConfigDependencyInputs(args.root, configTokens);
+  // A repo-shipped, PR-writable `.mvn/maven.config` can carry `-q`/`--quiet`,
+  // which strips EVERY `[INFO]`/framed line the neverRan check below keys on:
+  // a quiet run that skipped its tests (or a module with none) exits 0 with
+  // zero bytes of output, indistinguishable there from a wrapper that never
+  // started. Detect it so the note names the real cause.
+  const quietConfig = configTokens.some(
+    (token) => token === '-q' || token === '--quiet',
+  );
   const dependencyInputsChanged = args.changedFiles.some((file) => {
     const path = normalizedChangedPath(args.root, file);
     if (path === null) return false;
@@ -1816,10 +1902,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // relocated `<reportsDirectory>` the sweep cannot see, and are printed
   // even under `testFailureIgnore`: when they record failures the zero exit
   // did not fail on, the run is not clean even with zero reports on disk.
-  const stdoutTestFailures =
-    result.exitCode === 0 &&
-    !result.timedOut &&
-    hasStdoutTestFailure(result.output);
+  // Deliberately NOT gated on the exit code: a failing module is
+  // `[ERROR]`-framed at a non-zero exit too, and the acquisition carve-out
+  // below must not launder those executed test failures into infrastructure
+  // when the sweep misses the failing XML — stdout evidence of executed
+  // failing tests is source-side.
+  const stdoutTestFailures = hasStdoutTestFailure(result.output);
   // A NON-EMPTY wrapper can still exit 0 without launching Maven (a stub
   // `#!/bin/sh` edit keeps the exec bit): zero fresh reports AND zero
   // Maven-framed output means the build never started — "never ran", not
@@ -1861,6 +1949,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !ok &&
     !freshFailures &&
     !isSourceFailure(result.output) &&
+    // Executed failing tests record themselves in the stdout summaries even
+    // when the sweep misses their XML: dependency-flavored assertion text
+    // (`Connection refused`, `Unknown host`) otherwise matches the
+    // dependency matcher and launders a genuine test failure into an
+    // infrastructure result.
+    !stdoutTestFailures &&
     result.exitCode !== null &&
     ((isLaunchFailure(result.output) &&
       !executedWrapperChanged &&
@@ -1916,6 +2010,22 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       `Surefire/Failsafe reports written before it record ${totals.failures} ` +
       `failure(s) and ${totals.errors} error(s): treat those as test failures, ` +
       'not as a pass or as purely environmental.';
+  } else if (
+    (result.timedOut || result.exitCode === null) &&
+    stdoutTestFailures
+  ) {
+    // The sibling arm's principle, applied to stdout evidence: the
+    // interruption does not retroactively excuse the failures Surefire's
+    // framed summaries already recorded — name them instead of asserting a
+    // purely informational result.
+    const cause = result.timedOut
+      ? `ran out of time (${deadlineSecs(result)}s)`
+      : 'ended without an exit code (a spawn failure or signal outside the deadline)';
+    report.note =
+      `\`${result.command}\` ${cause} — that part is infrastructure. But its ` +
+      'captured output records Surefire test failures (`Tests run: …` summaries ' +
+      'with non-zero Failures/Errors): treat those as test failures, not as ' +
+      'purely environmental.';
   } else if (result.timedOut) {
     report.note =
       `\`${result.command}\` ran out of time (${deadlineSecs(result)}s). This is an infrastructure result, ` +
@@ -1991,13 +2101,18 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `\`${result.command}\` exited 0 without starting Maven — no fresh reports and no ` +
       'Maven output at all, so the build never ran and nothing was verified (an empty or ' +
-      'stub wrapper passes the launch gates and exits 0). Treat this as an unverified run, ' +
-      'not a pass.';
+      'stub wrapper passes the launch gates and exits 0' +
+      (quietConfig
+        ? ', or a `-q`/`--quiet` setting in `.mvn/maven.config` suppressed every line ' +
+          'Maven prints, which also silences a run that skipped its tests'
+        : '') +
+      '). Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0) {
     report.note =
       `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
-      'a fail-never setting (e.g. `-fn`/`--fail-never` in `.mvn/maven.config`) is swallowing ' +
-      'them. Treat this as a failed run, not a pass.';
+      'a fail-never or testFailureIgnore-style setting (e.g. `-fn`/`--fail-never` in ' +
+      '`.mvn/maven.config`, or surefire `testFailureIgnore`) is swallowing them. ' +
+      'Treat this as a failed run, not a pass.';
   } else if (!ok) {
     report.note =
       `\`${result.command}\` failed. Correlate compiler or test errors with the changed files; ` +
@@ -2047,11 +2162,13 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         : ` Note: the diff changes the Maven wrapper, but this run executed \`${executable}\`, ` +
           'so the wrapper change itself was not exercised.';
   }
-  if (existsSync(join(args.root, 'package.json'))) {
+  if (isRegularFile(join(args.root, 'package.json'))) {
     // A mixed root: npm's applies() refused the root package.json (an
     // unmodeled workspace glob, a zero-package glob, or no build/test
     // script), so Maven was selected ALONE — the npm half is unscopable
-    // here, and a green Maven run must not certify it.
+    // here, and a green Maven run must not certify it. The isFile() gate
+    // matters: a DIRECTORY named `package.json` fails npm's applies() too
+    // (EISDIR swallowed to no manifests), so the caveat would be false.
     report.note +=
       ' Mixed root: a root package.json exists that this run did not scope — ' +
       'files outside the Maven reactor (npm/frontend sources) were NOT verified.';
@@ -2059,7 +2176,18 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   return report;
 }
 
+/** Existence AND regular file: a DIRECTORY carrying the name passes
+ *  existsSync but is not a manifest — the same gate mavenExecutable and
+ *  mavenConfigDependencyInputs apply. */
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 export const mavenToolchainAdapter: ReviewToolchainAdapter = {
-  applies: (root) => existsSync(join(root, 'pom.xml')),
+  applies: (root) => isRegularFile(join(root, 'pom.xml')),
   run: runMavenToolchain,
 };

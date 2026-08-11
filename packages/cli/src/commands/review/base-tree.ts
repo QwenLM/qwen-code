@@ -111,6 +111,15 @@ function git(cwd: string, ...args: string[]): void {
 }
 
 /**
+ * Every sibling capture in these commands raises Node's 1 MiB spawnSync
+ * default (`gh.ts`, `git.ts`, `build-test.ts`, `test-delta.ts`): on
+ * overflow the child returns `error.code: 'ENOBUFS'` with `status: null`,
+ * which the probes below would swallow into the same answer as 'absent' —
+ * silently settling a base the probes never answered.
+ */
+const GIT_PROBE_MAX_BUFFER = 64 * 1024 * 1024;
+
+/**
  * Accepted symlink carve-out for all three git probes below: they are
  * symlink-blind where the disk-side twins follow links. `gitBlob` reads a
  * symlinked manifest as the link-target PATH text (JSON.parse fails, the
@@ -131,6 +140,7 @@ function gitHasPath(cwd: string, sha: string, path: string): boolean {
   const r = spawnSync('git', ['cat-file', '-t', `${sha}:${path}`], {
     cwd,
     encoding: 'utf8',
+    maxBuffer: GIT_PROBE_MAX_BUFFER,
   });
   return !r.error && r.status === 0 && (r.stdout ?? '').trim() === 'blob';
 }
@@ -139,6 +149,7 @@ function gitBlob(cwd: string, sha: string, path: string): string | null {
   const r = spawnSync('git', ['cat-file', 'blob', `${sha}:${path}`], {
     cwd,
     encoding: 'utf8',
+    maxBuffer: GIT_PROBE_MAX_BUFFER,
   });
   if (r.error || r.status !== 0) return null;
   return r.stdout ?? '';
@@ -238,6 +249,7 @@ function gitTreeChildDirs(cwd: string, sha: string, dir: string): string[] {
   const r = spawnSync('git', ['ls-tree', '-z', `${sha}:${dir}`], {
     cwd,
     encoding: 'utf8',
+    maxBuffer: GIT_PROBE_MAX_BUFFER,
   });
   if (r.error || r.status !== 0) return [];
   const dirs: string[] = [];
@@ -264,11 +276,29 @@ function gitTreeChildDirs(cwd: string, sha: string, dir: string): string[] {
  * disable A/B attribution for a repo that merely ships one.
  */
 function gitTreeHasNestedPom(cwd: string, sha: string): boolean {
-  // Only mode 040000 entries are probed: file, symlink, and gitlink entries
-  // cannot hold a child pom.xml.
-  return gitTreeChildDirs(cwd, sha, '').some((dir) =>
-    gitHasPath(cwd, sha, `${dir}/pom.xml`),
-  );
+  const dirs = gitTreeChildDirs(cwd, sha, '');
+  if (dirs.length === 0) return false;
+  // The batch probe below is line-based: a name carrying a line terminator
+  // (PR-choosable) would split into two wrong refs, so those names keep
+  // the per-dir argv probe, which hands the whole path as ONE argument.
+  if (!dirs.every((dir) => !/[\r\n]/.test(dir))) {
+    return dirs.some((dir) => gitHasPath(cwd, sha, `${dir}/pom.xml`));
+  }
+  // ONE batched `cat-file` for every root dir, not one spawn each: step 4's
+  // verifier shards all offer this command, the gate's answer is a pure
+  // function of baseSha's tree, and the per-dir spawns multiplied into
+  // N shards x O(D) synchronous processes on the review's critical path.
+  // `--batch-check` answers a missing path with `<ref> missing` on its own
+  // line and still exits 0; a DIRECTORY named pom.xml answers `tree` and is
+  // not a nested pom, exactly as the per-dir blob gate before it.
+  const r = spawnSync('git', ['cat-file', '--batch-check'], {
+    cwd,
+    encoding: 'utf8',
+    input: dirs.map((dir) => `${sha}:${dir}/pom.xml`).join('\n') + '\n',
+    maxBuffer: GIT_PROBE_MAX_BUFFER,
+  });
+  if (r.error || r.status !== 0) return false;
+  return (r.stdout ?? '').split('\n').some((line) => / blob \d+$/.test(line));
 }
 
 export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {

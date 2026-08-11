@@ -2725,23 +2725,32 @@ describe('maven toolchain adapter', () => {
   it('cross-checks surefire stdout summaries against a relocated report directory', () => {
     // Reports written to a non-default `<reportsDirectory>` sit outside the
     // sweep; the framed `Tests run:` summary Surefire prints even under
-    // testFailureIgnore is the cross-check that keeps the run green no more.
+    // testFailureIgnore is the cross-check that keeps the run green no
+    // more. A FAILING summary is `[ERROR]`-framed on real Maven (verified
+    // 3.8.7 / surefire 3.2.5) — the `[INFO]` twin stays covered because
+    // the regex admits both.
     writeReactor();
-    const report = runAdapter(['core/src/Main.java'], {
-      exec: (command) =>
-        result(command, {
-          exitCode: 0,
-          output:
-            '[INFO] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0\n' +
-            '[INFO] BUILD SUCCESS',
-        }),
-    });
+    for (const framing of ['[ERROR]', '[INFO]']) {
+      const report = runAdapter(['core/src/Main.java'], {
+        exec: (command) =>
+          result(command, {
+            exitCode: 0,
+            output:
+              `${framing} Tests run: 5, Failures: 2, Errors: 0, Skipped: 0\n` +
+              '[INFO] BUILD SUCCESS',
+          }),
+      });
 
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.swallowedFailure).toBe(true);
+      expect(report.ok).toBe(false);
+      expect(report.test[0]?.swallowedFailure).toBe(true);
+      expect(report.test[0]?.infrastructure).toBeUndefined();
+      expect(report.note).toContain('fail-never or testFailureIgnore');
+    }
   });
 
-  it.skipIf(process.platform === 'win32')(
+  // chmod is the only lever this case has: a root user reads through it,
+  // so the branch under test is unreachable there — the repo convention.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'fails closed when a reports directory is unreadable',
     () => {
       // An unreadable directory is the same epistemic state as the caps: the
@@ -3189,5 +3198,295 @@ describe('maven toolchain adapter', () => {
 
     expect(reportPaths(root, 5).truncated).toBe(true);
     expect(reportPaths(root, 100).truncated).toBe(false);
+  });
+
+  it('caps the accumulated report paths when the per-dimension product blows up', () => {
+    // Every cap bounded ONE dimension; nothing bounded their product — two
+    // modules x both report dirs x 5,100 XMLs respects the per-dir entry
+    // cap and the scanned-dir cap yet accumulates past the path cap. The
+    // sweep must stop collecting instead of retaining and statSync-ing
+    // hundreds of thousands of paths.
+    writeReactor();
+    for (const module of ['core', 'extension']) {
+      for (const reportDir of ['surefire-reports', 'failsafe-reports']) {
+        const dir = join(root, module, 'target', reportDir);
+        mkdirSync(dir, { recursive: true });
+        for (let i = 0; i < 5_100; i++) {
+          writeFileSync(join(dir, `t${reportDir[0]}${i}.xml`), '');
+        }
+      }
+    }
+
+    const { paths, truncated } = reportPaths(root);
+
+    expect(truncated).toBe(true);
+    expect(paths.length).toBe(20_000);
+  }, 60_000);
+
+  it('matches unmatched closers against a deep open stack in linear time', () => {
+    // The closeTag membership scan went quadratic on PR-controlled bytes:
+    // k never-closed openers plus k unmatched closers is k full stack
+    // scans — measured seconds at 20k pairs through the real adapter
+    // (extrapolating to tens of minutes at the report cap), the same
+    // denial-of-service class the other linear pins in this suite. The
+    // trailing comment is load-bearing: without a CDATA/comment marker
+    // stripOpaqueSections returns before scanning at all.
+    writeReactor();
+    const startedAt = Date.now();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"/>' +
+            '<opener>'.repeat(50_000) +
+            '</closer>'.repeat(50_000) +
+            '<!-- trailing -->',
+        );
+        return result(command);
+      },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(report.ok).toBe(true);
+  }, 20_000);
+
+  it('scans comment-interior close tokens against a deep stack in linear time', () => {
+    // The swallow check ran `.some(...)` over the whole open stack for
+    // EVERY close token inside a comment — the second quadratic site,
+    // reachable through a single `<!--` marker. The interior names match
+    // nothing open, so the report stays parseable and the scan must stay
+    // fast.
+    writeReactor();
+    const startedAt = Date.now();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"/>' +
+            '<opener>'.repeat(30_000) +
+            '<!--' +
+            '</closer>'.repeat(30_000) +
+            '-->' +
+            '<testcase classname="example.T" name="passes"/>',
+        );
+        return result(command);
+      },
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(report.ok).toBe(true);
+  }, 20_000);
+
+  it('prints per-report clamped totals on the failing rollup', () => {
+    // Surefire does not guarantee tests >= failures + skipped within one
+    // report, and test-plan clamps per parsed LINE: raw pre-aggregated
+    // totals would let one anomalous report cancel its batchmates' passed
+    // counts (report A below parses to -3 passed without the per-report
+    // clamp). The failing rollup must emit the same clamped shape the
+    // clean rollup does.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Anomalous.xml'),
+          '<testsuite tests="2" failures="2" errors="0" skipped="3"/>',
+        );
+        writeFileSync(
+          join(dir, 'TEST-Normal.xml'),
+          '<testsuite tests="10" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="example.T" name="fails"><failure/></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 1, output: '[ERROR] Tests failed' });
+      },
+    });
+
+    // Per-report truth: A passed max(0, 2-2-3)=0, B passed max(0, 10-1-0)=9
+    // — so tests = 9 passed + 3 failed with skipped zeroed, and the line
+    // clamp parses back to 9 instead of the old wash-down to 6.
+    expect(report.test[0]?.output).toContain(
+      '[maven-test-report] core (2 failing report(s)): ' +
+        'tests=12, failures=3, errors=0, skipped=0',
+    );
+  });
+
+  it('reads [ERROR]-framed stdout test failures as source-side, not infrastructure', () => {
+    // Real Maven frames a failing module's stdout summary `[ERROR]`, and a
+    // test throwing ConnectException prints dependency-flavored wording the
+    // dependency matcher claims. With the failing reports relocated out of
+    // the sweep, the stdout summary is the only evidence that the run
+    // executed failing tests — that is source-side, never an acquisition
+    // outage.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] ConnTest.connects:7 \u00bb Connect Connection refused\n' +
+            '[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n' +
+            '[INFO] BUILD FAILURE',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+    expect(report.test[0]?.swallowedFailure).toBeUndefined();
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('does not launder a swallowed stdout test failure into infrastructure', () => {
+    // The exit-0 twin of the ConnectException wash: a fail-never run whose
+    // stdout records executed failing tests beside dependency-flavored
+    // wording is a swallowed test failure, not an acquisition outage.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[ERROR] Could not transfer artifact org.example:lib:pom:1 from central: Connection timed out\n' +
+            '[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n' +
+            '[INFO] BUILD SUCCESS',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+  });
+
+  // chmod is the only lever this case has; the repo convention for it.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails closed when a target directory is unreadable',
+    () => {
+      // The lstat gate one level ABOVE the report dir: an unreadable
+      // `target` used to read as 'no reports dir here', certifying green a
+      // run whose fresh failing reports the sweep could not see. chmod 000
+      // is within the threat model this file grants.
+      writeReactor();
+      const target = join(root, 'core', 'target');
+      const report = runAdapter(['core/src/Main.java'], {
+        exec: (command) => {
+          const dir = join(target, 'surefire-reports');
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, 'TEST-Core.xml'),
+            '<testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="T" name="f"><failure/></testcase></testsuite>',
+          );
+          chmodSync(target, 0o000);
+          return result(command);
+        },
+      });
+
+      // Restore so the sandbox cleanup can remove the tree.
+      chmodSync(target, 0o755);
+      expect(report.ok).toBe(false);
+      expect(report.test[0]?.evidenceCapped).toBe(true);
+    },
+  );
+
+  it('names a quiet maven.config as the never-ran alternative cause', () => {
+    // `-q`/`--quiet` in the PR-writable config strips every framed line the
+    // neverRan check keys on: a quiet run that skipped its tests exits 0
+    // with empty output, indistinguishable there from a wrapper that never
+    // started — the note must name the real alternative.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-q\n-DskipTests\n');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.neverRan).toBe(true);
+    expect(report.note).toContain('`-q`/`--quiet`');
+  });
+
+  it('does not name the quiet setting when the config has none', () => {
+    // Control for the note above: the same empty-output shape without the
+    // flag points at the wrapper only.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.neverRan).toBe(true);
+    expect(report.note).toContain('empty or');
+    expect(report.note).not.toContain('--quiet');
+  });
+
+  it('names stdout-recorded failures in a timed-out run', () => {
+    // The deadline kill is infrastructure, but the captured framed `Tests
+    // run:` summaries are failures Surefire already recorded — the note
+    // must not assert a purely informational result over them.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: null,
+          timedOut: true,
+          output: '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('ran out of time');
+    expect(report.note).toContain('treat those as test failures');
+  });
+
+  it('omits the mixed-root caveat when package.json is a directory', () => {
+    // npm's applies() fails closed on a DIRECTORY named package.json
+    // (EISDIR swallowed to no manifests), so Maven runs alone with no npm
+    // half — the caveat would be false.
+    writeReactor();
+    mkdirSync(join(root, 'package.json'));
+
+    const report = runAdapter(['core/src/Main.java']);
+
+    expect(report.ok).toBe(true);
+    expect(report.note).not.toContain('Mixed root');
+  });
+
+  it('keeps the mixed-root caveat for a real root package.json', () => {
+    writeReactor();
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc' } }),
+    );
+
+    const report = runAdapter(['core/src/Main.java']);
+
+    expect(report.ok).toBe(true);
+    expect(report.note).toContain('Mixed root');
+  });
+
+  it('applies() requires a REGULAR pom.xml file', () => {
+    // A DIRECTORY named pom.xml passes existsSync but selects Maven over a
+    // shape `mvn` refuses to build — the same isFile() gate mavenExecutable
+    // and mavenConfigDependencyInputs apply. This is also what keeps a
+    // polyglot base selecting npm instead of falling unsupported.
+    const plain = join(sandbox, 'applies-plain');
+    mkdirSync(plain);
+    expect(mavenToolchainAdapter.applies(plain)).toBe(false);
+
+    writeFileSync(join(plain, 'pom.xml'), pom());
+    expect(mavenToolchainAdapter.applies(plain)).toBe(true);
+
+    const dirPom = join(sandbox, 'applies-dir');
+    mkdirSync(join(dirPom, 'pom.xml'), { recursive: true });
+    expect(mavenToolchainAdapter.applies(dirPom)).toBe(false);
   });
 });

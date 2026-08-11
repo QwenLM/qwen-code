@@ -24,9 +24,10 @@ import {
 import type { BuildTestReport, CommandResult } from './build-test.js';
 
 // A passthrough spy on the real spawn: the fractional-timeout pin below must
-// observe the OPTIONS handed to spawnSync — the ERR_OUT_OF_RANGE a reverted
-// coercion throws lands in the same report shape as a real run, so outcome-
-// level assertions cannot see it.
+// observe the OPTIONS handed to spawnSync. A reverted coercion throws
+// ERR_OUT_OF_RANGE synchronously and nothing on the call path catches it, so
+// the outcome-level test catches the revert as a hard failure — but a crash
+// only proves spawn REJECTED the value; this probe proves what it RECEIVED.
 const spawnSpy = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', async (importOriginal) => {
   const actual =
@@ -513,11 +514,13 @@ describe('runTestDelta', () => {
   });
 
   it('hands spawnSync an integral, positive timeout for a fractional budget', () => {
-    // The outcome-level probe above cannot see a reverted coercion — the
-    // ERR_OUT_OF_RANGE throw lands in the same report shape as a real run —
-    // so pin the spawn OPTIONS directly. The input is genuinely fractional
-    // (60.1234 * 1000 is not integral): 60.123 used to pass even with the
-    // coercion reverted, because its deadline is exact in JS.
+    // The outcome-level probe above catches a reverted coercion as a hard
+    // crash — the ERR_OUT_OF_RANGE throw propagates out of the whole call,
+    // so NO report of any shape is produced — but the crash only proves
+    // spawn rejected the value; pin the spawn OPTIONS directly to prove
+    // what it received. The input is genuinely fractional (60.1234 * 1000
+    // is not integral): 60.123 used to pass even with the coercion
+    // reverted, because its deadline is exact in JS.
     spawnSpy.mockClear();
     runTestDelta({
       report: writeReport([
