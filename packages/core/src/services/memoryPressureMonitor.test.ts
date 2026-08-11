@@ -21,6 +21,7 @@ import type { FileReadCache } from './fileReadCache.js';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
 import { MICROCOMPACT_CLEARED_MESSAGE } from './microcompaction/microcompact.js';
+import { buildSkillLlmContent } from '../tools/skill-utils.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { MemoryMetricType } from '../telemetry/metrics.js';
 
@@ -1463,7 +1464,12 @@ describe('MemoryPressureMonitor', () => {
               functionResponse: {
                 name: 'skill',
                 id: 'call_skill',
-                response: { output: 'skill body '.repeat(50) },
+                response: {
+                  output: buildSkillLlmContent(
+                    '/demo',
+                    'skill body '.repeat(50),
+                  ),
+                },
               },
             },
           ],

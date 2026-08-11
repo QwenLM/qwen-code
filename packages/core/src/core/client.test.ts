@@ -91,7 +91,10 @@ import {
   buildChangedSkillsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
-import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import {
+  collectAvailableSkillEntries,
+  buildSkillLlmContent,
+} from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -3070,7 +3073,12 @@ describe('Gemini Client (client.ts)', () => {
               functionResponse: {
                 id: 'mc-skill-0',
                 name: 'skill',
-                response: { output: 'skill body '.repeat(50) },
+                response: {
+                  output: buildSkillLlmContent(
+                    '/demo',
+                    'skill body '.repeat(50),
+                  ),
+                },
               },
             },
           ],
