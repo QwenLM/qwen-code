@@ -5800,6 +5800,11 @@ export function App({
   const [reasoningActionBusy, setReasoningActionBusy] = useState<
     Partial<Record<'thinking' | 'effort', boolean>>
   >({});
+  const reasoningActionTokenRef = useRef(0);
+  useLayoutEffect(() => {
+    reasoningActionTokenRef.current += 1;
+    setReasoningActionBusy({});
+  }, [logicalSessionKey]);
   // Serialize thinking/effort writes: both merge into the same
   // model.reasoningPreferences entry, so a concurrent pair computed from the
   // same pre-write snapshot would silently drop the earlier toggle. Memoized
@@ -9444,6 +9449,11 @@ export function App({
 
   const handleReasoningOptionSelect = useCallback(
     (configId: 'thinking' | 'effort', value: string) => {
+      if (sessionWriteBlocked) return;
+      const owner = connectionRef.current.sessionId
+        ? sessionOwnerGuard.capture()
+        : undefined;
+      const reasoningActionToken = ++reasoningActionTokenRef.current;
       setReasoningActionBusy((current) => ({
         ...current,
         [configId]: true,
@@ -9504,14 +9514,17 @@ export function App({
           })();
       void update
         .catch((error: unknown) => {
+          if (owner && !owner.isCurrent()) return;
           reportError(error, t('reasoning.updateFailed'));
         })
-        .finally(() =>
-          setReasoningActionBusy((current) => ({
-            ...current,
-            [configId]: false,
-          })),
-        );
+        .finally(() => {
+          if (reasoningActionTokenRef.current === reasoningActionToken) {
+            setReasoningActionBusy((current) => ({
+              ...current,
+              [configId]: false,
+            }));
+          }
+        });
     },
     [
       composerReasoningState?.effort,
@@ -9519,7 +9532,9 @@ export function App({
       reloadWorkspaceSettings,
       reportError,
       providersState.status?.modelConfigScope,
+      sessionOwnerGuard,
       sessionActions,
+      sessionWriteBlocked,
       setWorkspaceSetting,
       t,
     ],

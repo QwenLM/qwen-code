@@ -887,6 +887,7 @@ function ToolbarPopover({
         collisionPadding={8}
         collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
+        data-web-shell-reasoning-popover={submenu ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
         onOpenAutoFocus={(event) => {
           if (!submenu) return;

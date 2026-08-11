@@ -7,6 +7,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,6 +17,7 @@ import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
   useConnection,
+  useDaemonSessionOwnerGuard,
   useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptHistory,
@@ -241,6 +243,10 @@ export function ChatPane({
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const sessionWriteBlocked =
+    connection.sessionTransition?.phase === 'queued' ||
+    connection.sessionTransition?.phase === 'preparing';
   const workspace = useWorkspace();
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
@@ -811,6 +817,11 @@ export function ChatPane({
   const [reasoningBusy, setReasoningBusy] = useState<
     Partial<Record<'thinking' | 'effort', boolean>>
   >({});
+  const reasoningActionTokenRef = useRef(0);
+  useLayoutEffect(() => {
+    reasoningActionTokenRef.current += 1;
+    setReasoningBusy({});
+  }, [connection.sessionId, connection.workspaceCwd]);
   // Serialize thinking/effort writes: both merge into the same per-model
   // reasoning preference, so concurrent writes could drop each other.
   // Memoized to keep ChatEditor's memoized props referentially stable.
@@ -823,20 +834,26 @@ export function ChatPane({
   );
   const handleSelectReasoningOption = useCallback(
     (configId: 'thinking' | 'effort', value: string) => {
+      if (sessionWriteBlocked) return;
+      const owner = sessionOwnerGuard.capture();
+      const reasoningActionToken = ++reasoningActionTokenRef.current;
       setReasoningBusy((current) => ({ ...current, [configId]: true }));
       actions
         .setConfigOption(configId, value)
-        .catch((error: unknown) =>
-          reportError(error, t('reasoning.updateFailed')),
-        )
-        .finally(() =>
-          setReasoningBusy((current) => ({
-            ...current,
-            [configId]: false,
-          })),
-        );
+        .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
+          reportError(error, t('reasoning.updateFailed'));
+        })
+        .finally(() => {
+          if (reasoningActionTokenRef.current === reasoningActionToken) {
+            setReasoningBusy((current) => ({
+              ...current,
+              [configId]: false,
+            }));
+          }
+        });
     },
-    [actions, reportError, t],
+    [actions, reportError, sessionOwnerGuard, sessionWriteBlocked, t],
   );
 
   const headerLabel =

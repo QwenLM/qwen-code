@@ -1337,6 +1337,11 @@ describe('ChatEditor toolbar popovers', () => {
       '[data-web-shell-model-submenu-trigger]',
     );
     expect(submenuTrigger).not.toBeNull();
+    expect(
+      document
+        .querySelector('[data-web-shell-toolbar-popover]')
+        ?.hasAttribute('data-web-shell-reasoning-popover'),
+    ).toBe(true);
     expect(document.querySelector('input[type="search"]')).toBeNull();
 
     act(() => {

@@ -4311,6 +4311,9 @@ export class Config {
       ) {
         this.globalReasoningEffortPreference = effort;
       }
+    } else {
+      this.reasoningEffortPreference = undefined;
+      this.globalReasoningEffortPreference = undefined;
     }
     const applyEffort = (
       cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
@@ -4707,11 +4710,31 @@ export class Config {
     // we captured off the still-intact live contentGeneratorConfig above. This is
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
-    await this.refreshAuth(authType);
+    const targetIsRuntimeSnapshot = Boolean(
+      this.getActiveRuntimeModelSnapshot(),
+    );
     const targetHasReasoningControls =
-      !this.getActiveRuntimeModelSnapshot() &&
+      !targetIsRuntimeSnapshot &&
+      Boolean(getModelReasoningControls(this.modelsConfig.getModel()));
+    if (
+      !previousModelHasReasoningControls &&
+      targetHasReasoningControls &&
+      !this.modelsConfig.isStrictModelProviderSelection()
+    ) {
+      delete this.modelsConfig.getGenerationConfig().reasoning;
+      delete this.modelsConfig.getGenerationConfigSources()['reasoning'];
+    }
+
+    await this.refreshAuth(authType);
+    const activeRuntimeModelSnapshot = this.getActiveRuntimeModelSnapshot();
+    const refreshedTargetHasReasoningControls =
+      !activeRuntimeModelSnapshot &&
       Boolean(getModelReasoningControls(this.contentGeneratorConfig.model));
-    if (!targetHasReasoningControls) {
+    const targetHasRuntimeReasoning = Boolean(
+      activeRuntimeModelSnapshot &&
+        this.contentGeneratorConfig.reasoning !== undefined,
+    );
+    if (!refreshedTargetHasReasoningControls && !targetHasRuntimeReasoning) {
       const globalEffort =
         priorReasoningEffort ?? this.globalReasoningEffortPreference;
       if (globalEffort && this.contentGeneratorConfig.reasoning !== false) {

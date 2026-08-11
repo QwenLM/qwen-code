@@ -759,6 +759,7 @@ export function createDaemonSessionActions({
     },
 
     async setConfigOption(configId, value) {
+      requireStableSession();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,

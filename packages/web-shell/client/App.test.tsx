@@ -232,6 +232,7 @@ const {
       }),
       refreshCommands: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
+      setConfigOption: vi.fn().mockResolvedValue(undefined),
       setApprovalMode: vi.fn().mockResolvedValue(undefined),
       getRewindSnapshots: vi.fn().mockResolvedValue([]),
       rewindSession: vi.fn().mockResolvedValue(undefined),
@@ -4416,6 +4417,7 @@ beforeEach(() => {
   };
   mockConnection.gitBranch = undefined;
   mockConnection.gitStatus = undefined;
+  mockConnection.sessionTransition = undefined;
   testState.ownerVersion = 0;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
@@ -4543,6 +4545,7 @@ beforeEach(() => {
   mockSessionActions.reloadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
+  mockSessionActions.setConfigOption.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
   mockSessionActions.getRewindSnapshots.mockResolvedValue([]);
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
@@ -4966,7 +4969,7 @@ describe('App composer footer renderer', () => {
   });
 });
 
-describe('App pre-session reasoning composer', () => {
+describe('App reasoning composer', () => {
   it('derives reasoning state from stored preferences and ignores stale session state', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.currentModel = 'qwen3.8-max(openai)';
@@ -5086,6 +5089,53 @@ describe('App pre-session reasoning composer', () => {
     });
     expect(settingsSetValue).toHaveBeenCalled();
     expect(settingsReload).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
+  });
+
+  it('blocks active-session reasoning writes while a session transition is preparing', async () => {
+    mockConnection.sessionTransition = {
+      phase: 'preparing',
+      operation: 'load',
+      origin: 'action',
+      targetSessionId: 'session-2',
+    };
+    renderApp();
+    await flush();
+
+    const editorProps = testState.latestChatEditorProps as unknown as {
+      onSelectReasoningOption?: (
+        configId: 'thinking' | 'effort',
+        value: string,
+      ) => void;
+    };
+    act(() => editorProps.onSelectReasoningOption?.('effort', 'medium'));
+
+    expect(mockSessionActions.setConfigOption).not.toHaveBeenCalled();
+  });
+
+  it('ignores a reasoning-write failure after the session owner changes', async () => {
+    const update = deferred<unknown>();
+    mockSessionActions.setConfigOption.mockReturnValueOnce(update.promise);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    renderApp();
+    await flush();
+
+    const editorProps = testState.latestChatEditorProps as unknown as {
+      onSelectReasoningOption?: (
+        configId: 'thinking' | 'effort',
+        value: string,
+      ) => void;
+    };
+    act(() => editorProps.onSelectReasoningOption?.('effort', 'medium'));
+    await act(async () => {
+      testState.ownerVersion += 1;
+      update.reject(new Error('stale failure'));
+      await update.promise.catch(() => undefined);
+    });
+
+    expect(consoleError).not.toHaveBeenCalled();
     consoleError.mockRestore();
   });
 });

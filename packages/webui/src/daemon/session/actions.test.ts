@@ -819,6 +819,19 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('rejects config-option writes while a session transition is preparing', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      isCrossSessionTransitionPending: () => true,
+    });
+
+    await expect(
+      actions.setConfigOption('thinking', 'off'),
+    ).rejects.toMatchObject({ name: 'InvalidStateError' });
+    expect(session.setConfigOption).not.toHaveBeenCalled();
+  });
+
   it('ignores a config-option response after the active session changes', async () => {
     const session = createMockSession('session-a');
     const deferred = createDeferred<{ configOptions: unknown[] }>();

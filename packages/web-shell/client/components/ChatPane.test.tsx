@@ -26,6 +26,7 @@ const catalogController = vi.hoisted(() => ({
   renamed: vi.fn(),
   turnCompleted: vi.fn(),
 }));
+const ownerGuardState = vi.hoisted(() => ({ version: 0 }));
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
@@ -113,7 +114,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
   useDaemonSessionOwnerGuard: () => ({
-    capture: () => ({ isCurrent: () => true }),
+    capture: () => {
+      const ownerVersion = ownerGuardState.version;
+      return { isCurrent: () => ownerGuardState.version === ownerVersion };
+    },
   }),
 }));
 
@@ -298,6 +302,7 @@ let container: HTMLDivElement | null = null;
 const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
+  ownerGuardState.version = 0;
   connectionState = {
     status: 'connected',
     sessionId: 'sess-1',
@@ -562,6 +567,94 @@ describe('ChatPane', () => {
       latestChatEditorProps.onSelectReasoningOption('effort', 'medium');
     });
     expect(setConfigOption).toHaveBeenCalledWith('effort', 'medium');
+  });
+
+  it('blocks reasoning writes while the pane session is transitioning', () => {
+    connectionState.sessionTransition = {
+      phase: 'preparing',
+      operation: 'load',
+      origin: 'action',
+      targetSessionId: 'sess-2',
+    };
+    render();
+
+    act(() => {
+      latestChatEditorProps.onSelectReasoningOption('effort', 'medium');
+    });
+
+    expect(setConfigOption).not.toHaveBeenCalled();
+  });
+
+  it('ignores a reasoning-write failure after the pane owner changes', async () => {
+    let rejectUpdate: ((error: Error) => void) | undefined;
+    setConfigOption.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectUpdate = reject;
+      }),
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    render();
+
+    act(() => {
+      latestChatEditorProps.onSelectReasoningOption('effort', 'medium');
+    });
+    await act(async () => {
+      ownerGuardState.version += 1;
+      rejectUpdate?.(new Error('stale failure'));
+      await Promise.resolve();
+    });
+
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it('does not let a stale reasoning write clear the current busy state', async () => {
+    let rejectStaleUpdate: ((error: Error) => void) | undefined;
+    let resolveCurrentUpdate: (() => void) | undefined;
+    setConfigOption
+      .mockReturnValueOnce(
+        new Promise((_, reject) => {
+          rejectStaleUpdate = reject;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveCurrentUpdate = () => resolve({});
+        }),
+      );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    render();
+
+    act(() => {
+      latestChatEditorProps.onSelectReasoningOption('effort', 'medium');
+    });
+    ownerGuardState.version += 1;
+    connectionState.sessionId = 'sess-2';
+    rerender();
+    act(() => {
+      latestChatEditorProps.onSelectReasoningOption('effort', 'low');
+    });
+    await act(async () => {
+      rejectStaleUpdate?.(new Error('stale failure'));
+      await Promise.resolve();
+    });
+
+    expect(latestChatEditorProps.reasoningBusy).toEqual({
+      thinking: true,
+      effort: true,
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveCurrentUpdate?.();
+      await Promise.resolve();
+    });
+    expect(latestChatEditorProps.reasoningBusy).toEqual({});
+    consoleError.mockRestore();
   });
 
   it('does not advertise reasoning controls without the capability', () => {

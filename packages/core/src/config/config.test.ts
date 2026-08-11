@@ -4453,6 +4453,41 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('does not resurrect a cleared global effort on auth refresh', async () => {
+      const authType = AuthType.USE_GEMINI;
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          model: 'unregistered-model',
+          reasoning: { effort: 'high' },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'unregistered-model',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+      expect(config.getReasoningEffort()).toBe('high');
+
+      config.setReasoningEffort(undefined);
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBeUndefined();
+      expect(config.getReasoningEffortPreference()).toBeUndefined();
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBeUndefined();
+    });
+
     it('does not carry an unregistered effort into a registered auth-refresh target', async () => {
       const config = new Config({
         ...baseParams,
@@ -4655,6 +4690,77 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('keeps a runtime snapshot effort on a full-refresh switch', async () => {
+      const sourceAuthType = AuthType.USE_GEMINI;
+      const targetAuthType = AuthType.USE_OPENAI;
+      const config = new Config({
+        ...baseParams,
+        authType: sourceAuthType,
+        model: 'source-model',
+        generationConfig: {
+          model: 'source-model',
+          reasoning: { effort: 'high' },
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'source-key',
+          model: 'source-model',
+          authType: sourceAuthType,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(sourceAuthType);
+
+      const modelsConfig = config.getModelsConfig();
+      const snapshotId = '$runtime|openai|snapshot-model';
+      const runtimeModelSnapshots = (
+        modelsConfig as unknown as {
+          runtimeModelSnapshots: Map<
+            string,
+            {
+              id: string;
+              authType: AuthType;
+              modelId: string;
+              apiKey: string;
+              baseUrl: string;
+              generationConfig: Partial<ContentGeneratorConfig>;
+              sources: Record<string, never>;
+              createdAt: number;
+            }
+          >;
+        }
+      ).runtimeModelSnapshots;
+      runtimeModelSnapshots.set(snapshotId, {
+        id: snapshotId,
+        authType: targetAuthType,
+        modelId: 'snapshot-model',
+        apiKey: 'snapshot-key',
+        baseUrl: 'https://runtime.example/v1',
+        generationConfig: { reasoning: { effort: 'low' } },
+        sources: {},
+        createdAt: Date.now(),
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'snapshot-key',
+          baseUrl: 'https://runtime.example/v1',
+          model: 'snapshot-model',
+          authType: targetAuthType,
+          reasoning: { effort: 'low' },
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await modelsConfig.switchToRuntimeModel(snapshotId);
+
+      expect(config.getActiveRuntimeModelSnapshot()).toBeDefined();
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'low',
+      });
+    });
+
     it('keeps an effort selection as a preference before auth initializes', () => {
       const config = new Config(baseParams);
 
@@ -4809,6 +4915,50 @@ describe('Server Config (config.ts)', () => {
         effort: 'xhigh',
       });
     });
+
+    it.each([
+      ['an effort', { effort: 'medium' }],
+      ['thinking off', false],
+    ] as const)(
+      'does not carry %s from a raw model into a registered target',
+      async (_label, sourceReasoning) => {
+        const authType = AuthType.USE_GEMINI;
+        const config = new Config({
+          ...baseParams,
+          authType,
+          model: 'unregistered-source',
+          generationConfig: {
+            model: 'unregistered-source',
+            reasoning: sourceReasoning,
+          },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'unregistered-source',
+            authType,
+            reasoning: sourceReasoning,
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+        await config.refreshAuth(authType);
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'qwen3.8-max',
+            authType,
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+
+        await config.setModel('qwen3.8-max');
+
+        expect(config.getContentGeneratorConfig().reasoning).toEqual({
+          effort: 'xhigh',
+        });
+        expect(config.isThinkingEnabled()).toBe(true);
+      },
+    );
 
     it('keeps thinking-off across repeated registry-resolved auth refreshes', async () => {
       // Regression: the repair must mirror `reasoning: false` into

@@ -117,6 +117,11 @@
   overflow: hidden;
 }
 
+:global([data-web-shell-reasoning-popover]) {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 :global([data-web-shell-model-submenu]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
   min-width: min(280px, var(--radix-popover-content-available-width));

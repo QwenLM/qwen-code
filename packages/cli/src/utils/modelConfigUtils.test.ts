@@ -1942,13 +1942,13 @@ describe('modelConfigUtils', () => {
         ).toEqual({ effort: 'medium' });
       });
 
-      it('does not inherit the global model.reasoningEffort into a registered model', () => {
+      it('uses the legacy global effort when no registered preference exists', () => {
         const result = resolveForModel('qwen3.8-max', {
           name: 'qwen3.8-max',
           reasoningEffort: 'low',
         });
 
-        expect(result.generationConfig.reasoning).toEqual({ effort: 'xhigh' });
+        expect(result.generationConfig.reasoning).toEqual({ effort: 'low' });
         expect(
           result.warnings.filter((warning) =>
             /reasoning|effort/i.test(warning),

@@ -487,9 +487,10 @@ export function resolveCliGenerationConfig(
     const resolvedReasoning = resolveModelReasoningControls(
       resolved.config.model,
       {
-        // Seed the resolver-supplied preset tier so an explicit provider
-        // generationConfig tier wins over the registry default; stored
-        // per-model preferences still override the preset.
+        // Preserve the pre-reasoningPreferences setting as the lowest-priority
+        // compatibility seed. Provider presets and stored per-model
+        // preferences still win.
+        ...(reasoningEffort ? { effort: reasoningEffort } : {}),
         ...(presetReasoning && presetReasoning.effort
           ? { effort: presetReasoning.effort }
           : {}),
