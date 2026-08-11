@@ -7,6 +7,7 @@
 import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import {
+  collectReferencedImageIds,
   InMemoryImagePayloadStore,
   countAllInlineImages,
   prepareImagePayloadsForRequest,
@@ -47,6 +48,23 @@ function imageParts(contents: Content[]): Part[] {
 }
 
 describe('prepareImagePayloadsForRequest', () => {
+  it('collects image references nested in function responses', () => {
+    const ids = collectReferencedImageIds({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'screenshot',
+            response: {},
+            parts: [{ text: 'Inspect Image #abcdef123456' }],
+          },
+        },
+      ],
+    });
+
+    expect([...ids]).toEqual(['abcdef123456']);
+  });
+
   it('replaces historical image positions with stable refs and reattaches only the most recent images', () => {
     const store = new InMemoryImagePayloadStore();
     const history: Content[] = [

@@ -802,7 +802,11 @@ describe('Gemini Client (client.ts)', () => {
       const imagePart = {
         inlineData: { mimeType: 'image/png', data: 'pre-compact-shot' },
       };
+      const discardedImagePart = {
+        inlineData: { mimeType: 'image/png', data: 'discarded-shot' },
+      };
       const imageId = imagePartToStoredPayload(imagePart).id;
+      const discardedImageId = imagePartToStoredPayload(discardedImagePart).id;
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {
           sessionId: 'resumed-session-id',
@@ -819,7 +823,7 @@ describe('Gemini Client (client.ts)', () => {
                       id: 'call-screenshot',
                       name: 'computer_use__get_app_state',
                       response: { output: 'captured' },
-                      parts: [imagePart],
+                      parts: [imagePart, discardedImagePart],
                     },
                   },
                 ],
@@ -851,6 +855,11 @@ describe('Gemini Client (client.ts)', () => {
           resumedClient.resolveImageReferences(`inspect Image #${imageId}`),
         ),
       ).toContain('"data":"pre-compact-shot"');
+      expect(
+        resumedClient.resolveImageReferences(
+          `inspect Image #${discardedImageId}`,
+        ),
+      ).toBe(`inspect Image #${discardedImageId}`);
     });
 
     it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {

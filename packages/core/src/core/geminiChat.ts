@@ -1745,6 +1745,7 @@ export class GeminiChat {
         });
       }
       this.setHistory(newHistory);
+      this.reconcileImagePayloads(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
       clearDetailedSpanState();
@@ -1844,6 +1845,7 @@ export class GeminiChat {
       }),
     );
     this.setHistory(newHistory);
+    this.reconcileImagePayloads(newHistory);
     clearDetailedSpanState();
     this.lastPromptTokenCount = adjustedTokenCount;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);

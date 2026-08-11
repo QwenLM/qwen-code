@@ -190,6 +190,10 @@ describe('GeminiChat', async () => {
       getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
+      getClearContextOnIdle: vi.fn().mockReturnValue({
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      }),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
         .fn()
@@ -11610,6 +11614,41 @@ describe('GeminiChat', async () => {
       expect(chat.getHistory()).toHaveLength(3);
       expect(chat.getHistory()[0]).toEqual(userMsg('summary'));
       expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('drops image payloads removed by compression', async () => {
+      mockCompressionService('compressed');
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'discarded-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      chat.rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+
+      await chat.tryCompress('p-image', 'm1');
+
+      expect(chat.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
+    });
+
+    it('drops image payloads removed by fast compression', () => {
+      const imagePart = {
+        inlineData: { mimeType: 'image/png', data: 'discarded-fast-shot' },
+      };
+      const imageId = imagePartToStoredPayload(imagePart).id;
+      chat.rememberImagePayloads([{ role: 'user', parts: [imagePart] }]);
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'answer' }],
+        },
+      ]);
+
+      chat.compressFast();
+
+      expect(chat.resolveImageReferences(`inspect Image #${imageId}`)).toBe(
+        `inspect Image #${imageId}`,
+      );
     });
 
     it('mirrors lastPromptTokenCount to the global telemetry only when wired', async () => {

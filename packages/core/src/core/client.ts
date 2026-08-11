@@ -356,6 +356,7 @@ export class GeminiClient {
           record.message ? [record.message] : [],
         ),
       );
+      chat.reconcileImagePayloads(chat.getHistory());
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
