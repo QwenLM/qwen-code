@@ -16,6 +16,7 @@ import {
   tokenPlanProvider,
   buildProviderTemplate,
   computeModelListVersion,
+  deepseekProvider,
   kimiProvider,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
@@ -223,22 +224,34 @@ describe('useProviderUpdates', () => {
     expect(entry?.diff.added).toContain(addedModelId);
   });
 
-  it('preserves user-added custom models when executing an update', async () => {
+  it('preserves baseUrl-less custom models when executing an update', async () => {
+    const deepseekBaseUrl = 'https://api.deepseek.com';
+    const deepseekEnvKey = 'DEEPSEEK_API_KEY';
+    const deepseekTemplate = buildProviderTemplate(
+      deepseekProvider,
+      deepseekBaseUrl,
+    );
+    const deepseekVersion = computeModelListVersion(deepseekTemplate);
     const customModel = {
       id: 'my-custom-model',
-      baseUrl: CODING_PLAN_CHINA_BASE_URL,
-      envKey: CODING_PLAN_ENV_KEY,
-      name: '[Coding Plan] my-custom-model',
+      envKey: deepseekEnvKey,
+      name: '[DeepSeek] my-custom-model',
     };
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
-      METADATA_KEY
+      'deepseek'
     ] = {
-      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      baseUrl: deepseekBaseUrl,
       version: 'old-version-hash',
     };
     mockSettings.merged['modelProviders'] = {
-      [AuthType.USE_OPENAI]: [...chinaTemplate, customModel],
+      [AuthType.USE_OPENAI]: [...deepseekTemplate, customModel],
     };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: deepseekBaseUrl,
+      apiKeyEnvKey: deepseekEnvKey,
+    });
+    mockConfig.getModel.mockReturnValue('deepseek-v4-flash');
     mockConfig.refreshAuth.mockResolvedValue(undefined);
 
     const { result } = renderHook(() =>
@@ -262,7 +275,10 @@ describe('useProviderUpdates', () => {
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
     expect(reloaded[AuthType.USE_OPENAI]).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: 'my-custom-model' }),
+        expect.objectContaining({
+          id: 'my-custom-model',
+          baseUrl: deepseekBaseUrl,
+        }),
       ]),
     );
     // The persisted version tracks the built-in template, never the
@@ -270,9 +286,10 @@ describe('useProviderUpdates', () => {
     // re-trigger the prompt on the next launch.
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       expect.anything(),
-      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.version`,
-      chinaVersion,
+      `${PROVIDER_METADATA_NS}.deepseek.version`,
+      deepseekVersion,
     );
+    delete process.env[deepseekEnvKey];
   });
 
   it('does not re-prompt when the stored version matches the template but the selection differs', () => {
@@ -590,6 +607,64 @@ describe('useProviderUpdates', () => {
     );
 
     expect(result.current.providerUpdateRequest).toBeUndefined();
+  });
+
+  it('preserves a legacy postponed cooldown when migrating endpoint metadata', () => {
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const apiTemplate = buildProviderTemplate(kimiProvider, apiUrl);
+    const apiVersion = computeModelListVersion(apiTemplate);
+    const postponedAt = Date.now();
+    const metadata = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadata['kimi'] = {
+      baseUrl: apiUrl,
+      version: 'old-version-hash',
+      postponedVersion: apiVersion,
+      postponedAt,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: apiTemplate,
+    };
+
+    const firstLaunch = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(firstLaunch.result.current.providerUpdateRequest).toBeUndefined();
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--api-international.postponedVersion`,
+      apiVersion,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--api-international.postponedAt`,
+      postponedAt,
+    );
+    firstLaunch.unmount();
+
+    metadata['kimi--api-international'] = {
+      baseUrl: apiUrl,
+      version: 'old-version-hash',
+      postponedVersion: apiVersion,
+      postponedAt,
+    };
+    delete metadata['kimi'];
+    const secondLaunch = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(secondLaunch.result.current.providerUpdateRequest).toBeUndefined();
   });
 
   it('executes update when user confirms with "update"', async () => {

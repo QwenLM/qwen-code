@@ -169,8 +169,9 @@ export function getExistingProviderSetup(
     saved?.models
       .filter(
         (model) =>
+          model.baseUrl === undefined ||
           normalizeBaseUrlForMatching(model.baseUrl) ===
-          normalizeBaseUrlForMatching(initialBaseUrl),
+            normalizeBaseUrlForMatching(initialBaseUrl),
       )
       .map((model) => model.id) ?? [];
   const restoredModelIdSet = new Set(restoredModelIds);

@@ -257,18 +257,22 @@ export async function applyProviderInstallPlan(
       const currentBaseUrl = settings.getValue('model.baseUrl') as
         | string
         | undefined;
+      const retainAcrossEndpoints = (plan.modelProviders ?? []).some(
+        (patch) => patch.retainCurrentModelAcrossEndpoints,
+      );
+      const offeredModels = retainAcrossEndpoints
+        ? (updatedModelProviders[plan.authType] ?? [])
+        : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
-        (plan.modelProviders ?? []).some((patch) =>
-          patch.models.some((model) =>
-            currentBaseUrl === '' || currentBaseUrl === undefined
-              ? model.id === currentModelId
-              : isSameModelIdentity(
-                  { id: currentModelId, baseUrl: currentBaseUrl },
-                  model,
-                ),
-          ),
+        offeredModels.some((model) =>
+          currentBaseUrl === '' || currentBaseUrl === undefined
+            ? model.id === currentModelId
+            : isSameModelIdentity(
+                { id: currentModelId, baseUrl: currentBaseUrl },
+                model,
+              ),
         );
       if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;

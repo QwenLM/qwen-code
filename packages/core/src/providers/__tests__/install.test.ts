@@ -32,6 +32,7 @@ import {
 
 function createAdapter(modelProviders: ModelProvidersConfig = {}) {
   const adapter: ProviderSettingsAdapter & {
+    getValue: ReturnType<typeof vi.fn>;
     setValue: ReturnType<typeof vi.fn>;
     persist: ReturnType<typeof vi.fn>;
     backup: ReturnType<typeof vi.fn>;
@@ -538,6 +539,53 @@ describe('applyProviderInstallPlan', () => {
       'model-b',
       baseUrl,
     );
+  });
+
+  it('keeps the selected sibling endpoint model when reconnecting', async () => {
+    const codingModels = buildProviderTemplate(
+      kimiProvider,
+      KIMI_CODE_BASE_URL,
+    );
+    const apiBaseUrl = 'https://api.moonshot.ai/v1';
+    const apiModels = buildProviderTemplate(kimiProvider, apiBaseUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...codingModels, ...apiModels],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return 'kimi-k3';
+      if (key === 'model.baseUrl') return apiBaseUrl;
+      return undefined;
+    });
+    const syncAuthState = vi.fn();
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: KIMI_CODE_BASE_URL,
+      apiKey: 'sk-kimi',
+      modelIds: codingModels.map((model) => model.id),
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        syncAuthState,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[KIMI_CODE_ENV_KEY];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      ...codingModels,
+      ...apiModels,
+    ]);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(syncAuthState).not.toHaveBeenCalled();
   });
 
   it('writes provider state and legacy credentials', async () => {

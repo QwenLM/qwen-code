@@ -154,6 +154,8 @@ export interface ProviderModelProvidersPatch {
   models: ProviderModelConfig[];
   mergeStrategy: 'prepend-and-remove-owned' | 'replace-owned' | 'append';
   ownsModel?: (model: ProviderModelConfig) => boolean;
+  /** Keep a selected sibling endpoint model when it survives this patch. */
+  retainCurrentModelAcrossEndpoints?: boolean;
 }
 
 /**

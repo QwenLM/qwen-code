@@ -215,6 +215,18 @@ function persistEndpointMetadataMigration(
       metadata.ignoredVersion,
     );
   }
+  if (metadata.postponedVersion && typeof metadata.postponedAt === 'number') {
+    settings.setValue(
+      persistScope,
+      `${PROVIDER_METADATA_NS}.${metadataKey}.postponedVersion`,
+      metadata.postponedVersion,
+    );
+    settings.setValue(
+      persistScope,
+      `${PROVIDER_METADATA_NS}.${metadataKey}.postponedAt`,
+      metadata.postponedAt,
+    );
+  }
 }
 
 function getInstalledOwnedModelIds(
@@ -380,7 +392,13 @@ export function useProviderUpdates(
         const defaultIds = getDefaultModelIds(providerCfg, resolved);
         const builtInIds = new Set(defaultIds);
         const installedOwnedModels = readInstalledModels(settings, providerCfg);
-        const customIds = modelsAtBaseUrl(installedOwnedModels, resolved)
+        const customIds = installedOwnedModels
+          .filter(
+            (model) =>
+              model.baseUrl === undefined ||
+              normalizeBaseUrlForMatching(model.baseUrl) ===
+                normalizeBaseUrlForMatching(resolved),
+          )
           .map((model) => model.id)
           .filter((id) => !builtInIds.has(id));
         const installPlan = buildInstallPlan(providerCfg, {

@@ -213,6 +213,73 @@ describe('AuthMessageHandler', () => {
     );
   });
 
+  it('restores saved endpoint custom models into the models step', async () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const defaults = [
+      'k3-256k',
+      'k3',
+      'kimi-for-coding',
+      'kimi-for-coding-highspeed',
+    ];
+    const seeded = [...defaults, 'my-custom', 'legacy-custom'];
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: codingUrl });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-kimi')
+      .mockResolvedValueOnce(seeded.join(','));
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({
+        openai: [
+          {
+            id: 'k3-256k',
+            name: '[Kimi Code] k3-256k',
+            baseUrl: codingUrl,
+            envKey: 'KIMI_CODE_API_KEY',
+          },
+          {
+            id: 'my-custom',
+            name: '[Kimi Code] my-custom',
+            baseUrl: codingUrl,
+            envKey: 'KIMI_CODE_API_KEY',
+          },
+          {
+            id: 'legacy-custom',
+            name: '[Kimi Code] legacy-custom',
+            envKey: 'KIMI_CODE_API_KEY',
+          },
+          {
+            id: 'api-custom',
+            name: '[Kimi API] api-custom',
+            baseUrl: 'https://api.moonshot.ai/v1',
+            envKey: 'MOONSHOT_API_KEY',
+          },
+        ],
+      }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ value: seeded.join(',') }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: codingUrl,
+        modelIds: seeded,
+      }),
+    );
+  });
+
   // -- Custom provider flow ------------------------------------------------
   // The custom provider exercises every step in runProviderSetupFlow:
   // protocol pick, free-form URL input + scheme validation, API key,

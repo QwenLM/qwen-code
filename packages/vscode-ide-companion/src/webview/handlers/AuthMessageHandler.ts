@@ -15,8 +15,10 @@ import {
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  findExistingProviderModels,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   type ProviderConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
@@ -33,6 +35,23 @@ export class AuthMessageHandler extends BaseMessageHandler {
   private authInteractiveHandler:
     | ((config: ProviderConfig, inputs: ProviderSetupInputs) => Promise<void>)
     | null = null;
+
+  constructor(
+    agentManager: ConstructorParameters<typeof BaseMessageHandler>[0],
+    conversationStore: ConstructorParameters<typeof BaseMessageHandler>[1],
+    currentConversationId: string | null,
+    sendToWebView: (message: unknown) => void,
+    private readonly getModelProviders: () =>
+      | Record<string, unknown>
+      | undefined = () => undefined,
+  ) {
+    super(
+      agentManager,
+      conversationStore,
+      currentConversationId,
+      sendToWebView,
+    );
+  }
 
   canHandle(messageType: string): boolean {
     return ['auth', 'getAccountInfo'].includes(messageType);
@@ -354,11 +373,28 @@ export class AuthMessageHandler extends BaseMessageHandler {
     let modelIds: string[];
     if (shouldShowStep(provider, 'models')) {
       const defaults = getDefaultModelIds(provider, baseUrl);
+      const existing = findExistingProviderModels(
+        provider,
+        this.getModelProviders(),
+      );
+      const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+      const restoredIds =
+        existing?.models
+          .filter(
+            (model) =>
+              model.baseUrl === undefined ||
+              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint,
+          )
+          .map((model) => model.id) ?? [];
+      const seededModelIds = [
+        ...defaults,
+        ...restoredIds.filter((id) => !defaults.includes(id)),
+      ];
       const modelInput = await this.input({
         title: `${flowTitle}: Models`,
         prompt: 'Enter model IDs (comma-separated)',
         placeHolder: defaults.join(',') || 'model-name',
-        value: defaults.join(','),
+        value: seededModelIds.join(','),
         required: true,
       });
       if (!modelInput) return;

@@ -416,6 +416,30 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     });
   });
 
+  it('restores legacy provider models without a baseUrl', () => {
+    const deepseek = findProviderById('deepseek');
+    expect(deepseek).toBeDefined();
+
+    const setup = getExistingProviderSetup(deepseek!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'deepseek-v4-flash',
+          name: '[DeepSeek] deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+        {
+          id: 'legacy-custom',
+          name: '[DeepSeek] legacy-custom',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup.customModelIds).toContain('legacy-custom');
+    expect(setup.initialBaseUrl).toBe('https://api.deepseek.com');
+  });
+
   it('seeds no trims or customs for a provider without saved models', () => {
     const kimi = findProviderById('kimi');
     expect(kimi).toBeDefined();
