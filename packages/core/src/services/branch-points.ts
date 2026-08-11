@@ -18,7 +18,7 @@ export interface BranchCheckpointRecordPayloadV1 {
   assistantRecordUuid: string;
 }
 
-export interface BranchCandidate {
+interface BranchCandidate {
   startExclusiveRecordUuid: string | null;
   endInclusiveRecordUuid: string;
   assistantRecordUuid: string;
@@ -181,47 +181,6 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
     endInclusiveRecordUuid: activeChain[endIndex]!.uuid,
     assistantRecordUuid,
   };
-}
-
-export function resolveCompletedTurnBranchCandidate(input: {
-  activeChain: readonly BranchPointRecord[];
-  startExclusiveRecordUuid: string | null;
-  endInclusiveRecordUuid: string;
-}): BranchCandidate | undefined {
-  const { activeChain, startExclusiveRecordUuid, endInclusiveRecordUuid } =
-    input;
-  const startIndex =
-    startExclusiveRecordUuid === null
-      ? -1
-      : activeChain.findIndex(
-          (record) => record.uuid === startExclusiveRecordUuid,
-        );
-  const endIndex = activeChain.findIndex(
-    (record) => record.uuid === endInclusiveRecordUuid,
-  );
-  if (
-    endIndex < 0 ||
-    (startExclusiveRecordUuid !== null && startIndex < 0) ||
-    startIndex >= endIndex
-  ) {
-    return undefined;
-  }
-
-  const pendingCalls: BranchToolCallIdentity[] = [];
-  for (let index = 0; index <= startIndex; index++) {
-    const record = activeChain[index]!;
-    pendingCalls.push(...functionCalls(record));
-    for (const response of functionResponses(record)) {
-      closeToolCall(pendingCalls, response);
-    }
-  }
-  return resolveCompletedTurnBranchCandidateInRange({
-    activeChain,
-    startIndex,
-    endIndex,
-    startExclusiveRecordUuid,
-    pendingCallsAtStart: pendingCalls,
-  });
 }
 
 export function updatePendingBranchToolCalls(

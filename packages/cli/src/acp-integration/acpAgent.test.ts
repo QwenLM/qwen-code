@@ -13389,6 +13389,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
   let liveWaitForCloseGateToRelease: ReturnType<typeof vi.fn>;
   let liveReleaseCloseGate: ReturnType<typeof vi.fn>;
   let liveBeginClose: ReturnType<typeof vi.fn>;
+  let liveIsIdle: ReturnType<typeof vi.fn>;
   let liveAssertCanStartTurn: ReturnType<typeof vi.fn>;
   let liveBeginHistoryMutation: ReturnType<typeof vi.fn>;
   let liveReleaseHistoryMutation: ReturnType<typeof vi.fn>;
@@ -13407,6 +13408,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     liveWaitForCloseGateToRelease = vi.fn().mockResolvedValue(undefined);
     liveReleaseCloseGate = vi.fn();
     liveBeginClose = vi.fn().mockReturnValue(liveReleaseCloseGate);
+    liveIsIdle = vi.fn().mockReturnValue(true);
     liveAssertCanStartTurn = vi.fn().mockResolvedValue(undefined);
     liveReleaseHistoryMutation = vi.fn();
     liveBeginHistoryMutation = vi
@@ -13521,6 +13523,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
           waitForActiveTurnsToSettle: liveWaitForActiveTurnsToSettle,
+          isIdle: liveIsIdle,
           assertCanStartTurn: liveAssertCanStartTurn,
           beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -13945,6 +13948,38 @@ describe('QwenAgent extMethod renameSession routing', () => {
     // assertCanStartTurn, so a failing assert never leaves the busy latch set
     // with no wired release.
     expect(liveBeginHistoryMutation).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects a branch before queueing while an automatic turn is active', async () => {
+    const recording = makeRecordingService();
+    const sessionService = {
+      forkSession: vi.fn().mockResolvedValue(undefined),
+      findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    };
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    innerConfig.getSessionService.mockReturnValue(
+      sessionService as unknown as SessionService,
+    );
+    liveIsIdle.mockReturnValue(false);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+        cwd: '/tmp',
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+    expect(liveAssertCanStartTurn).not.toHaveBeenCalled();
+    expect(liveBeginHistoryMutation).not.toHaveBeenCalled();
+    expect(sessionService.forkSession).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

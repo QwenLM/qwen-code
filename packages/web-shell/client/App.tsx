@@ -6373,11 +6373,20 @@ export function App({
     showContextUsage('/context detail', true);
   }, [showContextUsage]);
 
+  const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
     (name?: string, atRecordId?: string) => {
       if (!requireActiveSessionForLocalCommand()) return;
       const sourceSessionId = connectionRef.current.sessionId;
-      return sessionActions
+      const requestKey = JSON.stringify([
+        sourceSessionId,
+        name ?? null,
+        atRecordId ?? null,
+      ]);
+      const pending = pendingBranchRequestsRef.current.get(requestKey);
+      if (pending) return pending;
+
+      const request = sessionActions
         .branchSession(name || undefined, atRecordId)
         .then((result) => {
           if (!result.switchStarted) return;
@@ -6420,7 +6429,14 @@ export function App({
             return;
           }
           reportError(error, t('branch.failed'));
+        })
+        .finally(() => {
+          if (pendingBranchRequestsRef.current.get(requestKey) === request) {
+            pendingBranchRequestsRef.current.delete(requestKey);
+          }
         });
+      pendingBranchRequestsRef.current.set(requestKey, request);
+      return request;
     },
     [
       reportError,

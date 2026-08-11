@@ -14,7 +14,6 @@ import {
   extractLastJsonStringFields,
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
-  readLastJsonStringFieldsAsync,
   readLastJsonStringFieldsSync,
   unescapeJsonString,
 } from './sessionStorageUtils.js';
@@ -772,118 +771,6 @@ describe('sessionStorageUtils', () => {
           'custom_title',
         ),
       ).toEqual({ customTitle: 'new', titleSource: 'auto' });
-    });
-  });
-
-  describe('readLastJsonStringFieldsAsync', () => {
-    let tmpDir: string;
-
-    beforeEach(() => {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sst-readfields-async-'));
-    });
-
-    afterEach(() => {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    });
-
-    it('reads the atomic title pair without synchronous filesystem calls', async () => {
-      const filePath = path.join(tmpDir, 'tail.jsonl');
-      fs.writeFileSync(
-        filePath,
-        '{"subtype":"custom_title","customTitle":"A","titleSource":"auto"}\n',
-      );
-      const syncSpies = [
-        vi.spyOn(fs, 'statSync'),
-        vi.spyOn(fs, 'openSync'),
-        vi.spyOn(fs, 'readSync'),
-        vi.spyOn(fs, 'closeSync'),
-        vi.spyOn(fs, 'existsSync'),
-        vi.spyOn(fs, 'accessSync'),
-        vi.spyOn(fs, 'readFileSync'),
-        vi.spyOn(fs, 'lstatSync'),
-        vi.spyOn(fs, 'realpathSync'),
-      ];
-
-      try {
-        await expect(
-          readLastJsonStringFieldsAsync(
-            filePath,
-            'customTitle',
-            ['titleSource'],
-            'custom_title',
-            Buffer.alloc(LITE_READ_BUF_SIZE),
-          ),
-        ).resolves.toEqual({ customTitle: 'A', titleSource: 'auto' });
-        for (const spy of syncSpies) expect(spy).not.toHaveBeenCalled();
-      } finally {
-        for (const spy of syncSpies) spy.mockRestore();
-      }
-    });
-
-    it('falls back to the bounded head window', async () => {
-      const filePath = path.join(tmpDir, 'head.jsonl');
-      fs.writeFileSync(
-        filePath,
-        '{"subtype":"custom_title","customTitle":"Head","titleSource":"manual"}\n' +
-          '{"type":"user","message":"' +
-          'x'.repeat(LITE_READ_BUF_SIZE) +
-          '"}\n',
-      );
-
-      await expect(
-        readLastJsonStringFieldsAsync(
-          filePath,
-          'customTitle',
-          ['titleSource'],
-          'custom_title',
-        ),
-      ).resolves.toEqual({ customTitle: 'Head', titleSource: 'manual' });
-    });
-
-    it('re-reads the latest tail when the file grows after the first read', async () => {
-      const initial = Buffer.from(
-        '{"subtype":"custom_title","customTitle":"old","titleSource":"manual"}\n' +
-          'x'.repeat(LITE_READ_BUF_SIZE + 16 * 1024) +
-          '\n',
-      );
-      const latest = Buffer.from(
-        '{"subtype":"custom_title","customTitle":"new","titleSource":"auto"}\n',
-      );
-      const grown = Buffer.concat([initial, latest]);
-      let readCount = 0;
-      const handle = {
-        stat: vi
-          .fn()
-          .mockResolvedValueOnce({ size: initial.length })
-          .mockResolvedValueOnce({ size: grown.length }),
-        read: vi.fn(
-          async (
-            buffer: Buffer,
-            offset: number,
-            length: number,
-            position: number,
-          ) => {
-            const source = readCount++ === 0 ? initial : grown;
-            const bytes = source.subarray(position, position + length);
-            bytes.copy(buffer, offset);
-            return { bytesRead: bytes.length, buffer };
-          },
-        ),
-        close: vi.fn().mockResolvedValue(undefined),
-      };
-      vi.spyOn(fs.promises, 'open').mockResolvedValue(
-        handle as unknown as Awaited<ReturnType<typeof fs.promises.open>>,
-      );
-
-      await expect(
-        readLastJsonStringFieldsAsync(
-          '/virtual/growing.jsonl',
-          'customTitle',
-          ['titleSource'],
-          'custom_title',
-        ),
-      ).resolves.toEqual({ customTitle: 'new', titleSource: 'auto' });
-      expect(handle.read).toHaveBeenCalledTimes(2);
     });
   });
 });

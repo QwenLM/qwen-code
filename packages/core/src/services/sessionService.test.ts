@@ -4403,36 +4403,25 @@ describe('SessionService', () => {
         realPath.join(sourceBackupDir, 'backup-copy-fails'),
         'cannot copy',
       );
-      const realLink = fs.promises.link;
-      const realCopyFile = fs.promises.copyFile;
-      const linkSpy = vi
-        .spyOn(fs.promises, 'link')
-        .mockImplementation(
-          async (source: fs.PathLike, target: fs.PathLike) => {
-            if (String(source).endsWith('backup-copy-fails')) {
-              throw new Error('hard link unavailable');
-            }
-            return realLink(source, target);
-          },
-        );
-      const copySpy = vi
-        .spyOn(fs.promises, 'copyFile')
-        .mockImplementation(
-          async (source: fs.PathLike, target: fs.PathLike, mode?: number) => {
-            if (String(source).endsWith('backup-copy-fails')) {
-              throw new Error('backup copy failed');
-            }
-            return realCopyFile(source, target, mode);
-          },
-        );
+      const realOpen = fs.promises.open;
+      const openSpy = vi
+        .spyOn(fs.promises, 'open')
+        .mockImplementation(async (filePath, flags, mode) => {
+          if (
+            String(filePath).endsWith('backup-copy-fails') &&
+            flags === 'wx'
+          ) {
+            throw new Error('backup copy failed');
+          }
+          return realOpen(filePath, flags, mode);
+        });
 
       try {
         await expect(service.forkSession(oldId, newId)).rejects.toThrow(
           'backup copy failed',
         );
       } finally {
-        linkSpy.mockRestore();
-        copySpy.mockRestore();
+        openSpy.mockRestore();
       }
 
       expect(fs.existsSync(targetTranscript)).toBe(false);
@@ -4444,46 +4433,30 @@ describe('SessionService', () => {
       ).toBe(false);
     });
 
-    it('publishes a backup through the copy fallback when hard links are unavailable', async () => {
+    it('does not follow a file-history backup symlink', async () => {
       const oldId = '31313131-3131-3131-3131-313131313136';
       const newId = '41414141-4141-4141-4141-414141414146';
+      const warnings: string[] = [];
+      service = new SessionService(cwd, {
+        onWarning: (message) => warnings.push(message),
+      });
       const { file, lines } = seedSession(oldId);
-      appendFileHistorySnapshot(oldId, file, lines, ['backup-cross-device']);
+      appendFileHistorySnapshot(oldId, file, lines, ['backup-symlink']);
       const sourceBackupDir = realPath.join(realTmpDir, 'file-history', oldId);
       const targetBackupDir = realPath.join(realTmpDir, 'file-history', newId);
       fs.mkdirSync(sourceBackupDir, { recursive: true });
-      fs.writeFileSync(
-        realPath.join(sourceBackupDir, 'backup-cross-device'),
-        'cross device content',
-      );
-      const realLink = fs.promises.link;
-      const linkSpy = vi
-        .spyOn(fs.promises, 'link')
-        .mockImplementation(
-          async (source: fs.PathLike, target: fs.PathLike) => {
-            if (String(source).endsWith('backup-cross-device')) {
-              const error = new Error(
-                'cross-device link',
-              ) as NodeJS.ErrnoException;
-              error.code = 'EXDEV';
-              throw error;
-            }
-            return realLink(source, target);
-          },
-        );
+      const outside = realPath.join(realTmpDir, 'outside-backup');
+      fs.writeFileSync(outside, 'outside content');
+      fs.symlinkSync(outside, realPath.join(sourceBackupDir, 'backup-symlink'));
 
-      try {
-        await expect(service.forkSession(oldId, newId)).resolves.toBeDefined();
-      } finally {
-        linkSpy.mockRestore();
-      }
+      await expect(service.forkSession(oldId, newId)).resolves.toBeDefined();
 
-      expect(
-        fs.readFileSync(
-          realPath.join(targetBackupDir, 'backup-cross-device'),
-          'utf8',
+      expect(fs.existsSync(targetBackupDir)).toBe(false);
+      expect(warnings).toEqual([
+        expect.stringContaining(
+          'omitted missing file-history backup backup-symlink',
         ),
-      ).toBe('cross device content');
+      ]);
     });
 
     it('preserves a backup target that appears immediately before publication', async () => {
@@ -4739,60 +4712,6 @@ describe('SessionService', () => {
 
         expect(fs.existsSync(targetPath)).toBe(true);
         expect(await service.loadSession(newId)).toBeDefined();
-      },
-    );
-
-    it.each(['ENOTSUP', 'EPERM', 'EXDEV'] as const)(
-      'keeps copied backups when transcript hard links fail with %s',
-      async (causeCode) => {
-        const oldId = '55555555-5555-5555-5555-555555555562';
-        const newId = '66666666-6666-6666-6666-666666666680';
-        const { file, lines } = seedSession(oldId);
-        appendFileHistorySnapshot(oldId, file, lines, ['backup-rollback']);
-        const sourceBackupDir = realPath.join(
-          realTmpDir,
-          'file-history',
-          oldId,
-        );
-        fs.mkdirSync(sourceBackupDir, { recursive: true });
-        fs.writeFileSync(
-          realPath.join(sourceBackupDir, 'backup-rollback'),
-          'rollback content',
-        );
-        const chatsDir = realPath.join(
-          service['storage'].getProjectDir(),
-          'chats',
-        );
-        const targetPath = realPath.join(chatsDir, `${newId}.jsonl`);
-        const realLink = fs.promises.link;
-        const linkSpy = vi
-          .spyOn(fs.promises, 'link')
-          .mockImplementation(async (source, target) => {
-            if (target === targetPath) {
-              const error = new Error(
-                'hard links are unsupported',
-              ) as NodeJS.ErrnoException;
-              error.code = causeCode;
-              throw error;
-            }
-            return realLink(source, target);
-          });
-
-        try {
-          await expect(
-            service.forkSession(oldId, newId),
-          ).resolves.toMatchObject({ filePath: targetPath });
-        } finally {
-          linkSpy.mockRestore();
-        }
-
-        expect(fs.existsSync(targetPath)).toBe(true);
-        expect(
-          fs.readFileSync(
-            realPath.join(realTmpDir, 'file-history', newId, 'backup-rollback'),
-            'utf8',
-          ),
-        ).toBe('rollback content');
       },
     );
 
@@ -5358,34 +5277,6 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('anything');
       expect(titles).toEqual([]);
-    });
-
-    it('uses only asynchronous filesystem APIs for the collision scan', async () => {
-      seedSessionWithTitle(
-        '11111111-1111-1111-1111-111111111111',
-        'async branch (Branch)',
-      );
-      const syncSpies = [
-        vi.spyOn(fs, 'readdirSync'),
-        vi.spyOn(fs, 'statSync'),
-        vi.spyOn(fs, 'openSync'),
-        vi.spyOn(fs, 'readSync'),
-        vi.spyOn(fs, 'closeSync'),
-        vi.spyOn(fs, 'existsSync'),
-        vi.spyOn(fs, 'accessSync'),
-        vi.spyOn(fs, 'readFileSync'),
-        vi.spyOn(fs, 'lstatSync'),
-        vi.spyOn(fs, 'realpathSync'),
-      ];
-
-      try {
-        await expect(
-          service.findSessionTitlesByPrefix('async branch (Branch'),
-        ).resolves.toEqual(['async branch (Branch)']);
-        for (const spy of syncSpies) expect(spy).not.toHaveBeenCalled();
-      } finally {
-        for (const spy of syncSpies) spy.mockRestore();
-      }
     });
   });
 

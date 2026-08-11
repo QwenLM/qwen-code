@@ -11163,6 +11163,13 @@ class QwenAgent implements Agent {
         }
 
         if (!isSideTask) {
+          if (!sourceSession.isIdle()) {
+            throw new RequestError(
+              -32602,
+              'Cannot branch while a prompt is running',
+              { errorKind: 'session_busy' },
+            );
+          }
           try {
             return await this.runExclusiveHistoryMutation(
               sessionId,

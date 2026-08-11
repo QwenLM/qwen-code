@@ -6310,8 +6310,11 @@ describe('App session callbacks', () => {
     await flush();
 
     let request: void | Promise<void>;
+    let duplicate: void | Promise<void>;
     act(() => {
       request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      duplicate =
         testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
     });
 
@@ -6320,6 +6323,8 @@ describe('App session callbacks', () => {
       'checkpoint-1',
     );
     expect(request!).toBeInstanceOf(Promise);
+    expect(duplicate).toBe(request);
+    expect(mockSessionActions.branchSession).toHaveBeenCalledTimes(1);
 
     branch.resolve({
       sessionId: 'branch-1',

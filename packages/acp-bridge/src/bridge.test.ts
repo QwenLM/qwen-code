@@ -9409,67 +9409,51 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('rejects a queued branch when the source starts closing', async () => {
-      const closeGate = deferred<Record<string, unknown>>();
-      const handle = makeChannel({
-        extMethodImpl: (method) => {
-          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
-            return closeGate.promise;
-          }
-          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
-            throw new Error('branch must not reach the closing source');
-          }
-          return {};
-        },
-      });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const branch = bridge.branchSession(session.sessionId, {});
-      const close = bridge.closeSession(session.sessionId);
+    it.each([
+      {
+        operation: 'branch',
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+      },
+      {
+        operation: 'rewind',
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+      },
+    ])(
+      'rejects a queued $operation when the source starts closing',
+      async ({ method, invoke }) => {
+        const closeGate = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          extMethodImpl: (calledMethod) => {
+            if (calledMethod === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+              return closeGate.promise;
+            }
+            if (calledMethod === method) {
+              throw new Error('mutation must not reach the closing source');
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const mutation = invoke(bridge, session.sessionId);
+        const close = bridge.closeSession(session.sessionId);
 
-      await expect(branch).rejects.toBeInstanceOf(SessionNotFoundError);
-      expect(handle.agent.extMethodCalls).not.toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
-        }),
-      );
+        await expect(mutation).rejects.toBeInstanceOf(SessionNotFoundError);
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({ method }),
+        );
 
-      closeGate.resolve({});
-      await close;
-      await bridge.shutdown();
-    });
-
-    it('rejects a queued rewind when the source starts closing', async () => {
-      const closeGate = deferred<Record<string, unknown>>();
-      const handle = makeChannel({
-        extMethodImpl: (method) => {
-          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
-            return closeGate.promise;
-          }
-          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
-            throw new Error('rewind must not reach the closing source');
-          }
-          return {};
-        },
-      });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const rewind = bridge.rewindSession(session.sessionId, {
-        promptId: 'prompt-1',
-      });
-      const close = bridge.closeSession(session.sessionId);
-
-      await expect(rewind).rejects.toBeInstanceOf(SessionNotFoundError);
-      expect(handle.agent.extMethodCalls).not.toContainEqual(
-        expect.objectContaining({
-          method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
-        }),
-      );
-
-      closeGate.resolve({});
-      await close;
-      await bridge.shutdown();
-    });
+        closeGate.resolve({});
+        await close;
+        await bridge.shutdown();
+      },
+    );
 
     it('rejects a normal branch at admission while a prompt is active', async () => {
       const promptStarted = deferred<void>();
@@ -9545,40 +9529,6 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('waits for a dispatched branch instead of timing out and committing later', async () => {
-      const branchStarted = deferred<void>();
-      const branchGate = deferred<void>();
-      const handle = makeChannel({
-        extMethodImpl: async (method) => {
-          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
-          branchStarted.resolve();
-          await branchGate.promise;
-          return { newSessionId: 'slow-branch', title: 'Slow branch' };
-        },
-        resumeSessionImpl: () => ({}),
-      });
-      const bridge = makeBridge({
-        channelFactory: async () => handle.channel,
-        initializeTimeoutMs: 20,
-      });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-
-      let settled = false;
-      const branch = bridge.branchSession(session.sessionId, {}).finally(() => {
-        settled = true;
-      });
-      await branchStarted.promise;
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      expect(settled).toBe(false);
-
-      branchGate.resolve();
-      await expect(branch).resolves.toMatchObject({
-        sessionId: 'slow-branch',
-        displayName: 'Slow branch',
-      });
-      await bridge.shutdown();
-    });
-
     it('rejects rewind as soon as a prompt is admitted', async () => {
       const promptGate = deferred<PromptResponse>();
       const handle = makeChannel({
@@ -9615,40 +9565,56 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('waits for a dispatched rewind instead of timing out and committing later', async () => {
-      const rewindStarted = deferred<void>();
-      const rewindGate = deferred<void>();
-      const handle = makeChannel({
-        extMethodImpl: async (method) => {
-          if (method !== SERVE_CONTROL_EXT_METHODS.sessionRewind) return {};
-          rewindStarted.resolve();
-          await rewindGate.promise;
-          return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
-        },
-      });
-      const bridge = makeBridge({
-        channelFactory: async () => handle.channel,
-        initializeTimeoutMs: 20,
-      });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    it.each([
+      {
+        operation: 'branch',
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+        response: { newSessionId: 'slow-branch', title: 'Slow branch' },
+        expected: { sessionId: 'slow-branch', displayName: 'Slow branch' },
+      },
+      {
+        operation: 'rewind',
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+        response: { targetTurnIndex: 1, filesChanged: [], filesFailed: [] },
+        expected: { rewound: true, targetTurnIndex: 1 },
+      },
+    ])(
+      'waits for a dispatched $operation instead of timing out and committing later',
+      async ({ method, invoke, response, expected }) => {
+        const started = deferred<void>();
+        const gate = deferred<void>();
+        const handle = makeChannel({
+          extMethodImpl: async (calledMethod) => {
+            if (calledMethod !== method) return {};
+            started.resolve();
+            await gate.promise;
+            return response;
+          },
+          resumeSessionImpl: () => ({}),
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          initializeTimeoutMs: 20,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      let settled = false;
-      const rewind = bridge
-        .rewindSession(session.sessionId, { promptId: 'prompt-1' })
-        .finally(() => {
+        let settled = false;
+        const mutation = invoke(bridge, session.sessionId).finally(() => {
           settled = true;
         });
-      await rewindStarted.promise;
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      expect(settled).toBe(false);
+        await started.promise;
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(settled).toBe(false);
 
-      rewindGate.resolve();
-      await expect(rewind).resolves.toMatchObject({
-        rewound: true,
-        targetTurnIndex: 1,
-      });
-      await bridge.shutdown();
-    });
+        gate.resolve();
+        await expect(mutation).resolves.toMatchObject(expected);
+        await bridge.shutdown();
+      },
+    );
 
     it.each([
       {

@@ -34,7 +34,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
-  readLastJsonStringFieldsAsync,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
@@ -278,7 +277,6 @@ const MAX_PROMPT_SCAN_LINES = 10;
  * Used by readLastRecordUuid which still does its own tail read.
  */
 const TAIL_READ_SIZE = 64 * 1024;
-const BRANCH_TITLE_SCAN_CONCURRENCY = 16;
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
@@ -290,23 +288,8 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
-async function fsyncPath(
-  filePath: string,
-  openFlags: fs.OpenMode = 'r',
-): Promise<void> {
-  let handle: fs.promises.FileHandle;
-  try {
-    // Windows maps fsync to FlushFileBuffers, which needs write access.
-    handle = await fs.promises.open(filePath, openFlags);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'EACCES' && code !== 'EPERM') throw error;
-    // Backups inherit their source file's mode, so a read-only file cannot
-    // be opened for write: POSIX flushes through a read handle, while
-    // Windows has no flush path without write access (best-effort skip).
-    if (process.platform === 'win32') return;
-    handle = await fs.promises.open(filePath, 'r');
-  }
+async function fsyncPath(filePath: string): Promise<void> {
+  const handle = await fs.promises.open(filePath, 'r');
   try {
     await handle.sync();
   } finally {
@@ -347,6 +330,7 @@ async function copyFileHistoryBackupsToStaging(
     FILE_HISTORY_DIR,
     sourceSessionId,
   );
+  const copyBuffer = Buffer.alloc(64 * 1024);
   let stagingCreated = false;
   const ensureStaging = async () => {
     if (stagingCreated) return;
@@ -359,27 +343,76 @@ async function copyFileHistoryBackupsToStaging(
   for (const name of backupNames) {
     const source = validatedBackupPath(sourceDir, name);
     const target = validatedBackupPath(targetDirectory, name);
-    let sourceIsRegularFile: boolean;
+    let sourceHandle: fs.promises.FileHandle;
     try {
-      sourceIsRegularFile = (await fs.promises.lstat(source)).isFile();
+      sourceHandle = await fs.promises.open(
+        source,
+        fs.constants.O_RDONLY |
+          (process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW),
+      );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ELOOP') {
         onMissing(name);
         continue;
       }
       throw error;
     }
-    if (!sourceIsRegularFile) {
-      onMissing(name);
-      continue;
-    }
-    await ensureStaging();
     try {
-      await fs.promises.link(source, target);
-    } catch {
-      await fs.promises.copyFile(source, target, fs.constants.COPYFILE_EXCL);
+      const sourceStat = await sourceHandle.stat();
+      let pathStat: fs.Stats;
+      try {
+        pathStat = await fs.promises.lstat(source);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        onMissing(name);
+        continue;
+      }
+      if (
+        !sourceStat.isFile() ||
+        !pathStat.isFile() ||
+        sourceStat.dev !== pathStat.dev ||
+        sourceStat.ino !== pathStat.ino
+      ) {
+        onMissing(name);
+        continue;
+      }
+
+      await ensureStaging();
+      const targetHandle = await fs.promises.open(target, 'wx', 0o600);
+      try {
+        let sourceOffset = 0;
+        while (true) {
+          const { bytesRead } = await sourceHandle.read(
+            copyBuffer,
+            0,
+            copyBuffer.length,
+            sourceOffset,
+          );
+          if (bytesRead === 0) break;
+          let written = 0;
+          while (written < bytesRead) {
+            const result = await targetHandle.write(
+              copyBuffer,
+              written,
+              bytesRead - written,
+              null,
+            );
+            if (result.bytesWritten === 0) {
+              throw new Error(`Failed to copy file-history backup: ${name}`);
+            }
+            written += result.bytesWritten;
+          }
+          sourceOffset += bytesRead;
+        }
+        await targetHandle.sync();
+      } finally {
+        await targetHandle.close();
+      }
+      copiedNames.add(name);
+    } finally {
+      await sourceHandle.close();
     }
-    copiedNames.add(name);
   }
   return copiedNames;
 }
@@ -761,25 +794,6 @@ export class SessionService {
     source?: TitleSource;
   } {
     const hit = readLastJsonStringFieldsSync(
-      filePath,
-      'customTitle',
-      ['titleSource'],
-      '"subtype":"custom_title"',
-      tailBuffer,
-    );
-    const title = hit['customTitle'];
-    if (!title) return {};
-    const rawSource = hit['titleSource'];
-    const source =
-      rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
-    return { title, source };
-  }
-
-  private async readSessionTitleInfoFromFileAsync(
-    filePath: string,
-    tailBuffer: Buffer,
-  ): Promise<{ title?: string; source?: TitleSource }> {
-    const hit = await readLastJsonStringFieldsAsync(
       filePath,
       'customTitle',
       ['titleSource'],
@@ -2051,7 +2065,7 @@ export class SessionService {
       `.${newSessionId}.${operationId}.tmp`,
     );
     const targetBackupPath = path.join(backupRoot, newSessionId);
-    let backupNames = collectReferencedFileHistoryBackupNames(forked);
+    const backupNames = collectReferencedFileHistoryBackupNames(forked);
 
     await Promise.all([
       fs.promises.mkdir(chatsDir, { recursive: true }),
@@ -2091,24 +2105,12 @@ export class SessionService {
             );
           },
         );
-        if (copiedBackupNames.size !== backupNames.size) {
-          backupNames = copiedBackupNames;
-        }
-        if (backupNames.size > 0) {
+        if (copiedBackupNames.size > 0) {
           if (await pathExists(targetBackupPath)) {
             throw new Error(`Target session already exists: ${newSessionId}`);
           }
           await fs.promises.rename(stagedBackupPath, targetBackupPath);
           backupPublished = true;
-          for (const name of backupNames) {
-            if (
-              !(await pathExists(validatedBackupPath(targetBackupPath, name)))
-            ) {
-              throw new Error(
-                `Published file-history backup is missing: ${name}`,
-              );
-            }
-          }
         }
       }
 
@@ -2298,7 +2300,7 @@ export class SessionService {
 
     let fileNames: string[];
     try {
-      fileNames = await fs.promises.readdir(chatsDir);
+      fileNames = fs.readdirSync(chatsDir);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return titles;
@@ -2306,57 +2308,34 @@ export class SessionService {
       throw error;
     }
 
-    const candidates = fileNames
-      .filter((name) => SESSION_FILE_PATTERN.test(name))
-      .slice(0, MAX_FILES_TO_PROCESS);
-    const tailBuffers = Array.from(
-      { length: Math.min(BRANCH_TITLE_SCAN_CONCURRENCY, candidates.length) },
-      () => Buffer.alloc(LITE_READ_BUF_SIZE),
-    );
+    let filesProcessed = 0;
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed++;
 
-    for (
-      let offset = 0;
-      offset < candidates.length;
-      offset += BRANCH_TITLE_SCAN_CONCURRENCY
-    ) {
-      const batch = candidates.slice(
-        offset,
-        offset + BRANCH_TITLE_SCAN_CONCURRENCY,
-      );
-      const matches = await Promise.all(
-        batch.map(async (name, index): Promise<string | undefined> => {
-          const filePath = path.join(chatsDir, name);
-          const titleInfo = await this.readSessionTitleInfoFromFileAsync(
-            filePath,
-            tailBuffers[index]!,
-          );
-          if (!titleInfo.title) return undefined;
-          if (
-            !titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)
-          ) {
-            return undefined;
-          }
-
-          try {
-            const records = await jsonl.readLines<ChatRecord>(filePath, 1);
-            if (records.length === 0) return undefined;
-            if (
-              !(await this.sessionBelongsToCurrentProject(
-                records[0].sessionId,
-                records[0].cwd,
-              ))
-            ) {
-              return undefined;
-            }
-          } catch {
-            return undefined;
-          }
-          return titleInfo.title;
-        }),
-      );
-      for (const title of matches) {
-        if (title !== undefined) titles.push(title);
+      const filePath = path.join(chatsDir, name);
+      const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+      if (!titleInfo.title) continue;
+      if (!titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)) {
+        continue;
       }
+
+      try {
+        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+        if (records.length === 0) continue;
+        if (
+          !(await this.sessionBelongsToCurrentProject(
+            records[0].sessionId,
+            records[0].cwd,
+          ))
+        ) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      titles.push(titleInfo.title);
     }
 
     return titles;

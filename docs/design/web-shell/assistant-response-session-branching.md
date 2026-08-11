@@ -11,6 +11,10 @@
   unused checkpoint correlation fields
 - Simplicity stance: the feature needs the minimum sufficient invariants, not
   branch-specific recovery, job-ledger, or speculative schema subsystems
+- Documentation stance: this document intentionally retains the architectural
+  rationale, cross-layer flow, failure boundaries, and verification plan.
+  Simplicity constrains the implementation; it does not remove context that
+  reviewers and maintainers need to verify those invariants.
 
 ## 1. Summary
 
@@ -231,19 +235,21 @@ ordinary user record, and automatic turns also use user-role records.
 
 ### 7.2 Shared eligibility helper and resolver
 
-Keep the structural turn test in one pure Core helper:
+Keep the structural turn test in one internal pure Core implementation. The
+recorder-facing entry accepts only the records appended since its captured
+cursor plus the pending tool calls carried across that boundary:
 
 ```ts
-resolveCompletedTurnBranchCandidate(input: {
-  activeChain: readonly ChatRecord[];
+resolveCompletedTurnBranchCandidateFromRecords(input: {
+  records: readonly BranchPointRecord[];
   startExclusiveRecordUuid: string | null;
-  endInclusiveRecordUuid: string;
+  pendingCallsAtStart: readonly BranchToolCallIdentity[];
 }): BranchCandidate | undefined;
 ```
 
-The recorder calls this helper before a checkpoint exists. The persisted
-checkpoint resolver calls the same helper when it authenticates stored
-evidence:
+This is the hot-path incremental entry used before a checkpoint exists. The
+persisted checkpoint resolver reuses the same internal range implementation
+when it authenticates stored evidence:
 
 ```ts
 resolveBranchPoints(
@@ -261,16 +267,18 @@ For each checkpoint, the resolver verifies:
    ancestor of `checkpoint.parentUuid` on the supplied active chain.
 3. `assistantRecordUuid` lies inside
    `(startExclusiveRecordUuid, checkpoint.parentUuid]`.
-4. `resolveCompletedTurnBranchCandidate()` finds one eligible final Assistant
-   in the interval according to the product semantics in section 5.
+4. The shared internal range resolver finds one eligible final Assistant in
+   the interval according to the product semantics in section 5.
 5. The eligible Assistant is exactly the Assistant referenced by the payload.
 
 Malformed checkpoints are ignored during replay. A requested checkpoint that
 is missing from the current catalog is rejected by the mutation path.
 
-The recorder must use the shared eligibility helper. The transcript reader and
-session fork must use `resolveBranchPoints()`. No layer may maintain a second
-approximation of branchability.
+The recorder must use the incremental entry. The transcript reader and session
+fork must use `resolveBranchPoints()`. Core does not expose a second full-chain
+candidate wrapper solely for tests; both production entries share the same
+private semantic engine. No layer may maintain a second approximation of
+branchability.
 
 ## 8. Recorder Topology Transaction
 
@@ -517,11 +525,18 @@ currently active. Temporarily hiding the action while a later turn is running
 prevents the request from waiting behind that turn longer than the client action
 timeout and then committing a branch after the client has given up.
 
-While a branch request is pending, disable the selected action. The SDK bounds
-the request to 120 seconds. On success, switch to the returned session only if
-the user is still on the captured source session and no newer session-load
-generation has started. A late result never supersedes newer navigation; the
-persisted branch remains available in the session picker. On
+While a branch request is pending, disable the selected action. That row-local
+state is presentation feedback, not the request-identity boundary: transcript
+virtualization can unmount and remount the row while the request is still in
+flight. `App` therefore also keeps one shared in-flight promise keyed by source
+session, requested title, and checkpoint UUID. A remounted row joins the same
+promise instead of issuing a second persistent mutation, and the entry is
+removed in `finally`.
+
+The SDK bounds the request to 120 seconds. On success, switch to the returned
+session only if the user is still on the captured source session and no newer
+session-load generation has started. A late result never supersedes newer
+navigation; the persisted branch remains available in the session picker. On
 `branch_point_invalid`, refresh the source transcript and explain that the
 response is no longer on the active history path.
 
@@ -550,8 +565,10 @@ Each live session owns a `promptQueue` FIFO promise chain (in
 - rewind; and
 - close/drain coordination.
 
-A branch request additionally rejects with `BranchWhilePromptActiveError` while
-a prompt is active.
+A branch request additionally rejects with `BranchWhilePromptActiveError` when
+`pendingPromptCount > 0` or `promptActive` is true. Checking both values closes
+the FIFO hand-off window in which an accepted prompt is pending but has not yet
+set the active flag.
 
 Closing first marks the session as closing, rejects new mutations, and drains
 accepted work before teardown. Read-only attach and load operations do not join
@@ -565,6 +582,13 @@ exclusive history mutations:
 - branch read, validation, and creation;
 - rewind; and
 - cron and notification transcript writers.
+
+Before an ordinary branch is queued behind that boundary, the Agent checks
+`sourceSession.isIdle()` and returns `session_busy` immediately when an
+interactive, cron, or notification turn is active. This is not a replacement
+for the lock or the Session admission flag. It prevents a request from waiting
+behind an automatic writer until the SDK's 120-second bound expires and then
+committing later without a waiting UI.
 
 Interactive prompts do not hold this lock for their complete lifetime. They
 retain the Session's existing direct-preemption semantics: a newly admitted
@@ -643,10 +667,19 @@ For each referenced name:
 
 1. validate it as a filename, not an arbitrary path;
 2. resolve source and destination paths and verify their directory boundary;
-3. if the source is already missing or is no longer a regular file, warn and
-   omit it from backup staging;
-4. asynchronously copy or link every available source into staging; and
-5. treat an access or copy failure for an existing backup as a fork failure.
+3. open the source without following symbolic links, verify that the opened
+   handle and current path still identify the same regular file, and reject a
+   changed or unsafe source;
+4. asynchronously copy through that opened handle into an exclusively created
+   staging file and flush the target; and
+5. warn and omit a source that is already missing, but treat an access or copy
+   failure for an existing regular backup as a fork failure.
+
+Backup hard links are deliberately not used. Besides coupling the source and
+target sessions to one inode, an `lstat`-then-`link` optimization leaves a
+same-user race in which the source path can change before publication. Copying
+from the verified open handle keeps ownership independent and avoids that
+time-of-check/time-of-use gap.
 
 The branch operation does not restore these backups into the working tree.
 They exist only so a later explicit rewind in the new session remains valid.
@@ -692,8 +725,9 @@ All filesystem operations in this sequence use asynchronous promise APIs so a
 large transcript or backup set does not block the daemon event loop.
 
 1. Write the complete titled transcript to staging.
-2. Copy or link every available referenced backup to backup staging; warn and
-   omit source backups that are already missing.
+2. Securely copy every available referenced backup to backup staging; warn and
+   omit source backups that are already missing or no longer safe regular
+   files.
 3. Publish the complete backup directory.
 4. Publish the transcript last. Prefer a hard link for no-overwrite semantics;
    if hard links are unavailable or disallowed, use same-directory rename so
@@ -733,7 +767,7 @@ Normal session deletion remains responsible for committed session backups.
 | Transcript hard link unsupported                      | Yes              | Fall back to same-directory atomic rename         |
 | Title computation                                     | No               | Return error; create no target resources          |
 | Staged transcript write                               | No               | Best-effort cleanup                               |
-| Referenced backup already missing                     | Yes, degraded    | Warn, omit backup, preserve branch                |
+| Referenced backup missing, unsafe, or changed         | Yes, degraded    | Warn, omit backup, preserve branch                |
 | Backup partially copied                               | No               | Fail and clean staging                            |
 | Target checkpoint revalidation                        | No               | Fail and clean staging                            |
 | Process exits before transcript commit                | No               | May leave hidden staging or an orphan backup      |
@@ -746,18 +780,19 @@ Normal session deletion remains responsible for committed session backups.
 
 | Area                                                              | Primary responsibility                                                                    |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `packages/core/src/services/branch-points.ts`                     | Shared incremental and durable checkpoint semantics                                       |
 | `packages/core/src/services/chatRecordingService.ts`              | Checkpoint schema, central append coordinator, topology transaction                       |
 | `packages/core/src/services/sessionService.ts`                    | Shared resolver integration, bounded fork, backup whitelist, staging, commit, and cleanup |
 | `packages/core/src/services/session-transcript-reader.ts`         | Same-snapshot branch-point catalog for paged replay                                       |
 | `packages/cli/src/acp-integration/session/Session.ts`             | Prompt preemption, branch admission flag, turn capture, and checkpoint timing             |
 | `packages/cli/src/acp-integration/session/history-replay-page.ts` | Attach branch metadata while projecting Assistant records                                 |
-| `packages/cli/src/acp-integration/acpAgent.ts`                    | Exclusive-mutation lock, branch parameters, typed error mapping, titled fork invocation   |
+| `packages/cli/src/acp-integration/acpAgent.ts`                    | Idle fail-fast, exclusive-mutation lock, typed errors, and titled fork invocation         |
 | `packages/acp-bridge/src/bridge.ts`                               | Persisted branch mutation; explicit restore/admission only for live side-task sessions    |
 | `packages/cli/src/serve/routes/session.ts`                        | Optional `atRecordId`, validation, and minimal persisted-branch result                    |
 | `packages/cli/src/serve/acp-http/dispatch.ts`                     | Compose ACP-standard fork with an explicit load and connection ownership                  |
 | `packages/sdk-typescript`                                         | Branch request and live/replay metadata types                                             |
 | `packages/webui/src/daemon/session`                               | Preserve metadata and expose the extended action                                          |
-| `packages/web-shell/client`                                       | Branch action on every block with `branchRecordId`                                        |
+| `packages/web-shell/client`                                       | Branch action, request deduplication, and stale-navigation protection                     |
 
 ## 18. Verification Plan
 
@@ -796,6 +831,8 @@ Normal session deletion remains responsible for committed session backups.
 - Branch enters before rewind.
 - Rewind enters before branch.
 - Prompt or continuation enters around branch.
+- A branch presented while an automatic turn is active fails with
+  `session_busy` before waiting on the Agent mutation queue.
 - A second direct prompt reaches Session admission immediately and preempts the
   first instead of waiting behind the Agent mutation queue.
 - Branch admission wins atomically against a prompt waiting for writer or
@@ -818,6 +855,8 @@ Normal session deletion remains responsible for committed session backups.
 - Shared backup references are copied once.
 - A backup already missing from the source is warned and omitted without
   blocking the branch.
+- A symbolic link or a source replaced between path validation and open-handle
+  verification is never published as a target backup.
 - Access and partial-copy failures for existing backups leave no visible
   target session.
 - Current working files remain unchanged.
@@ -841,7 +880,9 @@ Verify picker visibility, backup completeness, best-effort staging cleanup, and
 commit-point behavior at every boundary. Also verify that ordinary branching
 does not restore or consume live-session admission, side-task creation still
 returns a loaded session, and a late branch result cannot override a newer
-navigation intent.
+navigation intent. Unmount and remount the selected virtualized transcript row
+while the request is in flight and verify that only one persistent branch
+mutation is sent.
 
 ### 18.6 Web Shell E2E
 
@@ -898,6 +939,13 @@ them and create sibling topology.
 
 Rejected because it leaks future history into a historical fork and makes a
 partially copied target appear successful.
+
+### Hard-link referenced backups
+
+Rejected because it couples source and target retention to one inode and a
+path-check-then-link sequence can publish a different file if the source path
+changes concurrently. Copying from a verified open handle is small enough and
+keeps session ownership independent.
 
 ### Publish the transcript before backups or title
 
