@@ -656,6 +656,19 @@ export function WebShellSidebar({
     !organizationEnabled ||
     !includePrimaryWorkspaceSessions ||
     sessionsPage !== undefined;
+  // Which source the settled sessions page belongs to. The resource retains
+  // the previous source's page while a source-switch refetch is in flight, so
+  // section reconciliation must not run against a stale page of the other
+  // source (its sections would be consumed as the wrong source's initial
+  // catalog). A page identity change marks a successful fetch settling.
+  const lastSettledSessionsPageRef = useRef(sessionsPage);
+  const settledSessionsSourceRef = useRef<SidebarSessionSource>(sessionSource);
+  useEffect(() => {
+    if (lastSettledSessionsPageRef.current !== sessionsPage) {
+      lastSettledSessionsPageRef.current = sessionsPage;
+      settledSessionsSourceRef.current = sessionSource;
+    }
+  }, [sessionsPage, sessionSource]);
   const loadPinnedSessions =
     organizationEnabled && selectedSessionSource !== 'channel';
   const { sessions: primaryPinnedSessions, reload: reloadPinnedSessions } =
@@ -744,11 +757,16 @@ export function WebShellSidebar({
       ),
   );
   const knownSessionSectionIdsRef = useRef<Set<string>>(new Set());
-  // Dedicated first-sync latch. Cleared only after both groups catalog and
-  // sessions list have settled (including empty responses). Do not infer this
-  // from knownSessionSectionIdsRef.size — seeding that set early would make the
-  // first real sync look mid-session and auto-collapse restored expansions.
-  const awaitingInitialSessionCatalogRef = useRef(true);
+  // Dedicated first-sync latch, keyed by session source: each source's first
+  // settled catalog only registers section ids. Without per-source latches the
+  // Tasks settle consumes the shared latch and the first Channels visit treats
+  // every platform section as brand-new, auto-collapsing and persisting them.
+  // Do not infer this from knownSessionSectionIdsRef.size — seeding that set
+  // early would make the first real sync look mid-session and auto-collapse
+  // restored expansions.
+  const awaitingInitialSessionCatalogBySourceRef = useRef<
+    Record<SidebarSessionSource, boolean>
+  >({ default: true, channel: true });
   const [groupsCatalogReady, setGroupsCatalogReady] =
     useState(!organizationEnabled);
   // organizationEnabled can flip true mid-session (capabilities can land after
@@ -2751,7 +2769,10 @@ export function WebShellSidebar({
   useEffect(() => {
     const activeSections = channelSessionSections ?? sessionSections;
     if (selectedSessionSource === 'channel') {
-      if (!channelCatalogLoaded || sessionsPage === undefined) return;
+      if (!channelCatalogLoaded) return;
+      // The refetch for the new source retains the previous source's page
+      // until it settles; wait for a page fetched for the channel source.
+      if (settledSessionsSourceRef.current !== 'channel') return;
     } else {
       if (!organizationEnabled) return;
       if (!groupsCatalogReady || !sessionsCatalogReady) return;
@@ -2763,9 +2784,10 @@ export function WebShellSidebar({
     const unseenIds = activeSections
       .map((section) => section.id)
       .filter((id) => !knownSessionSectionIdsRef.current.has(id));
-    const isInitialCatalog = awaitingInitialSessionCatalogRef.current;
+    const isInitialCatalog =
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource];
     if (isInitialCatalog) {
-      awaitingInitialSessionCatalogRef.current = false;
+      awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = false;
       for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
       return;
     }
@@ -2784,8 +2806,8 @@ export function WebShellSidebar({
     organizationEnabled,
     selectedSessionSource,
     sessionSections,
+    sessionSource,
     sessionsCatalogReady,
-    sessionsPage,
   ]);
 
   useEffect(() => {

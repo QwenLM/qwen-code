@@ -8,6 +8,8 @@ import {
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   type ChannelLoopToolHandler,
 } from './ChannelAgentBridge.js';
@@ -166,6 +168,27 @@ describe('AcpBridge', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('performs the private-parent capability handshake with the spawned child', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+
+    const spawnOptions = child.spawn.mock.calls[0]![2] as {
+      env?: Record<string, string | undefined>;
+    };
+    const capability = spawnOptions.env?.[ACP_PRIVATE_PARENT_CAPABILITY_ENV];
+    expect(typeof capability).toBe('string');
+    expect(capability!.length).toBeGreaterThan(0);
+    const initializeParams = child.connections[0]!.initialize.mock
+      .calls[0]![0] as { _meta?: Record<string, unknown> };
+    expect(
+      initializeParams._meta?.[ACP_PRIVATE_PARENT_CAPABILITY_META_KEY],
+    ).toBe(capability);
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {

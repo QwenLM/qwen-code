@@ -25,6 +25,7 @@ import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   PollingChannelBase,
+  sanitizeDisplayText,
   sanitizeLogText,
   sanitizePromptText,
   truncateCodePoints,
@@ -1446,7 +1447,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const summary = comments
       .map(
         (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${(comment.body || '').trim().slice(0, MAX_AGGREGATE_COMMENT_CHARS)}`,
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {

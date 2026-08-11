@@ -2099,6 +2099,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen-code/invocation': invocation,
         'qwen-code/private-parent-capability': 'must-not-propagate',
         'qwen.daemon.modelPrompt': 'trusted model-only prompt',
+        'qwen.daemon.promptDisplayText': 'trusted display text',
       },
     });
 
@@ -2106,7 +2107,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         sessionId: 'trusted-session',
         prompt: [{ type: 'text', text: 'hello' }],
-        _meta: { keep: true },
+        _meta: {
+          keep: true,
+          'qwen.daemon.promptDisplayText': 'trusted display text',
+        },
       },
       invocation,
       expect.any(AbortSignal),
@@ -2461,6 +2465,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
         'qwen-code/private-parent-capability': 'forged-capability',
         'qwen.daemon.modelPrompt': 'forged model-only prompt',
+        'qwen.daemon.promptDisplayText': 'forged display text',
       },
     });
 

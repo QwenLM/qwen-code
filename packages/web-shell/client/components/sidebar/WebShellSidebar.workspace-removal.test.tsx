@@ -156,6 +156,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
+const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
+  './collapsedSessionSections'
+);
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 if (!globalThis.PointerEvent) {
@@ -3300,6 +3303,104 @@ describe('WebShellSidebar session source switch', () => {
     await act(async () => click(toggle!));
     expect(toggle?.getAttribute('aria-expanded')).toBe('true');
     expect(dingTalkGroup?.textContent).toContain('DingTalk one');
+  });
+
+  it('starts channel sections expanded on the first Channels visit with organization enabled', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [
+        ...capabilities.features,
+        'channel_management',
+        'session_organization',
+      ],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: [],
+    });
+    channelState.catalog = [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+    ];
+    channelState.channels = {
+      'ding-one': {
+        name: 'ding-one',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+    };
+    channelState.data = {
+      catalog: channelState.catalog,
+      snapshot: { revision: '1', instances: channelState.channels },
+    };
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    // Serve a distinct settled page per source (distinct identities), as the
+    // real resource does when the source-switch refetch resolves.
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    // Settle the groups catalog so the Tasks source consumes its own
+    // first-sync latch before the Channels visit.
+    await act(async () => {
+      await workspaceActions.listSessionGroups.mock.results.at(-1)?.value;
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Task session');
+
+    await switchSessionSource('Channels');
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    // The first Channels visit consumes the channel-source latch without
+    // treating the platform sections as brand-new mid-session additions.
+    expect(
+      dingTalkGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
   });
 });
 
