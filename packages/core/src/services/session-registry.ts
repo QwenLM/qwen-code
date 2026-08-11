@@ -413,20 +413,12 @@ function isEntryRace(error: unknown): boolean {
  * mkdir failed for some other reason (`EACCES` on a parent, most likely),
  * which is not an obstruction and is rethrown to the caller's own handler.
  *
- * Scope, measured rather than assumed: `mkdir(recursive)` throws `EEXIST`
- * on a regular file and on a symlink to one, and `ENOENT` on a dangling
- * symlink — all three are repaired here. It *succeeds* on a symlink that
- * resolves to a real directory, so that case never reaches this function
- * and is not addressed by it; records would be written through the link.
- * Refusing it belongs with the directory's own hardening (an `O_NOFOLLOW`
- * open of the dir, or an `lstat` gate on the healthy path), not with a
- * repair that only ever runs after a failure, and it trades against users
- * who deliberately symlink the qwen dir onto another disk.
+ * After creation, `lstat` rejects a symlink-to-directory and a directory
+ * owned by another uid before chmod or record writes can follow it.
  */
 async function ensureRegistryDir(dir: string): Promise<void> {
   try {
     await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
-    return;
   } catch (error) {
     let obstruction: fsSync.Stats;
     try {
@@ -444,6 +436,46 @@ async function ensureRegistryDir(dir: string): Promise<void> {
     );
     await fs.unlink(dir);
     await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
+  }
+  const stat = await fs.lstat(dir);
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (!stat.isDirectory() || (uid !== null && stat.uid !== uid)) {
+    throw new Error(`session registry directory is not owned by this user`);
+  }
+}
+
+async function sweepStaleEntry(
+  filePath: string,
+  expected: EntryIdentity,
+): Promise<void> {
+  const quarantinePath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${randomBytes(6).toString('hex')}.stale`,
+  );
+  try {
+    await fs.rename(filePath, quarantinePath);
+  } catch {
+    return;
+  }
+
+  let moved: fsSync.Stats;
+  try {
+    moved = await fs.lstat(quarantinePath);
+  } catch {
+    return;
+  }
+  if (moved.dev === expected.dev && moved.ino === expected.ino) {
+    await fs.unlink(quarantinePath).catch(() => {});
+    return;
+  }
+
+  try {
+    await fs.link(quarantinePath, filePath);
+    await fs.unlink(quarantinePath);
+  } catch (error) {
+    debugLogger.debug(
+      `listLiveSessions: preserved a raced registry entry at ${quarantinePath}: ${describe(error)}`,
+    );
   }
 }
 
@@ -1030,17 +1062,7 @@ export async function listLiveSessions(
       }
 
       if (sweepStale) {
-        try {
-          // Same binding as unregisterSession's: the entry that proved
-          // itself stale is the only one this may remove, so a co-tenant
-          // who swaps a live foreign record into the name after the read
-          // does not get it deleted on their behalf.
-          assertSameEntry(filePath, read.entry, true);
-          await fs.unlink(filePath);
-        } catch {
-          // Raced with another session's sweep, replaced under us, or not
-          // ours to delete.
-        }
+        await sweepStaleEntry(filePath, read.entry);
       }
     },
   );

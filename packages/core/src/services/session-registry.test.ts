@@ -61,6 +61,11 @@ const statSizeLie = vi.hoisted(() => ({ value: null as number | null }));
  */
 const sweepBeforeCommit = vi.hoisted(() => ({ value: null as string | null }));
 
+const sweepReplacement = vi.hoisted(() => ({
+  path: null as string | null,
+  contents: null as string | null,
+}));
+
 /**
  * Lets a test make `readdir` fail the way an unreadable registry directory
  * does, without depending on the uid the suite runs as. A chmod-based
@@ -103,6 +108,20 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     }
     return result;
   };
+  const rename: typeof actual.rename = async (oldPath, newPath) => {
+    if (
+      typeof oldPath === 'string' &&
+      oldPath === sweepReplacement.path &&
+      sweepReplacement.contents !== null
+    ) {
+      const contents = sweepReplacement.contents;
+      sweepReplacement.path = null;
+      sweepReplacement.contents = null;
+      await actual.rm(oldPath, { force: true });
+      await actual.writeFile(oldPath, contents);
+    }
+    return actual.rename(oldPath, newPath);
+  };
   const open: typeof actual.open = async (...args) => {
     const handle = await actual.open(...args);
     const realStat = handle.stat.bind(handle);
@@ -122,6 +141,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     default: { ...actual, open, writeFile, readdir },
     open,
     writeFile,
+    rename,
     readdir,
   };
 });
@@ -154,6 +174,8 @@ beforeEach(async () => {
 afterEach(async () => {
   statSizeLie.value = null;
   sweepBeforeCommit.value = null;
+  sweepReplacement.path = null;
+  sweepReplacement.contents = null;
   readdirFails.value = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
@@ -307,6 +329,26 @@ describe('registerSession', () => {
 
     expect((await fs.lstat(dir)).isDirectory()).toBe(true);
     expect(await fs.readFile(target, 'utf8')).toBe('must survive');
+  });
+
+  it('refuses a registry directory symlink without touching its target', async () => {
+    const dir = getSessionRegistryDir();
+    const target = path.join(tmpDir, 'victim-directory');
+    await fs.mkdir(target);
+    await fs.chmod(target, 0o755);
+    await fs.symlink(target, dir);
+
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      }),
+    ).toBe(false);
+
+    expect((await fs.lstat(dir)).isSymbolicLink()).toBe(true);
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o755);
+    expect(await fs.readdir(target)).toEqual([]);
   });
 
   it('leaves an existing registry directory and its records alone', async () => {
@@ -1087,6 +1129,45 @@ describe('listLiveSessions', () => {
     // selfPid is set elsewhere so this record goes through the liveness
     // path rather than the trust-our-own-record shortcut.
     expect(await listLiveSessions({ selfPid: DEAD_PID })).toEqual([]);
+  });
+
+  it('does not sweep a newer record published after stale validation', async () => {
+    const pid = DEAD_PID;
+    const filePath = await writeRaw(`${pid}.json`, {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid,
+      sessionId: 'stale',
+      cwd: '/w/stale',
+      name: 'stale-aa',
+      kind: 'interactive',
+      startedAt: Date.now() - 1000,
+      qwenVersion: null,
+      peerProtocol: 1,
+      pidNamespace: readPidNamespaceId(),
+      machineId: readMachineId(),
+      procStart: null,
+    });
+    sweepReplacement.path = filePath;
+    sweepReplacement.contents = JSON.stringify({
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid,
+      sessionId: 'replacement',
+      cwd: '/w/live',
+      name: 'live-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+      qwenVersion: null,
+      peerProtocol: 1,
+      pidNamespace: readPidNamespaceId(),
+      machineId: readMachineId(),
+      procStart: null,
+    });
+
+    await listLiveSessions({ selfPid: -1 });
+
+    expect(JSON.parse(await fs.readFile(filePath, 'utf8')).sessionId).toBe(
+      'replacement',
+    );
   });
 
   it('neither lists nor sweeps a same-origin record with no start token', async () => {
