@@ -63,6 +63,7 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
+import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -1414,6 +1415,28 @@ describe('runQwenServe telemetry validation', () => {
         }),
       ]);
 
+      for (const [
+        index,
+        [bridgeOptions],
+      ] of createBridge.mock.calls.entries()) {
+        const target = path.join(
+          tmpDir,
+          `static-runtime-external-${index}.txt`,
+        );
+        await bridgeOptions.fileSystem!.writeText({
+          path: target,
+          content: `runtime-${index}`,
+          sessionId: `session-static-${index}`,
+          _meta: {
+            'qwen-code/tool-write-origin': {
+              version: 1,
+              source: 'write_file',
+            },
+          },
+        });
+        expect(fs.readFileSync(target, 'utf8')).toBe(`runtime-${index}`);
+      }
+
       closing = handle.close();
       await vi.waitFor(() => expect(shutdownResolvers).toHaveLength(2));
     } finally {
@@ -1433,6 +1456,69 @@ describe('runQwenServe telemetry validation', () => {
       expect(result.value.shutdown).toHaveBeenCalledWith({
         reason: 'daemon_shutdown',
       });
+    }
+  });
+
+  it('keeps external built-in writes disabled for an injected primary filesystem factory', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-injected-fs-')),
+    );
+    const workspace = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(workspace);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    const boundaryError = Object.assign(new Error('outside workspace'), {
+      kind: 'path_outside_workspace',
+    });
+    const writeSameHostToolText = vi.fn(async () => undefined);
+    const fsFactory = {
+      assertCanWrite: vi.fn(),
+      writeSameHostToolText,
+      forRequest: () =>
+        ({
+          resolve: vi.fn(async () => {
+            throw boundaryError;
+          }),
+        }) as never,
+    } satisfies WorkspaceFileSystemFactory;
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        trustedWorkspace: true,
+        fsFactory,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await expect(
+        createBridge.mock.calls[0]?.[0].fileSystem!.writeText({
+          path: path.join(tmpDir, 'outside.txt'),
+          content: 'must-not-write',
+          sessionId: 'session-injected-primary',
+          _meta: {
+            'qwen-code/tool-write-origin': {
+              version: 1,
+              source: 'write_file',
+            },
+          },
+        }),
+      ).rejects.toBe(boundaryError);
+      expect(writeSameHostToolText).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
     }
   });
 
@@ -1598,6 +1684,25 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+      const firstDynamicFileSystem = createBridge.mock.calls[1]?.[0].fileSystem;
+      const firstDynamicTarget = path.join(
+        tmpDir,
+        'dynamic-runtime-external.txt',
+      );
+      await firstDynamicFileSystem!.writeText({
+        path: firstDynamicTarget,
+        content: 'first-generation',
+        sessionId: 'session-dynamic-first',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+      expect(fs.readFileSync(firstDynamicTarget, 'utf8')).toBe(
+        'first-generation',
+      );
 
       const before = (await (
         await fetch(`${handle.url}/capabilities`, { headers })
@@ -1638,6 +1743,19 @@ describe('runQwenServe telemetry validation', () => {
       expect(dynamicBridge?.shutdown).toHaveBeenCalledWith({
         reason: 'workspace_removed',
       });
+      await expect(
+        firstDynamicFileSystem!.writeText({
+          path: path.join(tmpDir, 'closed-dynamic-generation.txt'),
+          content: 'must-not-write',
+          sessionId: 'session-dynamic-closed',
+          _meta: {
+            'qwen-code/tool-write-origin': {
+              version: 1,
+              source: 'write_file',
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'workspace_generation_closed' });
 
       const afterResponse = await fetch(`${handle.url}/capabilities`, {
         headers,
@@ -1659,6 +1777,24 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(readded.status).toBe(201);
       expect(createBridge).toHaveBeenCalledTimes(3);
+      const secondDynamicTarget = path.join(
+        tmpDir,
+        'dynamic-runtime-readded.txt',
+      );
+      await createBridge.mock.calls[2]?.[0].fileSystem!.writeText({
+        path: secondDynamicTarget,
+        content: 'second-generation',
+        sessionId: 'session-dynamic-second',
+        _meta: {
+          'qwen-code/tool-write-origin': {
+            version: 1,
+            source: 'write_file',
+          },
+        },
+      });
+      expect(fs.readFileSync(secondDynamicTarget, 'utf8')).toBe(
+        'second-generation',
+      );
       for (const [options] of createBridge.mock.calls) {
         expect(options).toMatchObject({
           delegateReadTextFileToClient: false,
@@ -10777,6 +10913,55 @@ describe('runQwenServe channel worker supervisor', () => {
 });
 
 describe('runQwenServe startup observability', () => {
+  it("names every pre-auth surface in the --allow-origin '*' warning", async () => {
+    // This warning is the operator's only notice of what a wildcard origin
+    // exposes without a token, so it must enumerate the actual pre-auth
+    // surface: the Web Shell static assets (mounted before bearerAuth in
+    // every mode) and, on loopback without --require-auth, /health. If the
+    // pre-auth set drifts again, this assertion is what catches the stale
+    // message.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-allow-origin-')),
+    );
+    const stderrWrites: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        token: 'secret',
+        allowOrigins: ['*'],
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      const warning = stderrWrites
+        .join('')
+        .split('\n')
+        .find((line) => line.includes('--allow-origin:'));
+      expect(warning).toBeDefined();
+      expect(warning).toContain('Web Shell static assets');
+      expect(warning).toContain('--no-web');
+      expect(warning).toContain('/health');
+      expect(warning).toContain('--require-auth');
+      // The retired debug page must not resurface in the enumeration.
+      expect(warning).not.toContain('/demo');
+    } finally {
+      spy.mockRestore();
+      await handle.close();
+    }
+  });
+
   let tmpDir: string;
 
   afterEach(() => {
