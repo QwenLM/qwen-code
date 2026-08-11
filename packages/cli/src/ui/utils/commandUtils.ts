@@ -101,13 +101,17 @@ export const isBtwCommand = (query: string): boolean => {
 
 /**
  * Whether a submission consumes the one-shot context-file announcement.
- * Mirrors the downstream input classification so only submissions that
- * actually reach the model consume it: blank input is dropped by the queue,
- * btw side-questions and shell-mode input bypass the model, local slash
- * commands resolve without a model turn — but model-invocable slash
- * commands (skills, MCP prompts) are expanded into a submit_prompt that is
- * sent to the model, and slash commands are routed before the shell-mode
- * intercept, so both consume it even while shell mode is active.
+ * Heuristically mirrors the downstream input classification so the latch
+ * is consumed by the submission most likely to start the first main model
+ * turn: blank input is dropped by the queue, btw side-questions are
+ * deliberately exempt (they don't advance the main conversation even
+ * though they may fork a model call), shell-mode input is intercepted, and
+ * local slash commands resolve without a model turn — but model-invocable
+ * slash commands (skills, MCP prompts) are expanded into a submit_prompt
+ * and routed before the shell-mode intercept, so they consume it even
+ * while shell mode is active. This is a prediction, not an admission
+ * guarantee; rare post-admission aborts and built-in submit_prompt
+ * commands without the modelInvocable flag are out of scope here.
  */
 export function consumesContextAnnouncementLatch(
   trimmedPrompt: string,

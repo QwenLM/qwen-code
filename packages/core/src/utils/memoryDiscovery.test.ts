@@ -1424,8 +1424,9 @@ describe('formatContextFileDisplayPath', () => {
   });
 
   it('strips ANSI escapes and control characters from display paths', () => {
-    // CSI parameter bytes span 0x30-0x3F, so ESC[2J consumes the 'b' too;
-    // BEL is removed by the residual control-char pass.
+    // stripVTControlCharacters matches ESC[2Jb…\x07 as one BEL-terminated
+    // sequence, swallowing 'b' with the BEL; a bare BEL would survive it,
+    // which is why this fixture pairs the two to exercise that pass.
     expect(
       formatContextFileDisplayPath(
         path.join(proj, 'a\u001b[2Jb\u0007.md'),

@@ -2483,13 +2483,15 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
-      // Mirror the downstream input classification so the latch is only
-      // consumed by submissions that actually reach the model (see
-      // consumesContextAnnouncementLatch). Queued (deferUntilIdle)
-      // submissions are admitted later, so they don't consume it here.
+      // Heuristically mirror the downstream input classification (see
+      // consumesContextAnnouncementLatch) so the latch is consumed by the
+      // submission most likely to start the first main model turn. This is a
+      // prediction, not an admission guarantee: rare post-admission aborts
+      // (ESC, expansion errors) and built-in submit_prompt commands without
+      // the modelInvocable flag are not re-armed here; consuming at the true
+      // admission choke point is a deeper refactor deferred for this feature.
       const trimmedPrompt = userPromptText.trim();
       if (
-        !options?.deferUntilIdle &&
         !contextFilesAnnouncedRef.current &&
         consumesContextAnnouncementLatch(trimmedPrompt, {
           shellModeActive,
@@ -2993,6 +2995,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleClearScreen = useCallback(() => {
     clearPendingStateRef.current();
+    // Ctrl-L wipes the emitted INFO item without a session switch, so re-arm
+    // the latch or the remaining attached files go unannounced afterwards.
+    contextFilesAnnouncedRef.current = false;
     historyManager.clearItems();
     clearScreen();
     remountStaticHistory();

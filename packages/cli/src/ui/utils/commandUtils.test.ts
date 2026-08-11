@@ -1294,7 +1294,7 @@ describe('consumesContextAnnouncementLatch', () => {
     expect(consumesContextAnnouncementLatch('', options(false))).toBe(false);
   });
 
-  it('rejects btw side-questions (they bypass the model)', () => {
+  it('rejects btw side-questions (deliberately exempt, not a main turn)', () => {
     expect(
       consumesContextAnnouncementLatch('?btw side note', options(false)),
     ).toBe(false);
