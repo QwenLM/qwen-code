@@ -675,6 +675,12 @@ describe('<TableRenderer />', () => {
       expect(stripAnsi(output)).toContain(`${secondUrl}_。`);
     });
 
+    it('preserves dunder identifiers as visible text', () => {
+      const output = renderTable(['Value'], [['Python 的 __init__ 方法']], 60);
+
+      expect(stripAnsi(output)).toContain('__init__');
+    });
+
     it('falls back to legacy `label (url)` in cells on unsupported terminals', () => {
       // isTTY=false from the suite-wide beforeEach disables hyperlinks.
       const url = 'https://example.com/page';

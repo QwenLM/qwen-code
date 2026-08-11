@@ -280,6 +280,14 @@ math then literal: $x^2\$$`;
       expect(stripAnsi(out)).toContain(`${secondUrl}_`);
     });
 
+    it('preserves dunder identifiers as visible text', () => {
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text="Python 的 __init__ 方法" />,
+      );
+
+      expect(stripAnsi(lastFrame() ?? '')).toContain('__init__');
+    });
+
     it('leaves bare URLs unwrapped when unsupported', () => {
       const url = 'https://example.com/plain';
       const { lastFrame } = renderWithProviders(

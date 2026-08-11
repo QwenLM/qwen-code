@@ -300,6 +300,9 @@ describe('osc8 helpers', () => {
       'https://ja.wikipedia.org/wiki/人々',
       'https://ja.wikipedia.org/wiki/〆切',
       'https://example.com/二〇二六年報',
+      'https://ja.example.com/〼道と〻次',
+      'https://example.com/〱〢',
+      'https://example.com/a︳b︴c',
       'https://zh.wikipedia.org/wiki/北京',
     ])('keeps word-forming CJK characters in %s', (url) => {
       expect(new RegExp(BARE_URL_PATTERN).exec(url)?.[0]).toBe(url);
