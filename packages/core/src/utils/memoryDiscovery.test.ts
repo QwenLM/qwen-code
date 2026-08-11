@@ -479,6 +479,24 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it('counts but does not announce whitespace-only context files', async () => {
+    await createTestFile(path.join(cwd, DEFAULT_CONTEXT_FILENAME), '   \n\t ');
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+    );
+
+    // The file is discovered, but its blank content never reaches the system
+    // prompt, so it must not be announced as attached.
+    expect(result.fileCount).toBe(1);
+    expect(result.memoryContent).toBe('');
+    expect(result.contextFilePaths).toEqual([]);
+  });
+
   it('notifies when startup instruction files are loaded', async () => {
     const globalFile = await createTestFile(
       path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),

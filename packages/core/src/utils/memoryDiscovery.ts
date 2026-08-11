@@ -324,20 +324,29 @@ async function readGeminiMdFiles(
 export function formatContextFileDisplayPath(
   filePath: string,
   currentWorkingDirectory: string,
+  // Same home the loader used for discovery, so display and discovery agree.
+  userHomePath = homedir(),
 ): string {
   if (!path.isAbsolute(filePath)) {
     return stripAnsiAndControl(filePath);
   }
   const relativePath = path.relative(currentWorkingDirectory, filePath);
-  if (relativePath.startsWith('..')) {
-    // Pass homedir() explicitly: tildeifyPath's own lookup goes through a
-    // node:os default import that this module's test mock doesn't reach.
-    const tildeified = tildeifyPath(filePath, homedir());
+  // On Windows, cross-drive targets come back as absolute paths (no common
+  // root) instead of `..` chains; treat them as outside the CWD tree too.
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    const tildeified = tildeifyPath(filePath, userHomePath);
     if (tildeified !== filePath) {
       return stripAnsiAndControl(tildeified);
     }
   }
   return stripAnsiAndControl(relativePath);
+}
+
+// The attachment rule for the system prompt: only non-blank string content
+// reaches it. Shared by concatenateInstructions and contextFilePaths so the
+// "displayed = attached" property holds by construction.
+function hasAttachedContent(item: GeminiFileContent): boolean {
+  return typeof item.content === 'string' && item.content.trim().length > 0;
 }
 
 function concatenateInstructions(
@@ -346,18 +355,14 @@ function concatenateInstructions(
   currentWorkingDirectoryForDisplay: string,
 ): string {
   return instructionContents
-    .filter((item) => typeof item.content === 'string')
+    .filter(hasAttachedContent)
     .map((item) => {
       const trimmedContent = (item.content as string).trim();
-      if (trimmedContent.length === 0) {
-        return null;
-      }
       const displayPath = path.isAbsolute(item.filePath)
         ? path.relative(currentWorkingDirectoryForDisplay, item.filePath)
         : item.filePath;
       return `--- Context from: ${displayPath} ---\n${trimmedContent}\n--- End of Context from: ${displayPath} ---`;
     })
-    .filter((block): block is string => block !== null)
     .join('\n\n');
 }
 
@@ -538,15 +543,16 @@ export async function loadServerHierarchicalMemory(
       memoryFilenames.has(path.basename(item.filePath)),
     );
     fileCount = memoryItems.length;
-    // Mirror concatenateInstructions' empty-content filter: only files whose
-    // content actually reached the system prompt count as "attached".
+    // Only files whose content actually reached the system prompt count as
+    // "attached" (see hasAttachedContent).
     contextFilePaths = memoryItems
-      .filter(
-        (item) =>
-          typeof item.content === 'string' && item.content.trim().length > 0,
-      )
+      .filter(hasAttachedContent)
       .map((item) =>
-        formatContextFileDisplayPath(item.filePath, currentWorkingDirectory),
+        formatContextFileDisplayPath(
+          item.filePath,
+          currentWorkingDirectory,
+          userHomePath,
+        ),
       );
   }
 

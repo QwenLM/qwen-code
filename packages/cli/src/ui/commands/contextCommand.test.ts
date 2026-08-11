@@ -289,9 +289,10 @@ describe('collectContextData (contextCommand)', () => {
   });
 
   it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {
-    // Memory markers store paths relative to the session working directory;
-    // global files must render as `~/...` instead of `../../..` chains.
-    const workingDir = process.cwd();
+    // Memory markers store paths relative to the session working directory,
+    // which in ACP/daemon-served sessions differs from process.cwd(); global
+    // files must render as `~/...` instead of `../../..` chains.
+    const workingDir = path.join(os.tmpdir(), 'context-session-dir');
     const globalFile = path.join(os.homedir(), '.qwen', 'QWEN.md');
     const markerPath = path.relative(workingDir, globalFile);
     const memory =

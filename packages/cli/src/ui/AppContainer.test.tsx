@@ -6152,6 +6152,7 @@ describe('AppContainer State Management', () => {
   describe('context files announcement (#5267)', () => {
     const renderAnnouncementHarness = (contextFilePaths: string[]) => {
       const addItem = vi.fn();
+      const enqueueMessage = vi.fn();
       mockedUseHistory.mockReturnValue({
         history: [],
         addItem,
@@ -6159,6 +6160,16 @@ describe('AppContainer State Management', () => {
         clearItems: vi.fn(),
         loadHistory: vi.fn(),
         truncateToItem: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: enqueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
       vi.spyOn(mockConfig, 'getContextFilePaths').mockReturnValue(
         contextFilePaths,
@@ -6171,7 +6182,7 @@ describe('AppContainer State Management', () => {
           initializationResult={mockInitResult}
         />,
       );
-      return addItem;
+      return { addItem, enqueueMessage };
     };
 
     const announcementCalls = (addItem: ReturnType<typeof vi.fn>) =>
@@ -6183,7 +6194,10 @@ describe('AppContainer State Management', () => {
       );
 
     it('announces loaded context files above the first real prompt, once', () => {
-      const addItem = renderAnnouncementHarness(['QWEN.md', '~/.qwen/QWEN.md']);
+      const { addItem, enqueueMessage } = renderAnnouncementHarness([
+        'QWEN.md',
+        '~/.qwen/QWEN.md',
+      ]);
 
       capturedUIActions.handleFinalSubmit('hello', {
         submittedPrompt: 'hello',
@@ -6196,6 +6210,12 @@ describe('AppContainer State Management', () => {
         }),
         expect.any(Number),
       );
+      // The INFO item must be added before the submission is admitted, so it
+      // renders above the prompt.
+      expect(enqueueMessage).toHaveBeenCalled();
+      expect(addItem.mock.invocationCallOrder[0]).toBeLessThan(
+        enqueueMessage.mock.invocationCallOrder[0],
+      );
 
       capturedUIActions.handleFinalSubmit('again', {
         submittedPrompt: 'again',
@@ -6204,7 +6224,7 @@ describe('AppContainer State Management', () => {
     });
 
     it('does not consume the latch on a leading slash command', () => {
-      const addItem = renderAnnouncementHarness(['QWEN.md']);
+      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
 
       capturedUIActions.handleFinalSubmit('/help', {
         submittedPrompt: '/help',
@@ -6218,7 +6238,7 @@ describe('AppContainer State Management', () => {
     });
 
     it('does not consume the latch on a leading /btw command', () => {
-      const addItem = renderAnnouncementHarness(['QWEN.md']);
+      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
 
       capturedUIActions.handleFinalSubmit('?btw side note', {
         submittedPrompt: '?btw side note',
@@ -6232,12 +6252,27 @@ describe('AppContainer State Management', () => {
     });
 
     it('emits nothing when no context files are loaded', () => {
-      const addItem = renderAnnouncementHarness([]);
+      const { addItem } = renderAnnouncementHarness([]);
 
       capturedUIActions.handleFinalSubmit('hello', {
         submittedPrompt: 'hello',
       });
       expect(announcementCalls(addItem)).toHaveLength(0);
+    });
+
+    it('does not consume the latch on a whitespace-only prompt', () => {
+      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
+
+      // Blank submissions are dropped downstream and never reach the model.
+      capturedUIActions.handleFinalSubmit('   ', {
+        submittedPrompt: '   ',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(0);
+
+      capturedUIActions.handleFinalSubmit('hello', {
+        submittedPrompt: 'hello',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
     });
   });
 });

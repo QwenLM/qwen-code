@@ -2473,11 +2473,12 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
-      // Mirror the downstream input classification (trim + btw + shell-mode
-      // exclusions) so the latch is only consumed by submissions that
-      // actually reach the model.
+      // Mirror the downstream input classification (trim + blank + btw +
+      // shell-mode exclusions) so the latch is only consumed by submissions
+      // that actually reach the model.
       const trimmedPrompt = userPromptText.trim();
       if (
+        trimmedPrompt.length > 0 &&
         !contextFilesAnnouncedRef.current &&
         !isSlashCommand(trimmedPrompt) &&
         !isBtwCommand(trimmedPrompt) &&
