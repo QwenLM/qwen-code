@@ -860,6 +860,16 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'subagents', 'backgroundTasks'];
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
+
+// One preview tab per image, keyed by its content, so opening several images
+// keeps a tab each while re-clicking the same image just focuses its tab.
+function imageTabId(src: string): string {
+  let hash = 0;
+  for (let i = 0; i < src.length; i++) {
+    hash = (hash * 31 + src.charCodeAt(i)) | 0;
+  }
+  return `image:${hash.toString(36)}`;
+}
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -3002,6 +3012,28 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openImagePanel = useCallback(
+    (src: string, alt?: string) => {
+      const tab: ArtifactPanelTab = {
+        id: imageTabId(src),
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        src,
+        ...(alt ? { alt } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [tab, ...tabs],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3143,6 +3175,10 @@ export function App({
         );
         return;
       }
+      if (request.kind === 'image') {
+        openImagePanel(request.src, request.alt);
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3198,6 +3234,7 @@ export function App({
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
+      openImagePanel,
       openSubagentPanelForSession,
     ],
   );
@@ -10601,6 +10638,7 @@ export function App({
                                     : undefined
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
+                                onImagePreview={openImagePanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -10893,6 +10931,7 @@ export function App({
                             handleComposerAttachmentsChange
                           }
                           onImageIngestionNotice={pushToast}
+                          onImagePreview={openImagePanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
