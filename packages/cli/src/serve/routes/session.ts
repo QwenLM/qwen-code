@@ -3251,12 +3251,18 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
-        res.status(200).json(
-          await runtime.bridge.continueSession(sessionId, {
-            ...(clientId !== undefined ? { clientId } : {}),
+        const result = await runtime.bridge.continueSession(sessionId, {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId,
+        });
+        if (daemonLog && result.accepted) {
+          daemonLog.info('continuation enqueued', {
+            sessionId,
             promptId,
-          }),
-        );
+            clientId,
+          });
+        }
+        res.status(200).json(result);
       },
     ),
   );
