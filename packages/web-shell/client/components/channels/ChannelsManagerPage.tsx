@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from 'react';
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -157,6 +164,10 @@ export function ChannelsManagerPage({
     descriptor: DaemonChannelTypeDescriptor;
     instance?: DaemonChannelInstanceSnapshot;
   }>();
+  const editorRef = useRef(editor);
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
   const activeWorkspaceCwd =
     editor?.workspaceCwd ?? selectedManagementWorkspace?.cwd;
   const activeWorkspace = registeredWorkspaces.find(
@@ -262,9 +273,10 @@ export function ChannelsManagerPage({
 
   const saveChannel = useCallback(
     async (name: string, request: DaemonChannelUpsertRequest) => {
+      const workspaceCwd = editor?.workspaceCwd;
       const result = await createOrUpdate(name, request);
-      if (editor?.workspaceCwd) {
-        setManagementWorkspaceCwd(editor.workspaceCwd);
+      if (workspaceCwd && editorRef.current?.workspaceCwd === workspaceCwd) {
+        setManagementWorkspaceCwd(workspaceCwd);
       }
       return result;
     },

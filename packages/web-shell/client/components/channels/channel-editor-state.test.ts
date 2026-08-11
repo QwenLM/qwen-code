@@ -306,6 +306,31 @@ describe('Channel editor state', () => {
     ).not.toHaveProperty('groups');
   });
 
+  it('removes stored group settings when leaving allowlist policy', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...configuredInstance(),
+      config: {
+        ...configuredInstance().config,
+        groupPolicy: 'allowlist',
+        groups: {
+          'group-a': {},
+          'group-b': { requireMention: true },
+        },
+      },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.values.groupPolicy = 'open';
+
+    expect(
+      buildChannelUpsertRequest(
+        DINGTALK_WITH_ACCESS,
+        draft,
+        'revision-open',
+        instance,
+      ).config,
+    ).not.toHaveProperty('groups');
+  });
+
   it('supports explicitly clearing a stored secret', () => {
     const instance = configuredInstance();
     const draft = createChannelEditorDraft(DINGTALK, instance);

@@ -337,11 +337,12 @@ export function buildChannelUpsertRequest(
   if (!hasDescriptorSenderPolicy(descriptor)) {
     config['senderPolicy'] = draft.senderPolicy;
   }
-  if (
-    hasDescriptorGroupPolicy(descriptor) &&
-    config['groupPolicy'] === 'allowlist'
-  ) {
-    assignGroups(config, draft.allowedGroupIds, instance);
+  if (hasDescriptorGroupPolicy(descriptor)) {
+    if (config['groupPolicy'] === 'allowlist') {
+      assignGroups(config, draft.allowedGroupIds, instance);
+    } else {
+      delete config['groups'];
+    }
   }
   return { expectedRevision, config, secrets };
 }

@@ -126,6 +126,24 @@ async function renderPage() {
   });
 }
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function inputByLabel(label: string): HTMLInputElement | null {
+  const match = Array.from(document.querySelectorAll('label')).find((item) =>
+    item.textContent?.includes(label),
+  );
+  return match?.htmlFor
+    ? document.querySelector<HTMLInputElement>(`#${match.htmlFor}`)
+    : null;
+}
+
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -323,6 +341,107 @@ describe('ChannelsManagerPage', () => {
       autoLoad: true,
       enabled: true,
       workspaceCwd: '/workspace/secondary',
+    });
+  });
+
+  it('keeps a newer workspace selection when a dismissed save finishes', async () => {
+    let finishSave!: () => void;
+    channelState.current.createOrUpdate.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    workspaceState.current = {
+      ...workspaceState.current,
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/workspace/main',
+            displayName: 'Main repo',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/workspace/secondary',
+            displayName: 'Secondary repo',
+            primary: false,
+            trusted: true,
+          },
+          {
+            id: 'third',
+            cwd: '/workspace/third',
+            displayName: 'Third repo',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await renderPage();
+
+    const platform = container.querySelector<HTMLButtonElement>(
+      '[data-testid="channel-platform-dingtalk"]',
+    );
+    await act(async () => platform?.click());
+    const dialog = document.querySelector('[role="dialog"]');
+    const workspaceLabel = Array.from(
+      dialog?.querySelectorAll<HTMLLabelElement>('label') ?? [],
+    ).find((label) => label.textContent?.includes('Workspace'));
+    const workspaceTrigger = workspaceLabel?.htmlFor
+      ? document.getElementById(workspaceLabel.htmlFor)
+      : undefined;
+    await act(async () => {
+      workspaceTrigger?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const secondary = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Secondary repo');
+    await act(async () => secondary?.click());
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+    expect(channelState.current.createOrUpdate).toHaveBeenCalledTimes(1);
+
+    const cancel = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Cancel',
+    );
+    await act(async () => cancel?.click());
+    const toolbarWorkspace = document.querySelector<HTMLElement>(
+      '[aria-label="Workspace"]',
+    );
+    await act(async () => {
+      toolbarWorkspace?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const third = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Third repo');
+    await act(async () => third?.click());
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/third',
+    });
+
+    await act(async () => finishSave());
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/third',
     });
   });
 
