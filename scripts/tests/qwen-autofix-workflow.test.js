@@ -283,6 +283,16 @@ function writeWorkdirStub(dir, lines) {
   ]);
 }
 
+function qwenResultLine({ result, errorMessage, isError = false }) {
+  return `${JSON.stringify({
+    type: 'result',
+    subtype: isError ? 'error_during_execution' : 'success',
+    is_error: isError,
+    ...(result === undefined ? {} : { result }),
+    ...(errorMessage === undefined ? {} : { error: { message: errorMessage } }),
+  })}\n`;
+}
+
 function runAutofixRunner(args) {
   return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
     encoding: 'utf8',
@@ -7721,6 +7731,11 @@ exit 1
       /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
     );
     expect(pushAndReportStep).toContain('verification predates that merge');
+    // The STALE_BASE_RETRY handoff embeds a rejection written BEFORE the
+    // auto-update; the note un-poisons its framing for the retry agent.
+    expect(reviewAddressReportStep).toContain(
+      'the base has since been auto-updated',
+    );
     // Bounded: the loop gives up after the last attempt instead of spinning.
     // The structural pin connects the guard value to the error exit — a
     // mutation of == 3 to == 4 survives presence-only checks: the loop
@@ -8737,6 +8752,28 @@ exit 1
     });
     expect(staleConflict.split('|')[0]).toBe(NEWEST);
     expect(staleConflict).toContain('Could not produce a passing fix');
+
+    // Pre-existing verdicts pick their remedy from the compare the step
+    // already ran — swapping the two clause bodies must fail here, not ship
+    // a headline prescribing a merge that changes nothing.
+    const preAhead = run(
+      { OUTCOME: 'failed', PREEXISTING: 'true' },
+      { gateRejection: true },
+    );
+    expect(preAhead).toContain('PRE-EXISTING failure');
+    expect(preAhead).toContain('own pre-round code needs attention');
+    expect(preAhead).not.toContain('base update (merge main)');
+    const preBehindConflict = run(
+      {
+        OUTCOME: 'failed',
+        PREEXISTING: 'true',
+        CMP_STATUS_STUB: 'behind',
+        UPDATE_OK_STUB: '0',
+      },
+      { gateRejection: true },
+    );
+    expect(preBehindConflict).toContain('PRE-EXISTING failure');
+    expect(preBehindConflict).toContain('base update (merge main)');
 
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
@@ -10685,7 +10722,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'turn_tool_call_cap: too many tool calls',
+            isError: true,
+          }),
+        )});`,
         'process.exit(1);',
       ]);
 
@@ -10713,11 +10755,17 @@ exit 1
     );
   });
 
-  it('detects loop guard output before it falls out of the log tail', () => {
+  it('detects the terminal loop result despite later log output', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
+        // Trailing output must not replace the already parsed terminal result.
         "process.stdout.write('x'.repeat(21_000));",
         'process.exit(1);',
       ]);
@@ -10801,6 +10849,210 @@ exit 1
     });
   });
 
+  it('flags a recoverable stream-json API error even when qwen exits zero', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        '[API Error: 429 quota exceeded]',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'recoverable API error without an agent verdict',
+      );
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+      expect(
+        readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+      ).toBe('transient');
+    });
+  });
+
+  it('classifies split and unterminated stream-json result lines', () => {
+    for (const [name, writes] of [
+      [
+        'split',
+        [
+          "const line = qwenResultLine({ result: '[API Error: 429 quota exceeded]' });",
+          'process.stdout.write(line.slice(0, 20));',
+          'process.stdout.write(line.slice(20));',
+        ],
+      ],
+      [
+        'unterminated',
+        [
+          "process.stdout.write(qwenResultLine({ result: '[API Error: 429 quota exceeded]' }).trimEnd());",
+        ],
+      ],
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeWorkdirStub(dir, [
+          "const qwenResultLine = (value) => `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, ...value })}\\n`;",
+          ...writes,
+          'process.exit(0);',
+        ]);
+
+        const result = runAddressReview(dir, stub);
+
+        expect(result.status, name).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error')), name).toBe(true);
+      });
+    }
+  });
+
+  it('ignores API-error markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: '[API Error: 429 quota exceeded]',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'finished without required output file(s)',
+      );
+    });
+  });
+
+  it('drops oversized stdout lines from API-error diagnostics', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const oversizedToolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content:
+                'x'.repeat(1_045_000) +
+                '[API Error: 429 quota exceeded]' +
+                'x'.repeat(55_000),
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(oversizedToolResult)}, () => process.exit(1));`,
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'status 1',
+      );
+      expect(result.stdout).toContain(
+        'dropped oversized stream-json line; full bytes in agent.log',
+      );
+    });
+  });
+
+  it('resumes parsing after a terminated oversized stdout line', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const loopResult = qwenResultLine({
+        errorMessage: 'Loop detection halted the run',
+        isError: true,
+      });
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write('x'.repeat(1_100_000) + '\\n' + ${JSON.stringify(
+          loopResult,
+        )});`,
+        'process.exitCode = 1;',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+      expect(
+        result.stdout.match(/dropped oversized stream-json line/g),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('ignores loop-guard markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: 'turn_tool_call_cap Loop detection halted the run',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: '[API Error: 429 quota exceeded]',
+            isError: true,
+          }),
+        )});`,
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+    });
+  });
+
+  it('keeps a recovered exit-zero run with a verdict out of the API-error retry path', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
   it('does not flag a non-API subprocess failure for retry', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -10836,7 +11088,12 @@ exit 1
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
         "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
         'process.exit(1);',
       ]);
@@ -11323,6 +11580,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     extraBaselineDiag = false,
     restoreClash = false,
     hugeFail = false,
+    noIdentity = false,
+    trackedDirt = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -11400,6 +11659,16 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '        if [[ -n "${HEAD_MSG:-}" ]]; then msg="${HEAD_MSG}"; fi',
           '      fi',
           '      echo "stub build FAILED at $head"',
+          '      if [[ "${NO_IDENTITY:-}" == "1" ]]; then',
+          // vite/esbuild shape: a red build with no tsc diagnostic at all.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${TRACKED_DIRT:-}" == "1" ]]; then',
+          // The build rewrites a TRACKED file (the settings-schema shape):
+          // f.txt differs across refs, so an undiscarded rewrite makes the
+          // restore checkout refuse.
+          '        echo dirt > f.txt',
+          '      fi',
           '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
           '      if [[ "${HUGE_FAIL:-}" == "1" ]]; then',
           '        for i in $(seq 1 200); do echo "verbose failure context line $i ****************************************"; done',
@@ -11471,6 +11740,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
             EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
+            NO_IDENTITY: noIdentity ? '1' : '',
+            TRACKED_DIRT: trackedDirt ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
             NOISY_SUCCESS: noisySuccess ? '1' : '',
@@ -11500,6 +11771,10 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.status).toBe(1);
     expect(r.outputs).toContain('outcome=failed');
     expect(r.outputs).toContain('retryable=true');
+    // The repair agent's only warning that dist/ now holds baseline-built
+    // artifacts — dropped, it burns its budget on phantom dist-consuming
+    // failures.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
     expect(r.outputs).not.toContain('preexisting=true');
     // The A/B genuinely ran — the verdict is measured, not assumed.
     expect(r.stdout).toContain('Baseline A/B');
@@ -11537,23 +11812,67 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('DIFFERENT reason');
   });
 
-  it('rejects WITHOUT retry when the baseline leg breaks the restore', () => {
-    // The baseline run recreates (untracked) a file the branch tracks, so
-    // `git checkout` back refuses — the tree can no longer be trusted. No
-    // pre-existing label (a transient git failure is not a verdict about
-    // the failure's origin) and no retry either: the repair agent works in
-    // this very checkout and performs no git recovery, so on the detached
-    // tree its commit would land on the baseline and be orphaned. The next
-    // round starts clean from the trusted checkout instead.
+  it('crashes verdict-less when the baseline leg breaks the restore (retry, not handoff)', () => {
+    // The baseline run recreates (untracked) a file the branch tracks
+    // (`git restore -- .` touches tracked files only), so the checkout back
+    // refuses — the tree can no longer be trusted, and the repair must not
+    // run in it (its commit would orphan on the detached baseline). But a
+    // transient git-state failure is NOT a verdict either: a plain
+    // outcome=failed is an EVALUATED rejection — the watermark advances and
+    // the item is handed off for good. The gate therefore leaves outcome
+    // UNSET (the report's gate-crashed path retries next scan) while still
+    // writing the detail document so the crash comment explains itself.
     const r = runGate({
       failAt: ['feature', 'origin/feature'],
       restoreClash: true,
     });
     expect(r.status).toBe(1);
-    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).not.toContain('outcome=');
     expect(r.outputs).not.toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('could not restore the verification tree');
+    expect(r.rejection).toContain('could not restore the verification tree');
+  });
+
+  it('short-circuits before the detach when the head has no failure identity', () => {
+    // vite/esbuild/crash failures carry no tsc diagnostic: an empty head
+    // signature fails closed REGARDLESS of the baseline, so the gate must
+    // decide before paying the detach + full baseline re-run + restore.
+    const r = runGate({ failAt: ['feature'], noIdentity: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('no failure identity in the head transcript');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('discards tracked build dirt so a real verdict survives the restore', () => {
+    // The baseline build REWRITES a tracked file (the settings-schema
+    // shape): without the pre-checkout `git restore -- .` the restore
+    // refuses and a clean pre-existing verdict degrades into the
+    // verdict-less crash.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      trackedDirt: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.stdout).not.toContain('could not restore the verification tree');
+  });
+
+  it('caps the LONG-preamble (pre-existing) rejection under the render window', () => {
+    // The short-preamble flood is pinned above; the pre-existing path adds
+    // ~490 bytes of preamble, and the ${#preamble} subtraction is what
+    // keeps THIS document under the cap — a constant would pass the short
+    // case and truncate this one's closing fence.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      hugeFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
   });
 
   it('keeps the full message past the first n (the bracket class ate it)', () => {
@@ -11735,10 +12054,9 @@ describe('run-agent idle watchdog', () => {
   // last byte at docker container entry and then sat SILENT for the whole
   // 2-hour absolute budget — four different runners, two image versions, so
   // the watchdog lives in the runner script, not the environment. A wedged
-  // sandbox produces nothing; a legitimate run is never silent for 20
-  // minutes (the fleet's longest tolerated quiet is the review pipeline's
-  // 10-minute stream-idle window). These tests execute the REAL script with
-  // a stub agent whose only difference is whether it keeps talking.
+  // sandbox produces nothing; stream-json makes active headless work emit
+  // progress before its final result. These tests execute the REAL script
+  // with a stub agent whose only difference is whether it keeps talking.
   const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
     try {
@@ -11776,8 +12094,12 @@ describe('run-agent idle watchdog', () => {
       );
       return {
         status: res.status,
+        stdout: res.stdout,
         failure: existsSync(join(workdir, 'failure.md'))
           ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        agentLog: existsSync(join(workdir, 'agent.log'))
+          ? readFileSync(join(workdir, 'agent.log'), 'utf8')
           : '',
         timeoutSentinel: existsSync(join(workdir, 'agent-timeout'))
           ? readFileSync(join(workdir, 'agent-timeout'), 'utf8')
@@ -11805,17 +12127,16 @@ describe('run-agent idle watchdog', () => {
     expect(r.timeoutSentinel).toContain('idle-timeout (no output for 1200ms');
   });
 
-  it('never fires while the agent keeps talking, however slowly', () => {
+  it('never fires while the agent emits protocol events, however slowly', () => {
     // Output every 400ms with a 1500ms idle window: an absolute-timer
     // regression disguised as an idle watchdog would kill this run.
     const r = runAgent({
       stub: [
         '#!/bin/bash',
-        'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
+        'for i in $(seq 1 8); do echo "{\\"type\\":\\"progress\\",\\"step\\":$i}"; sleep 0.4; done',
         // The mode's output contract: a real run ends by writing its
         // summary, and the script fails a run that produced neither output.
         'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
-        'echo done',
         'exit 0',
       ].join('\n'),
       idleMs: 1500,
@@ -11840,6 +12161,78 @@ describe('run-agent idle watchdog', () => {
     });
     expect(r.status).toBe(0);
     expect(r.failure).toBe('');
+  });
+
+  it('does not treat an unterminated stdout byte stream as progress', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 20); do printf x; sleep 0.2; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 700,
+      timeoutMs: 2400,
+    });
+
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 700ms');
+    expect(r.failure).not.toContain('timeout (2400ms)');
+  });
+
+  it('requests streamed partial progress so active headless work refreshes the watchdog', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'if [[ " $* " == *" --output-format stream-json "* && " $* " == *" --include-partial-messages "* ]]; then',
+        '    for i in $(seq 1 8); do echo "{\\"type\\":\\"stream_event\\",\\"event\\":{\\"type\\":\\"input_json_delta\\",\\"partial_json\\":\\"x\\"}}"; sleep 0.4; done',
+        'else',
+        '    sleep 4',
+        'fi',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('keeps partial events in the artifact without flooding step output', () => {
+    const payload = 'x'.repeat(10_000);
+    const streamEvent = JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'input_json_delta', partial_json: payload },
+    });
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        `printf '%s\\n' '${streamEvent}'`,
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(payload);
+    expect(r.agentLog).toContain(payload);
+  });
+
+  it('bounds an unterminated stdout line while retaining the artifact', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        "head -c 2097152 /dev/zero | tr '\\0' x",
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout.length).toBeLessThan(10_000);
+    expect(r.agentLog.length).toBe(2_097_152);
   });
 
   it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {

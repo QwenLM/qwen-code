@@ -28,6 +28,7 @@ import {
   createDebugLogger,
   MCPServerConfig,
   AuthProviderType,
+  applyReasoningEffort,
   normalizeReasoningEffort,
   loadUsageDashboard,
   type MCPOAuthConfig,
@@ -185,11 +186,12 @@ export class SystemController extends BaseController {
       const normalized = normalizeReasoningEffort(payload.effort);
       if (normalized) {
         try {
-          this.context.config.setReasoningEffort(normalized);
+          const effortMatches = applyReasoningEffort(
+            this.context.config,
+            normalized,
+          );
           const override =
             this.context.config.getReasoningEffortOverride?.() ?? null;
-          const effortMatches =
-            this.context.config.getReasoningEffort() === normalized;
           const applied = effortMatches && override === null;
           const reason = applied
             ? undefined
@@ -557,12 +559,13 @@ export class SystemController extends BaseController {
     }
 
     try {
-      this.context.config.setReasoningEffort(normalized);
+      const effortMatches = applyReasoningEffort(
+        this.context.config,
+        normalized,
+      );
       const override =
         this.context.config.getReasoningEffortOverride?.() ?? null;
-      const applied =
-        this.context.config.getReasoningEffort() === normalized &&
-        override === null;
+      const applied = effortMatches && override === null;
 
       debugLogger.info(
         `[SystemController] Reasoning effort set to: ${normalized} (applied: ${applied})`,
