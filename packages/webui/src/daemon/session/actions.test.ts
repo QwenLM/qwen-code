@@ -517,9 +517,13 @@ describe('createDaemonSessionActions', () => {
     vi.useFakeTimers();
     try {
       const existingSession = createMockSession('session-a');
+      const manualSessionClearRef = { current: false };
+      const setRestoreSessionId = vi.fn();
       const { actions, getConnection } = createActionsHarness({
         connection: { status: 'connected', sessionId: 'session-a' },
+        manualSessionClearRef,
         session: existingSession,
+        setRestoreSessionId,
       });
 
       const loadPromise = actions.loadSession('session-b');
@@ -541,10 +545,12 @@ describe('createDaemonSessionActions', () => {
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
         status: 'disconnected',
-        sessionId: 'session-b',
+        sessionId: undefined,
         loadingTranscript: undefined,
         catchingUp: undefined,
       });
+      expect(manualSessionClearRef.current).toBe(true);
+      expect(setRestoreSessionId).toHaveBeenLastCalledWith(undefined);
     } finally {
       vi.useRealTimers();
     }
@@ -1024,6 +1030,7 @@ function createActionsHarness(
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
+    setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -1079,7 +1086,7 @@ function createActionsHarness(
       connection = typeof update === 'function' ? update(connection) : update;
     },
     setPromptStatus: vi.fn(),
-    setRestoreSessionId: vi.fn(),
+    setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
     setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),

@@ -8106,6 +8106,54 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('does not attach a session after its load watchdog expires', async () => {
+    const firstSession = createMockSession({ sessionId: 'session-a' });
+    const lateSession = createMockSession({ sessionId: 'session-b' });
+    const lateLoad = createDeferred<MockSession>();
+    sdkMocks.sessions.push(firstSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => lateLoad.promise,
+    );
+
+    vi.useFakeTimers();
+    try {
+      const loadPromise = requireActions(actions).loadSession('session-b');
+      const rejection = loadPromise.catch((error: unknown) => error);
+      await act(async () => {
+        await flushPromises();
+        await vi.advanceTimersByTimeAsync(75_000);
+      });
+      const loadError = await rejection;
+      expect(loadError).toBeInstanceOf(Error);
+      expect((loadError as Error).message).toContain('Session load timed out');
+      expect(connection).toMatchObject({ sessionId: undefined });
+
+      lateLoad.resolve(lateSession);
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(connection).toMatchObject({ sessionId: undefined });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('surfaces a restore 504 without treating the session as missing', async () => {
     sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
       new DaemonHttpError(
