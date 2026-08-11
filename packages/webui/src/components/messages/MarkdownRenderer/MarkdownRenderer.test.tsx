@@ -60,6 +60,23 @@ describe('MarkdownRenderer explicit file links', () => {
     expect(onFileClick).toHaveBeenCalledWith('/tmp/my dir/export.html');
   });
 
+  it('opens Windows file URI links through the file click handler', () => {
+    const { onFileClick } = renderMarkdown(
+      'Saved: [export.md](file:///C:/Users/Me/My%20Exports/export.md)',
+    );
+
+    const anchor = container?.querySelector('a');
+    expect(anchor).toBeTruthy();
+
+    anchor?.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, cancelable: true }),
+    );
+
+    expect(onFileClick).toHaveBeenCalledWith(
+      'C:/Users/Me/My Exports/export.md',
+    );
+  });
+
   it('converts markdown file links with line fragments into vscode paths', () => {
     const { onFileClick } = renderMarkdown('[app.ts](/tmp/src/app.ts#L12)');
 

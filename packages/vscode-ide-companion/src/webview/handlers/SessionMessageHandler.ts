@@ -6,6 +6,7 @@
 
 import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
+import { pathToFileURL } from 'node:url';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { Conversation } from '../../services/conversationStore.js';
@@ -36,7 +37,7 @@ function formatExportSuccessMessage(
   filename: string,
   filePath: string,
 ): string {
-  const markdownLinkPath = vscode.Uri.file(filePath).toString();
+  const markdownLinkPath = pathToFileURL(filePath).href;
   return `Session exported to ${formatLabel}: [${filename}](${markdownLinkPath})`;
 }
 

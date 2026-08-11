@@ -87,14 +87,21 @@ const escapeHtml = (unsafe: string): string =>
 /**
  * Create a cached MarkdownIt instance
  */
-const createMarkdownInstance = (): MarkdownIt =>
-  new MarkdownIt({
+const createMarkdownInstance = (): MarkdownIt => {
+  const md = new MarkdownIt({
     html: false, // Disable HTML for security
     xhtmlOut: false,
     breaks: true,
     linkify: true,
     typographer: true,
   } as MarkdownItOptions);
+
+  const defaultValidateLink = md.validateLink;
+  md.validateLink = (url: string): boolean =>
+    /^file:\/\//i.test(url) || defaultValidateLink(url);
+
+  return md;
+};
 
 /**
  * MarkdownRenderer component - renders markdown content with enhanced features
