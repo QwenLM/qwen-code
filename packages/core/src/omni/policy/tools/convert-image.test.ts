@@ -146,6 +146,24 @@ describe('OmniConvertImageTool', () => {
     ]);
   });
 
+  it('omits the alpha clause when the input cannot carry alpha (JPEG→JPEG)', async () => {
+    // A JPEG source structurally has no alpha channel — the disclosure
+    // must not assert a loss that cannot have occurred (D8).
+    probe({ codec: 'mjpeg', frameCount: 1 });
+    const { result } = await run();
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 JPEG/2MB → JPEG 质量 90/300KB，元数据丢弃',
+    );
+  });
+
+  it('softens the alpha clause when the input codec is unknown', async () => {
+    probe({ frameCount: 1 });
+    const { result } = await run();
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 未知格式/2MB → JPEG 质量 90/300KB，透明通道（如有）与元数据丢弃',
+    );
+  });
+
   it('converts to PNG without a quality clause', async () => {
     probe({ codec: 'mjpeg', frameCount: 1 });
     const { result } = await run({ format: 'png' });

@@ -41,31 +41,42 @@ interface OutputFormat {
   fileName: string;
   mimeType: string;
   label: string;
-  /** The disclosure's loss clause for this target format. */
-  lossNote: string;
+  /** The disclosure's loss clause for this target format, given the
+   * probed input codec (undefined when the probe could not tell). */
+  lossNote(inputCodec: string | undefined): string;
   encode(pipeline: SharpPipeline, quality: number): SharpPipeline;
 }
+
+/** Probed codecs whose format can structurally carry an alpha channel —
+ * the only sources for which a JPEG target's disclosure may assert
+ * 透明通道丢弃 (a JPEG→JPEG re-encode cannot lose what never existed). */
+const ALPHA_CAPABLE_CODECS = new Set(['png', 'webp', 'gif', 'tiff']);
 
 const OUTPUT_FORMATS: Record<string, OutputFormat> = {
   jpeg: {
     fileName: 'converted.jpg',
     mimeType: 'image/jpeg',
     label: 'JPEG',
-    lossNote: '透明通道与元数据丢弃',
+    lossNote: (codec) =>
+      codec === undefined
+        ? '透明通道（如有）与元数据丢弃'
+        : ALPHA_CAPABLE_CODECS.has(codec)
+          ? '透明通道与元数据丢弃'
+          : '元数据丢弃',
     encode: (p, quality) => p.jpeg({ quality }),
   },
   png: {
     fileName: 'converted.png',
     mimeType: 'image/png',
     label: 'PNG',
-    lossNote: '元数据丢弃',
+    lossNote: () => '元数据丢弃',
     encode: (p) => p.png(),
   },
   webp: {
     fileName: 'converted.webp',
     mimeType: 'image/webp',
     label: 'WEBP',
-    lossNote: '元数据丢弃',
+    lossNote: () => '元数据丢弃',
     encode: (p, quality) => p.webp({ quality }),
   },
 };
@@ -203,7 +214,7 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         probe.codec?.toUpperCase() ??
         '未知格式';
       const qualityPart = format === 'png' ? '' : ` 质量 ${quality}`;
-      const disclosure = `原 ${originalLabel}/${formatBytesShort(inputSizeBytes)} → ${output.label}${qualityPart}/${formatBytesShort(info.size)}，${output.lossNote}`;
+      const disclosure = `原 ${originalLabel}/${formatBytesShort(inputSizeBytes)} → ${output.label}${qualityPart}/${formatBytesShort(info.size)}，${output.lossNote(probe.codec)}`;
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
