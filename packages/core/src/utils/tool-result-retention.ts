@@ -14,6 +14,8 @@ import {
   TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from './truncation.js';
 
+export { COMBINED_PASS_TOLERANCE_FACTOR } from './truncation.js';
+
 // Fallback oversized budget for tool results whose producing tool declares no
 // `maxOutputChars` (or when no budget resolver is supplied). Callers should
 // pass the configured global truncation threshold instead; this constant only
@@ -112,14 +114,20 @@ export function analyzeToolResultRetention(
       // layer (their retained preview can sit slightly above the raw budget
       // due to the spill envelope); only un-truncated results can signal a
       // bypass, and only beyond the combined-pass 2x tolerance.
-      const output = part.functionResponse.response?.['output'];
+      const output =
+        part.functionResponse.response?.['output'] ??
+        part.functionResponse.response?.['error'];
       const alreadyTruncated =
         typeof output === 'string' &&
-        output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX);
+        (output.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX) ||
+          output.startsWith('<persisted-output>'));
+      // Compare raw string length — not estimatePartChars (which adds a
+      // wrapper floor) — to mirror the scheduler's content.length bound.
+      const rawChars = typeof output === 'string' ? output.length : 0;
       if (
         !alreadyTruncated &&
         Number.isFinite(budget) &&
-        chars > budget * COMBINED_PASS_TOLERANCE_FACTOR
+        rawChars > budget * COMBINED_PASS_TOLERANCE_FACTOR
       ) {
         stats.oversizedResultCount += 1;
       }

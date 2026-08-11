@@ -28,8 +28,10 @@ import {
   collectMemoryDiagnostics,
   analyzeToolResultRetention,
   canonicalToolName,
+  COMBINED_PASS_TOLERANCE_FACTOR,
   createDebugLogger,
   resolveSlimmingConfig,
+  ToolDisplayNamesMigration,
   type MemoryDiagnostics,
   type ToolResultRetentionStats,
 } from '@qwen-code/qwen-code-core';
@@ -501,7 +503,9 @@ function collectToolResultRetention(
       imageTokenEstimate: resolveSlimmingConfig(config?.getChatCompression?.())
         .imageTokenEstimate,
     });
-    const threshold = stats.oversizedThresholdChars;
+    const threshold =
+      config?.getTruncateToolOutputThreshold?.() ??
+      stats.oversizedThresholdChars;
     // Tool outputs live in `tool_group` items as `tools[].resultDisplay`
     // strings; scanning top-level text items would count model responses.
     // Each display is compared against its own tool's budget, matching the
@@ -520,11 +524,19 @@ function collectToolResultRetention(
         if (typeof tool.resultDisplay !== 'string') {
           continue;
         }
+        const migratedName =
+          ToolDisplayNamesMigration[
+            tool.name as keyof typeof ToolDisplayNamesMigration
+          ] ?? tool.name;
         const budget =
           displayNameBudgets.get(tool.name) ??
+          displayNameBudgets.get(migratedName) ??
           resolveToolBudgetChars(tool.name) ??
           threshold;
-        if (Number.isFinite(budget) && tool.resultDisplay.length > budget) {
+        if (
+          Number.isFinite(budget) &&
+          tool.resultDisplay.length > budget * COMBINED_PASS_TOLERANCE_FACTOR
+        ) {
           largeOutputsInUIHistory += 1;
         }
       }

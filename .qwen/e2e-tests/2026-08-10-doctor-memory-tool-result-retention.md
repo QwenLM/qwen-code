@@ -1,6 +1,6 @@
 # E2E: /doctor memory tool-result retention diagnostics
 
-Date: 2026-08-11 (re-verified after review round 3) · Branch:
+Date: 2026-08-11 (re-verified after review round 4) · Branch:
 `feat/doctor-tool-result-retention` · Runtime: `npm run dev` in tmux
 (220x52), IdeaLab API key auth, no sandbox, macOS.
 
@@ -11,7 +11,7 @@ Oversized counts compare each result against its own tool's declared budget
 back to the configured global truncation threshold), skip results already
 carrying the truncation sentinel, and apply the scheduler's combined-pass 2x
 tolerance. The UI-history scan compares each `tool_group` display against the
-same per-tool budget.
+same per-tool budget at the same 2x tolerance.
 
 ## Scenario 1 — fresh session (baseline)
 
@@ -53,9 +53,9 @@ Observed:
 
 Conclusion: mitigation (shell 30k budget + spill) keeps history retention
 bounded; diagnostics track the live history correctly. The spilled result's
-retained UI display stays within the shell budget, so the UI duplication
-signal correctly stays at 0 — it only fires when a rendered display actually
-exceeds its tool's budget.
+retained UI display stays well within 2x the shell budget, so the UI
+duplication signal correctly stays at 0 — it only fires when a rendered
+display actually exceeds 2x its tool's budget.
 
 ## Scenario 3 — multiple tool calls, raised global threshold
 
@@ -95,15 +95,14 @@ Observed payload includes:
   "totalChars": 4543,
   "largestResultChars": 4543,
   "oversizedResultCount": 0,
-  "oversizedThresholdChars": 100000,
+  "oversizedThresholdChars": 25000,
   "largeOutputsInUIHistory": 0,
   "presentInCompressionInput": false
 }
 ```
 
 `oversizedThresholdChars` reports the configured global threshold
-(100000 here; 25000 under defaults) — the fallback budget for tools
-declaring none.
+(25000 under defaults) — the fallback budget for tools declaring none.
 
 When no chat history is available, `--json` omits the `toolResultRetention`
 key entirely (no `null`), matching the readable output.
@@ -113,20 +112,23 @@ key entirely (no `null`), matching the readable output.
 Unreachable in normal operation (per-tool/global layers bound every result at
 or below its declared budget). Covered deterministically by unit tests:
 
-- `packages/core/src/utils/tool-result-retention.test.ts` (14 tests): counts,
+- `packages/core/src/utils/tool-result-retention.test.ts` (19 tests): counts,
   max, raw-char measurement of newline-dense outputs, strict `>` boundary at
-  2x budget, sentinel skip, per-tool budget resolver (high/low/unknown/
-  `Infinity` budgets), nested media billing, missing payload/parts,
-  unserializable payloads.
-- `packages/cli/src/ui/commands/doctorCommand.test.ts` (9 retention tests):
+  2x budget, sentinel skip (truncation prefix and `<persisted-output>` stubs
+  on both `output` and `error` keys), per-tool budget resolver
+  (high/low/unknown/`Infinity` budgets), nested media billing, missing
+  payload/parts, unserializable payloads, multiple functionResponse parts in
+  one Content.
+- `packages/cli/src/ui/commands/doctorCommand.test.ts` (11 retention tests):
   readable report with `Oversized results (above tool budget): 1` +
   compression input `yes (shared by reference, no extra copy)` + `/compress`
   hint; UI-history detection scoped to `tool_group` result displays with
-  per-tool budgets (model text and compliant high-budget renders excluded);
-  legacy-alias canonicalization; compliant-session shape (zero oversized, no
-  compression advice); `--json` fields; `--json` omits the key without
-  history; section omitted (rest of report intact) when history reads throw;
-  interactive report.
+  per-tool budgets at 2x tolerance (model text and compliant high-budget
+  renders excluded); legacy-alias canonicalization; compliant-session shape
+  (zero oversized, no compression advice); `--json` fields; `--json` omits
+  the key without history; section omitted (rest of report intact) when
+  history reads throw; disabled-truncation guard (no false positives at
+  `Infinity` threshold); unresolvable-name fallback; interactive report.
 
 ## Cleanup
 

@@ -89,9 +89,7 @@ describe('analyzeToolResultRetention', () => {
   });
 
   it('does not flag a result measured at exactly 2x the budget (strict >)', () => {
-    const exact = 'z'.repeat(
-      OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS * 2 - WRAPPER_FLOOR_CHARS,
-    );
+    const exact = 'z'.repeat(OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS * 2);
     const stats = analyzeToolResultRetention([toolResultContent(exact)]);
     expect(stats.oversizedResultCount).toBe(0);
   });
@@ -107,10 +105,13 @@ describe('analyzeToolResultRetention', () => {
   });
 
   it('supports a custom threshold', () => {
-    // 'abcdef' measures 70 (6 raw + 64 wrapper floor) > 2x5.
-    const stats = analyzeToolResultRetention([toolResultContent('abcdef')], {
-      thresholdChars: 5,
-    });
+    // 11 raw chars > 2x5.
+    const stats = analyzeToolResultRetention(
+      [toolResultContent('z'.repeat(11))],
+      {
+        thresholdChars: 5,
+      },
+    );
     expect(stats.oversizedThresholdChars).toBe(5);
     expect(stats.oversizedResultCount).toBe(1);
   });
@@ -124,8 +125,8 @@ describe('analyzeToolResultRetention', () => {
       [
         // Compliant high-budget result (e.g. MCP): not flagged.
         toolResultContent('m'.repeat(60_000), 'big_budget_tool'),
-        // 264 measured chars > 2x100: flagged under its own small budget.
-        toolResultContent('s'.repeat(200), 'small_budget_tool'),
+        // 201 raw chars > 2x100: flagged under its own small budget.
+        toolResultContent('s'.repeat(201), 'small_budget_tool'),
         // Unknown tool falls back to the default threshold: not flagged.
         toolResultContent('u'.repeat(500), 'unknown_tool'),
       ],
@@ -221,6 +222,69 @@ describe('analyzeToolResultRetention', () => {
     // No string output and no nested parts: only the wrapper floor counts.
     expect(stats.toolResultCount).toBe(1);
     expect(stats.totalChars).toBe(WRAPPER_FLOOR_CHARS);
+  });
+
+  it('skips error-key results carrying the persisted-output sentinel', () => {
+    // Failed/timed-out tools carry content under `error`; the error gate
+    // produces <persisted-output> stubs that must be skipped.
+    const stub =
+      '<persisted-output>job-123</persisted-output>' + 'x'.repeat(100_000);
+    const stats = analyzeToolResultRetention([
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { error: stub },
+            },
+          },
+        ],
+      },
+    ]);
+    expect(stats.oversizedResultCount).toBe(0);
+  });
+
+  it('flags oversized error-key results without a sentinel', () => {
+    const stats = analyzeToolResultRetention([
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { error: 'e'.repeat(65_000) },
+            },
+          },
+        ],
+      },
+    ]);
+    expect(stats.oversizedResultCount).toBe(1);
+  });
+
+  it('aggregates multiple functionResponse parts in a single Content', () => {
+    const stats = analyzeToolResultRetention([
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { output: 'x'.repeat(100) },
+            },
+          },
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { output: 'y'.repeat(200) },
+            },
+          },
+        ],
+      },
+    ]);
+    expect(stats.toolResultCount).toBe(2);
+    expect(stats.totalChars).toBe(100 + 200 + 2 * WRAPPER_FLOOR_CHARS);
+    expect(stats.largestResultChars).toBe(200 + WRAPPER_FLOOR_CHARS);
   });
 
   it('reports oversizedThresholdChars as 0 when truncation is disabled (Infinity)', () => {

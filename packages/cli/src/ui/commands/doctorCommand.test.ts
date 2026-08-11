@@ -885,8 +885,8 @@ describe('doctorCommand', () => {
         {
           type: 'tool_group',
           tools: [
-            // Above shell's 30k budget: counted.
-            { name: 'shell', resultDisplay: 'y'.repeat(35_000) },
+            // Above 2x shell's 30k budget: counted.
+            { name: 'shell', resultDisplay: 'y'.repeat(65_000) },
             // Compliant high-budget render: not counted.
             { name: 'mcp_tool', resultDisplay: 'm'.repeat(40_000) },
             { name: 'shell', resultDisplay: 'small' },
@@ -996,6 +996,69 @@ describe('doctorCommand', () => {
         result?.type === 'message' ? result.content : '{}',
       ) as Record<string, unknown>;
       expect(parsed).not.toHaveProperty('toolResultRetention');
+    });
+
+    it('should not flag UI displays as oversized when truncation is disabled', async () => {
+      // When truncation is disabled, getTruncateToolOutputThreshold returns
+      // Infinity; UI displays must not be false-positive counted.
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [{ name: 'shell', resultDisplay: 'x'.repeat(50_000) }],
+        },
+      ] as unknown as CommandContext['ui']['history'];
+      const ctx = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getSessionId: () => 'test-session',
+            getCliVersion: () => '0.0.0',
+            getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+            getGeminiClient: () => ({
+              getHistoryShallow: () => [],
+            }),
+            getToolRegistry: () => ({
+              getTool: () => undefined,
+              getAllTools: () => [],
+            }),
+          },
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+          history: uiHistory,
+        },
+      } as unknown as CommandContext);
+      const result = await getMemoryCommand().action!(ctx, '--json');
+      const parsed = JSON.parse(
+        result?.type === 'message' ? result.content : '{}',
+      ) as { toolResultRetention?: { largeOutputsInUIHistory?: number } };
+      expect(parsed.toolResultRetention?.largeOutputsInUIHistory).toBe(0);
+    });
+
+    it('should fall back to the global threshold for unresolvable tool names', async () => {
+      // A tool no longer in the registry (e.g. removed extension) falls
+      // back to the global threshold (25k); only displays above 2x that
+      // are counted.
+      const uiHistory = [
+        {
+          type: 'tool_group',
+          tools: [
+            // 50k > 2x25k: counted.
+            { name: 'removed_ext', resultDisplay: 'z'.repeat(50_001) },
+            // 40k < 2x25k: not counted.
+            { name: 'removed_ext', resultDisplay: 'z'.repeat(40_000) },
+          ],
+        },
+      ] as unknown as CommandContext['ui']['history'];
+      const result = await getMemoryCommand().action!(
+        contextWithHistory(history, uiHistory),
+        '',
+      );
+      const content = result?.type === 'message' ? result.content : '';
+      expect(content).toContain(
+        'Oversized also rendered in UI history: 1 item(s)',
+      );
     });
 
     it('should omit the retention section when reading history throws', async () => {
