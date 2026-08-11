@@ -489,6 +489,28 @@ describe('normalizeOmniProcessingConfig', () => {
         }),
       ).toThrow(/omni\.processing\.fixedPolicies\.p\.when/);
     });
+
+    it('preserves a valid when-condition verbatim through normalization (D7)', () => {
+      // `when` is preprocessing's ONLY trigger mechanism: a normalization
+      // regression that drops or rewrites it would silently widen every
+      // user condition to ALL matching resources. Pin the round-trip.
+      const when = [
+        'all',
+        ['>', ['field', 'resource.sizeBytes'], 10_000_000],
+        ['>=', ['field', 'session.availableContextTokens'], 4096],
+      ];
+      const config = normalize({
+        fixedPolicies: {
+          p: {
+            mediaTypes: ['image'],
+            toolName: 'omni_downsample_image',
+            when,
+          },
+        },
+      });
+      const p = config.fixedPolicies.find((x) => x.id === 'p');
+      expect(p?.when).toEqual(when);
+    });
   });
 
   describe('output.artifacts selectors (§13 #22/#24)', () => {
