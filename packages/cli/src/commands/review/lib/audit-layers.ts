@@ -26,11 +26,12 @@
 // it is handed and a coverage claim guessed from prose is the same self-consistent
 // blind spot the layer taxonomy exists to break.
 //
-// This module is pure and gate-free ON PURPOSE. It reports coverage; it does not
-// yet decide convergence. Wiring an uncovered layer into the `unreviewedDimensions`
-// cap (the safe direction — it can only withhold an Approve, never end the loop
-// early) is the next increment, staged behind the A/B the taxonomy makes
-// measurable. Nothing here can make the loop stop sooner.
+// This module is pure: it computes coverage, it decides nothing. The cap that
+// consumes it — one `unreviewedDimensions` entry per unwalked layer, which can
+// only withhold an Approve, never end the loop — ships alongside it in
+// `layer-audit-gate.ts`. What stays deferred behind an A/B is the RISKIER half:
+// letting an unwalked layer EXTEND the reverse-audit loop rather than only cap
+// the verdict. Nothing here can make the loop stop sooner.
 
 /** One defect layer of a modeled executable system. */
 export interface DefectLayer {
@@ -188,7 +189,7 @@ export function renderShellLayerBriefList(
 /** The marker an auditor writes to receipt a walked layer — the `Budget gap:`
  *  analogue. `Layer walked: <id> — <note>`; the note is free text after the id. */
 const LAYER_RECEIPT_LINE_RE =
-  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*`?[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z-]*)/i;
+  /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z0-9-]*)/i;
 
 /** Cheap pre-filter so the line walk skips returns with no marker at all. */
 const LAYER_HINT_RE = /layer\s+walked/i;
@@ -214,6 +215,14 @@ export function parseLayerReceipts(
     }
     if (inFence) continue;
     if (/^[ \t]*>/.test(line)) continue;
+    // A markdown code block — four or more leading spaces, or a leading tab — is
+    // quoting the marker, not using it, the same "quoted is not used" invariant
+    // the fences and blockquotes above enforce. Without this an indented
+    // `Layer walked:` line (and, with the leading-backtick tolerance removed from
+    // the pattern, an inline `` `Layer walked: …` `` code span) parsed as a live
+    // receipt, so an auditor enumerating the owed layers in the brief's own
+    // backtick-wrapped form could mark them all covered and release the cap.
+    if (/^(?: {4,}|\t)/.test(line)) continue;
     const m = LAYER_RECEIPT_LINE_RE.exec(line);
     if (!m) continue;
     const id = m[1].toLowerCase();

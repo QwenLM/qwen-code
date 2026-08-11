@@ -81,12 +81,49 @@ describe('parseLayerReceipts', () => {
     expect([...parseLayerReceipts(text)]).toEqual(['inheritance']);
     expect([...parseLayerReceipts(zh)]).toEqual(['toctou']);
   });
+
+  it('does not read a marker inside an inline code span or an indented code block', () => {
+    // A QUOTED marker is not a USED one. Before this the leading-backtick
+    // tolerance and unbounded indent let an auditor enumerating the owed layers
+    // in the brief's own backtick-wrapped form mark them covered and release the
+    // cap — probe-verified as a real bypass.
+    expect(parseLayerReceipts('`Layer walked: toctou — quoted`').size).toBe(0);
+    expect(
+      parseLayerReceipts('- `Layer walked: scope-propagation — quoted`').size,
+    ).toBe(0);
+    expect(
+      parseLayerReceipts('    Layer walked: inheritance — 4-space code block')
+        .size,
+    ).toBe(0);
+    expect(
+      parseLayerReceipts('\tLayer walked: lexing — tab code block').size,
+    ).toBe(0);
+  });
+
+  it('requires the colon — a colon-less shape is not a receipt', () => {
+    // Relaxing the mandatory colon would let colon-less parrot prose parse as a
+    // receipt, and that is the credit/release direction.
+    expect(
+      parseLayerReceipts('Layer walked scope-propagation — no colon').size,
+    ).toBe(0);
+  });
+
+  it('captures a digit-bearing id without truncating it', () => {
+    // Not a shipped shell layer, but the id capture must not silently truncate a
+    // digit a programmatic caller's taxonomy might use (`[a-z][a-z0-9-]*`).
+    const custom = [
+      { id: 'phase2', label: 'x', briefHint: 'x', signals: ['zzz'] },
+    ];
+    expect([
+      ...parseLayerReceipts('Layer walked: phase2 — ok', custom),
+    ]).toEqual(['phase2']);
+  });
 });
 
 describe('layerCoverage', () => {
   it('marks a layer covered by a finding OR a receipt, and lists the rest as owed', () => {
     const returns = [
-      // A token-layer finding — no explicit marker, but it IS a report in that layer.
+      // A token-layer receipt carrying a finding — the marker plus what it found.
       'Layer walked: lexing — a trailing `# comment` swallows the mutating git command.',
       // A dry receipt that names one deep layer, marker on its own line.
       [
@@ -147,6 +184,13 @@ describe('inferLayersFromProse', () => {
     // A generic all-clear names no layer concept, so it infers nothing.
     expect(
       inferLayersFromProse('No issues found — re-read the whole diff.').size,
+    ).toBe(0);
+    // Generic review vocabulary must not infer a layer either, or the keyword
+    // estimate would credit coverage to any prose that mentions the diff.
+    expect(
+      inferLayersFromProse(
+        'Reviewed the changed files and the diff thoroughly.',
+      ).size,
     ).toBe(0);
   });
 });
