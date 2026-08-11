@@ -36,6 +36,15 @@ vi.mock('../workflow-snapshot.js', () => ({
   readWorkflowManifest: readWorkflowManifestMock,
   writeWorkflowManifest: writeWorkflowManifestMock,
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
+  createWorkflowRunOwner: () => ({
+    machineId: 'test-host',
+    pid: 1,
+    nonce: 'test-nonce',
+    acquiredAt: 0,
+  }),
+  acquireWorkflowRunOwnership: async () => 1,
+  projectWorkflowResult: (result: unknown) => result,
+  WorkflowRunOwnershipError: class WorkflowRunOwnershipError extends Error {},
 }));
 
 vi.mock('./workflow-orchestrator.js', async (importOriginal) => {

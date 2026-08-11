@@ -200,8 +200,13 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
  * and the snapshot are written, and it is free to throw the second time
  * (turning a finished workflow into a persistence failure) or to return
  * something else (persisting output the run never produced).
+ *
+ * Exported so the runner can compute the projection ONCE at settlement and
+ * hand the same frozen value to every writer — if each writer re-projected
+ * the live result independently, getters/`toJSON()` would run once per
+ * write, which is exactly the failure mode above.
  */
-function safeResult(result: unknown): unknown {
+export function projectWorkflowResult(result: unknown): unknown {
   if (result === undefined) return undefined;
   let serialized: string | undefined;
   try {
@@ -230,7 +235,7 @@ function projectTask(task: WorkflowTask): Omit<WorkflowSnapshot, 'status'> {
     recentLogs: [...task.recentLogs],
     startTime: task.startTime,
     endTime: task.endTime,
-    result: safeResult(task.result),
+    result: projectWorkflowResult(task.result),
     error: task.error,
   };
 }
@@ -575,20 +580,28 @@ export async function writeWorkflowManifest(
   const guard = await resolveSafeRunDir(storage, task.runId, true);
   const manifestPath = storage.getWorkflowRunManifestPath(task.runId);
 
-  // The compare-and-swap. Read what is on disk now, refuse if it is not the
-  // generation this writer owns, then pin the commit to the entry we just
-  // read. Read-then-pin is a real CAS rather than a check-then-hope: a
-  // competing writer commits by renaming a new inode over this path, so its
-  // win invalidates our pin and `atomicWriteFile` refuses our rename. The
+  // The compare-and-swap. Pin the target inode BEFORE reading its content,
+  // then refuse if disk no longer shows the generation this writer owns.
+  // Pin-then-read is a real CAS rather than a check-then-hope: the content
+  // read verifies its own identity against the pin, and a competing writer
+  // commits by renaming a new inode over this path, so its win invalidates
+  // the pin and `atomicWriteFile` refuses our rename. Reading first and
+  // pinning after left a window where a competing commit was caught by
+  // neither check — the generation check saw pre-commit content, and the
+  // pin captured the competitor's inode, so both writers committed. The
   // residual window is the check/rename syscall pair, which is the same
   // narrowing every other guarded write site here accepts — Node exposes no
   // renameat2(RENAME_EXCHANGE) to close it.
+  const targetGuard = await guardArtifactTarget(
+    manifestPath,
+    guard.assertUnchanged,
+  );
   const ownership = options.ownership;
   let generation = ownership ? ownership.expectedGeneration + 1 : undefined;
   if (ownership) {
     const current = await readManifestForOwnership(
       manifestPath,
-      guard.assertUnchanged,
+      targetGuard.assertUnchanged,
     );
     if (current) {
       const currentGeneration = current.generation ?? 0;
@@ -623,10 +636,6 @@ export async function writeWorkflowManifest(
   };
   const serialized = JSON.stringify(manifest, null, 2);
   const frozenManifest = JSON.parse(serialized) as WorkflowManifestV2;
-  const targetGuard = await guardArtifactTarget(
-    manifestPath,
-    guard.assertUnchanged,
-  );
   await atomicWriteFile(manifestPath, serialized, {
     noFollow: true,
     mode: 0o600,
@@ -663,20 +672,28 @@ export async function acquireWorkflowRunOwnership(
   if (!storage) throw new Error('Workflow storage is unavailable.');
   const guard = await resolveSafeRunDir(storage, runId, false);
   const manifestPath = storage.getWorkflowRunManifestPath(runId);
-  const raw = await readRegularFileNoFollow(
-    manifestPath,
-    guard.assertUnchanged,
-  );
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  const currentGeneration = Number.isSafeInteger(parsed['generation'])
-    ? (parsed['generation'] as number)
-    : 0;
-  const generation = currentGeneration + 1;
-  const serialized = JSON.stringify({ ...parsed, generation, owner }, null, 2);
+  // Pin BEFORE reading, exactly like the settlement CAS in
+  // `writeWorkflowManifest`: a competing commit landing between the read
+  // and the pin would otherwise be caught by neither check.
   const targetGuard = await guardArtifactTarget(
     manifestPath,
     guard.assertUnchanged,
   );
+  const raw = await readRegularFileNoFollow(
+    manifestPath,
+    targetGuard.assertUnchanged,
+  );
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  // Same read rule as `readManifestForOwnership`: a negative or
+  // non-integer generation is not a claim, not an error — it reads as the
+  // generation-0 state every pre-generation manifest is in.
+  const rawGeneration = parsed['generation'];
+  const currentGeneration =
+    Number.isSafeInteger(rawGeneration) && (rawGeneration as number) >= 0
+      ? (rawGeneration as number)
+      : 0;
+  const generation = currentGeneration + 1;
+  const serialized = JSON.stringify({ ...parsed, generation, owner }, null, 2);
   try {
     await atomicWriteFile(manifestPath, serialized, {
       noFollow: true,
@@ -735,9 +752,15 @@ async function readManifestForOwnership(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return {};
+    return undefined;
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  // A corrupt or non-object manifest is no claim at all. Collapsing it into
+  // `{}` used to read as a live generation-0 claim and kill the owning
+  // writer with a phantom-writer ownership error instead of letting it
+  // replace the unreadable file.
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
   const record = parsed as Record<string, unknown>;
   const generation = record['generation'];
   const owner = record['owner'] as Record<string, unknown> | undefined;
@@ -935,7 +958,12 @@ function parseManifest(
     throw new Error('Workflow manifest run id does not match its directory.');
   }
   const status = manifest['status'];
+  // `typeof` first: `String(['paused'])` coerces a single-element array to
+  // 'paused', which would pass the whitelist and escape as the manifest's
+  // status — where `entry.status.padEnd` in the listing then aborts the
+  // entire `/workflows` render for everyone who clones the repo.
   if (
+    typeof status !== 'string' ||
     ![
       'running',
       'pausing',
@@ -943,7 +971,7 @@ function parseManifest(
       'completed',
       'failed',
       'cancelled',
-    ].includes(String(status))
+    ].includes(status)
   ) {
     throw new Error('Workflow manifest has an invalid status.');
   }
@@ -962,7 +990,8 @@ function parseManifest(
     (journal['byteLength'] as number) < 0 ||
     typeof journal['sha256'] !== 'string' ||
     !/^[0-9a-f]{64}$/.test(journal['sha256']) ||
-    !['complete', 'failed'].includes(String(journal['integrity']))
+    typeof journal['integrity'] !== 'string' ||
+    !['complete', 'failed'].includes(journal['integrity'])
   ) {
     throw new Error('Workflow manifest has invalid journal metadata.');
   }

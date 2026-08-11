@@ -24,6 +24,8 @@ import {
   writeWorkflowManifest,
   acquireWorkflowRunOwnership,
   createWorkflowRunOwner,
+  projectWorkflowResult,
+  WorkflowRunOwnershipError,
   type WorkflowManifestOwnership,
   writeWorkflowSnapshot,
 } from '../workflow-snapshot.js';
@@ -114,9 +116,11 @@ export class WorkflowRunner {
       ? new WorkflowJournal(storage.getWorkflowRunJournalPath(runId))
       : undefined;
     let resumeReplay: JournalReplay | undefined;
-    // Set only on the resume path: a fresh run has no prior writer to lose a
-    // race against, and stamping generation 1 on it costs a read per write
-    // for a guarantee nothing needs yet.
+    // Every run with durable storage carries an ownership claim. A fresh
+    // start used to skip it — "no prior writer to race" — but the first
+    // writer of a run is exactly the prior writer every later resume races
+    // against, and an unguarded stale fresh-start settlement could relabel
+    // the resumed run's terminal state.
     let ownership: WorkflowManifestOwnership | undefined;
     if (options.resumeFromRunId && journal) {
       const manifest = await readWorkflowManifest(config, runId);
@@ -141,6 +145,13 @@ export class WorkflowRunner {
           `Workflow run ${runId} args do not match its durable manifest.`,
         );
       }
+      // Reject an in-process duplicate BEFORE the claim: acquiring first
+      // would commit the generation CAS under this caller's nonce and only
+      // then have register() refuse the duplicate — evicting the live run's
+      // next persist on behalf of a writer that never started.
+      if (registry?.hasActiveRegistration(runId)) {
+        throw new Error(`Workflow run ${runId} is already active.`);
+      }
       // Claim the run before anything is replayed or dispatched. Two
       // processes resuming the same run both read this generation and both
       // try to commit the next one; exactly one rename lands, and the loser
@@ -159,6 +170,9 @@ export class WorkflowRunner {
       resumeReplay = await journal.load(manifest.journal);
     } else if (options.resumeFromRunId && !registry?.get(runId)) {
       throw new Error('Workflow storage is required to resume a run.');
+    }
+    if (journal && !ownership) {
+      ownership = { owner: createWorkflowRunOwner(), expectedGeneration: 0 };
     }
     if (runInBackground && options.signal.aborted) {
       throw new Error('Background workflow start was cancelled.');
@@ -205,22 +219,31 @@ export class WorkflowRunner {
       }
     };
 
+    let ownershipLost = false;
     const persistManifest = async (
       status: WorkflowTask['status'],
       checkpoint: JournalCheckpoint,
       source: WorkflowTask | undefined = entry,
     ): Promise<void> => {
       if (!source) return;
-      const written = await writeWorkflowManifest(config, source, {
-        args: options.args,
-        journal: checkpoint,
-        status,
-        ...(ownership ? { ownership } : {}),
-      });
-      // Each accepted write advances the generation this process owns, so
-      // the next one compare-and-swaps against what it just committed.
-      if (ownership && written?.generation !== undefined) {
-        ownership = { ...ownership, expectedGeneration: written.generation };
+      try {
+        const written = await writeWorkflowManifest(config, source, {
+          args: options.args,
+          journal: checkpoint,
+          status,
+          ...(ownership ? { ownership } : {}),
+        });
+        // Each accepted write advances the generation this process owns, so
+        // the next one compare-and-swaps against what it just committed.
+        if (ownership && written?.generation !== undefined) {
+          ownership = { ...ownership, expectedGeneration: written.generation };
+        }
+      } catch (error) {
+        // Another writer advanced the run past this one; everything this
+        // process still persists for it is stale by construction, so the
+        // settlement stops publishing durable state for the run.
+        if (error instanceof WorkflowRunOwnershipError) ownershipLost = true;
+        throw error;
       }
     };
 
@@ -294,6 +317,7 @@ export class WorkflowRunner {
     };
 
     let fatalPersistenceError: string | undefined;
+    let settlingJoined = false;
     const scheduler = new WorkflowDispatchScheduler(
       resolveConcurrencyLimit(),
       controller.signal,
@@ -324,9 +348,17 @@ export class WorkflowRunner {
               const checkpoint = await journal.flush();
               await persistManifest('paused', checkpoint);
             } catch (error) {
-              fatalPersistenceError = `Failed to persist workflow pause checkpoint: ${extractErrorMessage(error)}`;
-              registry?.fail(runId, fatalPersistenceError, Date.now());
-              controller.abort();
+              // A settlement that already joined this barrier records the
+              // run's terminal state durably on its own; killing the run
+              // here would flip a completed settlement to 'failed' and drop
+              // its result. The kill stays for a run left 'pausing' with no
+              // settlement in sight — the case where the failed write
+              // leaves no durable record of the pause at all.
+              if (!settlingJoined) {
+                fatalPersistenceError = `Failed to persist workflow pause checkpoint: ${extractErrorMessage(error)}`;
+                registry?.fail(runId, fatalPersistenceError, Date.now());
+                controller.abort();
+              }
               throw error;
             }
           }
@@ -342,7 +374,10 @@ export class WorkflowRunner {
     // orders the two: joining alone would only cover the barrier that exists
     // at call time, leaving the fsync + manifest write that follows open to a
     // pause that starts a fresh one.
-    const joinPauseBarrier = (): Promise<void> => scheduler.beginSettling();
+    const joinPauseBarrier = (): Promise<void> => {
+      settlingJoined = true;
+      return scheduler.beginSettling();
+    };
 
     let terminalCheckpoint: JournalCheckpoint | undefined;
 
@@ -401,12 +436,19 @@ export class WorkflowRunner {
             };
           }
           const endTime = Date.now();
+          // Project the result ONCE and hand the frozen value to every
+          // persisted consumer — the manifest write and, via the registry
+          // entry, the legacy snapshot. Re-projecting the live object at
+          // each writer would run getters/`toJSON()` once per write, free
+          // to throw the second time or to persist output the run never
+          // produced.
+          const projectedResult = projectWorkflowResult(outcome.result);
           if (entry && terminalCheckpoint) {
             const completedEntry = freezeWorkflowTask({
               ...entry,
               status: 'completed',
               endTime,
-              result: outcome.result,
+              result: projectedResult,
             });
             try {
               await persistManifest(
@@ -428,7 +470,11 @@ export class WorkflowRunner {
                   : (entry.error ?? 'Workflow run failed.'),
             };
           }
-          registry?.complete(runId, outcome.result, endTime);
+          registry?.complete(runId, projectedResult, endTime);
+          // The caller still receives the live result: the tool's display
+          // path has its own per-field degradation for non-serializable
+          // values, and the persisted writers above already got the
+          // projection.
           return { ok: true, outcome };
         } catch (error) {
           const details =
@@ -488,9 +534,8 @@ export class WorkflowRunner {
                 (settledEntry.endTime ?? settledEntry.startTime) -
                 settledEntry.startTime,
             });
-            const snapshotWrite = writeWorkflowSnapshot(config, settledEntry);
             // Reached without a terminal flush on the early-return paths
-            // (the entry settled mid-script), so this write needs the same
+            // (the entry settled mid-script), so these writes need the same
             // ordering guarantee the try/catch paths already took.
             await joinPauseBarrier();
             let checkpoint = terminalCheckpoint;
@@ -510,7 +555,15 @@ export class WorkflowRunner {
                 settledEntry,
               );
             }
-            await snapshotWrite;
+            // The snapshot goes last, after the barrier join and the
+            // terminal manifest — starting it ahead used to let it land
+            // before the terminal write it disagrees with. A writer that
+            // lost the ownership CAS publishes nothing: its view of the run
+            // is stale by construction, and writing anyway would relabel a
+            // run another writer owns.
+            if (!ownershipLost) {
+              await writeWorkflowSnapshot(config, settledEntry);
+            }
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {

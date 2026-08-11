@@ -626,13 +626,102 @@ describe('durable workflow manifests', () => {
     });
 
     it('leaves an unclaimed run unstamped', async () => {
-      // A fresh run has no prior writer to lose a race against, so it pays
-      // neither the extra read nor a schema field it cannot use.
+      // A write without an ownership claim (direct API use, tests) still
+      // pays no CAS read and stamps no generation.
       const config = fakeConfig(projectDir);
       await seed(config, 'wf_0e6');
       const manifest = await readWorkflowManifest(config, 'wf_0e6');
       expect(manifest.generation).toBeUndefined();
       expect(manifest.owner).toBeUndefined();
+    });
+
+    // The CAS must pin the target inode BEFORE reading its content. With
+    // the read first, a competing commit landing between the read and the
+    // pin was caught by neither check: the generation check saw pre-commit
+    // content and the pin captured the competitor's inode, so both writers
+    // committed. The swap below lands on the 3rd manifest lstat of an
+    // ownership write, which is inside the window under either ordering —
+    // the read's post-open identity check with pin-then-read, the pin's
+    // own lstat with read-then-pin.
+    const raceCompetingCommit = async (
+      drive: (config: Config) => Promise<unknown>,
+      seedRunId: string,
+    ) => {
+      const config = fakeConfig(projectDir);
+      await seed(config, seedRunId);
+      const mine = owner('nonce-mine');
+      const claimed = await acquireWorkflowRunOwnership(
+        config,
+        seedRunId,
+        mine,
+      );
+      const manifestPath = config.storage.getWorkflowRunManifestPath(seedRunId);
+      const onDisk = JSON.parse(
+        await fs.readFile(manifestPath, 'utf8'),
+      ) as Record<string, unknown>;
+      const rivalCommit = JSON.stringify(
+        {
+          ...onDisk,
+          generation: claimed + 1,
+          owner: owner('nonce-rival'),
+        },
+        null,
+        2,
+      );
+
+      let manifestLstats = 0;
+      const realLstat = fs.lstat.bind(fs);
+      const lstatSpy = vi
+        .spyOn(fs, 'lstat')
+        .mockImplementation(async (...args: Parameters<typeof fs.lstat>) => {
+          if (args[0] === manifestPath) {
+            manifestLstats += 1;
+            if (manifestLstats === 3) {
+              const tmp = `${manifestPath}.rival`;
+              await fs.writeFile(tmp, rivalCommit);
+              await fs.rename(tmp, manifestPath);
+            }
+          }
+          return realLstat(...args);
+        });
+      try {
+        await expect(drive(config)).rejects.toThrow();
+      } finally {
+        lstatSpy.mockRestore();
+      }
+
+      // The rival commit survives; the loser never renamed over it.
+      const durable = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as {
+        generation: number;
+        owner: { nonce: string };
+      };
+      expect(durable.generation).toBe(claimed + 1);
+      expect(durable.owner.nonce).toBe('nonce-rival');
+    };
+
+    it('refuses a competing commit landing inside the settlement CAS window', async () => {
+      const t = task({ runId: 'wf_0e7', status: 'running' });
+      await raceCompetingCommit(
+        (config) =>
+          writeWorkflowManifest(config, t, {
+            args: null,
+            journal: { ...EMPTY_JOURNAL },
+            status: 'paused',
+            ownership: {
+              owner: owner('nonce-mine'),
+              expectedGeneration: 1,
+            },
+          }),
+        'wf_0e7',
+      );
+    });
+
+    it('refuses a competing commit landing inside the acquisition CAS window', async () => {
+      await raceCompetingCommit(
+        (config) =>
+          acquireWorkflowRunOwnership(config, 'wf_0e8', owner('nonce-late')),
+        'wf_0e8',
+      );
     });
   });
 
@@ -839,6 +928,57 @@ describe('durable workflow manifests', () => {
       .concat('wf_05', 'wf_06', 'wf_07')) {
       await expect(readWorkflowManifest(config, runId)).rejects.toThrow();
     }
+  });
+
+  it('rejects non-string status and journal integrity instead of coercing them', async () => {
+    // `String(['paused'])` is 'paused': a whitelist that coerces before it
+    // compares admits single-element arrays, which then escape as the
+    // manifest's status and abort the whole `/workflows` listing at the
+    // first `entry.status.padEnd`. The journal integrity whitelist had the
+    // identical hole.
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_c0c0';
+    const original = await writeWorkflowManifest(
+      config,
+      task({ runId, status: 'running', startTime: 10 }),
+      { args: null, journal: { ...EMPTY_JOURNAL }, status: 'running' },
+    );
+    const manifestPath = config.storage.getWorkflowRunManifestPath(runId);
+
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify({ ...original, status: ['paused'] }, null, 2),
+      'utf8',
+    );
+    await expect(readWorkflowManifest(config, runId)).rejects.toThrow(
+      /invalid status/,
+    );
+
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify(
+        {
+          ...original,
+          journal: { ...original!.journal, integrity: ['complete'] },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    await expect(readWorkflowManifest(config, runId)).rejects.toThrow(
+      /invalid journal metadata/,
+    );
+
+    // Both shapes degrade to an invalid record instead of crashing the
+    // listing.
+    const records = await listWorkflowRunRecords(config);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      runId,
+      status: 'interrupted',
+      canResume: false,
+    });
   });
 
   it('converts structurally invalid v2 and legacy records into safe invalid records', async () => {

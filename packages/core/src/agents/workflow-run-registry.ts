@@ -386,17 +386,28 @@ export class WorkflowRunRegistry {
   }
 
   /**
+   * True when `register()` would refuse this runId as a duplicate. Lets a
+   * resume preflight reject an in-process duplicate BEFORE it touches any
+   * durable state — acquiring the run's ownership first would commit the
+   * generation CAS under the refused caller's nonce and evict the live
+   * run's next persist.
+   */
+  hasActiveRegistration(runId: string): boolean {
+    const existing = this.entries.get(runId);
+    return (
+      (existing !== undefined && isActiveWorkflowStatus(existing.status)) ||
+      this.handles.has(runId)
+    );
+  }
+
+  /**
    * Register a new run. Mutates the registration in place to graduate
    * it to a `WorkflowTask` (sets `id`, `kind`, derived counters), so
    * callers can keep using their local reference post-register and
    * observers see updates without an extra `get()`.
    */
   register(registration: WorkflowTaskRegistration): WorkflowTask {
-    const existing = this.entries.get(registration.runId);
-    if (
-      (existing && isActiveWorkflowStatus(existing.status)) ||
-      this.handles.has(registration.runId)
-    ) {
+    if (this.hasActiveRegistration(registration.runId)) {
       throw new Error(`Workflow run ${registration.runId} is already active.`);
     }
     const entry = registration as WorkflowTask;

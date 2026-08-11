@@ -13,6 +13,7 @@ import { Storage } from '../../config/storage.js';
 import { WorkflowRunRegistry } from '../workflow-run-registry.js';
 import * as workflowSnapshot from '../workflow-snapshot.js';
 import { readWorkflowManifest } from '../workflow-snapshot.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal } from './workflow-journal.js';
 import { WorkflowRunner } from './workflow-runner.js';
 
@@ -530,6 +531,26 @@ describe('WorkflowRunner persistence', () => {
 
     registry.cancel(handle.runId, Date.now());
     await expect(handle.completion).resolves.toMatchObject({ ok: false });
+
+    // The stale original runner's teardown must not relabel the resumed
+    // run's terminal state: its settlement persists lose the generation CAS
+    // (the resumed run owns the run now), and an evicted writer publishes
+    // no legacy snapshot. Re-read both artifacts — the corruption this test
+    // used to ship green was exactly these two files saying 'cancelled'.
+    const durable = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunManifestPath(handle.runId),
+        'utf8',
+      ),
+    ) as { status: string };
+    expect(durable.status).toBe('completed');
+    const snapshot = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunSnapshotPath(handle.runId),
+        'utf8',
+      ),
+    ) as { status: string };
+    expect(snapshot.status).toBe('completed');
   });
 
   it('refuses script or args drift instead of silently starting a fresh resume', async () => {
@@ -762,5 +783,186 @@ describe('WorkflowRunner persistence', () => {
         process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = originalTimeout;
       }
     }
+  });
+
+  // The barrier's catch used to kill the run unconditionally. A settlement
+  // that has already joined the barrier records the terminal state durably
+  // on its own; killing anyway flipped a script-completed run to 'failed'
+  // and dropped its result whenever the barrier's 'paused' write hit a
+  // transient fs error the very next write survived.
+  it('does not kill a successful run when the barrier write fails after settlement joined', async () => {
+    // Foreground run: the caller abort below releases the paused result
+    // gate WITHOUT touching the registry entry, the script completes on the
+    // delivered result, and settlement joins the barrier while its 'paused'
+    // write is still gated in flight. Only then does the write fail — the
+    // old unconditional kill flipped the successful settlement to 'failed'
+    // and dropped the result; with settlement already joined, the barrier
+    // must stand down and let the settlement record the terminal state.
+    const { config, registry, storage } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const caller = new AbortController();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: caller.signal,
+      script: 'return await agent("work")',
+      args: null,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    const originalWrite = workflowSnapshot.writeWorkflowManifest;
+    const started: Array<string | undefined> = [];
+    let releasePaused: (() => void) | undefined;
+    const pausedGate = new Promise<void>((resolve) => {
+      releasePaused = resolve;
+    });
+    vi.spyOn(workflowSnapshot, 'writeWorkflowManifest').mockImplementation(
+      async (...args: Parameters<typeof originalWrite>) => {
+        const status = args[2].status;
+        started.push(status);
+        if (status === 'paused') {
+          await pausedGate;
+          throw new Error('ENOSPC: simulated barrier write failure');
+        }
+        return originalWrite(...args);
+      },
+    );
+    const beginSettlingSpy = vi.spyOn(
+      WorkflowDispatchScheduler.prototype,
+      'beginSettling',
+    );
+
+    expect(handle.pause()).toBe(true);
+    finishDispatch?.('done');
+    await vi.waitFor(() => expect(started).toContain('paused'));
+    // The barrier is parked inside its 'paused' write. The abort releases
+    // the held dispatch result, the script completes, and settlement joins
+    // the in-flight barrier.
+    caller.abort();
+    await vi.waitFor(() => expect(beginSettlingSpy).toHaveBeenCalled());
+    releasePaused?.();
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+    const durable = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunManifestPath(handle.runId),
+        'utf8',
+      ),
+    ) as { status: string; canResume: boolean };
+    expect(durable).toMatchObject({ status: 'completed', canResume: false });
+  });
+
+  // An in-process duplicate resume must be refused before the durable
+  // manifest is touched: acquiring ownership first committed the generation
+  // CAS under the refused caller's nonce, evicting the live run's next
+  // persist on behalf of a writer that never started.
+  it('refuses an in-process duplicate resume without mutating the durable manifest', async () => {
+    const { config, storage } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const script = 'return await agent("work")';
+    const args = { topic: 'duplicate' };
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script,
+      args,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    const manifestPath = storage.getWorkflowRunManifestPath(handle.runId);
+    const before = await fs.readFile(manifestPath, 'utf8');
+
+    await expect(
+      WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script,
+        args,
+        resumeFromRunId: handle.runId,
+        dispatch: vi.fn(async () => 'must not run'),
+      }),
+    ).rejects.toThrow(/already active/);
+
+    expect(await fs.readFile(manifestPath, 'utf8')).toBe(before);
+
+    // The live run still owns its manifests: its next persist advances.
+    finishDispatch?.('done');
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    const after = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as {
+      status: string;
+    };
+    expect(after.status).toBe('completed');
+  });
+
+  it('stamps generation and owner on a fresh run from its first manifest', async () => {
+    const { config } = await harness();
+    let finishDispatch: ((value: string) => void) | undefined;
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return await agent("work")',
+      args: null,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+
+    // The first writer of a run is the prior writer every later resume
+    // races against, so even a fresh start's initial manifest carries the
+    // CAS stamp.
+    const manifest = await readWorkflowManifest(config, handle.runId);
+    expect(manifest.generation).toBe(1);
+    expect(manifest.owner).toMatchObject({ pid: process.pid });
+
+    finishDispatch?.('done');
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+    const completed = await readWorkflowManifest(config, handle.runId);
+    // Gen 2 is the try-path 'completed' write; gen 3 the finally re-persist.
+    expect(completed.generation).toBe(3);
+    expect(completed.owner?.nonce).toBe(manifest.owner?.nonce);
+  });
+
+  it('projects the settlement result once and writes the same value everywhere', async () => {
+    const { config, storage } = await harness();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      // Built INSIDE the sandbox: agent() returns are revived at the vm
+      // boundary, but the script's own return is not detached, so a live
+      // `toJSON()` rides into settlement. The settlement must project it
+      // ONCE — if either persisted writer re-serialized the live object,
+      // `calls` would advance past 1 and the artifacts would disagree.
+      script:
+        'let calls = 0; return { toJSON: () => ({ projected: true, calls: ++calls }) };',
+      args: null,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    const manifest = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunManifestPath(handle.runId),
+        'utf8',
+      ),
+    ) as { result: unknown };
+    expect(manifest.result).toEqual({ projected: true, calls: 1 });
+    const snapshot = JSON.parse(
+      await fs.readFile(
+        storage.getWorkflowRunSnapshotPath(handle.runId),
+        'utf8',
+      ),
+    ) as { result: unknown };
+    expect(snapshot.result).toEqual({ projected: true, calls: 1 });
   });
 });
