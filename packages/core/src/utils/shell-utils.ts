@@ -1532,10 +1532,10 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
-  const startsPromptExpansion = (text: string, index: number): boolean => {
-    const close = text.indexOf('}', index + 2);
+  const isPromptExpansion = (text: string, openIndex: number): boolean => {
+    const close = text.indexOf('}', openIndex + 1);
     if (close < 0) return false;
-    const body = text.slice(index + 2, close).replaceAll('\\\n', '');
+    const body = text.slice(openIndex + 1, close).replaceAll('\\\n', '');
     return /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[-?@$*])(?:\[[^\]\n]*\])?@P$/.test(
       body,
     );
@@ -1688,7 +1688,7 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
-      if (char === '$' && nextChar === '{' && startsPromptExpansion(line, i)) {
+      if (char === '$' && nextChar === '{' && isPromptExpansion(line, i + 1)) {
         return true;
       }
 
@@ -1846,7 +1846,12 @@ export function detectCommandSubstitution(command: string): boolean {
         while (command[nextIndex] === '\\' && command[nextIndex + 1] === '\n') {
           nextIndex += 2;
         }
-        if (precedingBackslashes % 2 === 0 && command[nextIndex] === '(') {
+        if (
+          precedingBackslashes % 2 === 0 &&
+          (command[nextIndex] === '(' ||
+            (command[nextIndex] === '{' &&
+              isPromptExpansion(command, nextIndex)))
+        ) {
           return true;
         }
       }
@@ -1891,7 +1896,7 @@ export function detectCommandSubstitution(command: string): boolean {
       if (
         char === '$' &&
         nextChar === '{' &&
-        startsPromptExpansion(command, i)
+        isPromptExpansion(command, i + 1)
       ) {
         return true;
       }

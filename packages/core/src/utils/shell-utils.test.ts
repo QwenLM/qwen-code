@@ -159,6 +159,8 @@ describe('isCommandAllowed', () => {
       expect(detectCommandSubstitution('echo "${value@P}"')).toBe(true);
       expect(detectCommandSubstitution('echo "${value@Q}"')).toBe(false);
       expect(detectCommandSubstitution("echo '${value@P}'")).toBe(false);
+      expect(detectCommandSubstitution('echo "$\\\n{value@P}"')).toBe(true);
+      expect(detectCommandSubstitution('echo $\\\n{value@P}')).toBe(true);
     });
 
     it('should block command substitution using `$(...)`', async () => {
