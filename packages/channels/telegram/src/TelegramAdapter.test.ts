@@ -96,12 +96,16 @@ function createChannel(
   configOverrides: Partial<ChannelConfig> = {},
   router: unknown = {},
 ): TestTelegramChannel {
+  const testRouter = {
+    setChannelApprovalMode: vi.fn(),
+    ...(router as object),
+  };
   return new TestTelegramChannel(
     'telegram',
     { ...config, ...configOverrides },
     {} as ChannelAgentBridge,
     {
-      router: router as never,
+      router: testRouter as never,
     },
   );
 }
