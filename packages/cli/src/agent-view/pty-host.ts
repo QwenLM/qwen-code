@@ -6,6 +6,7 @@
 
 import { StringDecoder } from 'node:string_decoder';
 import type { AgentViewLaunchFile } from './protocol.js';
+import { isCiEnvKey } from '../ui/utils/terminal-buffer.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
 const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
@@ -353,6 +354,15 @@ function buildWorkerPtyEnv(
   }
   for (const key of COLOR_ENV_KEYS) {
     delete env[key];
+  }
+  // CI keys describe the supervisor daemon's own environment, not the
+  // worker's: a daemon running under CI would otherwise make the pty-backed
+  // worker self-detect as non-interactive and degrade its renderer. A
+  // launch-provided CI key still wins via launchEnv below.
+  for (const key of Object.keys(env)) {
+    if (isCiEnvKey(key)) {
+      delete env[key];
+    }
   }
   return {
     ...env,

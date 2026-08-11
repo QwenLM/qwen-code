@@ -173,7 +173,7 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.spawnCalls[0]?.args).toEqual(['--agent-view-worker']);
   });
 
-  it('does not inherit color-disabling supervisor environment into workers', async () => {
+  it('does not inherit color-disabling or CI supervisor environment into workers', async () => {
     const pty = createFakePty();
     const originalTerm = process.env['TERM'];
     const originalNoColor = process.env['NO_COLOR'];
@@ -212,7 +212,7 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
     expect(pty.spawnCalls[0]?.options.env['NO_COLOR']).toBeUndefined();
     expect(pty.spawnCalls[0]?.options.env['FORCE_COLOR']).toBeUndefined();
-    expect(pty.spawnCalls[0]?.options.env['CI']).toBe('1');
+    expect(pty.spawnCalls[0]?.options.env['CI']).toBeUndefined();
   });
 
   it('falls back when launch TERM is empty', async () => {
@@ -228,6 +228,21 @@ describe('launchAgentViewPtyHost', () => {
 
     expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
     expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
+  });
+
+  it('honours a launch-provided TERM for the pty name and worker env', async () => {
+    const pty = createFakePty();
+
+    await launchAgentViewPtyHost(
+      {
+        ...createLaunch(),
+        env: { TERM: 'xterm-direct' },
+      },
+      { pty },
+    );
+
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-direct');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-direct');
   });
 
   it('exposes PTY write, data subscription, and resize controls', async () => {

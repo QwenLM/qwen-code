@@ -351,6 +351,10 @@ describe('agent view supervisor store', () => {
         env: {},
       }),
     });
+    expect(snapshots[0]?.worker).toMatchObject({
+      protocolVersion: 1,
+      recentOutputBytes: 0,
+    });
     expect(snapshots[0]?.worker).not.toHaveProperty('hostAuthToken');
   });
 

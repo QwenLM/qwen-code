@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { atomicWriteFile, Storage } from '@qwen-code/qwen-code-core';
 import type {
   AgentViewActivityFile,
@@ -198,6 +199,28 @@ export async function writeAgentViewSessionState(
   await fs.mkdir(paths.tmpDir, { recursive: true });
 }
 
+/**
+ * Merges only the given fields into the persisted session state, so the
+ * writer never re-asserts fields it does not own from a stale read.
+ */
+export async function patchAgentViewSessionState(
+  sessionId: string,
+  patch: Partial<AgentViewSessionStateFile>,
+  options: StoreOptions = {},
+): Promise<void> {
+  const paths = getAgentViewSessionPaths(sessionId, options);
+  const existing = await readJsonRecordForWrite(paths.statePath);
+  if (existing === undefined) {
+    return;
+  }
+  await writeJsonFile(paths.statePath, {
+    ...existing,
+    ...patch,
+    schemaVersion: 1,
+  });
+  await fs.mkdir(paths.tmpDir, { recursive: true });
+}
+
 export async function listAgentViewSessionStates(
   options: StoreOptions = {},
 ): Promise<AgentViewSessionStateFile[]> {
@@ -291,6 +314,10 @@ export async function writeAgentViewActivity(
     ...activity,
     schemaVersion: 1,
   });
+}
+
+export function digestAgentViewWorkerToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 export async function readAgentViewWorker(
@@ -648,18 +675,24 @@ function ownershipValue(
     : 'managed';
 }
 
-function sessionStateValue(
+export function isAgentViewSessionState(
   value: unknown,
-): AgentViewSessionStateFile['sessionState'] {
-  return value === 'starting' ||
+): value is AgentViewSessionStateFile['sessionState'] {
+  return (
+    value === 'starting' ||
     value === 'working' ||
     value === 'needs_input' ||
     value === 'idle' ||
     value === 'completed' ||
     value === 'stopped' ||
     value === 'failed'
-    ? value
-    : 'failed';
+  );
+}
+
+function sessionStateValue(
+  value: unknown,
+): AgentViewSessionStateFile['sessionState'] {
+  return isAgentViewSessionState(value) ? value : 'failed';
 }
 
 function processStateValue(
@@ -687,7 +720,9 @@ function worktreeModeValue(
   return value === 'worktree' || value === 'shared-unisolated' ? value : 'none';
 }
 
-function inputKindValue(value: unknown): AgentViewActivityFile['inputKind'] {
+export function inputKindValue(
+  value: unknown,
+): AgentViewActivityFile['inputKind'] {
   return value === 'blocking' || value === 'soft' ? value : undefined;
 }
 
