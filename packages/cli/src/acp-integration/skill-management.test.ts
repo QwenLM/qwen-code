@@ -16,6 +16,9 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const downloadSkillMock = vi.hoisted(() => vi.fn());
+const tempDirs: string[] = [];
+const pptxSourceUrl =
+  'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md';
 
 vi.mock('./skill-source-download.js', () => ({
   downloadSkill: downloadSkillMock,
@@ -50,27 +53,44 @@ function managerFor(name: string) {
   return { parseSkillContent, refreshCache };
 }
 
-async function writeSkill(root: string, relativeDir: string, name: string) {
+async function writeSkill(
+  root: string,
+  relativeDir: string,
+  name: string,
+  content = `---\nname: ${name}\ndescription: ${name} skill\n---\nBody\n`,
+) {
   const skillDir = path.join(root, relativeDir, name);
   const skillFile = path.join(skillDir, 'SKILL.md');
   await fs.mkdir(skillDir, { recursive: true });
-  await fs.writeFile(
-    skillFile,
-    `---\nname: ${name}\ndescription: ${name} skill\n---\nBody\n`,
-    'utf8',
-  );
+  await fs.writeFile(skillFile, content, 'utf8');
   return { skillDir, skillFile };
 }
 
-afterEach(() => {
+async function createTempDir(prefix: string): Promise<string> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  tempDirs.push(tempDir);
+  return tempDir;
+}
+
+async function createTempHome(): Promise<string> {
+  const tempHome = await createTempDir('qwen-skill-');
+  vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+  return tempHome;
+}
+
+afterEach(async () => {
   downloadSkillMock.mockReset();
   vi.restoreAllMocks();
+  await Promise.all(
+    tempDirs
+      .splice(0)
+      .map((tempDir) => fs.rm(tempDir, { recursive: true, force: true })),
+  );
 });
 
 describe('managed Skill mutations', () => {
   it('installs every downloaded file and replaces an existing Skill', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const tempHome = await createTempHome();
     const manager = managerFor('pptx');
     downloadSkillMock.mockResolvedValue({
       skillContent:
@@ -87,76 +107,69 @@ describe('managed Skill mutations', () => {
       ],
     });
 
-    try {
-      const result = await installManagedSkill(configWith(manager), {
-        skill: {
-          id: 'pptx-id',
-          slug: 'pptx',
-          name: 'PPTX',
-          sourceUrl:
-            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
-        },
-      });
-      const installedPath = path.join(tempHome, 'skills', 'pptx', 'SKILL.md');
-
-      expect(result).toMatchObject({
+    const result = await installManagedSkill(configWith(manager), {
+      skill: {
         id: 'pptx-id',
         slug: 'pptx',
-        installed: true,
-        installedPath,
-      });
-      await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
-        'name: pptx',
-      );
-      await expect(
-        fs.readFile(
-          path.join(tempHome, 'skills', 'pptx', 'references', 'editing.md'),
-          'utf8',
-        ),
-      ).resolves.toBe('# Editing guide\n');
-      expect(manager.parseSkillContent).toHaveBeenCalledWith(
-        expect.stringContaining('name: pptx'),
-        installedPath,
-        'user',
-      );
+        name: 'PPTX',
+        sourceUrl: pptxSourceUrl,
+      },
+    });
+    const installedPath = path.join(tempHome, 'skills', 'pptx', 'SKILL.md');
 
-      downloadSkillMock.mockResolvedValue({
-        skillContent:
-          '---\nname: pptx\ndescription: Updated slide decks\n---\nUpdated\n',
-        files: [
-          {
-            relativePath: 'SKILL.md',
-            content: Buffer.from(
-              '---\nname: pptx\ndescription: Updated slide decks\n---\nUpdated\n',
-            ),
-          },
-        ],
-      });
-      await installManagedSkill(configWith(manager), {
-        skill: {
-          slug: 'pptx',
-          sourceUrl:
-            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+    expect(result).toMatchObject({
+      id: 'pptx-id',
+      slug: 'pptx',
+      installed: true,
+      installedPath,
+    });
+    await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
+      'name: pptx',
+    );
+    await expect(
+      fs.readFile(
+        path.join(tempHome, 'skills', 'pptx', 'references', 'editing.md'),
+        'utf8',
+      ),
+    ).resolves.toBe('# Editing guide\n');
+    expect(manager.parseSkillContent).toHaveBeenCalledWith(
+      expect.stringContaining('name: pptx'),
+      installedPath,
+      'user',
+    );
+
+    downloadSkillMock.mockResolvedValue({
+      skillContent:
+        '---\nname: pptx\ndescription: Updated slide decks\n---\nUpdated\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from(
+            '---\nname: pptx\ndescription: Updated slide decks\n---\nUpdated\n',
+          ),
         },
-      });
+      ],
+    });
+    await installManagedSkill(configWith(manager), {
+      skill: {
+        slug: 'pptx',
+        sourceUrl: pptxSourceUrl,
+      },
+    });
 
-      await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
-        'Updated slide decks',
-      );
-      await expect(
-        fs.stat(
-          path.join(tempHome, 'skills', 'pptx', 'references', 'editing.md'),
-        ),
-      ).rejects.toThrow();
-      expect(manager.refreshCache).toHaveBeenCalledTimes(2);
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
+    await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
+      'Updated slide decks',
+    );
+    await expect(
+      fs.stat(
+        path.join(tempHome, 'skills', 'pptx', 'references', 'editing.md'),
+      ),
+    ).rejects.toThrow();
+    expect(manager.refreshCache).toHaveBeenCalledTimes(2);
   });
 
   it('rejects downloaded file paths outside the staging directory', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const tempHome = await createTempHome();
     const manager = managerFor('pptx');
     const outsidePath = path.join(tempHome, 'skills', 'evil.md');
     downloadSkillMock.mockResolvedValue({
@@ -169,26 +182,20 @@ describe('managed Skill mutations', () => {
       ],
     });
 
-    try {
-      await expect(
-        installManagedSkill(configWith(manager), {
-          skill: {
-            slug: 'pptx',
-            sourceUrl:
-              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
-          },
-        }),
-      ).rejects.toThrow('Invalid skill file path');
-      await expect(fs.stat(outsidePath)).rejects.toThrow();
-      expect(manager.refreshCache).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
+    await expect(
+      installManagedSkill(configWith(manager), {
+        skill: {
+          slug: 'pptx',
+          sourceUrl: pptxSourceUrl,
+        },
+      }),
+    ).rejects.toThrow('Invalid skill file path');
+    await expect(fs.stat(outsidePath)).rejects.toThrow();
+    expect(manager.refreshCache).not.toHaveBeenCalled();
   });
 
   it('rejects manifests whose parsed name does not match the slug', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const tempHome = await createTempHome();
     const manager = managerFor('other-name');
     const config = configWith(manager);
     downloadSkillMock.mockResolvedValue({
@@ -201,124 +208,87 @@ describe('managed Skill mutations', () => {
       ],
     });
 
-    try {
-      await expect(
-        installManagedSkill(config, {
-          skill: {
-            slug: 'pptx',
-            sourceUrl:
-              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
-          },
-        }),
-      ).rejects.toThrow('does not match requested slug');
-      await expect(
-        fs.stat(path.join(tempHome, 'skills', 'pptx')),
-      ).rejects.toThrow();
+    await expect(
+      installManagedSkill(config, {
+        skill: {
+          slug: 'pptx',
+          sourceUrl: pptxSourceUrl,
+        },
+      }),
+    ).rejects.toThrow('does not match requested slug');
+    await expect(
+      fs.stat(path.join(tempHome, 'skills', 'pptx')),
+    ).rejects.toThrow();
 
-      const { skillDir, skillFile } = await writeSkill(
-        tempHome,
-        'skills',
-        'pptx',
-      );
-      const originalContent = await fs.readFile(skillFile, 'utf8');
-      await expect(
-        deleteManagedSkill(config, { skill: { slug: 'pptx' } }),
-      ).rejects.toThrow('does not match requested slug');
-      await expect(
-        setManagedSkillEnabled(config, {
-          skill: { slug: 'pptx', enabled: false },
-        }),
-      ).rejects.toThrow('does not match requested slug');
+    const { skillDir, skillFile } = await writeSkill(
+      tempHome,
+      'skills',
+      'pptx',
+    );
+    const originalContent = await fs.readFile(skillFile, 'utf8');
+    await expect(
+      deleteManagedSkill(config, { skill: { slug: 'pptx' } }),
+    ).rejects.toThrow('does not match requested slug');
+    await expect(
+      setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: false },
+      }),
+    ).rejects.toThrow('does not match requested slug');
 
-      await expect(fs.stat(skillDir)).resolves.toBeDefined();
-      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(
-        originalContent,
-      );
-      expect(manager.refreshCache).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
+    await expect(fs.stat(skillDir)).resolves.toBeDefined();
+    await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(originalContent);
+    expect(manager.refreshCache).not.toHaveBeenCalled();
   });
 
-  it('refuses to delete the global Qwen directory', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
-    const skillFile = path.join(tempHome, 'SKILL.md');
+  it('refuses unsafe manager fallback targets', async () => {
+    const tempHome = await createTempHome();
     const content = '---\nname: pptx\n---\nBody\n';
-    await fs.writeFile(skillFile, content, 'utf8');
     const manager = managerFor('pptx');
-    const listSkills = vi
-      .fn()
-      .mockResolvedValue([{ name: 'pptx', filePath: skillFile }]);
+    const listSkills = vi.fn();
+    const config = configWith({ ...manager, listSkills });
 
-    try {
-      await expect(
-        deleteManagedSkill(configWith({ ...manager, listSkills }), {
-          skill: { slug: 'pptx' },
-        }),
-      ).rejects.toThrow('Refusing to delete unexpected skill directory');
-      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(content);
-      expect(manager.refreshCache).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
-  });
+    const rootSkillFile = path.join(tempHome, 'SKILL.md');
+    await fs.writeFile(rootSkillFile, content, 'utf8');
+    listSkills.mockResolvedValue([{ name: 'pptx', filePath: rootSkillFile }]);
 
-  it('refuses to delete the shared global Skills directory', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    await expect(
+      deleteManagedSkill(config, {
+        skill: { slug: 'pptx' },
+      }),
+    ).rejects.toThrow('Refusing to delete unexpected skill directory');
+    await expect(fs.readFile(rootSkillFile, 'utf8')).resolves.toBe(content);
+
     const skillsDir = path.join(tempHome, 'skills');
-    const skillFile = path.join(skillsDir, 'SKILL.md');
+    const sharedSkillFile = path.join(skillsDir, 'SKILL.md');
     const unrelatedSkillFile = path.join(skillsDir, 'unrelated', 'SKILL.md');
-    const content = '---\nname: pptx\n---\nBody\n';
     await fs.mkdir(path.dirname(unrelatedSkillFile), { recursive: true });
-    await fs.writeFile(skillFile, content, 'utf8');
+    await fs.writeFile(sharedSkillFile, content, 'utf8');
     await fs.writeFile(unrelatedSkillFile, 'unrelated', 'utf8');
-    const manager = managerFor('pptx');
-    const listSkills = vi
-      .fn()
-      .mockResolvedValue([{ name: 'pptx', filePath: skillFile }]);
+    listSkills.mockResolvedValue([{ name: 'pptx', filePath: sharedSkillFile }]);
 
-    try {
-      await expect(
-        deleteManagedSkill(configWith({ ...manager, listSkills }), {
-          skill: { slug: 'pptx' },
-        }),
-      ).rejects.toThrow('Refusing to delete unexpected skill directory');
-      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(content);
-      await expect(fs.readFile(unrelatedSkillFile, 'utf8')).resolves.toBe(
-        'unrelated',
-      );
-      expect(manager.refreshCache).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
-  });
+    await expect(
+      deleteManagedSkill(config, {
+        skill: { slug: 'pptx' },
+      }),
+    ).rejects.toThrow('Refusing to delete unexpected skill directory');
+    await expect(fs.readFile(sharedSkillFile, 'utf8')).resolves.toBe(content);
+    await expect(fs.readFile(unrelatedSkillFile, 'utf8')).resolves.toBe(
+      'unrelated',
+    );
 
-  it('refuses to update a non-SKILL.md fallback file', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
-    const skillDir = path.join(tempHome, 'fallback');
-    const skillFile = path.join(skillDir, 'README.md');
-    const content = '---\nname: pptx\n---\nBody\n';
-    await fs.mkdir(skillDir, { recursive: true });
-    await fs.writeFile(skillFile, content, 'utf8');
-    const manager = managerFor('pptx');
-    const listSkills = vi
-      .fn()
-      .mockResolvedValue([{ name: 'pptx', filePath: skillFile }]);
+    const fallbackDir = path.join(tempHome, 'fallback');
+    const fallbackFile = path.join(fallbackDir, 'README.md');
+    await fs.mkdir(fallbackDir, { recursive: true });
+    await fs.writeFile(fallbackFile, content, 'utf8');
+    listSkills.mockResolvedValue([{ name: 'pptx', filePath: fallbackFile }]);
 
-    try {
-      await expect(
-        setManagedSkillEnabled(configWith({ ...manager, listSkills }), {
-          skill: { slug: 'pptx', enabled: false },
-        }),
-      ).rejects.toThrow('Refusing to write to unexpected skill file');
-      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(content);
-      expect(manager.refreshCache).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
+    await expect(
+      setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: false },
+      }),
+    ).rejects.toThrow('Refusing to write to unexpected skill file');
+    await expect(fs.readFile(fallbackFile, 'utf8')).resolves.toBe(content);
+    expect(manager.refreshCache).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported mutation scopes before side effects', async () => {
@@ -329,8 +299,7 @@ describe('managed Skill mutations', () => {
         skill: {
           slug: 'pptx',
           scope: 'project',
-          sourceUrl:
-            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          sourceUrl: pptxSourceUrl,
         },
       }),
     ).rejects.toThrow('Only global skill installation is supported');
@@ -348,8 +317,7 @@ describe('managed Skill mutations', () => {
   });
 
   it('enables, disables, and deletes a global Skill', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const tempHome = await createTempHome();
     const { skillDir, skillFile } = await writeSkill(
       tempHome,
       'skills',
@@ -358,136 +326,116 @@ describe('managed Skill mutations', () => {
     const manager = managerFor('pptx');
     const config = configWith(manager);
 
-    try {
-      await expect(
-        setManagedSkillEnabled(config, {
-          skill: { slug: 'pptx', enabled: false },
-        }),
-      ).resolves.toMatchObject({
-        slug: 'pptx',
-        enabled: false,
-        installedPath: skillFile,
-      });
-      await expect(fs.readFile(skillFile, 'utf8')).resolves.toContain(
-        'disable-model-invocation: true',
-      );
+    await expect(
+      setManagedSkillEnabled(config, {
+        skill: { slug: 'pptx', enabled: false },
+      }),
+    ).resolves.toMatchObject({
+      slug: 'pptx',
+      enabled: false,
+      installedPath: skillFile,
+    });
+    await expect(fs.readFile(skillFile, 'utf8')).resolves.toContain(
+      'disable-model-invocation: true',
+    );
 
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: true },
-      });
-      await expect(fs.readFile(skillFile, 'utf8')).resolves.not.toContain(
-        'disable-model-invocation',
-      );
+    await setManagedSkillEnabled(config, {
+      skill: { slug: 'pptx', enabled: true },
+    });
+    await expect(fs.readFile(skillFile, 'utf8')).resolves.not.toContain(
+      'disable-model-invocation',
+    );
 
-      await expect(
-        deleteManagedSkill(config, { skill: { slug: 'pptx' } }),
-      ).resolves.toEqual({ slug: 'pptx', deleted: true });
-      await expect(fs.stat(skillDir)).rejects.toThrow();
-      expect(manager.refreshCache).toHaveBeenCalledTimes(3);
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
+    await expect(
+      deleteManagedSkill(config, { skill: { slug: 'pptx' } }),
+    ).resolves.toEqual({ slug: 'pptx', deleted: true });
+    await expect(fs.stat(skillDir)).rejects.toThrow();
+    expect(manager.refreshCache).toHaveBeenCalledTimes(3);
   });
 
   it('preserves comments and nested hooks when toggling frontmatter', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
-    const skillDir = path.join(tempHome, 'skills', 'pptx');
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    await fs.mkdir(skillDir, { recursive: true });
-    await fs.writeFile(
-      skillFile,
+    const tempHome = await createTempHome();
+    const { skillFile } = await writeSkill(
+      tempHome,
+      'skills',
+      'pptx',
       '---\n# keep this comment\nname: pptx\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      command: echo hi\n---\nBody\n',
-      'utf8',
     );
     const config = configWith(managerFor('pptx'));
 
-    try {
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: false },
-      });
-      let content = await fs.readFile(skillFile, 'utf8');
-      expect(content).toContain('# keep this comment');
-      expect(content).toContain('hooks:');
-      expect(content).toContain('matcher: Bash');
-      expect(content).toContain('disable-model-invocation: true');
+    await setManagedSkillEnabled(config, {
+      skill: { slug: 'pptx', enabled: false },
+    });
+    let content = await fs.readFile(skillFile, 'utf8');
+    expect(content).toContain('# keep this comment');
+    expect(content).toContain('hooks:');
+    expect(content).toContain('matcher: Bash');
+    expect(content).toContain('disable-model-invocation: true');
 
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: true },
-      });
-      content = await fs.readFile(skillFile, 'utf8');
-      expect(content).toContain('# keep this comment');
-      expect(content).toContain('hooks:');
-      expect(content).not.toContain('disable-model-invocation');
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
+    await setManagedSkillEnabled(config, {
+      skill: { slug: 'pptx', enabled: true },
+    });
+    content = await fs.readFile(skillFile, 'utf8');
+    expect(content).toContain('# keep this comment');
+    expect(content).toContain('hooks:');
+    expect(content).not.toContain('disable-model-invocation');
   });
 
-  it('canonicalizes duplicate top-level enablement fields', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
-    const skillDir = path.join(tempHome, 'skills', 'pptx');
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    await fs.mkdir(skillDir, { recursive: true });
-    const config = configWith(managerFor('pptx'));
+  it('normalizes supported top-level enablement fields', async () => {
+    const tempHome = await createTempHome();
     const parser = new SkillManager({} as Config);
+    const scenarios = [
+      {
+        field:
+          'disable-model-invocation: false\ndisable-model-invocation: true',
+        enabled: true,
+        expectedDisabled: undefined,
+        initiallyDisabled: false,
+      },
+      {
+        field:
+          'disable-model-invocation: true\ndisable-model-invocation: false',
+        enabled: false,
+        expectedDisabled: true,
+        initiallyDisabled: false,
+      },
+      ...['"', "'"].flatMap((quote) => [
+        {
+          field: `${quote}disable-model-invocation${quote}: true`,
+          enabled: true,
+          expectedDisabled: undefined,
+          initiallyDisabled: true,
+        },
+        {
+          field: `${quote}disable-model-invocation${quote}: false`,
+          enabled: false,
+          expectedDisabled: true,
+          initiallyDisabled: false,
+        },
+      ]),
+      {
+        field: 'disable-model-invocation:\n  false',
+        enabled: false,
+        expectedDisabled: true,
+        initiallyDisabled: false,
+      },
+      {
+        field: 'disable-model-invocation:\n  true',
+        enabled: true,
+        expectedDisabled: undefined,
+        initiallyDisabled: true,
+      },
+    ];
 
-    try {
-      await fs.writeFile(
-        skillFile,
-        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation: false\ndisable-model-invocation: true\n---\nBody\n',
-        'utf8',
+    for (const scenario of scenarios) {
+      const { skillFile } = await writeSkill(
+        tempHome,
+        'skills',
+        'pptx',
+        `---\nname: pptx\ndescription: Create slide decks\n${scenario.field}\n---\nBody\n`,
       );
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: true },
-      });
-      let content = await fs.readFile(skillFile, 'utf8');
-      expect(content.match(/^disable-model-invocation\s*:/gm) ?? []).toEqual(
-        [],
-      );
-      expect(
-        parser.parseSkillContent(content, skillFile, 'user')
-          .disableModelInvocation,
-      ).toBeUndefined();
 
-      await fs.writeFile(
-        skillFile,
-        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation: true\ndisable-model-invocation: false\n---\nBody\n',
-        'utf8',
-      );
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: false },
-      });
-      content = await fs.readFile(skillFile, 'utf8');
-      expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
-        'disable-model-invocation: true',
-      ]);
-      const parsed = parser.parseSkillContent(content, skillFile, 'user');
-      expect(parsed.disableModelInvocation).toBe(true);
-      expect(parsed.description).toBe('Create slide decks');
-      expect(parsed.body).toBe('Body');
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
-  });
-
-  it('toggles quoted top-level enablement fields', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
-    const skillDir = path.join(tempHome, 'skills', 'pptx');
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    await fs.mkdir(skillDir, { recursive: true });
-    const config = configWith(managerFor('pptx'));
-    const parser = new SkillManager({} as Config);
-
-    try {
-      for (const quote of ['"', "'"]) {
-        await fs.writeFile(
-          skillFile,
-          `---\nname: pptx\ndescription: Create slide decks\n${quote}disable-model-invocation${quote}: true\n---\nBody\n`,
-          'utf8',
-        );
+      if (scenario.initiallyDisabled) {
         expect(
           parser.parseSkillContent(
             await fs.readFile(skillFile, 'utf8'),
@@ -495,100 +443,27 @@ describe('managed Skill mutations', () => {
             'user',
           ).disableModelInvocation,
         ).toBe(true);
-        await setManagedSkillEnabled(config, {
-          skill: { slug: 'pptx', enabled: true },
-        });
-        let content = await fs.readFile(skillFile, 'utf8');
-        expect(
-          parser.parseSkillContent(content, skillFile, 'user')
-            .disableModelInvocation,
-        ).toBeUndefined();
-
-        await fs.writeFile(
-          skillFile,
-          `---\nname: pptx\ndescription: Create slide decks\n${quote}disable-model-invocation${quote}: false\n---\nBody\n`,
-          'utf8',
-        );
-        await setManagedSkillEnabled(config, {
-          skill: { slug: 'pptx', enabled: false },
-        });
-        content = await fs.readFile(skillFile, 'utf8');
-        expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
-          'disable-model-invocation: true',
-        ]);
-        expect(
-          parser.parseSkillContent(content, skillFile, 'user')
-            .disableModelInvocation,
-        ).toBe(true);
       }
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-    }
-  });
-
-  it('toggles enablement fields with next-line values', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
-    const skillDir = path.join(tempHome, 'skills', 'pptx');
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    await fs.mkdir(skillDir, { recursive: true });
-    const config = configWith(managerFor('pptx'));
-    const parser = new SkillManager({} as Config);
-
-    try {
-      await fs.writeFile(
-        skillFile,
-        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation:\n  false\n---\nBody\n',
-        'utf8',
-      );
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: false },
+      await setManagedSkillEnabled(configWith(managerFor('pptx')), {
+        skill: { slug: 'pptx', enabled: scenario.enabled },
       });
-      let content = await fs.readFile(skillFile, 'utf8');
-      expect(content.match(/^disable-model-invocation\s*:.*$/gm)).toEqual([
-        'disable-model-invocation: true',
-      ]);
-      const disabledSkill = parser.parseSkillContent(
-        content,
-        skillFile,
-        'user',
-      );
-      expect(disabledSkill.disableModelInvocation).toBe(true);
-      expect(disabledSkill.description).toBe('Create slide decks');
-      expect(disabledSkill.body).toBe('Body');
 
-      await fs.writeFile(
-        skillFile,
-        '---\nname: pptx\ndescription: Create slide decks\ndisable-model-invocation:\n  true\n---\nBody\n',
-        'utf8',
-      );
+      const content = await fs.readFile(skillFile, 'utf8');
       expect(
-        parser.parseSkillContent(
-          await fs.readFile(skillFile, 'utf8'),
-          skillFile,
-          'user',
-        ).disableModelInvocation,
-      ).toBe(true);
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'pptx', enabled: true },
-      });
-      content = await fs.readFile(skillFile, 'utf8');
-      expect(content).not.toContain('disable-model-invocation');
-      const enabledSkill = parser.parseSkillContent(content, skillFile, 'user');
-      expect(enabledSkill.disableModelInvocation).toBeUndefined();
-      expect(enabledSkill.description).toBe('Create slide decks');
-      expect(enabledSkill.body).toBe('Body');
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
+        content.match(
+          /^(?:disable-model-invocation|"disable-model-invocation"|'disable-model-invocation')\s*:.*$/gm,
+        ) ?? [],
+      ).toEqual(scenario.enabled ? [] : ['disable-model-invocation: true']);
+      const parsed = parser.parseSkillContent(content, skillFile, 'user');
+      expect(parsed.disableModelInvocation).toBe(scenario.expectedDisabled);
+      expect(parsed.description).toBe('Create slide decks');
+      expect(parsed.body).toBe('Body');
     }
   });
 
   it('resolves user and project Skills through the existing manager fallbacks', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    const tempProject = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-project-skill-'),
-    );
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const tempHome = await createTempHome();
+    const tempProject = await createTempDir('qwen-project-skill-');
     const userSkill = await writeSkill(tempHome, '.agents/skills', 'course');
     const projectSkill = await writeSkill(
       tempProject,
@@ -618,36 +493,29 @@ describe('managed Skill mutations', () => {
     );
     const config = configWith({ ...manager, listSkills });
 
-    try {
-      await setManagedSkillEnabled(config, {
-        skill: { slug: 'course', enabled: false },
-      });
-      await setManagedSkillEnabled(config, {
-        skill: {
-          slug: 'project-course',
-          enabled: false,
-          scope: 'project',
-        },
-      });
+    await setManagedSkillEnabled(config, {
+      skill: { slug: 'course', enabled: false },
+    });
+    await setManagedSkillEnabled(config, {
+      skill: {
+        slug: 'project-course',
+        enabled: false,
+        scope: 'project',
+      },
+    });
 
-      await expect(fs.readFile(userSkill.skillFile, 'utf8')).resolves.toContain(
-        'disable-model-invocation: true',
-      );
-      await expect(
-        fs.readFile(projectSkill.skillFile, 'utf8'),
-      ).resolves.toContain('disable-model-invocation: true');
-      expect(listSkills).toHaveBeenCalledWith({ level: 'user' });
-      expect(listSkills).toHaveBeenCalledWith({ level: 'project' });
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
-      await fs.rm(tempProject, { recursive: true, force: true });
-    }
+    await expect(fs.readFile(userSkill.skillFile, 'utf8')).resolves.toContain(
+      'disable-model-invocation: true',
+    );
+    await expect(
+      fs.readFile(projectSkill.skillFile, 'utf8'),
+    ).resolves.toContain('disable-model-invocation: true');
+    expect(listSkills).toHaveBeenCalledWith({ level: 'user' });
+    expect(listSkills).toHaveBeenCalledWith({ level: 'project' });
   });
 
   it('resolves project Skills from the requested working directory', async () => {
-    const tempProject = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-project-cwd-skill-'),
-    );
+    const tempProject = await createTempDir('qwen-project-cwd-skill-');
     const skillDir = path.join(tempProject, '.qwen', 'skills', 'issue-fixer');
     const skillFile = path.join(skillDir, 'SKILL.md');
     await fs.mkdir(skillDir, { recursive: true });
@@ -666,61 +534,52 @@ describe('managed Skill mutations', () => {
     const listSkills = vi.fn().mockResolvedValue([]);
     const config = configWith({ ...manager, loadSkillsFromDir, listSkills });
 
-    try {
-      await expect(
-        setManagedSkillEnabled(
-          config,
-          {
-            skill: { slug: 'bugfix', enabled: false, scope: 'project' },
-          },
-          tempProject,
-        ),
-      ).resolves.toMatchObject({
-        slug: 'bugfix',
-        enabled: false,
-        installedPath: skillFile,
-      });
-      expect(loadSkillsFromDir).toHaveBeenCalledWith(
-        path.join(tempProject, '.qwen', 'skills'),
-        'project',
-      );
-      expect(listSkills).not.toHaveBeenCalled();
-    } finally {
-      await fs.rm(tempProject, { recursive: true, force: true });
-    }
+    await expect(
+      setManagedSkillEnabled(
+        config,
+        {
+          skill: { slug: 'bugfix', enabled: false, scope: 'project' },
+        },
+        tempProject,
+      ),
+    ).resolves.toMatchObject({
+      slug: 'bugfix',
+      enabled: false,
+      installedPath: skillFile,
+    });
+    expect(loadSkillsFromDir).toHaveBeenCalledWith(
+      path.join(tempProject, '.qwen', 'skills'),
+      'project',
+    );
+    expect(listSkills).not.toHaveBeenCalled();
   });
 
   it('rejects traversal slugs before downloading or touching disk', async () => {
-    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
-    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const tempHome = await createTempHome();
     const sentinel = path.join(tempHome, 'settings.json');
     await fs.writeFile(sentinel, '{"keep":true}', 'utf8');
     const config = configWith(managerFor('unused'));
 
-    try {
-      for (const slug of ['..', '.']) {
-        await expect(
-          installManagedSkill(config, {
-            skill: {
-              slug,
-              sourceUrl:
-                'https://github.com/anthropics/skills/blob/main/SKILL.md',
-            },
-          }),
-        ).rejects.toThrow('Invalid skill.slug');
-        await expect(
-          deleteManagedSkill(config, { skill: { slug } }),
-        ).rejects.toThrow('Invalid skill.slug');
-        await expect(
-          setManagedSkillEnabled(config, {
-            skill: { slug, enabled: false },
-          }),
-        ).rejects.toThrow('Invalid skill.slug');
-      }
-      expect(downloadSkillMock).not.toHaveBeenCalled();
-      await expect(fs.readFile(sentinel, 'utf8')).resolves.toContain('keep');
-    } finally {
-      await fs.rm(tempHome, { recursive: true, force: true });
+    for (const slug of ['..', '.']) {
+      await expect(
+        installManagedSkill(config, {
+          skill: {
+            slug,
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/SKILL.md',
+          },
+        }),
+      ).rejects.toThrow('Invalid skill.slug');
+      await expect(
+        deleteManagedSkill(config, { skill: { slug } }),
+      ).rejects.toThrow('Invalid skill.slug');
+      await expect(
+        setManagedSkillEnabled(config, {
+          skill: { slug, enabled: false },
+        }),
+      ).rejects.toThrow('Invalid skill.slug');
     }
+    expect(downloadSkillMock).not.toHaveBeenCalled();
+    await expect(fs.readFile(sentinel, 'utf8')).resolves.toContain('keep');
   });
 });

@@ -12,6 +12,11 @@ import {
   fetchAllowedGitHub,
 } from './skill-source-download.js';
 
+const sourceUrl =
+  'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md';
+const directoryUrl =
+  'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
+
 function tarEntry(name: string, content: string): Buffer {
   const header = Buffer.alloc(512);
   header.write(name, 0, 'utf8');
@@ -33,6 +38,24 @@ function toArrayBuffer(buffer: Uint8Array): ArrayBuffer {
     buffer.byteOffset,
     buffer.byteOffset + buffer.byteLength,
   ) as ArrayBuffer;
+}
+
+function jsonResponse(value: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    json: vi.fn().mockResolvedValue(value),
+  };
+}
+
+function arrayBufferResponse(content: string | Uint8Array) {
+  const buffer = typeof content === 'string' ? Buffer.from(content) : content;
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: vi.fn().mockReturnValue(null) },
+    arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(buffer)),
+  };
 }
 
 afterEach(() => {
@@ -179,8 +202,6 @@ describe('downloadSkill', () => {
   });
 
   it('does not fetch a disallowed API-provided download URL', async () => {
-    const directoryUrl =
-      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
     const disallowedUrl = 'https://evil.com/SKILL.md';
     const archiveUrl =
       'https://codeload.github.com/anthropics/skills/tar.gz/main';
@@ -190,34 +211,21 @@ describe('downloadSkill', () => {
     );
     const fetchMock = vi.fn(async (url: string) => {
       if (url === directoryUrl) {
-        return {
-          ok: true,
-          status: 200,
-          json: vi.fn().mockResolvedValue([
-            {
-              name: 'SKILL.md',
-              path: 'skills/pptx/SKILL.md',
-              type: 'file',
-              download_url: disallowedUrl,
-            },
-          ]),
-        };
+        return jsonResponse([
+          {
+            name: 'SKILL.md',
+            path: 'skills/pptx/SKILL.md',
+            type: 'file',
+            download_url: disallowedUrl,
+          },
+        ]);
       }
       const content = url === archiveUrl ? archive : Buffer.from('unsafe');
-      return {
-        ok: true,
-        status: 200,
-        headers: { get: vi.fn().mockReturnValue(null) },
-        arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(content)),
-      };
+      return arrayBufferResponse(content);
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      downloadSkill(
-        'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
-      ),
-    ).resolves.toMatchObject({
+    await expect(downloadSkill(sourceUrl)).resolves.toMatchObject({
       skillContent: '---\nname: pptx\n---\nBody\n',
     });
     expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain(
@@ -233,47 +241,33 @@ describe('downloadSkill', () => {
     const skillContent =
       '---\nname: pptx\ndescription: Create slide decks\n---\nCreate slide decks\n';
     const editingContent = '# Editing guide\n';
-    const directoryUrl =
-      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
     const skillUrl =
       'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/SKILL.md';
     const editingUrl =
       'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/editing.md';
     const fetchMock = vi.fn(async (url: string) => {
       if (url === directoryUrl) {
-        return {
-          ok: true,
-          status: 200,
-          json: vi.fn().mockResolvedValue([
-            {
-              name: 'SKILL.md',
-              path: 'skills/pptx/SKILL.md',
-              type: 'file',
-              download_url: skillUrl,
-            },
-            {
-              name: 'editing.md',
-              path: 'skills/pptx/editing.md',
-              type: 'file',
-              download_url: editingUrl,
-            },
-          ]),
-        };
+        return jsonResponse([
+          {
+            name: 'SKILL.md',
+            path: 'skills/pptx/SKILL.md',
+            type: 'file',
+            download_url: skillUrl,
+          },
+          {
+            name: 'editing.md',
+            path: 'skills/pptx/editing.md',
+            type: 'file',
+            download_url: editingUrl,
+          },
+        ]);
       }
       const content = url === skillUrl ? skillContent : editingContent;
-      return {
-        ok: true,
-        status: 200,
-        arrayBuffer: vi
-          .fn()
-          .mockResolvedValue(toArrayBuffer(Buffer.from(content))),
-      };
+      return arrayBufferResponse(content);
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const skill = await downloadSkill(
-      'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
-    );
+    const skill = await downloadSkill(sourceUrl);
 
     expect(skill.skillContent).toBe(skillContent);
     expect(skill.files.map((file) => file.relativePath)).toEqual([
