@@ -909,7 +909,12 @@ export function ModelDialog({
         }
         const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'imageModel', imageModel);
-        await config.setImageModel(imageModel);
+        selectionInFlightRef.current = true;
+        try {
+          await config.setImageModel(imageModel);
+        } finally {
+          selectionInFlightRef.current = false;
+        }
         const scopeSuffix =
           persistScope === 'workspace'
             ? t(' (this project)')

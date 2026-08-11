@@ -910,6 +910,72 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('ignores duplicate input while an image model selection is in flight', async () => {
+    let resolveSetImageModel: (() => void) | undefined;
+    const setImageModel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSetImageModel = resolve;
+        }),
+    );
+    const baseUrl = 'https://images.example.com/api/v1';
+    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+    const { props, mockSettings, mockHistoryManager, recordSlashCommand } =
+      renderComponent({ isImageModelMode: true }, {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-image-2.0',
+            label: 'Qwen Image 2.0',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            envKey: 'IMAGE_API_KEY',
+            imageOnly: true,
+          },
+        ]),
+        resolveImageGenerationModel: vi.fn(() => ({
+          model: 'qwen-image-2.0',
+          baseUrl,
+          apiKeyEnv: 'IMAGE_API_KEY',
+        })),
+        setImageModel,
+      } as unknown as Partial<Config>);
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    const selection = onSelect(
+      `${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`,
+    );
+    await onSelect(`${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`);
+    mockedUseKeypress.mock.calls[0][0]({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(setImageModel).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    resolveSetImageModel?.();
+    await selection;
+
+    expect(setImageModel).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValue).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'imageModel',
+      persisted,
+    );
+  });
+
   it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();

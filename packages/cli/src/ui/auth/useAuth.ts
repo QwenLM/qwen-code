@@ -220,6 +220,7 @@ export const useAuthCommand = (
   }, []);
 
   const closeAuthDialog = useCallback(() => {
+    openedViaCommandRef.current = false;
     setIsAuthDialogOpen(false);
     setAuthError(null);
   }, []);

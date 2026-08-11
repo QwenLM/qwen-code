@@ -183,6 +183,34 @@ describe('useAuthCommand', () => {
     expect(recordSlashCommand).not.toHaveBeenCalled();
   });
 
+  it('clears the /auth recording latch when a command-opened dialog closes', async () => {
+    const settings = createSettings();
+    const recordSlashCommand = vi.fn();
+    const config = createConfig(recordSlashCommand);
+    const addItem = vi.fn();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+
+    act(() => {
+      result.current.openAuthDialog();
+      result.current.closeAuthDialog();
+      result.current.onAuthError('later unauthorized');
+    });
+
+    await act(async () => {
+      await result.current.handleProviderSubmit(deepseekProvider, {
+        baseUrl: resolveBaseUrl(deepseekProvider),
+        apiKey: 'sk-deepseek',
+        modelIds: ['deepseek-v4-flash'],
+      });
+    });
+
+    expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+  });
+
   it('configures OpenRouter via the unified provider submit', async () => {
     const settings = createSettings();
     const config = createConfig();
