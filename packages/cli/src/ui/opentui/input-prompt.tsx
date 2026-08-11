@@ -562,6 +562,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           maxHeight={8}
           placeholder={placeholder}
           placeholderColor={C.dim}
+          textColor={C.text}
           cursorColor={C.accent}
           wrapMode="char"
           onSubmit={handleSubmit}
