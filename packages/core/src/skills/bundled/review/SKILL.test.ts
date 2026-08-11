@@ -81,6 +81,23 @@ describe('bundled review skill', () => {
     expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
 
+  it('launches the 3B convergence pair in the same response', () => {
+    // The pair's wall-clock saving exists only while both rounds go out
+    // together: a later edit serializing the skill while the prompt-builder
+    // tests stay green (they call each round builder themselves) restores
+    // the extra round wall. Bounded to the 3B section so the 3A pair's
+    // identical phrasing cannot satisfy it.
+    const body = skillBody();
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`--all-chunks --round 1`');
+    expect(section).toContain('`--all-chunks --round 2`');
+    expect(section).toContain('in the same response');
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either

@@ -23,8 +23,11 @@ import {
   DEFAULT_RESERVE_SECONDS,
   DEFAULT_ROUND_SECONDS,
   DEFAULT_COMPOSE_FLOOR_SECONDS,
+  DEFAULT_TOOL_CONCURRENCY,
+  TOOL_CONCURRENCY_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
+  expectedAdmissionSeconds,
   expectedRoundSeconds,
   readBudgetStop,
   readRoundStamps,
@@ -277,6 +280,117 @@ describe('the round-cost estimate — measured when it can be', () => {
       { round: null, atMs: NOW_MS - 100 },
       { round: null, atMs: NOW_MS },
     ]);
+  });
+});
+
+describe('the pair admission price — a round launched beside an in-flight round pays for both', () => {
+  // The convergence pair's second member is built seconds after the first's
+  // stamp, so nothing has measured a round yet. Pricing it off that
+  // seconds-old span committed the pair at one round's price for up to two
+  // rounds' wall — these pin the wave-priced pair instead.
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function plan(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-pair-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, '{}');
+    backdatePlan(p);
+    return p;
+  }
+
+  it('prices a round with no in-flight predecessor like expectedRoundSeconds', () => {
+    const p = plan();
+    expect(expectedAdmissionSeconds(p, 1, 6, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    stampRound(p, 1, NOW_MS - 2_400_000); // round 1 returned 40 min ago
+    expect(expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS)).toBe(
+      expectedRoundSeconds(p, 2, NOW_MS),
+    );
+    expect(expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS)).toBe(2400);
+  });
+
+  it('prices the pair at both members when the pool serializes them', () => {
+    // Six chunks on the default 10-slot pool: one wave per round, two
+    // waves for the pair — the seconds-old round-1 stamp has measured
+    // nothing, so the price is 2x the round estimate, not the floor.
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    expect(expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS)).toBe(
+      2 * DEFAULT_ROUND_SECONDS,
+    );
+  });
+
+  it('prices the pair at one round when the pool holds both members at once', () => {
+    // Three chunks on ten slots: both members fit in a single wave, and
+    // the pair's wall is one round's — the 3A shape reads the same (width
+    // 1 on any pool of two or more).
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    expect(expectedAdmissionSeconds(p, 2, 3, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    expect(expectedAdmissionSeconds(p, 2, 1, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+  });
+
+  it('reads the pool from the tool-concurrency env, like the scheduler', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    // A 12-slot pool holds all twelve auditors of a 6-chunk pair in one
+    // wave.
+    expect(
+      expectedAdmissionSeconds(
+        p,
+        2,
+        6,
+        { [TOOL_CONCURRENCY_ENV]: '12' },
+        NOW_MS,
+      ),
+    ).toBe(DEFAULT_ROUND_SECONDS);
+    // A 3-slot pool runs a 6-chunk round in two waves and the pair in
+    // four — two rounds' price again.
+    expect(
+      expectedAdmissionSeconds(
+        p,
+        2,
+        6,
+        { [TOOL_CONCURRENCY_ENV]: '3' },
+        NOW_MS,
+      ),
+    ).toBe(2 * DEFAULT_ROUND_SECONDS);
+    // Malformed falls back to the default pool, never to a wedge.
+    expect(
+      expectedAdmissionSeconds(
+        p,
+        2,
+        6,
+        { [TOOL_CONCURRENCY_ENV]: 'soon' },
+        NOW_MS,
+      ),
+    ).toBe(
+      Math.ceil(
+        (DEFAULT_ROUND_SECONDS * Math.ceil(12 / DEFAULT_TOOL_CONCURRENCY)) /
+          Math.ceil(6 / DEFAULT_TOOL_CONCURRENCY),
+      ),
+    );
+  });
+
+  it('keeps the reserve on top of the pair price at the refusal boundary', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    const price = expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS);
+    expect(price).toBe(2 * DEFAULT_ROUND_SECONDS);
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_RESERVE_SECONDS + price),
+    };
+    expect(reverseAuditBudgetExhausted(env, price, NOW_MS)).toBeNull();
+    env[DEADLINE_ENV] = String(NOW_S + DEFAULT_RESERVE_SECONDS + price - 1);
+    expect(reverseAuditBudgetExhausted(env, price, NOW_MS)).not.toBeNull();
   });
 });
 

@@ -45,6 +45,7 @@ import {
   DEADLINE_ENV,
   RESERVE_ENV,
   COMPOSE_FLOOR_ENV,
+  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
 } from './lib/deadline.js';
@@ -2658,6 +2659,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   afterEach(() => {
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
+    delete process.env[TOOL_CONCURRENCY_ENV];
     process.exitCode = undefined;
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -3103,6 +3105,59 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // A refusal is not an admission.
     expect(readRoundStamps(plan)).toHaveLength(1);
   });
+
+  it('prices the 3B pair as one admission — round 2 bears the pair wall', () => {
+    // Round 2's build lands seconds after round 1's stamp, so nothing has
+    // measured a round yet; the price is both members' wall in waves of the
+    // tool-concurrency pool. PLAN has three chunks; at a 2-slot pool each
+    // round runs two waves and the pair three, so round 2 pays 3/2 of the
+    // round estimate — and the gate refuses it when the reserve plus that
+    // does not fit, even though round 1 (one estimate) just admitted.
+    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).some((st) => st.round === 1)).toBe(true);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    // Reserve 600 + pair price 2700 = 3300 > the 3000 remaining.
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    expect(readRoundStamps(plan)).toHaveLength(1);
+  });
+
+  it('admits the 3B pair when the reserve plus the pair wall fits', () => {
+    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3400);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).map((st) => st.round)).toEqual([1, 2]);
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('prices the pair at one round when the pool holds both fan-outs at once', () => {
+    // The default 10-slot pool holds all six auditors of PLAN's 3-chunk
+    // pair in one wave, so round 2 pays one round estimate — a flat 2x
+    // price would refuse this admission (reserve 600 + 3600 > 3000) and
+    // gut the pair's admission win near the deadline.
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).map((st) => st.round)).toEqual([1, 2]);
+  });
 });
 
 describe('per-chunk retirement — cold territories stop costing a round', () => {
@@ -3320,7 +3375,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // apart. Pins the mechanism the SKILL 3B-pair orchestration relies on.
     const r1 = runRound(1); // built, but no transcripts written for it
     expect(r1).toContain('3 auditors required this round — one per chunk.');
-    const r2 = runRound(2); // round 1's records are empty at this point
+    const r2 = runRound(2); // round 1's transcripts don't exist yet at this point
     expect(r2).toContain('3 auditors required this round — one per chunk.');
     expect(r2).not.toContain('retirement:');
     expect(keysOf(1)).toHaveLength(3);
