@@ -255,6 +255,23 @@ describe('OmniExtractKeyframesTool', () => {
       );
     });
 
+    it('discloses partial bucket coverage when some buckets yield no frame (D8)', async () => {
+      probe({ durationMs: 40_000, width: 640, height: 360 });
+      mocks.runFfmpeg
+        .mockImplementationOnce(framesRun(1, [2])) // bucket 1: scene hit
+        .mockImplementationOnce(noFrameRun) // bucket 2: scene attempt → nothing
+        .mockImplementationOnce(noFrameRun); // bucket 2: midpoint → nothing
+      const { result } = await run({ maxFrames: 2 });
+
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(1);
+      // The blanket 全片分桶采样 claim would be false here — bucket 2 was
+      // never sampled, so the note must disclose the actual coverage.
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '静态抽帧（全片分桶采样，仅覆盖 1/2 个分桶，其余时段未采样）',
+      );
+    });
+
     it('surfaces the last ffmpeg failure when every bucket failed', async () => {
       probe({ durationMs: 20_000 });
       mocks.runFfmpeg.mockResolvedValue({ code: 187, stderr: 'boom' });

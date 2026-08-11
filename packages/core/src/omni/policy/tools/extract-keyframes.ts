@@ -239,7 +239,15 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         probe.width !== undefined && probe.height !== undefined
           ? `/${probe.width}×${probe.height}`
           : '';
-      const samplingNote = bucketed ? '静态抽帧（全片分桶采样）' : '静态抽帧';
+      // D8: full-duration coverage may only be claimed when every bucket
+      // actually yielded a frame — an early budget stop or a failed
+      // bucket leaves unsampled spans, and the model must be told so it
+      // does not answer questions about footage it never saw.
+      const samplingNote = bucketed
+        ? frames.length < maxFrames
+          ? `静态抽帧（全片分桶采样，仅覆盖 ${frames.length}/${maxFrames} 个分桶，其余时段未采样）`
+          : '静态抽帧（全片分桶采样）'
+        : '静态抽帧';
 
       const artifacts: ToolArtifact[] = [];
       for (const [index, frame] of frames.entries()) {
