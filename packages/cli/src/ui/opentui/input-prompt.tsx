@@ -30,8 +30,22 @@
  *    the line, Shift+Enter inserts a newline.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useKeyboard, useTerminalDimensions } from '@opentui/react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import {
+  useKeyboard,
+  useRenderer,
+  useTerminalDimensions,
+} from '@opentui/react';
+import {
+  isPrintableKeyInput,
+  isUnmodifiedBackspaceSequence,
+} from './input-prompt-key.js';
 import type { KeyEvent, TextareaRenderable } from '@opentui/core';
 import {
   FileSearchFactory,
@@ -112,6 +126,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   } = props;
 
   const { width } = useTerminalDimensions();
+  const renderer = useRenderer();
   const editorRef = useRef<TextareaRenderable | null>(null);
   const userMessagesRef = useRef(userMessages);
   userMessagesRef.current = userMessages;
@@ -329,6 +344,22 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     [suggestions, applyTextToEditor, onSubmit],
   );
 
+  // ── raw Backspace: consumed before parsed-key dispatch so legacy DEL/BS
+  //    and unmodified kitty encodings delete exactly once via the editor API
+  //    and never double-fire through the focused editor ────────────────────
+  useLayoutEffect(() => {
+    const onRawInput = (sequence: string): boolean => {
+      if (!focus || !isUnmodifiedBackspaceSequence(sequence)) return false;
+      const el = editorRef.current;
+      if (!el) return false;
+      el.deleteCharBackward();
+      setTextVersion((v) => v + 1);
+      return true;
+    };
+    renderer.addInputHandler(onRawInput);
+    return () => renderer.removeInputHandler(onRawInput);
+  }, [renderer, focus]);
+
   // ── keyboard: global handlers run BEFORE the focused editor, so
   //    preventDefault here keeps the editor from double-handling a key ─────
   useKeyboard((key: KeyEvent) => {
@@ -361,13 +392,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
       return;
     }
-    if (
-      !key.ctrl &&
-      !key.meta &&
-      key.sequence &&
-      key.sequence.length >= 1 &&
-      !key.sequence.startsWith('\x1b')
-    ) {
+    if (isPrintableKeyInput(key)) {
       el.insertText(key.sequence);
       setTextVersion((v) => v + 1);
       key.preventDefault();
