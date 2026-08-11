@@ -188,6 +188,63 @@ function parseFrameRate(raw: string | undefined): number | undefined {
   return Number.isFinite(fps) && fps > 0 ? fps : undefined;
 }
 
+/** Image containers/codecs that can hold more than one frame. Only these
+ * warrant the decode-and-count fallback below — a plain JPEG/BMP without
+ * nb_frames is single-frame by construction. */
+function isAnimationCapableImage(
+  formatName: string | undefined,
+  codecName: string | undefined,
+): boolean {
+  const tokens = new Set([
+    ...(formatName?.split(',').map((t) => t.trim()) ?? []),
+    ...(codecName ? [codecName] : []),
+  ]);
+  return ['gif', 'webp', 'png', 'apng'].some((t) => tokens.has(t));
+}
+
+/**
+ * Count an image stream's frames by decoding it (`-count_frames` →
+ * `nb_read_frames`). The fallback for animation-capable containers whose
+ * headers carry no frame count (animated WebP, APNG). Returns NaN when
+ * counting fails or aborts — the caller's finite-and-positive guard then
+ * omits frameCount; the image tools' sharp `pages` check remains as the
+ * second, independent animated-input backstop.
+ */
+async function countImageFrames(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<number> {
+  try {
+    const { stdout, code } = await execCommand(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-count_frames',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=nb_read_frames',
+        '-print_format',
+        'json',
+        filePath,
+      ],
+      {
+        timeout: 15_000,
+        maxBuffer: 4 * 1024 * 1024,
+        ...(signal && { signal }),
+      },
+    );
+    if (signal?.aborted || code !== 0) return NaN;
+    const parsed = JSON.parse(stdout) as {
+      streams?: Array<{ nb_read_frames?: string }>;
+    };
+    return Number(parsed.streams?.[0]?.nb_read_frames);
+  } catch {
+    return NaN;
+  }
+}
+
 /**
  * Probe a local media file with ffprobe. Throws on non-zero exit or
  * unparseable output — the omni pipeline treats a failed probe as a
@@ -267,7 +324,22 @@ export async function probeMediaMetadata(
       // video stream; a single-frame image reports 1 or omits it. The token
       // estimator needs the real count — an animated GIF estimated as one
       // frame sails under the transport guard at ~1/300 of its real cost.
-      const nbFrames = Number(videoStream?.nb_frames);
+      let nbFrames = Number(videoStream?.nb_frames);
+      if (
+        !(Number.isFinite(nbFrames) && nbFrames > 0) &&
+        isAnimationCapableImage(
+          parsed.format?.format_name,
+          videoStream?.codec_name,
+        )
+      ) {
+        // Animation-capable container without a reported nb_frames:
+        // ffprobe leaves it out for WebP and APNG (their headers carry no
+        // frame count), so `missing` must not be read as `single-frame` —
+        // that would fail OPEN through every animated-image gate (the D9
+        // still-image exclusion and both image tools' refusals). Decode
+        // the stream once to count the real frames.
+        nbFrames = await countImageFrames(filePath, signal);
+      }
       return {
         ...base,
         width: videoStream?.width,

@@ -173,6 +173,16 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         return mediaPolicyToolError('image conversion aborted');
       }
 
+      // Second, independent animated-input gate (same rationale as
+      // omni_downsample_image): ffprobe cannot always report a frame
+      // count, while sharp's metadata decodes the page count directly.
+      const pages = (await sharp(this.params.inputPath).metadata()).pages;
+      if (pages !== undefined && pages > 1) {
+        return mediaPolicyToolError(
+          `animated image (${pages} frames) is not supported by ${OMNI_CONVERT_IMAGE_TOOL_NAME}`,
+        );
+      }
+
       const outputPath = path.join(this.params.outputDir, output.fileName);
       // `rotate()` bakes in the EXIF orientation — the orientation tag is
       // part of the metadata this conversion strips, so the pixels must

@@ -130,6 +130,18 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
         return mediaPolicyToolError('image downsampling aborted');
       }
 
+      // Second, independent animated-input gate: ffprobe cannot always
+      // report a frame count (and the counting fallback is best-effort),
+      // while sharp's own metadata decodes the page count directly. Both
+      // must agree the input is single-frame before the first-frame-only
+      // re-encode below is lossless-in-frames.
+      const pages = (await sharp(this.params.inputPath).metadata()).pages;
+      if (pages !== undefined && pages > 1) {
+        return mediaPolicyToolError(
+          `animated image (${pages} frames) is not supported by ${OMNI_DOWNSAMPLE_IMAGE_TOOL_NAME}`,
+        );
+      }
+
       const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
       // `rotate()` bakes in the EXIF orientation so the resized pixels
       // match what the user saw; `fit: 'inside'` preserves aspect ratio;

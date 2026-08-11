@@ -22,6 +22,10 @@ export interface SharpPipeline {
   jpeg(options: { quality: number }): SharpPipeline;
   png(): SharpPipeline;
   webp(options: { quality: number }): SharpPipeline;
+  /** Header-derived metadata; `pages` is the frame/page count of
+   * multi-frame containers (animated GIF/WebP/APNG) — the tools' second,
+   * ffprobe-independent animated-input gate. */
+  metadata(): Promise<{ pages?: number }>;
   toFile(
     outputPath: string,
   ): Promise<{ width: number; height: number; size: number }>;

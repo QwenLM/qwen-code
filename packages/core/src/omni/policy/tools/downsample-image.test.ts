@@ -78,7 +78,12 @@ describe('OmniDownsampleImageTool', () => {
     resize = vi.fn(() => ({ jpeg }));
     rotate = vi.fn(() => ({ resize }));
     timeout = vi.fn(() => ({ rotate }));
-    mocks.sharpCreate.mockReturnValue({ timeout });
+    mocks.sharpCreate.mockReturnValue({
+      timeout,
+      // Second animated-input gate: a bare metadata() call precedes the
+      // encode pipeline; single-frame by default.
+      metadata: vi.fn().mockResolvedValue({ pages: 1 }),
+    });
   });
 
   afterEach(async () => {
@@ -202,6 +207,20 @@ describe('OmniDownsampleImageTool', () => {
       /animated image \(12 frames\) is not supported/,
     );
     expect(mocks.sharpCreate).not.toHaveBeenCalled();
+    expect(result.artifacts).toBeUndefined();
+  });
+
+  it('refuses animated images the probe missed via sharp page count', async () => {
+    // ffprobe reports no frame count (animated WebP/APNG headers carry
+    // none) — sharp's metadata() is the independent second gate.
+    probe({ width: 640, height: 480 });
+    mocks.sharpCreate.mockReturnValue({
+      metadata: vi.fn().mockResolvedValue({ pages: 12 }),
+    });
+    const { result } = await run();
+    expect(result.error?.message).toMatch(
+      /animated image \(12 frames\) is not supported/,
+    );
     expect(result.artifacts).toBeUndefined();
   });
 
