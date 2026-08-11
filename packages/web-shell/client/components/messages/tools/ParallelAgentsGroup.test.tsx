@@ -147,6 +147,10 @@ describe('ParallelAgentsGroup activity rendering', () => {
         '8s',
       );
       expect(container.querySelector('[class*="rowAction"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(container.querySelector('[class*="rowStats"]')?.textContent).toBe(
+        '10s',
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -196,6 +200,38 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.querySelector('[class*="rowType"]')).toBeNull();
     expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
       'Inspect the message list',
+    );
+  });
+
+  it('omits the untyped task fallback while keeping its task description', () => {
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'untyped-task',
+        toolName: 'task',
+        args: { description: 'Inspect the message list' },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')).toBeNull();
+    expect(container.querySelector('[class*="rowTask"]')?.textContent).toBe(
+      'Inspect the message list',
+    );
+  });
+
+  it('caps a long agent type label at the row width limit', () => {
+    const longType = 'reviewer-' + 'x'.repeat(90);
+    const container = renderExpandedGroup([
+      agent({
+        callId: 'long-type',
+        args: {
+          description: 'Inspect the message list',
+          subagent_type: longType,
+        },
+      }),
+    ]);
+
+    expect(container.querySelector('[class*="rowType"]')?.textContent).toBe(
+      `${longType.slice(0, 50)}...:`,
     );
   });
 
@@ -1418,6 +1454,7 @@ describe('ParallelAgentsGroup activity rendering', () => {
     const row = container.querySelector('[class*="row"]') as HTMLElement;
     expect(row.getAttribute('data-detail-mode')).toBe('panel');
     expect(row.getAttribute('title')).toBe('Open subagent details');
+    expect(row.querySelector('[class*="rowAction"]')).not.toBeNull();
     expect(row.hasAttribute('aria-expanded')).toBe(false);
     act(() => row.click());
 

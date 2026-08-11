@@ -13,6 +13,7 @@ import {
 import {
   getTaskExecutionRecord,
   getAgentType,
+  isDefaultAgentType,
   getAgentDescription,
   getAgentCurrentToolHint,
   formatTokenCount,
@@ -462,7 +463,7 @@ export function ParallelAgentsGroup({
                     t,
                   );
                   const showAgentType =
-                    !!desc && agentType.toLowerCase() !== 'general-purpose';
+                    !!desc && !isDefaultAgentType(agentType);
                   return (
                     <div key={agent.callId}>
                       <button
@@ -503,7 +504,7 @@ export function ParallelAgentsGroup({
                         <span className={styles.rowText}>
                           {showAgentType && (
                             <span className={styles.rowType}>
-                              {localizedAgentType}:
+                              {truncateText(localizedAgentType, 50)}:
                             </span>
                           )}
                           <span className={styles.rowTask}>
