@@ -195,6 +195,12 @@ export class InboundGate {
       return 'accept';
     }
 
+    if (this.held.some((entry) => entry.frame.msgId === frame.msgId)) {
+      debugLogger.debug(`refused duplicate peer message ${frame.msgId}`);
+      this.options.reportStatus?.(frame, 'denied');
+      return 'refused';
+    }
+
     if (this.held.length >= MAX_HELD_MESSAGES) {
       const evicted = this.held.shift();
       if (evicted) {

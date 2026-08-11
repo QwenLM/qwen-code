@@ -72,17 +72,19 @@ export function sendPeerFrame(
     const fail = (error: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       socket.destroy();
       reject(new PeerSendError(error.message, error.code));
     };
 
-    socket.setTimeout(SEND_TIMEOUT_MS, () => {
+    const deadline = setTimeout(() => {
       fail(
         Object.assign(new Error(`Timed out sending to ${socketPath}`), {
           code: 'ETIMEDOUT',
         }),
       );
-    });
+    }, SEND_TIMEOUT_MS);
+    deadline.unref();
     socket.on('error', fail);
     socket.on('connect', () => {
       socket.end(encodePeerFrame(frame));
@@ -90,6 +92,7 @@ export function sendPeerFrame(
     socket.on('close', () => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       debugLogger.debug(`sent ${frame.type} frame to ${socketPath}`);
       resolve();
     });

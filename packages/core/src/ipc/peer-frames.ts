@@ -99,7 +99,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
   if (typeof msgV !== 'number' || msgV > PEER_FRAME_VERSION) return null;
 
   const msgId = parsed['msgId'];
-  if (typeof msgId !== 'string' || msgId.length === 0) return null;
+  if (typeof msgId !== 'string' || !/[A-Za-z0-9]/.test(msgId)) return null;
 
   if (parsed['type'] === 'user') {
     const message = parsed['message'];

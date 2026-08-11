@@ -86,6 +86,8 @@ describe('parsePeerFrame — user frames', () => {
   it.each([
     ['a missing msgId', { ...validUser, msgId: undefined }],
     ['an empty msgId', { ...validUser, msgId: '' }],
+    ['a whitespace-and-dashes msgId', { ...validUser, msgId: ' --\t- ' }],
+    ['a control-only msgId', { ...validUser, msgId: '\u0007' }],
     ['a non-string msgId', { ...validUser, msgId: 7 }],
     ['a missing message', { ...validUser, message: undefined }],
     [

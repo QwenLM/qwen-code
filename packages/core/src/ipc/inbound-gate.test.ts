@@ -231,6 +231,22 @@ describe('receipts', () => {
 });
 
 describe('hold buffer bounds', () => {
+  it('refuses a duplicate held message id', () => {
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const first = frame({ msgId: 'duplicate-id' });
+    const duplicate = frame({ msgId: first.msgId });
+
+    expect(h.gate.admit(first)).toBe('held');
+    expect(h.gate.admit(duplicate)).toBe('refused');
+    expect(h.gate.getHeld()).toEqual([
+      expect.objectContaining({ frame: first }),
+    ]);
+    expect(h.statuses).toEqual([
+      { msgId: first.msgId, status: 'held' },
+      { msgId: duplicate.msgId, status: 'denied' },
+    ]);
+  });
+
   it('evicts the oldest as expired once full', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
     const first = frame();

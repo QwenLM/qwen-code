@@ -131,6 +131,15 @@ describe('resolveHeld', () => {
       msgId: 'DE-ADBE-FF00-0000-0000-000000000000',
     });
   });
+
+  it('resolves the same sanitized handle shown to the user', () => {
+    messages = [held({ msgId: 'ab\u0007cdef-0000' })];
+    expect(shortId(messages[0]!.frame.msgId)).toBe('abcdef');
+    expect(resolveHeld(messages, 'abcdef')).toEqual({
+      kind: 'one',
+      msgId: 'ab\u0007cdef-0000',
+    });
+  });
 });
 
 describe('formatHeldList', () => {
@@ -271,6 +280,18 @@ describe('/peers', () => {
     const result = await run(fake, 'accept all');
     expect(fake.decide).toHaveBeenCalledTimes(2);
     expect(result.content).toContain('Released 2 messages');
+  });
+
+  it('decides an exact all handle before treating all as the bulk keyword', async () => {
+    messages = [
+      held({ msgId: 'all' }),
+      held({ msgId: 'bbbbbb22-0000-4000-8000-000000000000' }),
+    ];
+
+    const result = await run(fake, 'accept all');
+    expect(fake.decide).toHaveBeenCalledTimes(1);
+    expect(fake.decide).toHaveBeenCalledWith('all', 'approve');
+    expect(result.content).toContain('Released to this session');
   });
 
   it('says nothing is waiting rather than pretending it acted', async () => {

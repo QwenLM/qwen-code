@@ -22,7 +22,7 @@ import { t } from '../../i18n/index.js';
 
 /** Short handle shown to the user, so nobody has to type a full UUID. */
 export function shortId(msgId: string): string {
-  return msgId.replace(/-/g, '').slice(0, 6);
+  return sanitizeTerminalText(msgId).replace(/[-\s]/g, '').slice(0, 6);
 }
 
 // Everything rendered below is wire-supplied by another session. Collapsing
@@ -73,7 +73,7 @@ export function resolveHeld(
   const matches = held.filter(
     (entry) =>
       shortId(entry.frame.msgId).toLowerCase().startsWith(needle) ||
-      entry.frame.msgId.toLowerCase().startsWith(needle),
+      sanitizeTerminalText(entry.frame.msgId).toLowerCase().startsWith(needle),
   );
   if (matches.length === 0) return { kind: 'none' };
   if (matches.length > 1) return { kind: 'ambiguous' };
@@ -137,7 +137,9 @@ export const peersCommand: SlashCommand = {
       };
     }
 
-    if (target === 'all') {
+    const resolved = resolveHeld(held, target);
+
+    if (target === 'all' && resolved.kind === 'none') {
       // Snapshot first: deciding mutates the held list underneath us.
       const ids = held.map((entry) => entry.frame.msgId);
       let count = 0;
@@ -153,7 +155,6 @@ export const peersCommand: SlashCommand = {
       };
     }
 
-    const resolved = resolveHeld(held, target);
     if (resolved.kind === 'none') {
       return {
         type: 'message',
