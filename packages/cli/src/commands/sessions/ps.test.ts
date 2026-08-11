@@ -21,7 +21,9 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderr.push(line),
 }));
 
-const { psCommand, formatAge, NAME_COL } = await import('./ps.js');
+const { psCommand, formatAge, NAME_COL, PID_COL, AGE_COL } = await import(
+  './ps.js'
+);
 
 function record(
   over: Partial<SessionRegistryRecord> = {},
@@ -52,9 +54,17 @@ beforeEach(() => {
   stdout.length = 0;
   stderr.length = 0;
   listLiveSessions.mockReset();
+  // Only Date: the age cell is rendered from `Date.now()` read inside the
+  // handler, against a `startedAt` this file computes when it builds the
+  // record, so any real delay between the two shifts the rendered age and
+  // fails an exact-row assertion for a reason that has nothing to do with
+  // what the test covers. Faking the timer queue too would stall the
+  // handler's own awaits, so the fake is scoped to the clock.
+  vi.useFakeTimers({ toFake: ['Date'] });
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -149,19 +159,51 @@ describe('qwen sessions ps', () => {
     expect(stdout[1]).toContain('4242');
   });
 
+  it('renders a name that exactly fills the column without an ellipsis', async () => {
+    // The band a budget of NAME_COL - 2 got wrong: a name this long fits
+    // its cell, and ellipsizing it both claims a truncation that did not
+    // happen and eats the hash suffix that distinguishes two sessions
+    // started in the same directory.
+    const name = 'a'.repeat(NAME_COL - 3) + '-7f';
+    expect(name).toHaveLength(NAME_COL);
+    listLiveSessions.mockResolvedValue([record({ name })]);
+    await run({ json: false });
+
+    expect(stdout[1]).toContain(name);
+    expect(stdout[1]).not.toContain('...');
+    // Still a column, not a collision: the cell keeps a separator from the
+    // PID beside it even when the name uses every one of its columns.
+    expect(stdout[1]).toContain(`${name} 4242`);
+  });
+
   it('cuts a multi-width name on a character boundary, not a column one', async () => {
-    // 15 full-width characters is 30 display columns against a 20-column
-    // budget. Subtracting the three columns "..." costs leaves 17: the
-    // eighth character ends at column 16, and a ninth would straddle the
-    // limit, so the cut lands at eight characters for a 19-column cell.
-    // Asserting the cell exactly is what pins the accumulation loop —
-    // "contains ..." survives a loop that copies nothing at all.
+    // 15 full-width characters is 30 display columns against the NAME_COL
+    // budget. Subtracting the three columns "..." costs leaves 19: the
+    // ninth character ends at column 18, and a tenth would straddle the
+    // limit, so the cut lands at nine characters. Asserting the cell
+    // exactly is what pins the accumulation loop — "contains ..." survives
+    // a loop that copies nothing at all.
+    //
+    // The sibling cells are derived from the exported widths rather than
+    // spelled out: they have nothing to do with truncation, and hardcoding
+    // their padding would fail this test for a column-width change it does
+    // not test. The age is pinned by the frozen clock in `beforeEach`, not
+    // by wall time — read from `Date.now()` inside the handler, a real
+    // delay between the record's `startedAt` and that call would render
+    // "2m" and fail here for a reason that is not truncation.
     listLiveSessions.mockResolvedValue([record({ name: '中'.repeat(15) })]);
     await run({ json: false });
 
-    const cell = '中'.repeat(8) + '...';
+    const cell = '中'.repeat(9) + '...';
+    const pad = (text: string, width: number) =>
+      text + ' '.repeat(width - text.length);
     expect(stdout[1]).toBe(
-      cell + ' '.repeat(NAME_COL - 19) + '4242     ' + '1m        ' + '/w/app',
+      [
+        cell + ' '.repeat(NAME_COL - 21),
+        pad('4242', PID_COL),
+        pad('1m', AGE_COL),
+        '/w/app',
+      ].join(' '),
     );
   });
 

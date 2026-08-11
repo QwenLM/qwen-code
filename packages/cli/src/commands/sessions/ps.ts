@@ -21,7 +21,21 @@ import stringWidth from 'string-width';
 import { escapeAnsiCtrlCodes } from '../../ui/utils/textUtils.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
-/** Fixed column widths for the human-readable table (exported for tests). */
+/**
+ * Fixed column widths for the human-readable table (exported for tests).
+ *
+ * These are content widths, and cells are joined by an explicit space
+ * rather than relying on padding to leave one — the same shape as sibling
+ * `sessions list`. Folding the gutter into the width instead (truncating
+ * to `NAME_COL - 2`) costs two columns on *every* row to protect the rare
+ * full-width one, and `deriveSessionName` caps its basename at 32, so a
+ * name long enough to truncate is the common case rather than the edge:
+ * every one of them would lose two more characters, and a 21–22 column
+ * name would be ellipsized while its cell sat two columns empty. The
+ * suffix those two columns eat is the hash that tells two sessions in the
+ * same directory apart, which is the one part of the name that cannot be
+ * inferred from the DIRECTORY column beside it.
+ */
 export const NAME_COL = 22;
 export const PID_COL = 9;
 export const AGE_COL = 10;
@@ -84,17 +98,20 @@ export function formatAge(ms: number): string {
 
 function outputHuman(records: SessionRegistryRecord[], now: number): void {
   writeStdoutLine(
-    padDisplay('NAME', NAME_COL) +
-      padDisplay('PID', PID_COL) +
-      padDisplay('AGE', AGE_COL) +
-      'DIRECTORY',
+    `${padDisplay('NAME', NAME_COL)} ${padDisplay('PID', PID_COL)} ${padDisplay(
+      'AGE',
+      AGE_COL,
+    )} DIRECTORY`,
   );
   for (const record of records) {
     writeStdoutLine(
-      padDisplay(truncate(sanitize(record.name), NAME_COL - 2), NAME_COL) +
-        padDisplay(String(record.pid), PID_COL) +
-        padDisplay(formatAge(now - record.startedAt), AGE_COL) +
-        sanitize(record.cwd),
+      `${padDisplay(
+        truncate(sanitize(record.name), NAME_COL),
+        NAME_COL,
+      )} ${padDisplay(String(record.pid), PID_COL)} ${padDisplay(
+        formatAge(now - record.startedAt),
+        AGE_COL,
+      )} ${sanitize(record.cwd)}`,
     );
   }
 }

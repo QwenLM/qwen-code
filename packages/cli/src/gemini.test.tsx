@@ -2499,9 +2499,16 @@ describe('validateDnsResolutionOrder', () => {
 describe('startInteractiveUI', () => {
   // Mock dependencies
   const mockConfig = {
+    // Deliberately different from getTargetDir. Production registers
+    // `cwd: config.getTargetDir()`; with both getters returning the same
+    // string the registerSession contract assertion below cannot tell
+    // which one it read, and a refactor swapping in getProjectRoot() would
+    // keep this whole suite green while `qwen sessions ps` silently showed
+    // the git project root instead of the session's working directory
+    // whenever qwen was launched from a subdirectory.
     getProjectRoot: () => '/root',
     getSessionId: () => 'test-session-id',
-    getTargetDir: () => '/root',
+    getTargetDir: () => '/root/work',
     getScreenReader: () => false,
     isTelemetryInitializationDeferred: () => true,
     getChatRecordingService: () => undefined,
@@ -3315,7 +3322,7 @@ describe('startInteractiveUI', () => {
       expect(registerSession).toHaveBeenCalledTimes(1);
       expect(registerSession).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
-        cwd: '/root',
+        cwd: '/root/work',
         kind: 'interactive',
         qwenVersion: '1.0.0',
         onOriginConflict: expect.any(Function),

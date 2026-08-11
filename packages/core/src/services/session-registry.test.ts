@@ -61,8 +61,33 @@ const statSizeLie = vi.hoisted(() => ({ value: null as number | null }));
  */
 const sweepBeforeCommit = vi.hoisted(() => ({ value: null as string | null }));
 
+/**
+ * Lets a test make `readdir` fail the way an unreadable registry directory
+ * does, without depending on the uid the suite runs as. A chmod-based
+ * fixture proves nothing under root — which is what CI containers and this
+ * repo's own sandbox commonly run as — and would silently degrade to a
+ * no-op assertion there. Armed with an errno; fires once.
+ */
+const readdirFails = vi.hoisted(() => ({ value: null as string | null }));
+
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
+  // Cast rather than annotated: `readdir` is an overload set whose return
+  // type varies with `withFileTypes`, and a single async wrapper satisfies
+  // none of the signatures directly. The wrapper is pass-through, so the
+  // real types still hold at every call site.
+  const readdir = (async (...args: unknown[]) => {
+    const code = readdirFails.value;
+    if (code !== null) {
+      readdirFails.value = null;
+      const error: NodeJS.ErrnoException = new Error(
+        `${code}: permission denied, scandir`,
+      );
+      error.code = code;
+      throw error;
+    }
+    return (actual.readdir as (...a: unknown[]) => Promise<unknown>)(...args);
+  }) as unknown as typeof actual.readdir;
   const writeFile: typeof actual.writeFile = async (...args) => {
     const result = await actual.writeFile(...args);
     const victim = sweepBeforeCommit.value;
@@ -94,9 +119,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
   return {
     ...actual,
-    default: { ...actual, open, writeFile },
+    default: { ...actual, open, writeFile, readdir },
     open,
     writeFile,
+    readdir,
   };
 });
 
@@ -128,6 +154,7 @@ beforeEach(async () => {
 afterEach(async () => {
   statSizeLie.value = null;
   sweepBeforeCommit.value = null;
+  readdirFails.value = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -825,8 +852,27 @@ describe('patchSessionRecord', () => {
   });
 
   it('does not create a record for a session that never registered', async () => {
+    // The directory has to already exist, and that is not scene-setting:
+    // it is what makes the failure reachable. With no `sessions/` at all
+    // the stub write fails with ENOENT into `patchSessionRecord`'s catch,
+    // so the guard could be gone and nothing would be written either way.
+    // Production almost always has the directory — any other session on
+    // the machine creates it — so the state this pins is the normal one,
+    // not the empty-machine one.
+    await fs.mkdir(getSessionRegistryDir(), { recursive: true });
+
     await patchSessionRecord({ sessionId: 'new' });
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+    // The list assertion alone cannot see this. Drop the `existing === null`
+    // guard and the merge writes a stub `{sessionId: 'new'}` with no
+    // schemaVersion, kind or startedAt; `readRecord` rejects it, so the
+    // list is still empty and this test would stay green while the stub
+    // sat at `<pid>.json` forever — never swept, because a record that
+    // fails to read is skipped by the sweep, and invisible to every
+    // reader. Production reaches that state whenever startup registration
+    // fails (the best-effort path startInteractiveUI deliberately allows)
+    // and a later `/clear` or cwd change patches anyway.
+    await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
   });
 
   it('leaves a record from another origin unmerged', async () => {
@@ -950,6 +996,21 @@ describe('listLiveSessions', () => {
 
   it('returns an empty list when the registry does not exist', async () => {
     expect(await listLiveSessions({ includeSelf: true })).toEqual([]);
+  });
+
+  it('throws rather than reporting an empty machine it could not read', async () => {
+    // "Nothing is running" and "I could not look" are different facts, and
+    // a diagnostic command that renders them identically is the one that
+    // gets believed. ENOENT stays an empty list — see the test above — but
+    // EACCES is the registry directory re-created by another uid, a
+    // restrictive NFS export, or a sandbox uid mapping, and `qwen sessions
+    // ps` has to be able to say so and exit non-zero.
+    await fs.mkdir(getSessionRegistryDir(), { recursive: true });
+    readdirFails.value = 'EACCES';
+
+    await expect(listLiveSessions({ includeSelf: true })).rejects.toThrow(
+      /EACCES/,
+    );
   });
 
   it('sweeps a record whose process is gone', async () => {
