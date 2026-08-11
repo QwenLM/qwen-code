@@ -223,6 +223,92 @@ describe('registerSession', () => {
     expect(live[0].name).toMatch(/^app-[0-9a-f]{2}$/);
   });
 
+  it('clears a file planted at the registry directory path and registers', async () => {
+    // The co-tenant's two syscalls: move the directory aside, drop a
+    // regular file at its name. Without a repair path this is a permanent
+    // registration blackout — mkdir throws EEXIST here forever after.
+    const dir = getSessionRegistryDir();
+    await fs.writeFile(dir, 'not a directory');
+
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    expect((await fs.lstat(dir)).isDirectory()).toBe(true);
+    const live = await listLiveSessions({ includeSelf: true });
+    expect(live).toHaveLength(1);
+    expect(live[0].sessionId).toBe('s1');
+  });
+
+  it('clears a dangling symlink planted at the registry directory path', async () => {
+    // Fails mkdir with ENOENT rather than EEXIST, so it only gets repaired
+    // if the branch keys on what is at the path rather than on the errno.
+    const dir = getSessionRegistryDir();
+    await fs.symlink(path.join(tmpDir, 'nowhere'), dir);
+
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    expect((await fs.lstat(dir)).isDirectory()).toBe(true);
+    expect(await listLiveSessions({ includeSelf: true })).toHaveLength(1);
+  });
+
+  it('clears a symlink to a file without following it', async () => {
+    // The unlink must remove the link, never the thing it points at: a
+    // repair that followed would delete an arbitrary attacker-named path.
+    const dir = getSessionRegistryDir();
+    const target = path.join(tmpDir, 'victim');
+    await fs.writeFile(target, 'must survive');
+    await fs.symlink(target, dir);
+
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    expect((await fs.lstat(dir)).isDirectory()).toBe(true);
+    expect(await fs.readFile(target, 'utf8')).toBe('must survive');
+  });
+
+  it('leaves an existing registry directory and its records alone', async () => {
+    // The repair is reachable only through a failed mkdir. If it ever fired
+    // on the healthy path it would unlink the directory every other live
+    // session is registered in.
+    const sibling = await writeRaw('4242.json', {
+      schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
+      pid: 4242,
+      sessionId: 'sibling',
+      cwd: '/w/other',
+      name: 'other-aa',
+      kind: 'interactive',
+      startedAt: Date.now(),
+      pidNamespace: readPidNamespaceId(),
+      procStart: null,
+    });
+
+    expect(
+      await registerSession({
+        sessionId: 's1',
+        cwd: '/w/app',
+        kind: 'interactive',
+      }),
+    ).toBe(true);
+
+    await expect(fs.stat(sibling)).resolves.toBeDefined();
+  });
+
   it('records a start-time token so a recycled pid cannot resurrect it', async () => {
     await registerSession({
       sessionId: 's1',

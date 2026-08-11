@@ -389,6 +389,65 @@ function isEntryRace(error: unknown): boolean {
 }
 
 /**
+ * Create the registry directory, clearing a non-directory squatting on its
+ * path first.
+ *
+ * `mkdir(recursive)` is a no-op when the directory exists and throws when
+ * anything else does, so a plain file — or a symlink that resolves to one,
+ * or to nothing — planted at `~/.qwen/sessions` fails every registration
+ * from here on, and `listLiveSessions`' `readdir` fails with `ENOTDIR` into
+ * its catch-all and reports an empty machine. Nothing else in this module
+ * creates the directory, so nothing else would ever clear it: the blackout
+ * would last until a human deleted the file by hand. Under this module's
+ * threat model — a co-tenant with write access to the shared qwen dir —
+ * that is two syscalls for a permanent denial of discovery.
+ *
+ * An obstruction is unlinked and the mkdir retried exactly once. That is
+ * the same rule `registerSession` already applies one level down, where an
+ * unattributable entry at `<pid>.json` is replaceable: a non-directory at
+ * a path that must be a directory carries no record anyone could lose.
+ *
+ * `lstat`, not `stat`, so a symlink is judged as the symlink it is rather
+ * than by what it points at — following one would let it decide the verdict
+ * on a directory somewhere else entirely. A directory found here means the
+ * mkdir failed for some other reason (`EACCES` on a parent, most likely),
+ * which is not an obstruction and is rethrown to the caller's own handler.
+ *
+ * Scope, measured rather than assumed: `mkdir(recursive)` throws `EEXIST`
+ * on a regular file and on a symlink to one, and `ENOENT` on a dangling
+ * symlink — all three are repaired here. It *succeeds* on a symlink that
+ * resolves to a real directory, so that case never reaches this function
+ * and is not addressed by it; records would be written through the link.
+ * Refusing it belongs with the directory's own hardening (an `O_NOFOLLOW`
+ * open of the dir, or an `lstat` gate on the healthy path), not with a
+ * repair that only ever runs after a failure, and it trades against users
+ * who deliberately symlink the qwen dir onto another disk.
+ */
+async function ensureRegistryDir(dir: string): Promise<void> {
+  try {
+    await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
+    return;
+  } catch (error) {
+    let obstruction: fsSync.Stats;
+    try {
+      obstruction = await fs.lstat(dir);
+    } catch {
+      // Nothing there to blame the failure on — it vanished under us, or
+      // the parent is unreadable. Either way this is not the case being
+      // repaired.
+      throw error;
+    }
+    if (obstruction.isDirectory()) throw error;
+
+    debugLogger.debug(
+      `session registry: clearing a non-directory at ${dir} (mode ${obstruction.mode.toString(8)})`,
+    );
+    await fs.unlink(dir);
+    await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
+  }
+}
+
+/**
  * Write this process's record. Best-effort: a read-only or full home
  * directory must not stop a session from starting, so failures are logged
  * and reported, never thrown.
@@ -421,7 +480,7 @@ export async function registerSession(
   return enqueueWrite(async () => {
     try {
       const dir = getSessionRegistryDir();
-      await fs.mkdir(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
+      await ensureRegistryDir(dir);
       // mkdir's mode is masked by the umask, and does nothing at all when
       // the directory already exists — chmod is what actually guarantees
       // 0700 on an upgrade from a build that created it more loosely.
