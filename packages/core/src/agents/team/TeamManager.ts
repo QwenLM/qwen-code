@@ -304,6 +304,7 @@ export class TeamManager {
       isActive: undefined,
       subscriptions: [],
       planModeRequired: config.planModeRequired || undefined,
+      readOnly: config.readOnly || undefined,
       mode: config.planModeRequired ? PermissionMode.Plan : undefined,
     };
 
@@ -1744,6 +1745,7 @@ export class TeamManager {
     const agent = this.getAgentFromBackend(agentId);
     if (!agent) return;
     if (agent.getStatus() !== AgentStatus.IDLE) return;
+    if (findMemberByName(this.teamFile.members, agentName)?.readOnly) return;
     if (this._shutdownPending.has(agentName)) return;
 
     const pendingTasks =
@@ -1811,6 +1813,7 @@ export class TeamManager {
       const agent = this.getAgentFromBackend(member.agentId);
       if (!agent) return false;
       if (agent.getStatus() !== AgentStatus.IDLE) return false;
+      if (member.readOnly) return false;
       // Don't auto-claim a task for a teammate the leader is shutting
       // down — it would start work it's about to abandon. tryAutoClaimTask
       // repeats this check after async task reads for both claim paths.

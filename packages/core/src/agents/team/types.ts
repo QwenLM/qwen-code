@@ -90,6 +90,8 @@ export interface TeamMember {
   subscriptions: string[];
   /** Whether plan mode is required for this member. */
   planModeRequired?: boolean;
+  /** Whether this member is restricted to read-only investigation. */
+  readOnly?: boolean;
   /** Permission mode for this member. */
   mode?: PermissionMode;
   /** Phase 2: member's session UUID. */

@@ -320,6 +320,23 @@ describe('TeamCoordinationHarness', () => {
 
       expect(worker.getReceivedMessages()).toHaveLength(0);
     });
+
+    it('does not auto-claim tasks for read-only teammates', async () => {
+      const h = await createHarness();
+      await h.teamManager.spawnTeammate({
+        name: 'reader',
+        cwd: h.tmpDir,
+        readOnly: true,
+      });
+
+      await createTask(h.teamName, {
+        subject: 'Writer task',
+        description: 'Must remain available for the writer',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(h.getAgent('reader').getReceivedMessages()).toHaveLength(0);
+    });
   });
 
   // ─── 3. Message priority ───────────────────────────────────
