@@ -48,6 +48,8 @@ interface UserMessageProps {
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
   onRetrySend?: () => void;
+  /** Click an uploaded image to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 function DefaultUserMessageContent({
@@ -100,6 +102,7 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
   sendFailed = false,
   onRetrySend,
+  onImagePreview,
 }: UserMessageProps) {
   const { t } = useI18n();
   const {
@@ -208,7 +211,20 @@ export const UserMessage = memo(function UserMessage({
                       key={index}
                       src={src}
                       alt={t('user.uploadedImage', { index: index + 1 })}
-                      className={styles.chatImageThumb}
+                      className={`${styles.chatImageThumb}${
+                        onImagePreview
+                          ? ` ${styles.chatImageThumbInteractive}`
+                          : ''
+                      }`}
+                      onClick={
+                        onImagePreview
+                          ? () =>
+                              onImagePreview(
+                                src,
+                                t('user.uploadedImage', { index: index + 1 }),
+                              )
+                          : undefined
+                      }
                       onLoad={measureOverflow}
                     />
                   );
