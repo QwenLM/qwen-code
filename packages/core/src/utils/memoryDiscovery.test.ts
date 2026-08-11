@@ -1393,6 +1393,18 @@ describe('formatContextFileDisplayPath', () => {
     ).toBe('QWEN.md');
   });
 
+  it('keeps CWD-relative paths for directories with leading-dot names', () => {
+    // '..cfg' merely starts with two dots; it is not a real '..' segment, so
+    // the file is inside the CWD tree and must not be tildeified.
+    const projUnderHome = path.join(home, 'proj2');
+    expect(
+      formatContextFileDisplayPath(
+        path.join(projUnderHome, '..cfg', 'QWEN.md'),
+        projUnderHome,
+      ),
+    ).toBe(path.join('..cfg', 'QWEN.md'));
+  });
+
   it('does not tildeify sibling directories sharing the home prefix', () => {
     const file = path.join(siblingHome, 'proj', 'QWEN.md');
     expect(formatContextFileDisplayPath(file, proj)).toBe(

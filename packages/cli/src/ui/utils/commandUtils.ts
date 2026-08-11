@@ -10,6 +10,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
+  parseSlashCommand,
 } from '../../utils/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
@@ -97,6 +98,44 @@ export const isBtwCommand = (query: string): boolean => {
   const trimmed = query.trim();
   return trimmed.length > 0 && BTW_COMMAND_RE.test(trimmed);
 };
+
+/**
+ * Whether a submission consumes the one-shot context-file announcement.
+ * Mirrors the downstream input classification so only submissions that
+ * actually reach the model consume it: blank input is dropped by the queue,
+ * btw side-questions and shell-mode input bypass the model, local slash
+ * commands resolve without a model turn — but model-invocable slash
+ * commands (skills, MCP prompts) are expanded into a submit_prompt that is
+ * sent to the model, and slash commands are routed before the shell-mode
+ * intercept, so both consume it even while shell mode is active.
+ */
+export function consumesContextAnnouncementLatch(
+  trimmedPrompt: string,
+  options: {
+    shellModeActive: boolean;
+    slashCommands: readonly SlashCommand[];
+  },
+): boolean {
+  if (trimmedPrompt.length === 0) {
+    return false;
+  }
+  if (isBtwCommand(trimmedPrompt)) {
+    return false;
+  }
+  if (isSlashCommand(trimmedPrompt)) {
+    // Slash commands are routed before the shell-mode intercept, so shell
+    // mode does not exclude them; only the model-invocable ones (expanded
+    // into a submit_prompt) reach the model.
+    return (
+      parseSlashCommand(trimmedPrompt, options.slashCommands).commandToExecute
+        ?.modelInvocable === true
+    );
+  }
+  if (options.shellModeActive) {
+    return false;
+  }
+  return true;
+}
 
 const debugLogger = createDebugLogger('COMMAND_UTILS');
 

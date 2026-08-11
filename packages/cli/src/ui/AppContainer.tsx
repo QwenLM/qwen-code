@@ -166,7 +166,11 @@ import {
 } from './hooks/useGeminiStream.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
+import {
+  consumesContextAnnouncementLatch,
+  isBtwCommand,
+  isSlashCommand,
+} from './utils/commandUtils.js';
 import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
@@ -835,6 +839,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // users can verify discovery (e.g., catch typos in context.fileName)
   // without digging into debug logs (#5267).
   const contextFilesAnnouncedRef = useRef(false);
+  // /clear and other same-process session switches wipe the emitted INFO
+  // item without remounting this component while context files stay
+  // attached, so re-arm the latch for the new session's first prompt.
+  useEffect(() => {
+    contextFilesAnnouncedRef.current = false;
+  }, [sessionStats.sessionId]);
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -2473,24 +2483,25 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
-      // Mirror the downstream input classification (trim + blank + btw +
-      // shell-mode exclusions) so the latch is only consumed by submissions
-      // that actually reach the model. Model-invocable slash commands
-      // (skills, MCP prompts) are expanded into a submit_prompt and sent to
-      // the model, so they consume the latch like plain prompts.
+      // Mirror the downstream input classification so the latch is only
+      // consumed by submissions that actually reach the model (see
+      // consumesContextAnnouncementLatch). Queued (deferUntilIdle)
+      // submissions are admitted later, so they don't consume it here.
       const trimmedPrompt = userPromptText.trim();
       if (
-        trimmedPrompt.length > 0 &&
+        !options?.deferUntilIdle &&
         !contextFilesAnnouncedRef.current &&
-        (!isSlashCommand(trimmedPrompt) ||
-          parseSlashCommand(trimmedPrompt, slashCommands).commandToExecute
-            ?.modelInvocable === true) &&
-        !isBtwCommand(trimmedPrompt) &&
-        !shellModeActive
+        consumesContextAnnouncementLatch(trimmedPrompt, {
+          shellModeActive,
+          slashCommands,
+        })
       ) {
-        contextFilesAnnouncedRef.current = true;
         const contextFilePaths = config.getContextFilePaths();
         if (contextFilePaths.length > 0) {
+          // Consume the latch only when something was actually announced,
+          // so files attached later in the session (e.g. /directory add)
+          // still get their one-shot notice.
+          contextFilesAnnouncedRef.current = true;
           historyManager.addItem(
             {
               type: MessageType.INFO,

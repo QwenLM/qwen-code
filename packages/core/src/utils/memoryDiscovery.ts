@@ -331,9 +331,11 @@ export function formatContextFileDisplayPath(
     return stripAnsiAndControl(filePath);
   }
   const relativePath = path.relative(currentWorkingDirectory, filePath);
-  // On Windows, cross-drive targets come back as absolute paths (no common
-  // root) instead of `..` chains; treat them as outside the CWD tree too.
-  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+  // isSubpath rejects real `..` segments (not mere `..`-prefixed names like
+  // `..cfg`) and absolute relatives, which is what Windows cross-drive
+  // targets produce. That arm is consciously untested: POSIX `path.relative`
+  // never returns an absolute path and the fixtures share one volume.
+  if (!isSubpath(currentWorkingDirectory, filePath)) {
     const tildeified = tildeifyPath(filePath, userHomePath);
     if (tildeified !== filePath) {
       return stripAnsiAndControl(tildeified);
@@ -374,6 +376,8 @@ export interface LoadServerHierarchicalMemoryResponse {
    * inside the CWD tree, `~/...` shortcuts for files under the user home.
    * Display-only — do not resolve them against the CWD.
    * Lets callers tell users which files were actually attached (see #5267).
+   * Baseline rules (`.qwen/rules/`) are injected separately and deliberately
+   * not listed here (see `ruleCount`).
    */
   contextFilePaths: string[];
   /** Number of baseline rules injected at session start. */

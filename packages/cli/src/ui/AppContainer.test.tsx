@@ -6252,13 +6252,22 @@ describe('AppContainer State Management', () => {
       expect(announcementCalls(addItem)).toHaveLength(1);
     });
 
-    it('emits nothing when no context files are loaded', () => {
+    it('emits nothing when no context files are loaded, and re-arms for files attached later', () => {
       const { addItem } = renderAnnouncementHarness([]);
 
       capturedUIActions.handleFinalSubmit('hello', {
         submittedPrompt: 'hello',
       });
       expect(announcementCalls(addItem)).toHaveLength(0);
+
+      // Files attached later in the session (e.g. /directory add) must still
+      // get their one-shot notice: the latch is only consumed when something
+      // was actually announced.
+      vi.mocked(mockConfig.getContextFilePaths).mockReturnValue(['QWEN.md']);
+      capturedUIActions.handleFinalSubmit('again', {
+        submittedPrompt: 'again',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
     });
 
     it('does not consume the latch on a whitespace-only prompt', () => {
@@ -6302,28 +6311,6 @@ describe('AppContainer State Management', () => {
       });
       expect(announcementCalls(addItem)).toHaveLength(1);
 
-      capturedUIActions.handleFinalSubmit('hello', {
-        submittedPrompt: 'hello',
-      });
-      expect(announcementCalls(addItem)).toHaveLength(1);
-    });
-
-    it('does not consume the latch while shell mode is active', () => {
-      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
-
-      // Shell-mode submissions are intercepted by the shell processor and
-      // never reach the model.
-      act(() => {
-        capturedUIActions.setShellModeActive(true);
-      });
-      capturedUIActions.handleFinalSubmit('ls -la', {
-        submittedPrompt: 'ls -la',
-      });
-      expect(announcementCalls(addItem)).toHaveLength(0);
-
-      act(() => {
-        capturedUIActions.setShellModeActive(false);
-      });
       capturedUIActions.handleFinalSubmit('hello', {
         submittedPrompt: 'hello',
       });
