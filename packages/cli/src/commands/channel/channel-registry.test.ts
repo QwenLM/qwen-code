@@ -698,6 +698,7 @@ describe('channel registry', () => {
       'telegram',
       'weixin',
       'dingtalk',
+      'dws',
       'wecom',
       'feishu',
       'qq',
@@ -708,7 +709,7 @@ describe('channel registry', () => {
       builtinCatalog
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
-    ).toEqual(['dingtalk', 'wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual(['dingtalk', 'dws', 'wecom', 'feishu', 'github', 'gitlab']);
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,
     ).toContainEqual(
