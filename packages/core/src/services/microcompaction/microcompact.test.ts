@@ -2131,7 +2131,10 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
   it('reports the skill name of a blanked skill result', () => {
     const history: Content[] = [
       skillCall('s0', 'demo-poem'),
-      skillResult('s0', 'skill body content '.repeat(50)),
+      skillResult(
+        's0',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
       shellCall('c1'),
       shellResult('c1', 'newer shell output'),
     ];
@@ -2152,7 +2155,10 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
   it('counts a blanked skill result with no call id as unresolved', () => {
     const history: Content[] = [
       skillCall(undefined, 'demo-poem'),
-      skillResult(undefined, 'skill body content '.repeat(50)),
+      skillResult(
+        undefined,
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
       shellCall('c1'),
       shellResult('c1', 'newer shell output'),
     ];
@@ -2192,7 +2198,10 @@ describe('microcompactHistory evictedSkillNames (issue #6762 sync)', () => {
   it('dedupes when the body and a dedup confirmation are both blanked', () => {
     const history: Content[] = [
       skillCall('s0', 'demo-poem'),
-      skillResult('s0', 'skill body content '.repeat(50)),
+      skillResult(
+        's0',
+        buildSkillLlmContent('/demo', 'skill body content '.repeat(50)),
+      ),
       skillCall('s1', 'demo-poem'),
       skillResult('s1', 'Skill "demo-poem" is already loaded in context.'),
       shellCall('c2'),

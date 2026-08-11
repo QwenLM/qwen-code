@@ -2165,6 +2165,16 @@ export class GeminiChat {
     if (targetIds.size === 0) {
       return { cleared: false, tokensSaved: 0 };
     }
+    // An id mapped to several skill names cannot be addressed without
+    // blanking a co-resident skill's body — refuse, matching the
+    // microcompaction path's over-clear direction.
+    if (
+      [...targetIds].some(
+        (id) => (callIdToSkillName.get(id)?.length ?? 0) !== 1,
+      )
+    ) {
+      return { cleared: false, tokensSaved: 0 };
+    }
 
     const placeholder = skillUnloadedPlaceholder(skillName);
     const beforeEstimate = estimateContentTokens(this.history);
@@ -2181,10 +2191,13 @@ export class GeminiChat {
           'output'
         ];
         // Skip results an earlier rewrite already blanked — re-blanking
-        // only churns bytes (and prompt cache) for zero savings.
+        // only churns bytes (and prompt cache) for zero savings. Also
+        // skip error-shaped responses: they carry no body and rewriting
+        // them into a success-shaped placeholder would discard the error.
         if (
-          typeof output === 'string' &&
-          (output === placeholder || output === MICROCOMPACT_CLEARED_MESSAGE)
+          fr.response?.['error'] !== undefined ||
+          (typeof output === 'string' &&
+            (output === placeholder || output === MICROCOMPACT_CLEARED_MESSAGE))
         ) {
           return part;
         }

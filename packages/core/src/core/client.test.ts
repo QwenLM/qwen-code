@@ -2684,6 +2684,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistory).not.toHaveBeenCalled();
     });
 
+    it('truncateHistory clears loaded-skill tracking when entries are removed', () => {
+      mockFileReadCacheClear();
+      const clearLoadedSkills = vi.fn();
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill' ? { unloadSkills: vi.fn(), clearLoadedSkills } : null,
+      );
+      client['chat'] = mockChatWithLengths(3, 2);
+
+      client.truncateHistory(2);
+
+      expect(clearLoadedSkills).toHaveBeenCalled();
+    });
+
+    it('truncateHistory does NOT clear loaded-skill tracking when nothing was removed', () => {
+      mockFileReadCacheClear();
+      const clearLoadedSkills = vi.fn();
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill' ? { unloadSkills: vi.fn(), clearLoadedSkills } : null,
+      );
+      client['chat'] = mockChatWithLengths(2, 2);
+
+      client.truncateHistory(2);
+
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
+    });
+
     it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {
       const cacheClear = mockFileReadCacheClear();
       const strip = vi.fn();

@@ -834,7 +834,14 @@ export function microcompactHistory(
           // Record the blanked skill so the caller un-tracks it from
           // loadedSkillNames — otherwise the dedup guard keeps returning
           // "already loaded in context" for a body that no longer exists.
-          if (part.functionResponse.name === ToolNames.SKILL) {
+          // Only a body proves residency/eviction; non-body outputs (SkillTool
+          // errors, dedup confirmations) never created tracking or are
+          // vouched for by their body's own record, so counting them as
+          // unresolved would force a blanket clear that doubles resident bodies.
+          if (
+            part.functionResponse.name === ToolNames.SKILL &&
+            isSkillBodyOutput(part.functionResponse.response?.['output'])
+          ) {
             const skillNames = getSkillNamesForResponse(
               part,
               callIdToSkillName,

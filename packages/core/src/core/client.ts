@@ -644,6 +644,10 @@ export class GeminiClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    clearLoadedSkillTracking(
+      this.config.getToolRegistry(),
+      'stripOrphanedUserEntries',
+    );
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context
@@ -2031,8 +2035,8 @@ export class GeminiClient {
       const changed = m.tokensSaved > 0;
       if (changed) {
         this.getChat().setHistory(mcResult.history);
-        await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
         syncSkillEvictions(m, this.config.getToolRegistry(), 'microcompaction');
+        await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -4081,13 +4085,13 @@ export class GeminiClient {
     }
 
     if (microcompactMeta) {
-      await this.disarmFileReadCacheAfterEviction(
-        microcompactMeta,
-        'compress-fast',
-      );
       syncSkillEvictions(
         microcompactMeta,
         this.config.getToolRegistry(),
+        'compress-fast',
+      );
+      await this.disarmFileReadCacheAfterEviction(
+        microcompactMeta,
         'compress-fast',
       );
     }

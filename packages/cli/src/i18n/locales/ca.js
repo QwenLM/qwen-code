@@ -2838,14 +2838,14 @@ export default {
 
   // /unskill command
   'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':
-    'Descarrega del context el cos d’una habilitat carregada, alliberant-ne els tokens per a la resta de la sessió (a costa d’un reompliment de la memòria cau de prompt). La habilitat continua disponible i es recarrega completament en la propera invocació.',
+    'Descarrega del context el cos d’una habilitat carregada, alliberant-ne els tokens per a la resta de la sessió (a costa d’un reompliment de la memòria cau de prompt). L’habilitat continua disponible i es recarrega completament en la propera invocació.',
   'Usage: /unskill <skill-name>': 'Ús: /unskill <skill-name>',
   'Could not retrieve skill manager.':
     'No s’ha pogut obtenir el gestor d’habilitats.',
   'Skill "{{name}}" is not loaded in context.':
-    'La habilitat "{{name}}" no està carregada al context.',
+    'L’habilitat "{{name}}" no està carregada al context.',
   'Skill "{{name}}" had no body left in context; tracking cleared so it can be reloaded.':
-    'La habilitat "{{name}}" ja no tenia cos al context; s’ha esborrat el seguiment perquè es pugui recarregar.',
+    'L’habilitat "{{name}}" ja no tenia cos al context; s’ha esborrat el seguiment perquè es pugui recarregar.',
   'Unloaded skill "{{name}}" (~{{tokens}} tokens freed). Invoke it again to reload.':
     'Habilitat "{{name}}" descarregada (~{{tokens}} tokens alliberats). Invoca-la de nou per recarregar-la.',
   '"{{name}}" is not a skill (it may be a model-invocable command); /unskill only unloads skill bodies.':

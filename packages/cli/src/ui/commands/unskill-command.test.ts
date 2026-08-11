@@ -143,6 +143,20 @@ describe('unskillCommand', () => {
     expect(unloadSkills).not.toHaveBeenCalled();
   });
 
+  it('bypasses the cached-skill gate for a mid-session deleted skill whose body is still in history', async () => {
+    // Skill was loaded (tracked) but later deleted from disk — it's
+    // gone from the committed cache yet its body still occupies context.
+    realSkillNames = ['review', 'dormant'];
+    hasSkillBodyInHistory.mockReturnValue(true);
+    const result = await unskillCommand.action!(
+      makeContext('demo-poem'),
+      'demo-poem',
+    );
+    expect(unloadSkillBody).toHaveBeenCalledWith('demo-poem');
+    expect(unloadSkills).toHaveBeenCalledWith(['demo-poem']);
+    expect((result as { content: string }).content).toContain('72');
+  });
+
   it('completion lists only loaded skill names matching the prefix', async () => {
     const completions = await unskillCommand.completion!(makeContext(''), 'de');
     expect(completions).toEqual(['demo-poem']);
