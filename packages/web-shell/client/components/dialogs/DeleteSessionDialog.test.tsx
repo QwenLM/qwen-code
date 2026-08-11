@@ -38,8 +38,10 @@ const initialSessions = sessions.slice();
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: () => ({
     sessions,
     loading: false,
     error: undefined,

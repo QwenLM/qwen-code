@@ -39,14 +39,18 @@ const sessions = [
   },
 ];
 
+const releaseSessionMock = vi.fn().mockResolvedValue(undefined);
+
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: () => ({
     sessions,
     loading: false,
     error: undefined,
-    releaseSession: vi.fn().mockResolvedValue(undefined),
+    releaseSession: releaseSessionMock,
   }),
 }));
 
