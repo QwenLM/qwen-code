@@ -8790,8 +8790,8 @@ describe('createServeApp', () => {
       ['agent%2F8', 'agent/8'],
     ])(
       'resolves and cancels a virtual subagent through its routes: %s',
-      async (encodedTaskId, toolCallId) => {
-        const taskId = `general-purpose-${toolCallId}`;
+      async (encodedSubagentRef, subagentRef) => {
+        const taskId = `general-purpose-${subagentRef}`;
         const bridge = fakeBridge({
           cancelSessionTaskImpl: async () => ({ cancelled: true }),
         });
@@ -8812,11 +8812,11 @@ describe('createServeApp', () => {
 
         try {
           const resolveRes = await request(app)
-            .get(`/session/s-1/subagents/${encodedTaskId}`)
+            .get(`/session/s-1/subagents/${encodedSubagentRef}`)
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           const cancelRes = await request(app)
-            .post(`/session/s-1/subagents/${encodedTaskId}/cancel`)
+            .post(`/session/s-1/subagents/${encodedSubagentRef}/cancel`)
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
 
@@ -8831,11 +8831,11 @@ describe('createServeApp', () => {
           expect(resolveSpy).toHaveBeenCalledTimes(2);
           expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual([
             's-1',
-            toolCallId,
+            subagentRef,
           ]);
           expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual([
             's-1',
-            toolCallId,
+            subagentRef,
           ]);
           expect(bridge.cancelSessionTaskCalls).toEqual([
             {

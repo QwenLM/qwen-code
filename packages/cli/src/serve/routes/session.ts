@@ -2393,8 +2393,8 @@ export function registerSessionRoutes(
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
 
-  app.get('/session/:id/subagents/:toolCallId', async (req, res) => {
-    const route = 'GET /session/:id/subagents/:toolCallId';
+  app.get('/session/:id/subagents/:subagentRef', async (req, res) => {
+    const route = 'GET /session/:id/subagents/:subagentRef';
     const sessionId = requireSessionId(req, res);
     if (!sessionId) return;
     if (!virtualSubagentSessions) {
@@ -2405,11 +2405,14 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const toolCallId = req.params['toolCallId'];
-    if (!toolCallId || toolCallId.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH) {
+    const subagentRef = req.params['subagentRef'];
+    if (
+      !subagentRef ||
+      subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+    ) {
       res.status(400).json({
-        error: '`toolCallId` must be a non-empty tool call id',
-        code: 'invalid_tool_call_id',
+        error: '`subagentRef` must be a non-empty subagent reference',
+        code: 'invalid_subagent_ref',
       });
       return;
     }
@@ -2425,14 +2428,14 @@ export function registerSessionRoutes(
       const resolved = await virtualSubagentSessions.resolve(
         runtime,
         sessionId,
-        toolCallId,
+        subagentRef,
       );
       if (!resolved) {
         res.status(404).json({
           error: 'Subagent session not found',
           code: 'session_not_found',
           sessionId,
-          toolCallId,
+          subagentRef,
         });
         return;
       }
@@ -2443,10 +2446,10 @@ export function registerSessionRoutes(
   });
 
   app.post(
-    '/session/:id/subagents/:toolCallId/cancel',
+    '/session/:id/subagents/:subagentRef/cancel',
     mutate(),
     async (req, res) => {
-      const route = 'POST /session/:id/subagents/:toolCallId/cancel';
+      const route = 'POST /session/:id/subagents/:subagentRef/cancel';
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
       if (!virtualSubagentSessions) {
@@ -2457,14 +2460,14 @@ export function registerSessionRoutes(
         });
         return;
       }
-      const toolCallId = req.params['toolCallId'];
+      const subagentRef = req.params['subagentRef'];
       if (
-        !toolCallId ||
-        toolCallId.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+        !subagentRef ||
+        subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
       ) {
         res.status(400).json({
-          error: '`toolCallId` must be a non-empty tool call id',
-          code: 'invalid_tool_call_id',
+          error: '`subagentRef` must be a non-empty subagent reference',
+          code: 'invalid_subagent_ref',
         });
         return;
       }
@@ -2480,14 +2483,14 @@ export function registerSessionRoutes(
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
           sessionId,
-          toolCallId,
+          subagentRef,
         );
         if (!resolved) {
           res.status(404).json({
             error: 'Subagent session not found',
             code: 'session_not_found',
             sessionId,
-            toolCallId,
+            subagentRef,
           });
           return;
         }
