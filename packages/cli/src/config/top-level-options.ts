@@ -152,8 +152,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   channel: {
     type: 'string' as const,
-    choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop'] as const,
-    description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop)',
+    choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'] as const,
+    description: 'Channel identifier (VSCode, ACP, SDK, CI, desktop, daemon)',
   },
   'allowed-mcp-server-names': {
     type: 'array' as const,

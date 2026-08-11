@@ -331,7 +331,7 @@ async function initSession(
     'cron job fires and streams results via sessionUpdate after prompt returns',
     async () => {
       const rig = new TestRig();
-      rig.setup('acp-cron-e2e');
+      await rig.setup('acp-cron-e2e');
 
       // Only requestIndex 0 is load-bearing: it returns the cron_create
       // tool call. The CLI makes internal model calls (tool-call

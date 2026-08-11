@@ -53,6 +53,7 @@ describe('useProviderUpdates', () => {
       [PROVIDER_METADATA_NS]: {} as Record<string, unknown>,
     } as Record<string, unknown>,
     setValue: vi.fn(),
+    setValues: vi.fn(),
     forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
     isTrusted: true,
     workspace: { settings: {} },
@@ -87,7 +88,7 @@ describe('useProviderUpdates', () => {
       apiKeyEnvKey: CODING_PLAN_ENV_KEY,
     });
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
-    mockModelsConfig.syncAfterAuthRefresh.mockClear();
+    mockModelsConfig.syncAfterAuthRefresh.mockReset();
     delete process.env[CODING_PLAN_ENV_KEY];
   });
 
@@ -315,39 +316,65 @@ describe('useProviderUpdates', () => {
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
     expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
-  });
-
-  it('does not refresh auth when updating an inactive provider on the same protocol', async () => {
-    mockConfig.getContentGeneratorConfig.mockReturnValue({
-      authType: AuthType.USE_OPENAI,
-      baseUrl: TOKEN_PLAN_BASE_URL,
-      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
-    });
-    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
-      METADATA_KEY
-    ] = {
-      baseUrl: CODING_PLAN_CHINA_BASE_URL,
-      version: 'old-version-hash',
-    };
-    mockSettings.merged['modelProviders'] = {
-      [AuthType.USE_OPENAI]: chinaTemplate,
-    };
-
-    const { result } = renderHook(() =>
-      useProviderUpdates(
-        mockSettings as never,
-        mockConfig as never,
-        mockAddItem,
-      ),
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'security.auth.selectedType',
+      expect.anything(),
     );
-
-    await waitFor(() => {
-      expect(result.current.providerUpdateRequest).toBeDefined();
-    });
-    await result.current.providerUpdateRequest!.onConfirm('update');
-
-    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      name: 'on the same protocol',
+      activeConfig: {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: TOKEN_PLAN_BASE_URL,
+        apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+      },
+    },
+    {
+      name: 'on a different protocol',
+      activeConfig: {
+        authType: AuthType.USE_GEMINI,
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        apiKeyEnvKey: 'GEMINI_API_KEY',
+      },
+    },
+  ])(
+    'does not change auth when updating an inactive provider $name',
+    async ({ activeConfig }) => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue(activeConfig);
+      (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+        METADATA_KEY
+      ] = {
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        version: 'old-version-hash',
+      };
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: chinaTemplate,
+      };
+
+      const { result } = renderHook(() =>
+        useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.providerUpdateRequest).toBeDefined();
+      });
+      await result.current.providerUpdateRequest!.onConfirm('update');
+
+      expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'security.auth.selectedType',
+        expect.anything(),
+      );
+    },
+  );
 
   it('does not refresh auth before auth initialization completes', async () => {
     mockConfig.getContentGeneratorConfig.mockReturnValue(undefined as never);
@@ -418,7 +445,13 @@ describe('useProviderUpdates', () => {
   });
 
   it('switches model when previous model is no longer available', async () => {
-    mockConfig.getModel.mockReturnValue('removed-model');
+    let activeModel = 'removed-model';
+    mockConfig.getModel.mockImplementation(() => activeModel);
+    mockModelsConfig.syncAfterAuthRefresh.mockImplementation(
+      (_authType, modelId) => {
+        activeModel = modelId;
+      },
+    );
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -453,9 +486,82 @@ describe('useProviderUpdates', () => {
       'qwen3.5-plus',
       undefined,
     );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'Coding Plan configuration updated successfully. Model switched to "qwen3.5-plus".',
+      },
+      expect.any(Number),
+    );
   });
 
-  it('dismisses without persisting when user chooses "later"', async () => {
+  it.each([
+    { name: 'registered under the same protocol', registered: true },
+    { name: 'provided by the active runtime config only', registered: false },
+  ])('does not move the user off a model $name', async ({ registered }) => {
+    const foreignModel = {
+      id: 'my-own-model',
+      baseUrl: 'https://my-own-gateway.example.com/v1',
+      envKey: 'MY_OWN_KEY',
+      name: '[Mine] my-own-model',
+    };
+    mockConfig.getModel.mockReturnValue('my-own-model');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: foreignModel.baseUrl,
+      apiKeyEnvKey: foreignModel.envKey,
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: registered
+        ? [foreignModel, ...chinaTemplate]
+        : chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'Coding Plan configuration updated successfully.',
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('persists a cooldown (not a full update) when user chooses "later"', async () => {
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
       METADATA_KEY
     ] = {
@@ -478,13 +584,263 @@ describe('useProviderUpdates', () => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
 
+    // Pin Date.now so the persisted timestamp can be asserted exactly.
+    const postponedAt = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(postponedAt);
+    try {
+      await result.current.providerUpdateRequest!.onConfirm('later');
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+    // "later" persists a postponement cooldown so the prompt does not reappear
+    // on every launch, but it must not apply the update. The single batched
+    // write must contain exactly these two keys — pinning the values the
+    // read-side guard compares against and bounding all persisted writes.
+    expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValues).toHaveBeenCalledWith([
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedVersion`,
+        value: chinaVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedAt`,
+        value: postponedAt,
+      },
+    ]);
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('later persists the cooldown for all providers in one batched write', async () => {
+    const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
+      string,
+      unknown
+    >;
+    metadataNs[METADATA_KEY] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    metadataNs[TOKEN_METADATA_KEY] = {
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    const postponedAt = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(postponedAt);
+    try {
+      await result.current.providerUpdateRequest!.onConfirm('later');
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+    expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValues).toHaveBeenCalledWith([
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedVersion`,
+        value: chinaVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.postponedAt`,
+        value: postponedAt,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.postponedVersion`,
+        value: tokenVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.postponedAt`,
+        value: postponedAt,
+      },
+    ]);
+  });
+
+  it('surfaces an error but still dismisses when persisting the cooldown fails', async () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    mockSettings.setValues.mockImplementationOnce(() => {
+      throw new Error('settings file is read-only');
+    });
+
     await result.current.providerUpdateRequest!.onConfirm('later');
 
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
-    expect(mockSettings.setValue).not.toHaveBeenCalled();
-    expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('settings file is read-only'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('does not show prompt while the "later" cooldown is active', () => {
+    // Pin Date.now on the read side: 23h elapsed is still inside the 24h
+    // cooldown. Together with the 25h expiry test this pins the duration.
+    const now = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+        METADATA_KEY
+      ] = {
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        version: 'old-version-hash',
+        postponedVersion: chinaVersion,
+        postponedAt: now - 23 * 60 * 60 * 1000,
+      };
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: chinaTemplate,
+      };
+
+      const { result } = renderHook(() =>
+        useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+        ),
+      );
+
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('shows prompt again after the "later" cooldown expires', async () => {
+    // Pin Date.now on the read side: 25h elapsed is past the 24h cooldown.
+    const now = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: chinaVersion,
+      postponedAt: now - 25 * 60 * 60 * 1000,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+    dateNowSpy.mockRestore();
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+  });
+
+  it('shows prompt when the clock stepped backward after postponement', async () => {
+    // A backward clock jump makes the elapsed time negative; the cooldown must
+    // be treated as expired rather than suppressing the prompt until the wall
+    // clock catches up with postponedAt.
+    const now = Date.now();
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: chinaVersion,
+      postponedAt: now + 60 * 60 * 1000,
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+    dateNowSpy.mockRestore();
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+  });
+
+  it('shows prompt for a newer version despite an active "later" cooldown', async () => {
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+      postponedVersion: 'stale-postponed-hash',
+      postponedAt: Date.now(),
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
   });
 
   it('persists ignoredVersion when user chooses "skip"', async () => {

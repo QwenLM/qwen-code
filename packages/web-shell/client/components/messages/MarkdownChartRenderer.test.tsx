@@ -429,6 +429,12 @@ describe('Web Shell markdown-chart integration', () => {
     expect(mountedChart.container.textContent).toContain('Rendering chart');
 
     await mountedChart.rerender(tree(`\`\`\`markdown-chart\n${chart}\n\`\`\``));
+
+    // Wait for the 80ms streaming throttle to flush the new content
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
     await flushChart();
 
     expect(runtime.init).toHaveBeenCalledOnce();

@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import { TestRig } from '../test-helper.js';
+import { startFakeOpenAIServer } from '../fake-openai-server.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
@@ -25,6 +26,7 @@ type PendingRequest = {
 };
 
 type UsageMetadata = {
+  inputTokens?: number | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
   thoughtsTokens?: number | null;
@@ -47,6 +49,8 @@ type SessionUpdateNotification = {
     };
     modeId?: string;
     currentModeId?: string;
+    used?: number;
+    size?: number;
     _meta?: {
       usage?: UsageMetadata;
     };
@@ -86,7 +90,11 @@ type PermissionHandler = (
  */
 function setupAcpTest(
   rig: TestRig,
-  options?: { permissionHandler?: PermissionHandler; useNewFlag?: boolean },
+  options?: {
+    permissionHandler?: PermissionHandler;
+    useNewFlag?: boolean;
+    env?: NodeJS.ProcessEnv;
+  },
 ) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
@@ -125,7 +133,7 @@ function setupAcpTest(
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, QWEN_HOME: qwenHome },
+      env: { ...process.env, ...options?.env, QWEN_HOME: qwenHome },
     },
   );
 
@@ -308,7 +316,7 @@ function setupAcpTest(
 (IS_SANDBOX ? describe.skip : describe)('acp integration', () => {
   it('basic smoke test', async () => {
     const rig = new TestRig();
-    rig.setup('acp load session');
+    await rig.setup('acp load session');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -348,7 +356,7 @@ function setupAcpTest(
 
   it('initializes and allows setting mode', async () => {
     const rig = new TestRig();
-    rig.setup('acp mode and model');
+    await rig.setup('acp mode and model');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -412,7 +420,7 @@ function setupAcpTest(
 
   it('returns internal error details when model auth is required', async () => {
     const rig = new TestRig();
-    rig.setup('acp auth methods in error data', {
+    await rig.setup('acp auth methods in error data', {
       settings: {
         modelProviders: {
           openai: [
@@ -488,7 +496,7 @@ function setupAcpTest(
     // below). A registry model configured via `modelProviders` is always
     // enumerated and switchable without inference, making this test
     // deterministic regardless of how the ambient openai credentials resolve.
-    rig.setup('acp set config option', {
+    await rig.setup('acp set config option', {
       settings: {
         modelProviders: {
           openai: [
@@ -602,7 +610,7 @@ function setupAcpTest(
 
   it('returns error for invalid configId in set_config_option', async () => {
     const rig = new TestRig();
-    rig.setup('acp set config option error');
+    await rig.setup('acp set config option error');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -649,7 +657,7 @@ function setupAcpTest(
 
   it('receives available_commands_update with slash commands after session creation', async () => {
     const rig = new TestRig();
-    rig.setup('acp slash commands');
+    await rig.setup('acp slash commands');
 
     const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
 
@@ -709,7 +717,7 @@ function setupAcpTest(
 
   it('handles exit plan mode with permission request and mode update notification', async () => {
     const rig = new TestRig();
-    rig.setup('acp exit plan mode');
+    await rig.setup('acp exit plan mode');
 
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
@@ -825,7 +833,7 @@ function setupAcpTest(
 
   it('blocks write tools in plan mode (issue #1806)', async () => {
     const rig = new TestRig();
-    rig.setup('acp plan mode enforcement');
+    await rig.setup('acp plan mode enforcement');
 
     const toolCallEvents: Array<{
       toolName: string;
@@ -924,11 +932,34 @@ function setupAcpTest(
     }
   });
 
-  it('receives usage metadata in agent_message_chunk updates', async () => {
+  it('receives private usage metadata and standard ACP usage updates', async () => {
+    const fakeServer = await startFakeOpenAIServer(() => ({
+      content: 'hello',
+      usage: {
+        prompt_tokens: 321,
+        completion_tokens: 1,
+        total_tokens: 322,
+      },
+    }));
     const rig = new TestRig();
-    rig.setup('acp usage metadata');
+    await rig.setup('acp usage metadata', {
+      settings: {
+        model: {
+          generationConfig: { contextWindowSize: 128_000 },
+        },
+      },
+    });
 
-    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig, {
+      env: {
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: fakeServer.baseUrl,
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+        NO_PROXY: '127.0.0.1,localhost',
+        no_proxy: '127.0.0.1,localhost',
+      },
+    });
 
     try {
       await sendRequest('initialize', {
@@ -961,14 +992,29 @@ function setupAcpTest(
       const usage = updatesWithUsage[0].update?._meta?.usage;
       expect(usage).toBeDefined();
       expect(
-        typeof usage?.promptTokens === 'number' ||
+        typeof usage?.inputTokens === 'number' ||
+          typeof usage?.promptTokens === 'number' ||
           typeof usage?.totalTokens === 'number',
       ).toBe(true);
+
+      const standardUsageUpdates = sessionUpdates.filter(
+        (u) => u.update?.sessionUpdate === 'usage_update',
+      );
+      expect(standardUsageUpdates.length).toBeGreaterThan(0);
+
+      const standardUsage = standardUsageUpdates.at(-1)?.update;
+      expect(standardUsage).toMatchObject({ used: 321, size: 128_000 });
+
+      const privateInputTokens = usage?.inputTokens ?? usage?.promptTokens;
+      if (typeof privateInputTokens === 'number') {
+        expect(standardUsage?.used).toBe(privateInputTokens);
+      }
     } catch (e) {
       if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
     } finally {
       await cleanup();
+      await fakeServer.close();
     }
   });
 });
@@ -978,7 +1024,7 @@ function setupAcpTest(
   () => {
     it('should work with deprecated --experimental-acp flag and show warning', async () => {
       const rig = new TestRig();
-      rig.setup('acp backward compatibility');
+      await rig.setup('acp backward compatibility');
 
       const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
         useNewFlag: false,
@@ -1024,7 +1070,7 @@ function setupAcpTest(
 
     it('should work with new --acp flag without warnings', async () => {
       const rig = new TestRig();
-      rig.setup('acp new flag');
+      await rig.setup('acp new flag');
 
       const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
         useNewFlag: true,
