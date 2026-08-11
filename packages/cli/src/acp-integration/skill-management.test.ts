@@ -425,6 +425,18 @@ describe('managed Skill mutations', () => {
         expectedDisabled: undefined,
         initiallyDisabled: true,
       },
+      {
+        field: 'disable-model-invocation: |\n  true',
+        enabled: false,
+        expectedDisabled: true,
+        initiallyDisabled: false,
+      },
+      {
+        field: 'disable-model-invocation: >\n  true',
+        enabled: true,
+        expectedDisabled: undefined,
+        initiallyDisabled: false,
+      },
     ];
 
     for (const scenario of scenarios) {

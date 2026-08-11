@@ -198,17 +198,19 @@ function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   const disabledFieldPattern =
     /^(?:disable-model-invocation|"disable-model-invocation"|'disable-model-invocation')\s*:(.*)$/;
   for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(disabledFieldPattern);
-    if (!match) continue;
+    if (!disabledFieldPattern.test(lines[index])) continue;
 
     let end = index;
-    if (/^\s*(?:#.*)?$/.test(match[1])) {
-      while (
-        end + 1 < lines.length &&
-        (lines[end + 1].trim() === '' || /^[ \t]/.test(lines[end + 1]))
-      ) {
-        end += 1;
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      const line = lines[cursor];
+      if (line.trim() === '') {
+        cursor += 1;
+        continue;
       }
+      if (!/^[ \t]/.test(line)) break;
+      end = cursor;
+      cursor += 1;
     }
     disabledFields.push({ start: index, end });
     index = end;
