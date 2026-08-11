@@ -10,6 +10,7 @@ import {
   modelIdsAfterBaseUrlChange,
   parseModelIds,
   resetTrimmedDefaultModelIds,
+  seedProviderModelState,
   shouldResetApiKeyAfterBaseUrlChange,
   trimmedDefaultModelIds,
 } from './provider-state';
@@ -196,6 +197,68 @@ describe('provider endpoint state', () => {
     expect(codingTrims).toEqual(['k3']);
     expect(afterSwitchAway.modelIds).toEqual(['kimi-k3']);
     expect(afterRoundTrip.modelIds).toEqual(['k3-256k', 'kimi-k3']);
+  });
+
+  it('seeds saved models and trims for every configured endpoint', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: codingUrl,
+          models: [{ id: 'k3-256k' }, { id: 'k3' }],
+        },
+        {
+          id: 'api',
+          label: 'API',
+          url: apiUrl,
+          models: [
+            { id: 'kimi-k3' },
+            { id: 'kimi-k2.7-code' },
+            { id: 'kimi-k2.7-code-highspeed' },
+            { id: 'kimi-k2.6' },
+          ],
+        },
+      ],
+      existingConfig: {
+        baseUrl: codingUrl,
+        modelIds: ['k3-256k'],
+        modelIdsByBaseUrl: {
+          [codingUrl]: ['k3-256k'],
+          [apiUrl]: ['kimi-k3', 'my-api-model'],
+        },
+      },
+    };
+
+    const seeded = seedProviderModelState(provider, codingUrl);
+
+    expect(seeded.modelIds).toEqual(['k3-256k']);
+    expect(seeded.customModelIds).toEqual(['my-api-model']);
+    expect(seeded.customModelIdsByBaseUrl.get(codingUrl)).toEqual([]);
+    expect(seeded.customModelIdsByBaseUrl.get(apiUrl)).toEqual([
+      'my-api-model',
+    ]);
+    expect(seeded.trimmedDefaultModelIds.get(codingUrl)).toEqual(['k3']);
+    expect(seeded.trimmedDefaultModelIds.get(apiUrl)).toEqual([
+      'kimi-k2.7-code',
+      'kimi-k2.7-code-highspeed',
+      'kimi-k2.6',
+    ]);
+
+    expect(
+      modelIdsAfterBaseUrlChange(
+        provider,
+        codingUrl,
+        apiUrl,
+        seeded.modelIds.join(', '),
+        seeded.customModelIds,
+        seeded.trimmedDefaultModelIds.get(apiUrl),
+        seeded.customModelIdsByBaseUrl.get(apiUrl),
+      ).modelIds,
+    ).toEqual(['kimi-k3', 'my-api-model']);
   });
 
   it('keeps custom provenance when the id leaves the field as an endpoint built-in', () => {

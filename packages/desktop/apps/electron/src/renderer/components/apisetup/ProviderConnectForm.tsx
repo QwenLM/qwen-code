@@ -36,10 +36,9 @@ import {
   defaultBaseUrl,
   defaultModelIds,
   initialApiKey,
-  initialModelIds,
   modelIdsAfterBaseUrlChange,
   parseModelIds,
-  resetTrimmedDefaultModelIds,
+  seedProviderModelState,
   trimmedDefaultModelIds,
 } from './provider-state';
 
@@ -123,6 +122,7 @@ export function ProviderConnectForm({
   const [formError, setFormError] = useState<string | null>(null);
   const apiKeyDraftsRef = useRef(new Map<string, string>());
   const customModelIdsRef = useRef<string[]>([]);
+  const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
   const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
 
   const groups = useMemo(
@@ -190,18 +190,11 @@ export function ProviderConnectForm({
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
     setApiKey(initialApiKey(apiKeyDraftsRef.current));
-    const seededModelIds = initialModelIds(provider, baseUrl);
-    const seededDefaults = new Set(defaultModelIds(provider, baseUrl));
-    customModelIdsRef.current = seededModelIds.filter(
-      (id) => !seededDefaults.has(id),
-    );
-    resetTrimmedDefaultModelIds(
-      trimmedDefaultModelIdsRef.current,
-      provider,
-      baseUrl,
-      seededModelIds,
-    );
-    setModelIdsText(seededModelIds.join(', '));
+    const seeded = seedProviderModelState(provider, baseUrl);
+    customModelIdsRef.current = seeded.customModelIds;
+    customModelIdsByBaseUrlRef.current = seeded.customModelIdsByBaseUrl;
+    trimmedDefaultModelIdsRef.current = seeded.trimmedDefaultModelIds;
+    setModelIdsText(seeded.modelIds.join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
@@ -460,6 +453,7 @@ export function ProviderConnectForm({
                       modelIdsText,
                       customModelIdsRef.current,
                       trimmedDefaultModelIdsRef.current.get(value),
+                      customModelIdsByBaseUrlRef.current.get(value),
                     );
                     customModelIdsRef.current = nextModelIds.customModelIds;
                     setModelIdsText(nextModelIds.modelIds.join(', '));
@@ -521,6 +515,10 @@ export function ProviderConnectForm({
                 [...defaults],
                 customModelIdsRef.current,
                 ids,
+              );
+              customModelIdsByBaseUrlRef.current.set(
+                baseUrl,
+                ids.filter((id) => !defaults.has(id)),
               );
               trimmedDefaultModelIdsRef.current.set(
                 baseUrl,

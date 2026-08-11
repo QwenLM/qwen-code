@@ -11,6 +11,10 @@ import {
   applyProviderInstallPlan,
   buildProviderTemplate,
   buildInstallPlan,
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_ENV_KEY,
+  CODING_PLAN_GLOBAL_BASE_URL,
+  codingPlanProvider,
   customProvider,
   generateCustomEnvKey,
   KIMI_API_ENV_KEY,
@@ -20,6 +24,10 @@ import {
   ProviderInstallError,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
+  tokenPlanProvider,
 } from '../index.js';
 
 function createAdapter(modelProviders: ModelProvidersConfig = {}) {
@@ -283,6 +291,36 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it('replaces owned models at their existing position', async () => {
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        { id: 'region-a', envKey: 'A' },
+        { id: 'old-region-b', envKey: 'B' },
+        { id: 'tail', envKey: 'C' },
+      ],
+    });
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'new-region-b', envKey: 'B' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+          ownsModel: (model) => model.envKey === 'B',
+        },
+      ],
+    };
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      { id: 'region-a', envKey: 'A' },
+      { id: 'new-region-b', envKey: 'B' },
+      { id: 'tail', envKey: 'C' },
+    ]);
+  });
+
   it('falls back to id+baseUrl identity when ownsModel is omitted', async () => {
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [
@@ -310,8 +348,8 @@ describe('applyProviderInstallPlan', () => {
     await applyProviderInstallPlan(plan, { settings: adapter });
 
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
       { id: 'gpt-4o', baseUrl: 'https://proxy-a.example/v1' },
+      { id: 'gpt-4o', baseUrl: 'https://api.openai.com/v1' },
       { id: 'gpt-3.5', baseUrl: 'https://api.openai.com/v1' },
     ]);
   });
@@ -376,11 +414,61 @@ describe('applyProviderInstallPlan', () => {
     await applyProviderInstallPlan(plan, { settings: adapter });
 
     expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
-      ...intlModels,
       ...chinaModels,
       chinaCustom,
+      ...intlModels,
     ]);
   });
+
+  it.each([
+    {
+      label: 'Coding Plan',
+      provider: codingPlanProvider,
+      selectedUrl: CODING_PLAN_CHINA_BASE_URL,
+      siblingUrl: CODING_PLAN_GLOBAL_BASE_URL,
+      envKey: CODING_PLAN_ENV_KEY,
+    },
+    {
+      label: 'Token Plan',
+      provider: tokenPlanProvider,
+      selectedUrl: TOKEN_PLAN_CHINA_BASE_URL,
+      siblingUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
+      envKey: TOKEN_PLAN_ENV_KEY,
+    },
+  ])(
+    'keeps the $label sibling region untouched on resubmit',
+    async ({ provider, selectedUrl, siblingUrl, envKey }) => {
+      const selectedModels = buildProviderTemplate(provider, selectedUrl);
+      const siblingModels = buildProviderTemplate(provider, siblingUrl);
+      const siblingCustom = {
+        id: 'sibling-custom',
+        name: '[ModelStudio] sibling-custom',
+        baseUrl: siblingUrl,
+        envKey,
+      };
+      const adapter = createAdapter({
+        [AuthType.USE_OPENAI]: [
+          ...selectedModels,
+          ...siblingModels,
+          siblingCustom,
+        ],
+      });
+      const plan = buildInstallPlan(provider, {
+        baseUrl: selectedUrl,
+        apiKey: 'not-persisted-by-this-test',
+        modelIds: selectedModels.map((model) => model.id),
+      });
+      delete plan.env;
+
+      await applyProviderInstallPlan(plan, { settings: adapter });
+
+      expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+        ...selectedModels,
+        ...siblingModels,
+        siblingCustom,
+      ]);
+    },
+  );
 
   it('preserves existing custom provider models and selects the installed endpoint', async () => {
     const baseUrl = 'http://new.example/v1';

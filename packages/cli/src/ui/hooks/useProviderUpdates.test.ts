@@ -44,8 +44,8 @@ const tokenTemplate = buildProviderTemplate(
 );
 const tokenVersion = computeModelListVersion(tokenTemplate);
 
-const METADATA_KEY = 'coding-plan';
-const TOKEN_METADATA_KEY = 'token-plan';
+const METADATA_KEY = 'coding-plan--aliyun';
+const TOKEN_METADATA_KEY = 'token-plan--cn-beijing';
 
 describe('useProviderUpdates', () => {
   const mockSettings = {
@@ -519,7 +519,7 @@ describe('useProviderUpdates', () => {
       mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
         AuthType.USE_OPENAI
       ];
-    expect(reloaded).toEqual([...intlTemplate, ...chinaTemplate, chinaCustom]);
+    expect(reloaded).toEqual([...chinaTemplate, chinaCustom, ...intlTemplate]);
   });
 
   it('detects updates for every installed Kimi endpoint with legacy metadata', async () => {
@@ -888,7 +888,7 @@ describe('useProviderUpdates', () => {
     expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       'qwen3.5-plus',
-      undefined,
+      CODING_PLAN_CHINA_BASE_URL,
     );
     expect(mockAddItem).toHaveBeenCalledWith(
       {

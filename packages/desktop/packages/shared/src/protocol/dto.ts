@@ -814,6 +814,8 @@ export interface QwenProviderSummary {
     /** The ACP catalog never serializes the stored key, only its presence. */
     hasApiKey?: boolean
     modelIds?: string[]
+    /** Stored model ids grouped by canonical endpoint URL. */
+    modelIdsByBaseUrl?: Record<string, string[]>
     advancedConfig?: QwenProviderAdvancedConfig
   }
 }

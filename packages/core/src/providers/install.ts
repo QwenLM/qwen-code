@@ -54,19 +54,37 @@ function applyModelProvidersPatch(
     updatedModels = [...existingModels, ...patch.models];
   } else {
     const ownsModel = patch.ownsModel;
-    const preservedModels = existingModels.filter((model) => {
+    const removesModel = (model: (typeof existingModels)[number]) => {
       if (ownsModel) {
-        return !ownsModel(model);
+        return ownsModel(model);
       }
-      return !patch.models.some((newModel) =>
+      return patch.models.some((newModel) =>
         isSameModelIdentity(newModel, model),
       );
-    });
+    };
+    const firstRemovedIndex = existingModels.findIndex(removesModel);
+    const preservedModels = existingModels.filter(
+      (model) => !removesModel(model),
+    );
 
-    updatedModels =
-      patch.mergeStrategy === 'replace-owned'
-        ? [...preservedModels, ...patch.models]
-        : [...patch.models, ...preservedModels];
+    if (patch.mergeStrategy === 'replace-owned') {
+      updatedModels = [...preservedModels, ...patch.models];
+    } else if (firstRemovedIndex < 0) {
+      updatedModels = [...patch.models, ...preservedModels];
+    } else {
+      // Updating an existing endpoint must not reorder sibling endpoints.
+      // Duplicate model ids are resolved by first match, so prepending a
+      // replacement can silently change the selected region when baseUrl is
+      // intentionally absent from a legacy/id-only selection.
+      const insertionIndex = existingModels
+        .slice(0, firstRemovedIndex)
+        .filter((model) => !removesModel(model)).length;
+      updatedModels = [
+        ...preservedModels.slice(0, insertionIndex),
+        ...patch.models,
+        ...preservedModels.slice(insertionIndex),
+      ];
+    }
   }
 
   return {

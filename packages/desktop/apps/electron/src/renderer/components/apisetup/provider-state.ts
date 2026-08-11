@@ -32,10 +32,51 @@ export function initialModelIds(
   provider: QwenProviderSummary,
   baseUrl: string,
 ): string[] {
+  const endpointModelIds =
+    provider.existingConfig?.modelIdsByBaseUrl?.[baseUrl] ?? [];
+  if (endpointModelIds.length > 0) return endpointModelIds;
   const existingModelIds = provider.existingConfig?.modelIds ?? [];
   return existingModelIds.length > 0
     ? existingModelIds
     : defaultModelIds(provider, baseUrl);
+}
+
+export function seedProviderModelState(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+): {
+  modelIds: string[];
+  customModelIds: string[];
+  customModelIdsByBaseUrl: Map<string, string[]>;
+  trimmedDefaultModelIds: Map<string, string[]>;
+} {
+  const modelIds = initialModelIds(provider, baseUrl);
+  const endpointEntries = Object.entries(
+    provider.existingConfig?.modelIdsByBaseUrl ?? {},
+  );
+  const savedEntries: Array<[string, string[]]> =
+    endpointEntries.length > 0 ? endpointEntries : [[baseUrl, modelIds]];
+  const customModelIds = new Set<string>();
+  const customsByBaseUrl = new Map<string, string[]>();
+  const trims = new Map<string, string[]>();
+
+  for (const [endpoint, savedModelIds] of savedEntries) {
+    const defaults = new Set(defaultModelIds(provider, endpoint));
+    const endpointCustoms = savedModelIds.filter((id) => !defaults.has(id));
+    customsByBaseUrl.set(endpoint, endpointCustoms);
+    for (const id of endpointCustoms) customModelIds.add(id);
+    trims.set(
+      endpoint,
+      trimmedDefaultModelIds(provider, endpoint, savedModelIds),
+    );
+  }
+
+  return {
+    modelIds,
+    customModelIds: [...customModelIds],
+    customModelIdsByBaseUrl: customsByBaseUrl,
+    trimmedDefaultModelIds: trims,
+  };
 }
 
 export function customModelIdsAfterEdit(
@@ -105,6 +146,7 @@ export function modelIdsAfterBaseUrlChange(
   currentModelIds: string,
   customModelIds: readonly string[] = [],
   trimmedNextDefaultModelIds: readonly string[] = [],
+  savedNextCustomModelIds: readonly string[] = [],
 ): { modelIds: string[]; customModelIds: string[] } {
   const previousDefaults = new Set(defaultModelIds(provider, previousBaseUrl));
   const nextDefaults = defaultModelIds(provider, nextBaseUrl);
@@ -121,6 +163,7 @@ export function modelIdsAfterBaseUrlChange(
         (id) => fieldSet.has(id) || previousDefaults.has(id),
       ),
       ...fieldIds.filter((id) => !previousDefaults.has(id)),
+      ...savedNextCustomModelIds,
     ]),
   ];
   return {

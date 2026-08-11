@@ -2085,6 +2085,21 @@ function readExistingProviderConfig(
   if (!hasExistingConfig) return undefined;
 
   const advancedConfig = readExistingAdvancedConfig(firstModel);
+  const modelIdsByBaseUrl =
+    existing && Array.isArray(config.baseUrl)
+      ? Object.fromEntries(
+          config.baseUrl.flatMap((option) => {
+            const ids = existing.models
+              .filter(
+                (model) =>
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                  normalizeBaseUrlForMatching(option.url),
+              )
+              .map((model) => model.id);
+            return ids.length > 0 ? [[option.url, [...new Set(ids)]]] : [];
+          }),
+        )
+      : undefined;
 
   return {
     protocol,
@@ -2104,6 +2119,9 @@ function readExistingProviderConfig(
                 normalizeBaseUrlForMatching(firstModel?.baseUrl),
             )
             .map((model) => model.id),
+          ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0
+            ? { modelIdsByBaseUrl }
+            : {}),
         }
       : {}),
     ...(advancedConfig ? { advancedConfig } : {}),

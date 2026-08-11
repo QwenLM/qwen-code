@@ -11455,6 +11455,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
                 baseUrl: 'https://first.example/v1',
                 hasApiKey: true,
                 modelIds: ['first-model', 'custom-first'],
+                modelIdsByBaseUrl: {
+                  'https://first.example/v1': ['first-model', 'custom-first'],
+                  'https://second.example/v1': [
+                    'custom-second',
+                    'wrong-url-shared-env',
+                  ],
+                },
               },
             }),
           ],
