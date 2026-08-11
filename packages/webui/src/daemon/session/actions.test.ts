@@ -529,11 +529,7 @@ describe('createDaemonSessionActions', () => {
         loadingTranscript: true,
       });
 
-      // Split the boundary, and observe pendingness rather than connection
-      // status — the status stays 'connecting' after a rejection, so asserting
-      // it would stay green for any watchdog ≤ 75s, including the 30s attach
-      // value. A 30s load watchdog abandons a load the daemon's 60s budget
-      // still completes, recreating the #8678 symptom in the browser.
+      // Split the boundary so a shorter watchdog cannot pass this test.
       let settledEarly = false;
       void loadPromise.catch(() => {
         settledEarly = true;
@@ -544,6 +540,7 @@ describe('createDaemonSessionActions', () => {
 
       await expect(loadPromise).rejects.toThrow('Session load timed out');
       expect(getConnection()).toMatchObject({
+        status: 'disconnected',
         sessionId: 'session-b',
         loadingTranscript: undefined,
         catchingUp: undefined,

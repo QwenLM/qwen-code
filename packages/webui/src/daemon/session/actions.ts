@@ -247,6 +247,19 @@ export function createDaemonSessionActions({
           : setTimeout(() => {
               if (pendingSessionLoadRef.current?.id === loadId) {
                 pendingSessionLoadRef.current = undefined;
+                if (sessionRef.current?.sessionId !== sessionId) {
+                  setConnection((current) =>
+                    current.status === 'connecting' &&
+                    current.sessionId === sessionId
+                      ? {
+                          ...current,
+                          status: 'disconnected',
+                          loadingTranscript: undefined,
+                          catchingUp: undefined,
+                        }
+                      : current,
+                  );
+                }
                 reject(
                   dispatchActionError(
                     addNotice,
