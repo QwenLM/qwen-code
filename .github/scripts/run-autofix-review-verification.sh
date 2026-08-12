@@ -368,7 +368,7 @@ sensitive_class_of() {
   local f="${1}"
   case "${f}" in
     .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml) echo 'autofix-loop' ;;
-    .github/scripts/run-autofix-review-verification.sh) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh) echo 'autofix-loop' ;;
     .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
     .github/scripts/*) echo 'ci-scripts' ;;
     .github/*) echo 'gh-metadata' ;;
@@ -413,10 +413,34 @@ PR_BASE="$(git merge-base origin/main "origin/${BRANCH}" 2> /dev/null)" || PR_BA
 ROUND_CLASSES=''
 while IFS= read -r -d '' f; do
   [[ -n "${f}" ]] || continue
+  # A round that merges origin/main makes ROUND_RANGE degenerate (the
+  # pre-round head is an ancestor), attributing every incoming main-side
+  # change to the round. Content identical to current main is merge
+  # freight, not the round's authorship — skip it.
+  if git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null; then
+    continue
+  fi
   c="$(sensitive_class_of "${f}")"
+  case "${c}" in
+    lint-config | test-config | ts-config)
+      # Round-ADDED configs are the round's own new surface (the manifest
+      # arm has the same exemption via cat-file below).
+      git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null || c='' ;;
+  esac
   if [[ -z "${c}" ]]; then
     case "${f}" in
       package.json | */package.json)
+        # DELETED workspace manifests never resolve on the round's tree —
+        # classify them from pre-round existence instead (deleting a
+        # workspace removes command surface the gate dispatched over).
+        if [[ ! -e "${f}" ]]; then
+          if git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+            c='manifest-scripts-ws'
+            [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
+          fi
+          [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
+          continue
+        fi
         # Any DECLARED workspace manifest (nested included) is command
         # surface; fixture manifests deeper in a src tree are data. A
         # manifest the round ADDED (a new workspace) is the round's own
@@ -669,10 +693,11 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
     [[ -z "${f}" ]] && continue
     [[ "${f}" == "${BITE_PKGS}"/* ]] || BITE_STRAY='true'
   done < <(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}")
-  BITE_TEST_SCRIPT=''
-  if [[ -n "${BITE_PKGS}" && -f "${BITE_PKGS}/package.json" ]]; then
-    BITE_TEST_SCRIPT="$(node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(p.scripts?.test||"")' "${BITE_PKGS}/package.json" 2> /dev/null)" || BITE_TEST_SCRIPT=''
-  fi
+  # Read the test script from the PRE-ROUND tree: that is the manifest the
+  # detached runner will actually execute (the round tree's copy can
+  # differ on infra PRs).
+  BITE_TEST_SCRIPT="$(git show "origin/${BRANCH}:${BITE_PKGS}/package.json" 2> /dev/null |
+    node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(JSON.parse(d).scripts?.test||"")}catch{}})' 2> /dev/null)" || BITE_TEST_SCRIPT=''
   BITE_SELF_IMPORT='false'
   if [[ -n "${BITE_PKGS}" && -f "${BITE_PKGS}/package.json" ]]; then
     BITE_PKG_NAME="$(node -e 'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).name||"")' "${BITE_PKGS}/package.json" 2> /dev/null)" || BITE_PKG_NAME=''
