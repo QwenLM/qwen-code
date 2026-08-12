@@ -31,6 +31,35 @@ describe('MediaResourceRegistry', () => {
     expect(second.resourceId).toBe(first.resourceId);
   });
 
+  it('keeps the first binding when a version is rebound with different fields', () => {
+    // fileVersionId IS the identity here, so the version wins over the
+    // details: the binding a handle was minted with is the one the harness
+    // will resolve for the rest of the session. Overwriting `fileRef` in
+    // place would silently repoint a handle the model already holds at
+    // other bytes; minting a second handle for one version would break the
+    // correlation across recall calls that the idempotency exists for.
+    const registry = new MediaResourceRegistry();
+    const first = registry.bind(BINDING);
+    const second = registry.bind({
+      ...BINDING,
+      fileRef: '/objects/sha256/promoted.mp4',
+      mediaType: 'audio',
+    });
+
+    expect(second).toBe(first);
+    expect(second).toEqual({ ...BINDING, resourceId: first.resourceId });
+    expect(registry.resolve(first.resourceId)).toMatchObject({
+      fileRef: BINDING.fileRef,
+      mediaType: 'video',
+    });
+    // The rejected locator was never indexed either, so a path-based
+    // recovery cannot resolve it back to this handle.
+    expect(
+      registry.resolveByFileRef('/objects/sha256/promoted.mp4'),
+    ).toBeUndefined();
+    expect(registry.resolveByFileRef(BINDING.fileRef)).toBe(first);
+  });
+
   it('issues distinct handles for distinct versions', () => {
     const registry = new MediaResourceRegistry();
     const first = registry.bind(BINDING);

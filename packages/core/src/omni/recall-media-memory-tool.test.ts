@@ -274,6 +274,27 @@ describe('buildMediaMemoryRecallAdvisor', () => {
     ]);
   });
 
+  it('never suggests a tool that is not registered in this session', () => {
+    // modelAccess settings say what the operator ALLOWS; the tool registry
+    // says what actually exists this turn (omni tools are absent when omni
+    // is off, when ffmpeg is missing, or under a tool filter). Advising an
+    // unregistered tool spends the model's next turn on a call that comes
+    // back "tool not found" — a dead end recall itself invented.
+    const advise = buildMediaMemoryRecallAdvisor(
+      advisorConfig({
+        registered: [],
+        enabled: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
+      }),
+    );
+    expect(
+      advise({
+        resourceId: 'media-6-ab',
+        mediaType: 'video',
+        gap: gap(['visual']),
+      }),
+    ).toEqual([]);
+  });
+
   it('suggests transcription for an audio speech_text gap', () => {
     const advise = buildMediaMemoryRecallAdvisor(
       advisorConfig({

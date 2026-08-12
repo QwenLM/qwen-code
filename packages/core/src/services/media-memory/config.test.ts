@@ -28,6 +28,23 @@ describe('normalizeOmniMemoryConfig', () => {
     expect(normalized.recall.sideQuery).not.toBe(
       DEFAULT_OMNI_MEMORY_CONFIG.recall.sideQuery,
     );
+    expect(normalized.recall.active).not.toBe(
+      DEFAULT_OMNI_MEMORY_CONFIG.recall.active,
+    );
+
+    // The defaults are a module-global that every later normalization in
+    // the process reads: an aliased nested object turns one session's
+    // override into the baseline for the next config load (and for the
+    // Config accessors already holding the object), which is how a
+    // per-session budget becomes a permanent one nobody configured.
+    normalized.recall.active.maxFilesPerCall = 99;
+    normalized.recall.sideQuery.maxAttempts = 99;
+    normalized.recall.kinds.length = 0;
+    expect(DEFAULT_OMNI_MEMORY_CONFIG.recall.active.maxFilesPerCall).toBe(8);
+    expect(DEFAULT_OMNI_MEMORY_CONFIG.recall.sideQuery.maxAttempts).toBe(1);
+    expect(DEFAULT_OMNI_MEMORY_CONFIG.recall.kinds).toEqual([
+      ...OMNI_MEMORY_RECALL_KINDS,
+    ]);
   });
 
   it('merges per-key overrides over the defaults', () => {
@@ -120,6 +137,17 @@ describe('normalizeOmniMemoryConfig', () => {
     expect(normalized.recall.sideQuery.model).toBeNull();
   });
 
+  it('accepts an explicit mode: "active" override', () => {
+    // Every accepted value of a startup-fatal enum needs its own witness:
+    // writing the default out explicitly is the most common thing an
+    // operator does when documenting a settings file, and rejecting it
+    // would abort the session over configuration that changes nothing.
+    const normalized = normalizeOmniMemoryConfig({
+      recall: { mode: 'active' },
+    });
+    expect(normalized.recall.mode).toBe('active');
+  });
+
   it('validates the kinds array: non-empty, known, no duplicates, wholesale replace', () => {
     expect(() => normalizeOmniMemoryConfig({ recall: { kinds: [] } })).toThrow(
       OmniMemoryConfigError,
@@ -160,5 +188,44 @@ describe('normalizeOmniMemoryConfig', () => {
       },
     });
     expect(normalized.recall.maxEntries).toBe(20);
+  });
+
+  it('validates the budget ordering against the DEFAULTED siblings', () => {
+    // The ordering holds over the EFFECTIVE configuration, not over the
+    // keys the operator happened to write: lowering maxEntries alone
+    // leaves the default selector budget (12) able to pick more entries
+    // than recall will ever return, so the selector's picks would be
+    // silently dropped mid-request. Fail loud at startup instead.
+    expect(() =>
+      normalizeOmniMemoryConfig({ recall: { maxEntries: 6 } }),
+    ).toThrow(OmniMemoryConfigError);
+    // Same in the other direction: shrinking the manifest below the
+    // default maxEntries would have recall return entries the selector was
+    // never shown.
+    expect(() =>
+      normalizeOmniMemoryConfig({
+        recall: { sideQuery: { maxCandidateEntries: 8 } },
+      }),
+    ).toThrow(OmniMemoryConfigError);
+  });
+
+  it('allows the budgets to be exactly equal at both boundaries', () => {
+    // The bounds are "must not exceed", not "must be smaller": a session
+    // that selects, returns, and shows the same number of entries is the
+    // tightest legal configuration, and rejecting it would make the
+    // strictest sensible setting unusable.
+    const normalized = normalizeOmniMemoryConfig({
+      recall: {
+        maxEntries: 12,
+        sideQuery: { maxCandidateEntries: 12, maxSelectedEntries: 12 },
+      },
+    });
+    expect(normalized.recall).toMatchObject({
+      maxEntries: 12,
+      sideQuery: expect.objectContaining({
+        maxCandidateEntries: 12,
+        maxSelectedEntries: 12,
+      }),
+    });
   });
 });

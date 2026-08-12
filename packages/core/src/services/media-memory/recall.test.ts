@@ -355,6 +355,25 @@ describe('MediaMemoryRecallService — filters, limit, ranking', () => {
     ).recall({ resourceIds: [resourceId], query: 'q', roles: ['transcript'] });
     expect(result.entries[0].content).toHaveLength(40);
   });
+
+  it('never cuts a surrogate pair in half at the maxTextChars boundary', async () => {
+    const source = await recognizeMovie();
+    // Emoji and CJK extension characters are two UTF-16 units each, so an
+    // odd budget lands mid-pair — the common case for a transcript of a
+    // chat recording, not an exotic one.
+    await commitTranscript(source, '🎬'.repeat(30));
+    const resourceId = bindSource(source);
+
+    const result = await recallService(
+      recallConfig({ maxTextChars: 41 }),
+    ).recall({ resourceIds: [resourceId], query: 'q', roles: ['transcript'] });
+
+    // A trailing lone surrogate is not text: it cannot round-trip through
+    // UTF-8, so the recall payload handed to the model carries a replacement
+    // character or an encoder error where a character used to be.
+    expect(result.entries[0].content).toBe('🎬'.repeat(20));
+    expect(result.entries[0].contentTruncated).toBe(true);
+  });
 });
 
 describe('MediaMemoryRecallService — current-version-first (§9.5)', () => {
@@ -411,9 +430,75 @@ describe('MediaMemoryRecallService — current-version-first (§9.5)', () => {
 
     expect(result.entries.map((e) => e.role)).toEqual(['transcript']);
   });
+
+  it('keeps gaps speaking for the current version when history is included', async () => {
+    // The first content state was never processed; the file then changed on
+    // disk and the NEW content got the full treatment.
+    const stale = await recognizeMovie();
+    const staleResourceId = bindSource(stale);
+    const fresh = await recognizeMovie(SHA_MOVIE_V2);
+    await commitDegrade(fresh); // visual + acoustic
+    await commitTranscript(fresh); // speech_text
+
+    const result = await recallService().recall({
+      resourceIds: [staleResourceId],
+      query: 'q',
+      includeHistoricalVersions: true,
+    });
+
+    // History widens what memory OFFERS — both content states are listed.
+    expect(result.files.map((f) => f.fileVersionId).sort()).toEqual(
+      [stale.fileVersionId, fresh.fileVersionId].sort(),
+    );
+    expect(result.entries.filter((e) => e.kind === 'metadata')).toHaveLength(2);
+    // ...and never what memory OWES. Deriving gaps from the consulted set
+    // would report a superseded version's untouched channels as holes in the
+    // content that exists NOW, and the advisor would then hand the model
+    // follow-up calls to re-derive work that is already complete.
+    expect(result.gaps).toEqual([]);
+    expect(result.status).toBe('hit');
+  });
 });
 
 describe('MediaMemoryRecallService — gaps and availability', () => {
+  it('never lets a request filter manufacture a gap', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source); // visual + acoustic
+    await commitTranscript(source); // speech_text
+    const resourceId = bindSource(source);
+    const svc = recallService();
+
+    const unfiltered = await svc.recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+    expect(unfiltered.gaps).toEqual([]);
+
+    // Gap truth is a property of the graph, not of the question. Deriving
+    // it from the filtered entry set would report the transcript's channel
+    // as never processed the moment a caller asked only for metadata — and
+    // the advisor would then suggest re-transcribing a film that already
+    // has a transcript, at full cost, on every narrowed recall.
+    const kindsOnly = await svc.recall({
+      resourceIds: [resourceId],
+      query: 'q',
+      kinds: ['metadata'],
+    });
+    expect(kindsOnly.entries.map((e) => e.kind)).toEqual(['metadata']);
+    expect(kindsOnly.gaps).toEqual([]);
+    expect(kindsOnly.status).toBe('hit');
+
+    // Even a filter that matches nothing at all leaves the gaps empty:
+    // seeing nothing is not the same as nothing being there.
+    const rolesOnly = await svc.recall({
+      resourceIds: [resourceId],
+      query: 'q',
+      roles: ['keyframe'],
+    });
+    expect(rolesOnly.entries).toEqual([]);
+    expect(rolesOnly.gaps).toEqual([]);
+  });
+
   it('reports unprocessed channels as gaps (partial status)', async () => {
     const source = await recognizeMovie();
     await commitDegrade(source); // visual+acoustic covered, no transcript
@@ -654,6 +739,15 @@ describe('MediaMemoryRecallService — sideQuery manifest and selection (§9.3)'
     await commitDegrade(source);
     await commitTranscript(source);
     const resourceId = bindSource(source);
+    // Bind the derived artifact's handle too, so a leak has something to
+    // leak: an active recall over the same graph mints one.
+    const active = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+    const derivedHandle = active.entries.find(
+      (e) => e.kind === 'derived_media',
+    )!.resourceId!;
 
     const manifest = await recallService().candidateSummaries([resourceId]);
 
@@ -663,7 +757,72 @@ describe('MediaMemoryRecallService — sideQuery manifest and selection (§9.3)'
       expect((candidate.description ?? '').length).toBeLessThanOrEqual(200);
     }
     // Never a local path or a session handle in selector-visible data.
-    expect(JSON.stringify(manifest)).not.toContain(root);
+    // Manifest rows exist to be judged for relevance and answered with
+    // entryIds; a handle there is an executable capability that skipped the
+    // availability pass `finishResult` runs, so the selector prompt would
+    // carry a resolvable reference to bytes nobody checked still exist.
+    const serialized = JSON.stringify(manifest);
+    expect(serialized).not.toContain(root);
+    expect(serialized).not.toContain(resourceId);
+    expect(serialized).not.toContain(derivedHandle);
+    expect(serialized).not.toMatch(/media-\d+-[0-9a-f]{8}/);
+  });
+
+  it('cuts a manifest description at 200 chars, keeping it a text prefix', async () => {
+    const source = await recognizeMovie();
+    // A real transcript is thousands of characters; the manifest holds up
+    // to maxCandidateEntries (100) rows and is prompt for the selector
+    // model, so an uncapped preview would put whole transcripts in the very
+    // request whose job is to decide which transcripts to load.
+    const text = 'Two divers surface at dawn near the wreck. '.repeat(20);
+    await commitTranscript(source, text);
+    const resourceId = bindSource(source);
+
+    const manifest = await recallService().candidateSummaries([resourceId]);
+    const transcript = manifest.find((c) => c.role === 'transcript')!;
+
+    expect(text.length).toBeGreaterThan(200);
+    expect(transcript.description).toHaveLength(200);
+    // A preview is only honest if it is a prefix — a reshaped or elided
+    // description would have the selector judge relevance on text memory
+    // does not hold.
+    expect(text.startsWith(transcript.description!)).toBe(true);
+  });
+
+  it('orders the manifest newest first, so the cap drops the oldest rows', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+
+    const manifest = await recallService().candidateSummaries([resourceId]);
+
+    // Newest first: the two policy executions (recorded with 2026
+    // completion times), then the transcript, the degraded derivative, and
+    // finally the metadata synthesized at recognition.
+    expect(
+      manifest.map((c) => `${c.kind}:${c.role ?? c.producer ?? ''}`),
+    ).toEqual([
+      'execution:omni_transcribe',
+      'execution:omni_degrade_video',
+      'policy_result:transcript',
+      'derived_media:degraded',
+      'metadata:',
+    ]);
+
+    // Ordering is what decides which rows the cap silently withholds:
+    // insertion order would hide the most recent processing — exactly the
+    // knowledge most likely to answer the request — behind rows the
+    // selector has no way to know were dropped.
+    const capped = await recallService(
+      recallConfig({
+        sideQuery: {
+          ...DEFAULT_OMNI_MEMORY_CONFIG.recall.sideQuery,
+          maxCandidateEntries: 2,
+        },
+      }),
+    ).candidateSummaries([resourceId]);
+    expect(capped).toEqual(manifest.slice(0, 2));
   });
 
   it('caps the manifest at maxCandidateEntries deterministically', async () => {
@@ -747,6 +906,34 @@ describe('MediaMemoryRecallService — sideQuery manifest and selection (§9.3)'
         [resourceId],
         [manifest[0]!.entryId, 'entry-not-in-manifest'],
       ),
+    ).rejects.toMatchObject({ reason: 'invalid_selection' });
+  });
+
+  it('rejects a real entryId that sits beyond the manifest cap', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const config = recallConfig({
+      sideQuery: {
+        ...DEFAULT_OMNI_MEMORY_CONFIG.recall.sideQuery,
+        maxCandidateEntries: 2,
+      },
+    });
+    const svc = recallService(config);
+    const shown = await svc.candidateSummaries([resourceId]);
+    const hidden = (await recallService().candidateSummaries([resourceId])).at(
+      -1,
+    )!.entryId;
+    expect(shown.map((c) => c.entryId)).not.toContain(hidden);
+
+    // The manifest IS the budget: validating against the uncapped candidate
+    // set would let a selector materialize entries this turn never showed
+    // it — a manifest cached from an earlier turn, or a guessed id that
+    // happens to exist — quietly spending context on rows the operator's
+    // cap had ruled out.
+    await expect(
+      svc.recallSelection([resourceId], [hidden]),
     ).rejects.toMatchObject({ reason: 'invalid_selection' });
   });
 

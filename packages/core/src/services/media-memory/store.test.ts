@@ -72,6 +72,45 @@ describe('MediaMemoryStore', () => {
     }
   });
 
+  // Rename replaces the inode; an in-place write keeps it. Meaningless on
+  // Windows, where fs.stat().ino is not a stable identity.
+  it.runIf(process.platform !== 'win32')(
+    'replaces the document by rename instead of writing over it in place',
+    async () => {
+      const put = (fileId: string) =>
+        store.transact(undefined, (snapshot) => {
+          snapshot.files[fileId] = {
+            fileId,
+            rootFileId: fileId,
+            fileRef: `/tmp/${fileId}.mp4`,
+            origin: 'user',
+            currentVersionId: 'v1',
+            createdAt: '2026-08-11T00:00:00.000Z',
+          };
+          return { result: undefined, changed: true };
+        });
+
+      await put('f1');
+      const before = await fs.stat(store.filePath);
+      await put('f2');
+      const after = await fs.stat(store.filePath);
+
+      // An in-place rewrite truncates the live document first, so a
+      // concurrent reader (another store instance, another process on the
+      // same project) or a crash mid-write leaves half a JSON document —
+      // which the load path can only treat as corrupt, condemning the whole
+      // graph to a .corrupt backup and re-derivation.
+      expect(after.ino).not.toBe(before.ino);
+      expect(
+        JSON.parse(await fs.readFile(store.filePath, 'utf8')),
+      ).toMatchObject({ schemaVersion: 1, files: { f1: {}, f2: {} } });
+      // The staging file is committed by the rename, never left behind.
+      expect(
+        (await fs.readdir(root)).filter((n) => n.endsWith('.tmp')),
+      ).toEqual([]);
+    },
+  );
+
   it('does not save when the mutator reports no change', async () => {
     await store.transact(undefined, (snapshot) => {
       snapshot.files['ghost'] = {
@@ -145,6 +184,28 @@ describe('MediaMemoryStore', () => {
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
     expect((await listCorruptBackups()).length).toBeLessThanOrEqual(2);
+  });
+
+  it('discards the OLDEST corrupt backups, keeping the newest', async () => {
+    // Backups from earlier sessions, oldest first.
+    for (const stamp of ['1000000000000', '1000000000001', '1000000000002']) {
+      await fs.writeFile(`${store.filePath}.corrupt-${stamp}`, 'old');
+    }
+    await fs.writeFile(store.filePath, 'not json at all');
+    await store.read(undefined, () => undefined);
+
+    // A backup is the only surviving evidence of what went wrong, and the
+    // corruption worth investigating is the one that just happened —
+    // retaining the oldest two would delete the fresh backup and keep
+    // documents from sessions nobody is debugging.
+    const stamps = (await listCorruptBackups()).map((name) =>
+      name.slice(`${MEDIA_MEMORY_FILE_NAME}.corrupt-`.length),
+    );
+    expect(stamps).toHaveLength(2);
+    expect(stamps.some((s) => Number(s) > 1_700_000_000_000)).toBe(true);
+    expect(stamps).toContain('1000000000002');
+    expect(stamps).not.toContain('1000000000001');
+    expect(stamps).not.toContain('1000000000000');
   });
 
   it.runIf(canDropPermissions)(

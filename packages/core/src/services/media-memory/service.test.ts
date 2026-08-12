@@ -57,6 +57,7 @@ async function readSnapshot(): Promise<MediaMemorySnapshot> {
 const SHA_A = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
 const SHA_OUT = 'c'.repeat(64);
+const SHA_TEXT = 'd'.repeat(64);
 
 function recognizedEvent(
   overrides?: Partial<FileRecognizedEvent>,
@@ -372,6 +373,82 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     expect(entry.artifactRef?.managedId).toBe(`sha256/${SHA_OUT}`);
   });
 
+  it('records every output of a multi-output execution under one execution', async () => {
+    // Real policy runs deliver more than one artifact (extract the audio
+    // track AND its transcript; downscale AND a poster frame). Recording
+    // only the first would have memory report the run as done while half
+    // its products are invisible to recall and to reuse — the next
+    // identical run then re-derives what memory silently dropped.
+    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    const input = succeededInput(source, {
+      toolName: 'omni_extract_audio',
+      outputs: [
+        {
+          kind: 'media',
+          objectPath: `/store/objects/${SHA_OUT}.m4a`,
+          sha256: SHA_OUT,
+          mediaType: 'audio',
+          metadata: { durationMs: 4_860_000 },
+          sizeBytes: 5_000_000,
+          mimeType: 'audio/mp4',
+          role: 'extracted_audio',
+        },
+        {
+          kind: 'text',
+          objectPath: `/store/objects/${SHA_TEXT}.txt`,
+          sha256: SHA_TEXT,
+          mimeType: 'text/plain',
+          text: 'Two divers surface at dawn.',
+          sizeBytes: 27,
+          role: 'transcript',
+        },
+      ],
+    });
+    const commit = (await service.commitPolicySucceeded(input))!;
+
+    // Only the media output becomes a version the orchestrator can thread.
+    expect([...commit.mediaBindings.keys()]).toEqual([SHA_OUT]);
+
+    const snapshot = await readSnapshot();
+    const execution = snapshot.executions[commit.executionId];
+    expect(execution.outputRefs).toHaveLength(2);
+    expect(Object.keys(snapshot.executions)).toHaveLength(1);
+    const [audio, transcript] = execution.outputRefs.map(
+      (id) => snapshot.entries[id],
+    );
+    expect(audio).toMatchObject({
+      kind: 'derived_media',
+      role: 'extracted_audio',
+      derivedVersionId: commit.mediaBindings.get(SHA_OUT)!.fileVersionId,
+      parentVersionId: source.fileVersionId,
+      producedByExecutionId: commit.executionId,
+      channels: ['acoustic'],
+    });
+    expect(transcript).toMatchObject({
+      kind: 'policy_result',
+      role: 'transcript',
+      inlineText: 'Two divers surface at dawn.',
+      parentVersionId: source.fileVersionId,
+      producedByExecutionId: commit.executionId,
+      channels: ['speech_text'],
+    });
+    expect(transcript.derivedVersionId).toBeUndefined();
+    expect(transcript.outputId).not.toBe(audio.outputId);
+
+    // Reuse must offer the whole set: a caller that re-runs this exact
+    // computation skips it entirely, so a partially recorded set would hand
+    // back an audio track with no transcript and call it a complete reuse.
+    const reusable = await service.findReusableOutputs(
+      SHA_A,
+      input.omniConfigHash,
+    );
+    expect(reusable!.executionId).toBe(commit.executionId);
+    expect(reusable!.outputs.map((o) => `${o.kind}:${o.sha256}`)).toEqual([
+      `media:${SHA_OUT}`,
+      `text:${SHA_TEXT}`,
+    ]);
+  });
+
   it('derives sampled coverage for keyframe outputs', async () => {
     const source = (await service.recordFileRecognized(recognizedEvent()))!;
     const commit = await service.commitPolicySucceeded(
@@ -395,6 +472,37 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
       snapshot.entries[snapshot.executions[commit!.executionId].outputRefs[0]];
     expect(entry.coverage).toEqual({ mode: 'sampled', scope: {} });
     expect(entry.channels).toEqual(['visual']);
+  });
+
+  it('derives partial coverage for clip outputs', async () => {
+    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    const commit = await service.commitPolicySucceeded(
+      succeededInput(source, {
+        toolName: 'omni_extract_clip',
+        outputs: [
+          {
+            kind: 'media',
+            objectPath: `/store/objects/${SHA_OUT}.mp4`,
+            sha256: SHA_OUT,
+            mediaType: 'video',
+            metadata: { durationMs: 30_000, width: 1920, height: 1080 },
+            sizeBytes: 2_000_000,
+            mimeType: 'video/mp4',
+            role: 'clip',
+          },
+        ],
+      }),
+    );
+    const snapshot = await readSnapshot();
+    const entry =
+      snapshot.entries[snapshot.executions[commit!.executionId].outputRefs[0]];
+    // A clip is one slice of a 81-minute film. Recording it as `complete`
+    // would let the gap derivation count the version's visual and acoustic
+    // channels as fully covered, so recall reports nothing missing and the
+    // model answers about the whole film from a 30-second excerpt — the
+    // overclaim coverage exists to prevent.
+    expect(entry.coverage).toEqual({ mode: 'partial', scope: {} });
+    expect(entry.channels).toEqual(['visual', 'acoustic']);
   });
 });
 
