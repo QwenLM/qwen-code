@@ -24,6 +24,12 @@ type Translator = (
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
+// Upper bound on scheduled retries for one pending-agent set. After this many
+// retries the timer chain stops so a persistently erroring daemon route
+// cannot be polled indefinitely; agents still erroring at that point are
+// marked failed so the UI unblocks, while agents answering non-terminal stay
+// pending and rely on their completion notification for the final query.
+const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // The daemon registers a launched background task shortly after the tool
 // call appears in the transcript, so a first `session_not_found` can race
 // registration. Require repeated misses before treating the agent as gone.
@@ -211,13 +217,24 @@ export function useMessagesFromBlocks(
       }
     | undefined
   >(undefined);
+  // Keyed by session + pending-agent set (not the notification key) so other
+  // agents' notifications cannot reset the backoff and keep the retry delay
+  // pinned at its base.
   const retryBackoffRef = useRef<{ key: string; attempts: number }>({
     key: '',
     attempts: 0,
   });
   const missingAgentMissesRef = useRef(new Map<string, number>());
+  const lastConnectionKeyRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    // Miss counts may not span connection transitions: a post-reconnect 404
+    // is a fresh race with registration, not a continuation of an old miss.
+    const connectionKey = `${connection.sessionId}:${connection.status}`;
+    if (lastConnectionKeyRef.current !== connectionKey) {
+      lastConnectionKeyRef.current = connectionKey;
+      missingAgentMissesRef.current.clear();
+    }
     const sessionId = connection.sessionId;
     if (
       !sessionId ||
@@ -237,6 +254,7 @@ export function useMessagesFromBlocks(
       return;
     }
     const requestKey = `${sessionId}:${pendingBackgroundAgentKey}:${backgroundAgentNotificationKey}`;
+    const retryScopeKey = `${sessionId}:${pendingBackgroundAgentKey}`;
     const existingRequest = reconciliationRequestRef.current;
     const callIds = pendingBackgroundAgentKey.split('|');
     for (const callId of [...missingAgentMissesRef.current.keys()]) {
@@ -301,46 +319,77 @@ export function useMessagesFromBlocks(
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     request
       .then(({ resolutions, errors }) => {
-        if (active) {
-          setResolutionSnapshot((current) => ({
-            sessionId,
-            resolutions: new Map([
-              ...(current?.sessionId === sessionId ? current.resolutions : []),
-              ...resolutions,
-            ]),
-          }));
-          if (resolutions.size < callIds.length) {
-            if (errors.length > 0) {
-              console.warn(
-                '[web-shell] background agent reconciliation retry scheduled',
-                {
-                  sessionId,
-                  callIds: errors.map((entry) => entry.callId),
-                  errors: errors.map((entry) =>
-                    describeReconciliationError(entry.error),
-                  ),
-                },
-              );
-            }
-            const attempts =
-              (retryBackoffRef.current.key === requestKey
-                ? retryBackoffRef.current.attempts
-                : 0) + 1;
-            retryBackoffRef.current = { key: requestKey, attempts };
-            const delay = Math.min(
+        if (!active) return;
+        const unresolved = resolutions.size < callIds.length;
+        let scheduleRetry = false;
+        let retryDelayMs = BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS;
+        if (unresolved) {
+          const attempts =
+            (retryBackoffRef.current.key === retryScopeKey
+              ? retryBackoffRef.current.attempts
+              : 0) + 1;
+          if (attempts < BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
+            retryBackoffRef.current = { key: retryScopeKey, attempts };
+            retryDelayMs = Math.min(
               BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS *
                 2 ** (attempts - 1),
               BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS,
             );
-            retryTimer = setTimeout(() => {
-              if (reconciliationRequestRef.current?.request === request) {
-                reconciliationRequestRef.current = undefined;
-              }
-              setReconciliationAttempt((attempt) => attempt + 1);
-            }, delay);
+            scheduleRetry = true;
           } else {
-            retryBackoffRef.current = { key: requestKey, attempts: 0 };
+            retryBackoffRef.current = {
+              key: retryScopeKey,
+              attempts: BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS,
+            };
           }
+        } else {
+          retryBackoffRef.current = { key: retryScopeKey, attempts: 0 };
+        }
+        const exhaustedFailures =
+          unresolved && !scheduleRetry
+            ? errors.map(
+                (entry) => [entry.callId, { status: 'failed' }] as const,
+              )
+            : [];
+        setResolutionSnapshot((current) => ({
+          sessionId,
+          resolutions: new Map([
+            ...(current?.sessionId === sessionId ? current.resolutions : []),
+            ...resolutions,
+            ...exhaustedFailures,
+          ]),
+        }));
+        if (!unresolved) return;
+        if (scheduleRetry) {
+          if (errors.length > 0) {
+            console.warn(
+              '[web-shell] background agent reconciliation retry scheduled',
+              {
+                sessionId,
+                callIds: errors.map((entry) => entry.callId),
+                errors: errors.map((entry) =>
+                  describeReconciliationError(entry.error),
+                ),
+              },
+            );
+          }
+          retryTimer = setTimeout(() => {
+            if (reconciliationRequestRef.current?.request === request) {
+              reconciliationRequestRef.current = undefined;
+            }
+            setReconciliationAttempt((attempt) => attempt + 1);
+          }, retryDelayMs);
+        } else if (exhaustedFailures.length > 0) {
+          console.warn(
+            '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+            {
+              sessionId,
+              callIds: exhaustedFailures.map(([callId]) => callId),
+              errors: errors.map((entry) =>
+                describeReconciliationError(entry.error),
+              ),
+            },
+          );
         }
       })
       .catch(() => {

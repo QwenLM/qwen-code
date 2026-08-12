@@ -24,6 +24,9 @@ export class DaemonHttpError extends Error {
   }
 }
 
+// Kept local (instead of reusing `isRecord` from `acpTransportUtils.ts` or
+// `ui/utils.ts`) so this leaf module stays dependency-free: those modules
+// pull the ACP route table / UI helpers into the budgeted browser bundles.
 function getErrorBodyRecord(
   body: unknown,
 ): Record<string, unknown> | undefined {
@@ -36,7 +39,8 @@ function getErrorBodyRecord(
  * Type guard for the daemon's `GET /session/:id/subagents/:toolCallId` 404
  * contract: `{ code: 'session_not_found', sessionId, toolCallId? }`. Pass
  * `toolCallId` to require the body to identify that specific missing agent
- * (a session-level 404 carries no `toolCallId`); omit it to accept both.
+ * (a session-level 404 carries no identifying `toolCallId`); omit it to
+ * accept both.
  */
 export function isSubagentSessionNotFound(
   error: unknown,
@@ -53,12 +57,15 @@ export function isSubagentSessionNotFound(
 /**
  * Type guard for the session-level variant of that same 404 contract: the
  * daemon could not find the parent session itself, so the body carries
- * `code: 'session_not_found'` without a `toolCallId`.
+ * `code: 'session_not_found'` with no identifying `toolCallId` (an
+ * explicitly `null` id is treated the same as an absent one).
  */
 export function isSessionLevelNotFound(error: unknown): boolean {
   if (!(error instanceof DaemonHttpError) || error.status !== 404) {
     return false;
   }
   const body = getErrorBodyRecord(error.body);
-  return body?.['code'] === 'session_not_found' && !('toolCallId' in body);
+  if (body?.['code'] !== 'session_not_found') return false;
+  const toolCallId = body['toolCallId'];
+  return toolCallId === undefined || toolCallId === null;
 }

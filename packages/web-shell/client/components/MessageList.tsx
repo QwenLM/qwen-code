@@ -2655,7 +2655,11 @@ export const MessageList = memo(
     ] = useState(false);
     useEffect(() => {
       setUnmatchedCompletionGraceExpired(false);
-    }, [latestAgentNotificationId, latestTurnStartIndex]);
+    }, [
+      backgroundSummaryGraceActive,
+      latestAgentNotificationId,
+      latestTurnStartIndex,
+    ]);
     const latestTurnHoldsUnmatchedAgentCompletion = useMemo(
       () =>
         backgroundSummaryGraceActive &&

@@ -70,6 +70,15 @@ describe('isSubagentSessionNotFound', () => {
       'call-1',
     ],
     [
+      'null toolCallId in body',
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', sessionId: 'session-1', toolCallId: null },
+        'not found',
+      ),
+      'call-1',
+    ],
+    [
       'mismatched toolCallId',
       new DaemonHttpError(404, missingAgentBody, 'not found'),
       'call-other',
@@ -95,6 +104,22 @@ describe('isSessionLevelNotFound', () => {
         new DaemonHttpError(
           404,
           { code: 'session_not_found', sessionId: 'session-1' },
+          'not found',
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a 404 whose body carries a null toolCallId', () => {
+    expect(
+      isSessionLevelNotFound(
+        new DaemonHttpError(
+          404,
+          {
+            code: 'session_not_found',
+            sessionId: 'session-1',
+            toolCallId: null,
+          },
           'not found',
         ),
       ),

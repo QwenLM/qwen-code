@@ -842,6 +842,66 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'summary')).toBe('true');
   });
 
+  it('re-arms the unmatched-completion grace after a catch-up cycle', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    // The second sibling reconciles terminal before its notification arrives;
+    // the hold lasts until the bounded grace expires.
+    const settled = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ];
+    rerenderMessages(c, settled);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A catch-up cycle re-establishes the notification baseline, so the
+    // grace deactivates without any agent notification or turn change.
+    rerenderMessages(c, settled, { catchingUp: true });
+    rerenderMessages(c, settled, { catchingUp: false });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // When the grace reactivates afterwards, the stale expiry from the
+    // previous cycle must not skip the new grace window.
+    rerenderMessages(c, [...settled, monitorNotificationMsg('monitor')], {
+      catchingUp: false,
+    });
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+  });
+
   it('keeps completed turn actions while the latest turn awaits agents', () => {
     const activeAgent = agentMsg('agent-2');
     activeAgent.tools[0]!.status = 'pending';

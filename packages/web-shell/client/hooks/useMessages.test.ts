@@ -447,6 +447,151 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
+  it('stops retrying and fails agents whose errors exhaust the retry budget', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Seven scheduled retries (3s, 6s, 12s, 24s, 48s, then capped at 60s);
+    // the eighth round exhausts the budget instead of scheduling another.
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+      expect(container.textContent).toBe('failed');
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+      {
+        sessionId: 'session-1',
+        callIds: ['agent-call'],
+        errors: ['HTTP 500 internal_error'],
+      },
+    );
+
+    // The timer chain has stopped: no further polling.
+    await act(async () => vi.advanceTimersByTimeAsync(300_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('keeps the grown retry delay when other agent notifications arrive', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+
+    // First retry schedules at the 3s base; it errors, so the next delay
+    // grows to 6s.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+
+    // A notification for another agent triggers an immediate round but must
+    // not reset the backoff: the following retry is attempt 3 (12s), not a
+    // fresh 3s base.
+    hookState.blocks = [
+      ...hookState.blocks,
+      baseBlock({
+        id: 'terminal-notification',
+        kind: 'assistant',
+        text: '',
+        meta: {
+          source: 'background_notification',
+          backgroundTask: {
+            kind: 'agent',
+            taskId: 'other-agent',
+            status: 'completed',
+          },
+        },
+      }),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3),
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(9_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(4),
+    );
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not carry missing-agent miss counts across a reconnect', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        { code: 'session_not_found', toolCallId: 'agent-call' },
+        'not found',
+      ),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    hookState.connection.status = 'disconnected';
+    await act(async () => render());
+    hookState.connection.status = 'connected';
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    // The post-reconnect miss starts a fresh grace window, so the agent
+    // stays pending instead of failing on a stale second miss.
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
   it('treats a session-level 404 as terminal without a grace period', async () => {
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
