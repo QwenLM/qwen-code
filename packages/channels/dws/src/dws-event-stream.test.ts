@@ -6,7 +6,10 @@
 
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
-import { startDwsEventProcess } from './dws-event-stream.js';
+import {
+  DwsEventProcessError,
+  startDwsEventProcess,
+} from './dws-event-stream.js';
 
 describe('DWS event process', () => {
   it('becomes ready, forwards NDJSON lines, and stops by closing stdin', async () => {
@@ -30,5 +33,60 @@ describe('DWS event process', () => {
     subscription.stop();
     await expect(subscription.closed).resolves.toBeUndefined();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('preserves structured retry guidance from a stopped consumer', async () => {
+    const onError = vi.fn();
+    const fixture = fileURLToPath(
+      new URL('./fixtures/dws-event-error-source.mjs', import.meta.url),
+    );
+    const subscription = await startDwsEventProcess(
+      process.execPath,
+      [fixture],
+      vi.fn(),
+      onError,
+    );
+
+    await subscription.closed;
+
+    const error = onError.mock.calls[0]?.[0];
+    expect(error).toBeInstanceOf(DwsEventProcessError);
+    expect(error).toMatchObject({
+      message: 'subscription denied',
+      retryable: false,
+      retryAfterMs: 3_000,
+    });
+  });
+
+  it('serializes a burst of inbound event lines', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const handled: string[] = [];
+    const fixture = fileURLToPath(
+      new URL('./fixtures/dws-event-burst-source.mjs', import.meta.url),
+    );
+    const subscription = await startDwsEventProcess(
+      process.execPath,
+      [fixture],
+      async (line) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        handled.push(line);
+        active -= 1;
+      },
+      vi.fn(),
+    );
+
+    await vi.waitFor(() => expect(handled).toHaveLength(3));
+    subscription.stop();
+    await subscription.closed;
+
+    expect(maxActive).toBe(1);
+    expect(handled).toEqual([
+      '{"sequence":1}',
+      '{"sequence":2}',
+      '{"sequence":3}',
+    ]);
   });
 });

@@ -31,21 +31,21 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
   });
 
-  it('defaults sender and group access to open', () => {
+  it('defaults sender and group access to pairing', () => {
     const groupPolicy = plugin.management?.fields.find(
       (field) => field.key === 'groupPolicy',
     );
-    expect(groupPolicy?.default).toBe('open');
+    expect(groupPolicy?.default).toBe('pairing');
     expect(groupPolicy?.options?.map((option) => option.value)).toEqual([
-      'open',
-      'allowlist',
       'pairing',
+      'allowlist',
+      'open',
       'disabled',
     ]);
     expect(
       plugin.management?.fields.find((field) => field.key === 'senderPolicy')
         ?.default,
-    ).toBe('open');
+    ).toBe('pairing');
   });
 
   it('ignores removed source settings', () => {
@@ -73,5 +73,21 @@ describe('DWS channel plugin', () => {
         approvalMode: 'yolo',
       }),
     ).toContain('require approvalMode');
+    expect(
+      plugin.management?.validateConfig?.({
+        documents: { '*': { requireMention: false } },
+      }),
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({
+        documents: { 'doc-1': { requireMention: 'no' } },
+      }),
+    ).toContain('documents must map');
+    expect(
+      plugin.management?.validateConfig?.({ profile: 'corp:a,corp:b' }),
+    ).toContain('exactly one account');
+    expect(
+      plugin.management?.validateConfig?.({ pollInterval: 5_000.5 }),
+    ).toContain('integer of at least 5000');
   });
 });

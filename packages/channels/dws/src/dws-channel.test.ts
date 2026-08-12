@@ -14,15 +14,19 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 import { DwsChannel } from './dws-channel.js';
-import type {
-  DwsClientLike,
-  DwsDocumentComment,
-  DwsIdentity,
-  DwsImMessage,
-  DwsImSource,
-  DwsImTarget,
+import {
+  DwsCommandError,
+  type DwsClientLike,
+  type DwsDocumentComment,
+  type DwsIdentity,
+  type DwsImMessage,
+  type DwsImSource,
+  type DwsImTarget,
 } from './dws-client.js';
-import type { DwsEventSubscription } from './dws-event-stream.js';
+import {
+  DwsEventProcessError,
+  type DwsEventSubscription,
+} from './dws-event-stream.js';
 
 function makeConfig(
   overrides: Record<string, unknown> = {},
@@ -116,6 +120,7 @@ interface FakeStream {
 
 class FakeDwsClient implements DwsClientLike {
   identity: DwsIdentity = {
+    profile: 'corp:user-self',
     userId: 'user-self',
     openDingTalkId: 'open-self',
   };
@@ -297,7 +302,7 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('subscribes only to explicit groups that disable mention gating', async () => {
+  it('subscribes to all groups when wildcard mention gating is disabled', async () => {
     const client = new FakeDwsClient();
 
     await readyChannel(
@@ -313,6 +318,27 @@ describe('DwsChannel', () => {
 
     expect(client.streams.map((item) => item.source)).toEqual([
       { kind: 'at' },
+      { kind: 'group-all' },
+      { kind: 'direct' },
+    ]);
+  });
+
+  it('subscribes only to explicit ambient groups in allowlist mode', async () => {
+    const client = new FakeDwsClient();
+
+    await readyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { requireMention: false },
+          'cid-ambient': { requireMention: false },
+        },
+      }),
+    );
+
+    expect(client.streams.map((item) => item.source)).toEqual([
+      { kind: 'at' },
       { kind: 'group', conversationId: 'cid-ambient' },
       { kind: 'direct' },
     ]);
@@ -320,7 +346,10 @@ describe('DwsChannel', () => {
 
   it('requires a DWS user ID when document mentions are enabled', async () => {
     const client = new FakeDwsClient();
-    client.identity = { openDingTalkId: 'open-self' };
+    client.identity = {
+      profile: 'corp:user-self',
+      openDingTalkId: 'open-self',
+    };
 
     await expect(
       readyChannel(client, makeConfig({ wikiSpaceIds: ['wiki-1'] })),
@@ -329,7 +358,7 @@ describe('DwsChannel', () => {
 
   it('requires the current open DingTalk ID when direct messages are enabled', async () => {
     const client = new FakeDwsClient();
-    client.identity = { userId: 'user-self' };
+    client.identity = { profile: 'corp:user-self', userId: 'user-self' };
     client.resolveCurrentOpenDingTalkId.mockResolvedValue(undefined);
 
     await expect(readyChannel(client, makeConfig())).rejects.toThrow(
@@ -340,7 +369,7 @@ describe('DwsChannel', () => {
 
   it('requires the current open DingTalk ID for ambient group messages', async () => {
     const client = new FakeDwsClient();
-    client.identity = { userId: 'user-self' };
+    client.identity = { profile: 'corp:user-self', userId: 'user-self' };
     client.resolveCurrentOpenDingTalkId.mockResolvedValue(undefined);
 
     await expect(
@@ -414,6 +443,7 @@ describe('DwsChannel', () => {
 
   it('gives workspace actions the configured DWS executable and profile', async () => {
     const client = new FakeDwsClient();
+    client.identity.profile = 'corp:user';
     const channel = await readyChannel(
       client,
       makeConfig({ dwsPath: '/opt/dws', profile: 'corp:user' }),
@@ -435,6 +465,68 @@ describe('DwsChannel', () => {
       await vi.advanceTimersByTimeAsync(2_000);
 
       expect(client.streams).toHaveLength(3);
+      expect(client.streams[2]?.source).toEqual({ kind: 'at' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a retryable initial event subscription before failing startup', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      vi.spyOn(client, 'subscribeToIm').mockRejectedValueOnce(
+        new DwsEventProcessError('try again', true),
+      );
+
+      const connecting = readyChannel(client);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(connecting).resolves.toBeInstanceOf(DwsChannel);
+
+      expect(client.subscribeToIm).toHaveBeenCalledTimes(3);
+      expect(client.streams.map((item) => item.source)).toEqual([
+        { kind: 'direct' },
+        { kind: 'at' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets restart allowance when a replacement stream becomes ready', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      await readyChannel(client);
+
+      client.streams[0]?.subscription.close();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2_000);
+      client.streams[2]?.subscription.close();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(client.streams[3]?.source).toEqual({ kind: 'at' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses the full retry budget while creating a replacement stream', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      await readyChannel(client);
+      const subscribe = vi
+        .spyOn(client, 'subscribeToIm')
+        .mockRejectedValueOnce(new DwsEventProcessError('retry one', true))
+        .mockRejectedValueOnce(new DwsEventProcessError('retry two', true));
+
+      client.streams[0]?.subscription.close();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      expect(subscribe).toHaveBeenCalledTimes(3);
       expect(client.streams[2]?.source).toEqual({ kind: 'at' });
     } finally {
       vi.useRealTimers();
@@ -512,7 +604,7 @@ describe('DwsChannel', () => {
 
   it('drops messages sent by the current DWS identity before pairing', async () => {
     const client = new FakeDwsClient();
-    client.identity = { userId: 'user-self' };
+    client.identity = { profile: 'corp:user-self', userId: 'user-self' };
     const { channel, bridge } = await readyPolicyChannel(
       client,
       makeConfig({ senderPolicy: 'pairing' }),
@@ -578,6 +670,31 @@ describe('DwsChannel', () => {
     await client.emit(0, { ...event, type: 'user_im_message_receive_at' });
 
     expect(channel.inbound).toHaveLength(1);
+  });
+
+  it('lets an @ copy through when an ambient wildcard stream arrives first', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({
+        groups: {
+          '*': { requireMention: false },
+          'cid-1': { requireMention: true },
+        },
+      }),
+    );
+    const event = message(
+      'user_im_message_receive_group_all',
+      'message-1',
+      'please help',
+    );
+
+    await client.emit(1, event);
+    await client.emit(0, { ...event, type: 'user_im_message_receive_at' });
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: 'please help', isMentioned: true }),
+    ]);
   });
 
   it('requires both group and sender allowlists before dispatching', async () => {
@@ -684,25 +801,26 @@ describe('DwsChannel', () => {
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 
-  it('applies group access policy to document comment threads', async () => {
+  it('applies sender access policy independently to document comments', async () => {
     const client = new FakeDwsClient();
-    client.comments.set('doc-2', []);
     const { channel, bridge } = await readyPolicyChannel(
       client,
       makeConfig({
-        documentIds: ['doc-1', 'doc-2'],
+        documentIds: ['doc-1'],
         groupPolicy: 'allowlist',
-        groups: { 'doc-2': {} },
+        groups: {},
+        senderPolicy: 'allowlist',
+        allowedUsers: ['bob'],
       }),
     );
     await channel.poll();
     client.comments.set('doc-1', [
       comment('denied-document', 'do not run', {
+        authorId: 'alice',
         mentionedUserIds: ['user-self'],
       }),
-    ]);
-    client.comments.set('doc-2', [
       comment('allowed-document', 'please run', {
+        authorId: 'bob',
         mentionedUserIds: ['user-self'],
       }),
     ]);
@@ -715,6 +833,70 @@ describe('DwsChannel', () => {
       expect.stringContaining('please run'),
       expect.any(Object),
     );
+  });
+
+  it('retries a document pairing notification that was not delivered', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        documentIds: ['doc-1'],
+        senderPolicy: 'pairing',
+      }),
+    );
+    await channel.poll();
+    client.comments.set('doc-1', [
+      comment('pair-document', 'please help', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+    client.replyToComment.mockRejectedValueOnce(new Error('not sent'));
+
+    await channel.poll();
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.replyToComment).toHaveBeenCalledTimes(2);
+    expect(client.replyToComment).toHaveBeenLastCalledWith(
+      'doc-1',
+      'pair-document',
+      expect.stringContaining('pairing code'),
+    );
+  });
+
+  it('supports wildcard and per-document mention settings', async () => {
+    const client = new FakeDwsClient();
+    client.comments.set('doc-2', []);
+    const channel = await readyChannel(
+      client,
+      makeConfig({
+        documentIds: ['doc-1', 'doc-2'],
+        documents: {
+          '*': { requireMention: false },
+          'doc-2': { requireMention: true },
+        },
+      }),
+    );
+    await channel.poll();
+    client.comments.set('doc-1', [comment('ambient', 'run everywhere')]);
+    client.comments.set('doc-2', [comment('needs-at', 'do not run')]);
+
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ chatId: 'doc-1', text: 'run everywhere' }),
+    ]);
+  });
+
+  it('rejects unsafe document polling intervals', () => {
+    expect(
+      () =>
+        new DwsChannel(
+          'fast-dws',
+          makeConfig({ pollInterval: 1 }),
+          makeBridge(),
+        ),
+    ).toThrow('at least 5000');
   });
 
   it('deduplicates a successful message across restarts', async () => {
@@ -982,6 +1164,31 @@ describe('DwsChannel', () => {
     await expect(channel.poll()).resolves.toBeUndefined();
   });
 
+  it('keeps newly discovered wiki documents live after an initial document failure', async () => {
+    const client = new FakeDwsClient();
+    client.listUnresolvedComments.mockRejectedValueOnce(new Error('forbidden'));
+    const channel = await readyChannel(
+      client,
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
+    );
+
+    await channel.poll();
+    client.wikiDocuments.set('wiki-1', ['doc-1', 'doc-2']);
+    client.comments.set('doc-2', [
+      comment('new', 'review the new document', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-2',
+        text: 'review the new document',
+      }),
+    ]);
+  });
+
   it('caches knowledge-base discovery between configured refreshes', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
@@ -1094,6 +1301,28 @@ describe('DwsChannel', () => {
     expect(polledDocuments).toEqual(new Set(documents));
   });
 
+  it('rotates past persistently failing uninitialized wiki documents', async () => {
+    const client = new FakeDwsClient();
+    const documents = Array.from({ length: 60 }, (_, index) => `doc-${index}`);
+    client.wikiDocuments.set('wiki-1', documents);
+    client.listUnresolvedComments.mockImplementation(async (documentId) => {
+      if (Number(documentId.slice(4)) < 50) throw new Error('forbidden');
+      return [];
+    });
+    const channel = await readyChannel(
+      client,
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
+    );
+
+    await channel.poll();
+    await channel.poll();
+
+    expect(client.listUnresolvedComments).toHaveBeenCalledWith(
+      'doc-55',
+      expect.any(AbortSignal),
+    );
+  });
+
   it('persists successful document work across channel restarts', async () => {
     const client = new FakeDwsClient();
     const config = makeConfig({
@@ -1145,6 +1374,44 @@ describe('DwsChannel', () => {
       'root-1',
       'final answer',
     );
+  });
+
+  it('does not rerun a document task after an ambiguous reply failure', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ documentIds: ['doc-1'] }),
+      'ambiguous-doc-reply',
+    );
+    await channel.poll();
+    client.comments.set('doc-1', [comment('new', '/qwen once')]);
+    client.replyToComment.mockRejectedValue(
+      new DwsCommandError('connection reset', 'unknown'),
+    );
+
+    await channel.poll();
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(client.replyToComment).toHaveBeenCalledOnce();
+  });
+
+  it('does not swallow a document reply that failed before delivery', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ documentIds: ['doc-1'] }),
+    );
+
+    channel.responseThreadId = 'root-1';
+    client.replyToComment.mockRejectedValueOnce(
+      new DwsCommandError('not sent', 'not_sent'),
+    );
+
+    await expect(channel.respond('doc-1', 'final answer')).rejects.toThrow(
+      'not sent',
+    );
+    expect(client.replyToComment).toHaveBeenCalledOnce();
   });
 
   it('reacts to a mention in a document added to a watched knowledge base', async () => {

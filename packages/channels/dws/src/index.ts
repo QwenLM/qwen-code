@@ -8,8 +8,9 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import { DwsChannel } from './dws-channel.js';
 
 export { DwsChannel };
-export { DwsClient, parseDwsImEvent } from './dws-client.js';
+export { DwsClient, DwsCommandError, parseDwsImEvent } from './dws-client.js';
 export type {
+  DwsCommandOutcome,
   DwsClientLike,
   DwsClientOptions,
   DwsDocumentComment,
@@ -18,7 +19,10 @@ export type {
   DwsImSource,
   DwsImTarget,
 } from './dws-client.js';
-export { startDwsEventProcess } from './dws-event-stream.js';
+export {
+  DwsEventProcessError,
+  startDwsEventProcess,
+} from './dws-event-stream.js';
 export type {
   DwsEventProcessStarter,
   DwsEventSubscription,
@@ -30,6 +34,29 @@ function validStringList(value: unknown): boolean {
     (Array.isArray(value) &&
       value.every((item) => typeof item === 'string' && item.trim()))
   );
+}
+
+function validDocuments(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value).every(([documentId, config]) => {
+    if (
+      !documentId.trim() ||
+      documentId === '__proto__' ||
+      documentId === 'constructor' ||
+      documentId === 'prototype' ||
+      typeof config !== 'object' ||
+      config === null ||
+      Array.isArray(config)
+    ) {
+      return false;
+    }
+    const entries = Object.entries(config);
+    return entries.every(
+      ([key, setting]) =>
+        key === 'requireMention' && typeof setting === 'boolean',
+    );
+  });
 }
 
 export const plugin: ChannelPlugin = {
@@ -53,7 +80,7 @@ export const plugin: ChannelPlugin = {
         kind: 'string',
         envResolvable: true,
         description:
-          'Optional DWS profile. Leave empty to use the active profile',
+          'Exact account from dws profile list as corpId:userId. Leave empty to pin the active profile at startup',
       },
       {
         key: 'documentIds',
@@ -93,13 +120,13 @@ export const plugin: ChannelPlugin = {
         label: 'Group Policy',
         kind: 'enum',
         required: true,
-        default: 'open',
+        default: 'pairing',
         description:
-          'Controls which DingTalk conversations and document threads may start DWS tasks',
+          'Controls which DingTalk group conversations may start tasks',
         options: [
-          { value: 'open', label: 'Open' },
-          { value: 'allowlist', label: 'Allowlist' },
           { value: 'pairing', label: 'Pairing' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'open', label: 'Open' },
           { value: 'disabled', label: 'Disabled' },
         ],
       },
@@ -108,11 +135,12 @@ export const plugin: ChannelPlugin = {
         label: 'Sender Policy',
         kind: 'enum',
         required: true,
-        default: 'open',
-        description: 'Controls which DingTalk users may start DWS tasks',
+        default: 'pairing',
+        description:
+          'Controls which DingTalk users may start direct-message, document-comment, and non-paired group tasks',
         options: [
-          { value: 'allowlist', label: 'Allowlist' },
           { value: 'pairing', label: 'Pairing' },
+          { value: 'allowlist', label: 'Allowlist' },
           { value: 'open', label: 'Open' },
         ],
       },
@@ -129,6 +157,17 @@ export const plugin: ChannelPlugin = {
           return `DWS ${field} must contain non-empty strings.`;
         }
       }
+      if (!validDocuments(config['documents'])) {
+        return 'DWS documents must map document IDs or "*" to requireMention settings.';
+      }
+      if (
+        config['profile'] !== undefined &&
+        (typeof config['profile'] !== 'string' ||
+          !config['profile'].trim() ||
+          config['profile'].includes(','))
+      ) {
+        return 'DWS profile must select exactly one account.';
+      }
       if (
         config['trigger'] !== undefined &&
         (typeof config['trigger'] !== 'string' ||
@@ -143,6 +182,14 @@ export const plugin: ChannelPlugin = {
           config['wikiDiscoveryInterval'] < 0)
       ) {
         return 'DWS wikiDiscoveryInterval must be a non-negative integer.';
+      }
+      if (
+        config['pollInterval'] !== undefined &&
+        (typeof config['pollInterval'] !== 'number' ||
+          !Number.isSafeInteger(config['pollInterval']) ||
+          config['pollInterval'] < 5_000)
+      ) {
+        return 'DWS pollInterval must be an integer of at least 5000.';
       }
       const hasDocumentSource = ['documentIds', 'wikiSpaceIds'].some(
         (field) => Array.isArray(config[field]) && config[field].length > 0,

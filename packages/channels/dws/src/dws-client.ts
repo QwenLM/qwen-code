@@ -40,6 +40,7 @@ const USER_NAME_KEYS = [
 ] as const;
 
 export interface DwsIdentity {
+  profile?: string;
   userId?: string;
   openDingTalkId?: string;
 }
@@ -58,6 +59,7 @@ export interface DwsDocumentComment {
 export type DwsImSource =
   | { kind: 'at' }
   | { kind: 'direct' }
+  | { kind: 'group-all' }
   | { kind: 'group'; conversationId: string };
 
 export type DwsImTarget =
@@ -69,7 +71,8 @@ export interface DwsImMessage {
     | 'user_im_message_receive_at'
     | 'user_im_message_receive_o2o'
     | 'user_im_message_receive_o2o_all'
-    | 'user_im_message_receive_group';
+    | 'user_im_message_receive_group'
+    | 'user_im_message_receive_group_all';
   eventId: string;
   messageId: string;
   conversationId: string;
@@ -128,6 +131,27 @@ export type DwsCommandRunner = (
   signal?: AbortSignal,
 ) => Promise<{ stdout: string; stderr: string }>;
 
+export type DwsCommandOutcome = 'not_sent' | 'unknown';
+
+export class DwsCommandError extends Error {
+  constructor(
+    message: string,
+    readonly outcome: DwsCommandOutcome,
+  ) {
+    super(message);
+    this.name = 'DwsCommandError';
+  }
+}
+
+const DWS_NOT_SENT_ERROR_CODES = new Set([
+  'E2BIG',
+  'EACCES',
+  'ELOOP',
+  'ENOENT',
+  'ENOEXEC',
+  'ENOTDIR',
+]);
+
 function runDwsProcess(
   executable: string,
   args: string[],
@@ -149,9 +173,14 @@ function runDwsProcess(
         if (error) {
           const code = (error as NodeJS.ErrnoException & { code?: unknown })
             .code;
+          const outcome =
+            typeof code === 'string' && DWS_NOT_SENT_ERROR_CODES.has(code)
+              ? 'not_sent'
+              : 'unknown';
           reject(
-            new Error(
+            new DwsCommandError(
               `DWS command failed${code === undefined ? '' : ` (${String(code)})`}.`,
+              outcome,
             ),
           );
           return;
@@ -246,6 +275,48 @@ function findIdentityScalar(
   return undefined;
 }
 
+interface DwsProfileEntry {
+  profile: string;
+  current: boolean;
+}
+
+function collectProfiles(
+  value: unknown,
+  profiles: DwsProfileEntry[] = [],
+): DwsProfileEntry[] {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectProfiles(item, profiles);
+    }
+    return profiles;
+  }
+  if (!isRecord(value)) return profiles;
+  const explicit = firstString(value, ['profile']);
+  const corpId = firstString(value, ['corpId', 'corp_id']);
+  const userId = firstString(value, USER_ID_KEYS);
+  const profile =
+    explicit ?? (corpId && userId ? `${corpId}:${userId}` : undefined);
+  if (profile) {
+    profiles.push({
+      profile,
+      current: value['isCurrent'] === true || value['is_current'] === true,
+    });
+  }
+  for (const candidate of Object.values(value)) {
+    collectProfiles(candidate, profiles);
+  }
+  return profiles;
+}
+
+function resolveProfile(value: unknown, selected?: string): string | undefined {
+  const profiles = collectProfiles(value);
+  const candidates = selected
+    ? profiles.filter((item) => item.profile === selected)
+    : profiles.filter((item) => item.current);
+  const unique = [...new Set(candidates.map((item) => item.profile))];
+  return unique.length === 1 ? unique[0] : undefined;
+}
+
 function parseJson(text: string, description: string): unknown {
   try {
     return JSON.parse(text) as unknown;
@@ -256,8 +327,18 @@ function parseJson(text: string, description: string): unknown {
 
 function parseOutput(stdout: string): unknown {
   const trimmed = stdout.trim();
-  if (!trimmed) throw new Error('DWS returned an empty response.');
-  const parsed = parseJson(trimmed, 'a command response');
+  if (!trimmed) {
+    throw new DwsCommandError('DWS returned an empty response.', 'unknown');
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseJson(trimmed, 'a command response');
+  } catch (error) {
+    throw new DwsCommandError(
+      error instanceof Error ? error.message : 'DWS returned invalid JSON.',
+      'unknown',
+    );
+  }
   if (isRecord(parsed) && parsed['success'] === false) {
     throw new Error('DWS request failed.');
   }
@@ -427,7 +508,8 @@ export function parseDwsImEvent(line: string): DwsImMessage {
     type !== 'user_im_message_receive_at' &&
     type !== 'user_im_message_receive_o2o' &&
     type !== 'user_im_message_receive_o2o_all' &&
-    type !== 'user_im_message_receive_group'
+    type !== 'user_im_message_receive_group' &&
+    type !== 'user_im_message_receive_group_all'
   ) {
     throw new Error(`Unsupported DWS event type: ${type ?? 'unknown'}.`);
   }
@@ -478,6 +560,8 @@ function eventKey(source: DwsImSource): string {
       return 'user_im_message_receive_at';
     case 'direct':
       return 'user_im_message_receive_o2o_all';
+    case 'group-all':
+      return 'user_im_message_receive_group_all';
     case 'group':
       return 'user_im_message_receive_group';
     default:
@@ -487,7 +571,8 @@ function eventKey(source: DwsImSource): string {
 
 export class DwsClient implements DwsClientLike {
   private readonly executable: string;
-  private readonly profile?: string;
+  private profile?: string;
+  private profileResolved = false;
   private readonly runner: DwsCommandRunner;
   private readonly eventStarter: DwsEventProcessStarter;
 
@@ -498,11 +583,27 @@ export class DwsClient implements DwsClientLike {
   ) {
     this.executable = options.executable;
     this.profile = options.profile?.trim() || undefined;
+    if (this.profile?.includes(',')) {
+      throw new Error('DWS channel profile must select exactly one account.');
+    }
     this.runner = runner;
     this.eventStarter = eventStarter;
   }
 
   async assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity> {
+    if (!this.profileResolved) {
+      const selected = this.profile;
+      const profiles = await this.run(['profile', 'list'], signal, false);
+      this.profile = resolveProfile(profiles, selected);
+      if (!this.profile) {
+        throw new Error(
+          selected
+            ? 'DWS profile must exactly match one account from `dws profile list`.'
+            : 'DWS has no active profile. Run `dws auth login` or configure an exact account profile.',
+        );
+      }
+      this.profileResolved = true;
+    }
     const response = await this.run(['auth', 'status'], signal);
     const authenticated = findScalar(response, new Set(['authenticated']));
     if (authenticated !== true) {
@@ -513,6 +614,7 @@ export class DwsClient implements DwsClientLike {
     const userId = findScalar(response, new Set(USER_ID_KEYS));
     const openDingTalkId = findScalar(response, new Set(OPEN_DINGTALK_ID_KEYS));
     return {
+      profile: this.profile,
       userId:
         typeof userId === 'string' || typeof userId === 'number'
           ? String(userId)
@@ -777,8 +879,17 @@ export class DwsClient implements DwsClientLike {
     return this.profile ? ['--profile', this.profile] : [];
   }
 
-  private async run(command: string[], signal?: AbortSignal): Promise<unknown> {
-    const args = [...this.profileArgs(), ...command, '--format', 'json'];
+  private async run(
+    command: string[],
+    signal?: AbortSignal,
+    scoped = true,
+  ): Promise<unknown> {
+    const args = [
+      ...(scoped ? this.profileArgs() : []),
+      ...command,
+      '--format',
+      'json',
+    ];
     const result = signal
       ? await this.runner(this.executable, args, signal)
       : await this.runner(this.executable, args);

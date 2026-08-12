@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   DwsClient,
+  DwsCommandError,
   parseDwsImEvent,
   type DwsCommandRunner,
 } from './dws-client.js';
@@ -25,24 +26,39 @@ function subscription(): DwsEventSubscription {
 
 describe('DwsClient', () => {
   it('checks the selected profile for both DWS user identities', async () => {
-    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
-      stdout: json({
-        authenticated: true,
-        userId: 'user-1',
-        openDingTalkId: 'open-user-1',
-      }),
-      stderr: '',
-    });
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({
+          profiles: [{ profile: 'corp:user', isCurrent: false }],
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          authenticated: true,
+          userId: 'user-1',
+          openDingTalkId: 'open-user-1',
+        }),
+        stderr: '',
+      });
     const client = new DwsClient(
       { executable: '/opt/dws', profile: 'corp:user' },
       runner,
     );
 
     await expect(client.assertAuthenticated()).resolves.toEqual({
+      profile: 'corp:user',
       userId: 'user-1',
       openDingTalkId: 'open-user-1',
     });
-    expect(runner).toHaveBeenCalledWith('/opt/dws', [
+    expect(runner).toHaveBeenNthCalledWith(1, '/opt/dws', [
+      'profile',
+      'list',
+      '--format',
+      'json',
+    ]);
+    expect(runner).toHaveBeenNthCalledWith(2, '/opt/dws', [
       '--profile',
       'corp:user',
       'auth',
@@ -53,11 +69,20 @@ describe('DwsClient', () => {
   });
 
   it('rejects an unauthenticated DWS profile', async () => {
-    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
-      stdout: json({ authenticated: false }),
-      stderr: '',
-    });
-    const client = new DwsClient({ executable: 'dws' }, runner);
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({ profiles: [{ profile: 'corp:user' }] }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({ authenticated: false }),
+        stderr: '',
+      });
+    const client = new DwsClient(
+      { executable: 'dws', profile: 'corp:user' },
+      runner,
+    );
 
     await expect(client.assertAuthenticated()).rejects.toThrow(
       'DWS is not authenticated',
@@ -65,16 +90,50 @@ describe('DwsClient', () => {
   });
 
   it('normalizes the snake-case user identity returned by DWS', async () => {
-    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
-      stdout: json({ authenticated: true, user_id: 'user-1' }),
-      stderr: '',
-    });
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({
+          profiles: [{ corpId: 'corp', userId: 'user-1', isCurrent: true }],
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({ authenticated: true, user_id: 'user-1' }),
+        stderr: '',
+      });
     const client = new DwsClient({ executable: 'dws' }, runner);
 
     await expect(client.assertAuthenticated()).resolves.toEqual({
+      profile: 'corp:user-1',
       userId: 'user-1',
       openDingTalkId: undefined,
     });
+  });
+
+  it('rejects ambiguous or multi-account profile selectors', async () => {
+    expect(
+      () =>
+        new DwsClient({
+          executable: 'dws',
+          profile: 'corp:user-1,corp:user-2',
+        }),
+    ).toThrow('exactly one account');
+
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        profiles: [{ profile: 'corp:user-1', isCurrent: true }],
+      }),
+      stderr: '',
+    });
+    const client = new DwsClient(
+      { executable: 'dws', profile: 'corp' },
+      runner,
+    );
+
+    await expect(client.assertAuthenticated()).rejects.toThrow(
+      'exactly match one account',
+    );
   });
 
   it('resolves the current open DingTalk ID by exact user ID', async () => {
@@ -242,6 +301,34 @@ describe('DwsClient', () => {
       senderId: 'open-alice',
       senderName: 'Alice',
     });
+  });
+
+  it('subscribes to all ordinary group messages without a group filter', async () => {
+    const eventStarter = vi.fn<DwsEventProcessStarter>(async () =>
+      subscription(),
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:user' },
+      vi.fn(),
+      eventStarter,
+    );
+
+    await client.subscribeToIm({ kind: 'group-all' }, vi.fn(), vi.fn());
+
+    expect(eventStarter).toHaveBeenCalledWith(
+      '/opt/dws',
+      [
+        '--profile',
+        'corp:user',
+        'event',
+        'consume',
+        'user_im_message_receive_group_all',
+        '--format',
+        'compact',
+      ],
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
 
   it('parses the NDJSON envelope emitted by the default event format', () => {
@@ -665,4 +752,35 @@ describe('DwsClient', () => {
       ],
     ]);
   });
+
+  it('classifies a local executable spawn failure as not sent', async () => {
+    const client = new DwsClient({
+      executable: '/definitely-missing-qwen-dws',
+    });
+
+    const error = await client
+      .replyToComment('doc-1', 'comment-1', 'answer')
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(DwsCommandError);
+    expect(error).toMatchObject({ outcome: 'not_sent' });
+  });
+
+  it.each(['', 'not-json'])(
+    'classifies an unusable successful command response as unknown: %j',
+    async (stdout) => {
+      const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+        stdout,
+        stderr: '',
+      });
+      const client = new DwsClient({ executable: '/opt/dws' }, runner);
+
+      const error = await client
+        .replyToComment('doc-1', 'comment-1', 'answer')
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(DwsCommandError);
+      expect(error).toMatchObject({ outcome: 'unknown' });
+    },
+  );
 });

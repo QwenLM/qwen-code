@@ -10,6 +10,18 @@ import { sanitizeLogText } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 
 const READY_TIMEOUT_MS = 15_000;
+const STOP_TIMEOUT_MS = 5_000;
+
+export class DwsEventProcessError extends Error {
+  constructor(
+    message: string,
+    readonly retryable?: boolean,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = 'DwsEventProcessError';
+  }
+}
 
 export interface DwsEventSubscription {
   stop(): void;
@@ -23,9 +35,76 @@ export type DwsEventProcessStarter = (
   onError: (error: Error) => void,
 ) => Promise<DwsEventSubscription>;
 
-function processError(code?: number | null): Error {
-  return new Error(
+function processError(code?: number | null): DwsEventProcessError {
+  return new DwsEventProcessError(
     `DWS event consumer stopped${code === undefined || code === null ? '' : ` (${code})`}.`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function findValue(value: unknown, keys: ReadonlySet<string>): unknown {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findValue(item, keys);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  for (const [key, candidate] of Object.entries(value)) {
+    if (keys.has(key)) return candidate;
+  }
+  for (const candidate of Object.values(value)) {
+    const found = findValue(candidate, keys);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function parseEventError(line: string): DwsEventProcessError | undefined {
+  const jsonStart = line.indexOf('{');
+  if (jsonStart < 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line.slice(jsonStart)) as unknown;
+  } catch {
+    return undefined;
+  }
+  const retryable = findValue(parsed, new Set(['retryable']));
+  const retryAfter = findValue(
+    parsed,
+    new Set(['retry_after_seconds', 'retryAfterSeconds']),
+  );
+  const nextRetry = findValue(
+    parsed,
+    new Set(['next_retry_at', 'nextRetryAt']),
+  );
+  const message = findValue(parsed, new Set(['message', 'hint']));
+  if (
+    typeof retryable !== 'boolean' &&
+    typeof retryAfter !== 'number' &&
+    typeof nextRetry !== 'string'
+  ) {
+    return undefined;
+  }
+  let retryAfterMs: number | undefined;
+  if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+    retryAfterMs = Math.max(0, retryAfter * 1_000);
+  } else if (typeof nextRetry === 'string') {
+    const timestamp = Date.parse(nextRetry);
+    if (Number.isFinite(timestamp))
+      retryAfterMs = Math.max(0, timestamp - Date.now());
+  }
+  return new DwsEventProcessError(
+    sanitizeLogText(
+      typeof message === 'string' ? message : 'DWS event subscription failed.',
+      300,
+    ),
+    typeof retryable === 'boolean' ? retryable : undefined,
+    retryAfterMs,
   );
 }
 
@@ -43,20 +122,19 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
     });
     const stdout = readline.createInterface({ input: child.stdout });
     const stderr = readline.createInterface({ input: child.stderr });
-    let ready = false;
+    let state: 'pending' | 'ready' | 'failed' = 'pending';
     let stopping = false;
-    let settled = false;
+    let lastError: DwsEventProcessError | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let lineQueue = Promise.resolve();
     let resolveClosed!: () => void;
     const closed = new Promise<void>((done) => {
       resolveClosed = done;
     });
 
-    const settleError = (error: Error): void => {
-      if (settled) {
-        onError(error);
-        return;
-      }
-      settled = true;
+    const settleStartupError = (error: Error): void => {
+      if (state !== 'pending') return;
+      state = 'failed';
       clearTimeout(readyTimer);
       reject(error);
     };
@@ -65,12 +143,18 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
       if (stopping) return;
       stopping = true;
       child.stdin.end();
-      if (child.exitCode === null) child.kill('SIGTERM');
+      if (child.exitCode === null) {
+        child.kill('SIGTERM');
+        killTimer = setTimeout(() => {
+          if (child.exitCode === null) child.kill('SIGKILL');
+        }, STOP_TIMEOUT_MS);
+        killTimer.unref?.();
+      }
     };
 
     const readyTimer = setTimeout(() => {
       stop();
-      settleError(
+      settleStartupError(
         new Error(
           `DWS event consumer did not become ready within ${READY_TIMEOUT_MS / 1000} seconds.`,
         ),
@@ -79,37 +163,47 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
     readyTimer.unref?.();
 
     stdout.on('line', (line) => {
-      void Promise.resolve(onLine(line)).catch((error: unknown) => {
-        onError(error instanceof Error ? error : new Error(String(error)));
-      });
+      child.stdout.pause();
+      lineQueue = lineQueue
+        .then(() => onLine(line))
+        .catch((error: unknown) => {
+          onError(error instanceof Error ? error : new Error(String(error)));
+        })
+        .finally(() => {
+          if (!stopping) child.stdout.resume();
+        });
     });
 
     stderr.on('line', (line) => {
-      if (line.includes('[event] ready') && !settled) {
-        settled = true;
-        ready = true;
+      if (line.includes('[event] ready') && state === 'pending') {
+        state = 'ready';
         clearTimeout(readyTimer);
         resolve({ stop, closed });
+        return;
       }
+      lastError = parseEventError(line) ?? lastError;
     });
 
     child.once('error', (error) => {
-      settleError(
-        new Error(
-          `Failed to start DWS event consumer: ${sanitizeLogText(error.message, 300)}`,
-        ),
+      const resolvedError = new DwsEventProcessError(
+        `Failed to start DWS event consumer: ${sanitizeLogText(error.message, 300)}`,
       );
+      if (state === 'pending') settleStartupError(resolvedError);
+      else if (state === 'ready' && !stopping) lastError = resolvedError;
     });
 
-    child.once('exit', (code) => {
+    child.once('close', (code) => {
       clearTimeout(readyTimer);
-      stdout.close();
-      stderr.close();
-      resolveClosed();
-      if (!ready) {
-        settleError(processError(code));
-      } else if (!stopping) {
-        onError(processError(code));
-      }
+      if (killTimer) clearTimeout(killTimer);
+      void lineQueue.finally(() => {
+        stdout.close();
+        stderr.close();
+        resolveClosed();
+        if (state === 'pending') {
+          settleStartupError(lastError ?? processError(code));
+        } else if (state === 'ready' && !stopping) {
+          onError(lastError ?? processError(code));
+        }
+      });
     });
   });
