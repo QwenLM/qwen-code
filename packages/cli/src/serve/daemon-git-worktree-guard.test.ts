@@ -2057,6 +2057,19 @@ it -C ${outsideRepo} reset --hard`,
     // A command substitution inherits the exported function too.
     () =>
       `evil() { git -C ${plainOutsidePath} reset --hard; }; export -f evil; echo $(bash -c 'evil')`,
+    // A bare `unset NAME` removes a same-name variable first; Bash keeps the
+    // function, so the model must not delete it (it tracks no variables).
+    () =>
+      `pwn() { git -C ${plainOutsidePath} reset --hard; }; pwn=1; unset pwn; pwn`,
+    // `env -u BASH_FUNC_git%%` (separated, attached, and `--unset=` forms)
+    // strips the exported function from the child, which then runs the real
+    // git — the guard must not replay the harmless imported body.
+    () =>
+      `git() { :; }; export -f git; env -u 'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+    () =>
+      `git() { :; }; export -f git; env -u'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+    () =>
+      `git() { :; }; export -f git; env --unset='BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
   ])(
     'does not let a mis-modelled removal drop a live relocating shadow %#',
     async (build) => {
@@ -2084,6 +2097,10 @@ it -C ${outsideRepo} reset --hard`,
       `git() { :; }; export -f git; env -i bash -c "git -C ${plainOutsidePath} rev-parse HEAD"`,
       // `env` without a clearing flag keeps the bash-imported shadow live.
       `git() { :; }; export -f git; env FOO=bar bash -c "git -C ${plainOutsidePath} reset --hard"`,
+      // `env -u` of an unrelated key leaves the exported function in place.
+      `git() { :; }; export -f git; env -u FOO bash -c "git -C ${plainOutsidePath} reset --hard"`,
+      // `env -u BASH_FUNC_other%%` strips a different function, not git.
+      `git() { :; }; export -f git; env -u 'BASH_FUNC_other%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }

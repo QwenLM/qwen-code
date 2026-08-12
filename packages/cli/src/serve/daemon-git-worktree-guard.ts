@@ -282,6 +282,21 @@ interface PrefixState {
   // `env -i` / `--ignore-environment` wipe the inherited environment, so a
   // later shell child receives none of the parent's `export -f` functions.
   clearsEnvironment?: boolean;
+  // Environment names removed by `env -u` / `--unset`. A bash `export -f foo`
+  // travels as a `BASH_FUNC_foo%%` entry, so unsetting it strips the function
+  // from the child even though the environment is otherwise intact.
+  unsetEnvKeys?: Set<string>;
+}
+
+// Bash exports a function `foo` as a `BASH_FUNC_foo%%` (4.3+) or
+// `BASH_FUNC_foo()` (older) environment entry; an `env -u` of that entry drops
+// the function from the child even though `-u` names an ordinary key.
+function envUnsetRemovesFunction(name: string, state: PrefixState): boolean {
+  const keys = state.unsetEnvKeys;
+  return (
+    keys !== undefined &&
+    (keys.has(`BASH_FUNC_${name}%%`) || keys.has(`BASH_FUNC_${name}()`))
+  );
 }
 
 type GuardDenial = { allowed: false; reason: string };
@@ -707,6 +722,12 @@ function consumeEnvWrapper(
       };
     }
     if (ENV_VALUE_FLAGS.has(token.text)) {
+      // Only `-u`/`--unset` reach here (`-S`/`--split-string` returned above);
+      // remember the removed key so a stripped `BASH_FUNC_*` is honoured.
+      const removed = run[index + 1];
+      if (removed !== undefined && !removed.dynamic) {
+        (state.unsetEnvKeys ??= new Set()).add(removed.text);
+      }
       index += 2;
       continue;
     }
@@ -722,6 +743,10 @@ function consumeEnvWrapper(
         const rest = joinArgvTexts(run.slice(index + 1));
         return { next: run.length, payload: rest ? `${fused} ${rest}` : fused };
       }
+      const removedName = token.text.startsWith('--unset=')
+        ? token.text.slice('--unset='.length)
+        : token.text.slice(2);
+      (state.unsetEnvKeys ??= new Set()).add(removedName);
       index++;
       continue;
     }
@@ -2213,8 +2238,12 @@ async function evaluateCommandWithCwd(
         !definedBodies.has(removalProgram)
       ) {
         const removesAliases = removalProgram === 'unalias';
-        const removesVariablesOnly =
-          !removesAliases && run.some((token) => token.text === '-v');
+        // Only `unset -f` removes a function. A bare `unset NAME` unsets a
+        // same-name variable first and touches the function only when none
+        // exists; this evaluator does not track ordinary variables, so it
+        // cannot tell — leaving the function is the safe (over-deny) choice.
+        const removesFunctions =
+          !removesAliases && run.some((token) => token.text === '-f');
         if (
           removesAliases &&
           run.some((token) => token.text === '-a' || token.text === '-af')
@@ -2223,15 +2252,15 @@ async function evaluateCommandWithCwd(
           for (const [name, entry] of [...definedBodies]) {
             if (entry.alias) definedBodies.delete(name);
           }
-        } else if (!removesVariablesOnly) {
+        } else if (removesAliases || removesFunctions) {
           for (const token of run.slice(1)) {
             if (token.text.startsWith('-')) continue;
             const entry = definedBodies.get(token.text);
             if (removesAliases) {
               if (entry?.alias) definedBodies.delete(token.text);
             } else if (!entry?.alias) {
-              // `unset -f NAME` / bare `unset NAME`: a function and its
-              // git/export attributes, never an alias.
+              // `unset -f NAME`: a function and its git/export attributes,
+              // never an alias.
               definedBodies.delete(token.text);
               gitShapedNames.delete(token.text);
               exportedFunctions.delete(token.text);
@@ -2345,13 +2374,22 @@ async function evaluateCommandWithCwd(
                   ? {
                       // Only bash imports `export -f` functions. A `-c`
                       // subprocess is a separate process: copy the set so a
-                      // child `unset -f` cannot retract the parent's exports.
+                      // child `unset -f` cannot retract the parent's exports,
+                      // and drop any function whose `BASH_FUNC_*` entry an
+                      // `env -u` stripped before the child started.
                       definedBodies: new Map(
-                        [...definedBodies].filter(([name]) =>
-                          exportedFunctions.has(name),
+                        [...definedBodies].filter(
+                          ([name]) =>
+                            exportedFunctions.has(name) &&
+                            !envUnsetRemovesFunction(name, analysis.state),
                         ),
                       ),
-                      exportedFunctions: new Set(exportedFunctions),
+                      exportedFunctions: new Set(
+                        [...exportedFunctions].filter(
+                          (name) =>
+                            !envUnsetRemovesFunction(name, analysis.state),
+                        ),
+                      ),
                     }
                   : {}),
             },
