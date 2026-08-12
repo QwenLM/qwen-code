@@ -171,6 +171,11 @@ describe('parseLayerReceipts', () => {
         ].join('\n'),
       ),
     ]).toEqual(['scope-propagation']);
+    // A receipt after a `>` BLOCKQUOTE counts too — the close-depth decrement
+    // must return to 0, or every later inline would be skipped as still-quoted.
+    expect([
+      ...parseLayerReceipts('> quoted\n\nLayer walked: toctou — real'),
+    ]).toEqual(['toctou']);
   });
 
   it('does not credit a marker hidden in an INLINE construct — the R4-1 residual, closed', () => {
@@ -185,21 +190,37 @@ describe('parseLayerReceipts', () => {
       '[x\nLayer walked: toctou]: /url', // link-reference continuation
       '![Layer walked: toctou](/u)', // image alt — an attribute, never prose
       'Layer walked: `toctou` — styled id', // id inside a code span, dropped
-      // A dropped inline node BREAKS the line, so a marker cannot stitch across
-      // it into an id GitHub renders as one token. Both render two things, not a
-      // receipt: "Layer walked: xtoctou" and "Layer walked: ⟨img⟩toctou".
+      // A dropped inline node becomes a non-whitespace sentinel, so a marker
+      // never stitches across it into an id GitHub renders as one token. Both
+      // render two things: "Layer walked: xtoctou" and "Layer walked: ⟨img⟩toctou".
       'Layer walked: `x`toctou', // code span splits marker from id
       'Layer walked: ![a](/u)toctou', // image splits marker from id
+      // The sentinel is not a line break either, so an inline node BEFORE a marker
+      // leaves it mid-line — exactly where GitHub renders it — not floated to a
+      // fresh line start. GitHub shows "x Layer walked: toctou", never a receipt.
+      '`x` Layer walked: toctou', // code span before the marker
+      // A hard break (two trailing spaces) IS a visible line break, so it splits
+      // an inline-`<br>` marker from its id — GitHub shows the id on its own line.
+      'Layer walked:  \ntoctou',
+      // Raw-text elements (`<script>`, `<style>`, `<textarea>`, `<title>`,
+      // `<template>`, `<noscript>`): markdown-it exposes their inner text as a
+      // child, but GitHub renders it only inline/escaped, never as a line-leading
+      // receipt. The sentinel keeps the marker mid-line, matching that render.
+      'x <script>Layer walked: toctou</script>',
+      'x <style>Layer walked: toctou</style>',
+      'x <textarea>Layer walked: toctou</textarea>',
+      'x <title>Layer walked: toctou</title>',
+      'x <template>Layer walked: toctou</template>',
+      'x <noscript>Layer walked: toctou</noscript>',
+      '<script>Layer walked: toctou</script>', // even with no prefix
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
-    // A link's VISIBLE text is prose and still counts.
+    // A link's VISIBLE text is prose and still counts, and a hard break BEFORE a
+    // whole marker leaves the marker at the start of its own visible line.
     expect([
       ...parseLayerReceipts('[Layer walked: toctou](/u) — real'),
     ]).toEqual(['toctou']);
-    // A code span BEFORE a whole marker leaves the marker as visible prose
-    // ("x Layer walked: toctou"), so it stays a real receipt — the break only
-    // stops fragments STITCHING, it does not invent a quotation.
-    expect([...parseLayerReceipts('`x` Layer walked: toctou')]).toEqual([
+    expect([...parseLayerReceipts('x  \nLayer walked: toctou')]).toEqual([
       'toctou',
     ]);
   });

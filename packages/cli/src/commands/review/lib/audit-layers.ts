@@ -208,22 +208,30 @@ const LAYER_HINT_RE = /layer\s+walked/i;
  */
 const MD = new MarkdownIt({ html: true });
 
+// Stands in for a dropped inline node (code span, inline HTML, image) in the
+// reconstructed prose. A single NON-whitespace, non-marker code point (U+0000):
+// unlike a newline it does not FORGE a line start, and unlike an empty string it
+// does not let the text on either side STITCH — the receipt regex's leading
+// anchor (`^\s*…`) and its id class (`[\s*_~\`]*[a-z]`) both reject it, so a
+// marker only ever begins a reconstructed line when it truly begins a visible one.
+const DROPPED_INLINE = '\u0000';
+
 /**
  * The lines an auditor is USING, not quoting — the VISIBLE PROSE markdown-it
  * renders, reconstructed from its token stream. A quoted block (a fenced or
  * indented code block, an HTML block, or anything inside a blockquote) yields
  * nothing; a prose block (paragraph, heading, list item) yields its text nodes
- * and line breaks, with inline code spans, raw HTML (tags, comments, attribute
- * values) and the title/alt attributes of links and images dropped — GitHub
- * renders those as nothing or as monospace/attribute text, never as a receipt.
+ * and visible line breaks, with inline code spans, raw HTML (tags, comments,
+ * attribute values, raw-text elements) and the title/alt attributes of links and
+ * images reduced to a non-line-starting sentinel — GitHub renders those as
+ * nothing, as monospace, or inline/escaped, never as a line-leading receipt.
  *
  * Reading the rendered prose, not the source lines, is what closes the divergence
  * outright: a block-only pass still leaked a marker hidden in an INLINE construct
  * — a multi-line inline code span, an HTML comment or attribute, a link title, a
  * link-reference continuation — as a live receipt, and enumerating those one by
  * one just opens the next. A parser throw (unconstructed in practice) falls back
- * to the raw lines; the receipt regex's no-leading-backtick rule still guards the
- * common inline span there.
+ * to the raw source lines, where the anchored receipt regex still holds.
  */
 function* usedLines(finalText: string): Generator<string> {
   const src = finalText.replace(/\r\n?/g, '\n');
@@ -239,25 +247,30 @@ function* usedLines(finalText: string): Generator<string> {
     if (t.type === 'blockquote_open') blockquoteDepth++;
     else if (t.type === 'blockquote_close') blockquoteDepth--;
     else if (t.type === 'inline' && blockquoteDepth === 0) {
-      // The visible prose of this inline. `text` is prose; `code_inline` (a code
-      // span), `html_inline` (raw tags, comments, attributes) and an `image` (its
-      // alt/title live in attributes, never in a text child) are quoted or
-      // non-prose and BREAK the line — a dropped node must not let the text on
-      // either side stitch into a marker GitHub never renders as one receipt
-      // (`` `x` Layer walked: X `` renders two things, not a receipt). Emphasis
-      // and link open/close nodes are deliberately NOT breaks: their visible text
-      // children flow through as prose (a link's visible text is a real receipt).
+      // The visible prose of this inline, reconstructed the way GitHub lays it
+      // out. `text` is prose. A soft/hard break is a real visible line break, so
+      // it splits the line. Every OTHER inline node — a code span, inline HTML (a
+      // raw tag, a comment, or a raw-text element like `<script>`/`<title>` whose
+      // inner text markdown-it exposes as a child but GitHub shows only inline or
+      // escaped), or an image — does NOT start a new visible line on GitHub, so it
+      // must not start one here: it is replaced by `DROPPED_INLINE`, a
+      // non-whitespace sentinel that neither forges a line start (`x <script>Layer
+      // walked: id` stays one line, marker mid-line → rejected, as GitHub renders
+      // it) nor lets fragments stitch (`Layer walked: <x>id` → the id capture
+      // stops at the sentinel). Emphasis and link open/close nodes are NEITHER:
+      // their visible text children flow through as prose (a link's visible text
+      // is a real receipt).
       let prose = '';
       for (const c of t.children ?? []) {
         if (c.type === 'text') prose += c.content;
+        else if (c.type === 'softbreak' || c.type === 'hardbreak')
+          prose += '\n';
         else if (
-          c.type === 'softbreak' ||
-          c.type === 'hardbreak' ||
           c.type === 'code_inline' ||
           c.type === 'html_inline' ||
           c.type === 'image'
         )
-          prose += '\n';
+          prose += DROPPED_INLINE;
       }
       yield* prose.split('\n');
     }
