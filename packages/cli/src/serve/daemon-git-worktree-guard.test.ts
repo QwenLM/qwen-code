@@ -1975,6 +1975,34 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  it.each([
+    // A redirection before an alias/function invocation must not hide it.
+    () => `alias gg='git -C ${plainOutsidePath} reset --hard'; 2>/dev/null gg`,
+    () => `gg() { git -C ${plainOutsidePath} reset --hard; }; 2>/dev/null gg`,
+    // Only the segment `&` follows is backgrounded; the next runs foreground.
+    () => `true & cd ${plainOutsidePath}; git reset --hard`,
+  ])('denies a relocation past a redirect or background %#', async (build) => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(build()))).resolves.toMatchObject({
+      allowed: false,
+    });
+  });
+
+  it('keeps foreground/background boundaries correct', async () => {
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      // The backgrounded `cd` is a subshell; the foreground git stays inside.
+      `cd ${outsideRepo} & git status`,
+      'true & cd nested; git status',
+      "2>/dev/null alias gg='git status'; gg",
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {

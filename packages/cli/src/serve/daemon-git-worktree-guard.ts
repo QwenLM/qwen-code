@@ -997,6 +997,7 @@ function disablesAllExport(run: GuardToken[], start: number): boolean {
  */
 function readProgramWord(run: GuardToken[]): string | undefined {
   for (const token of run) {
+    if (token.redirect || token.ambiguousFd) continue;
     if (leadingEnvAssignmentKey(token.text) !== null) continue;
     if (LEADING_SHELL_KEYWORDS.has(token.text)) continue;
     return token.text;
@@ -2063,14 +2064,17 @@ async function evaluateCommandWithCwd(
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;
-  const SUBSHELL_SEPARATORS = new Set(['|', '&']);
   const isPipeComponent = (index: number): boolean =>
     separatorsMatch
-      ? SUBSHELL_SEPARATORS.has(separators[index - 1] ?? '') ||
-        SUBSHELL_SEPARATORS.has(separators[index] ?? '')
+      ? // Both sides of a pipe run in subshells; for `&` only the segment it
+        // follows (the backgrounded one) does — the next segment is
+        // foreground.
+        separators[index - 1] === '|' ||
+        separators[index] === '|' ||
+        separators[index] === '&'
       : // Structural disagreement with `splitCommands`: scope every segment
         // rather than guess which ones ran in a subshell.
-        separators.some((separator) => SUBSHELL_SEPARATORS.has(separator));
+        separators.some((separator) => separator === '|' || separator === '&');
   for (const [segmentIndex, segment] of segments.entries()) {
     const pipeComponent = isPipeComponent(segmentIndex);
     const cwdBeforeSegment = trackedCwd;
