@@ -30,6 +30,13 @@ import {
   type LiveToolItem,
 } from './live-session-model.js';
 import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
+import {
+  findProviderByCredentials,
+  resolveMetadataKey,
+  tildeifyPath,
+} from '@qwen-code/qwen-code-core';
+import { readFileSync } from 'node:fs';
+import nodePath from 'node:path';
 import type { PartListUnion } from '@google/genai';
 import { livePromptEvents } from './live-session.js';
 import { resumeEventsFromConfig } from './resume-session.js';
@@ -269,28 +276,65 @@ function AssistantMessage(props: {
 // app
 // ---------------------------------------------------------------------------
 
-const LOGO = '▄▀▀▀▀▄';
-
 /** Original-style header banner. Stable: depends only on config/width, so it
  *  does not re-render on streaming; resize re-renders without flicker via the
  *  erase-free painter. */
-function buildBanner(config: Config | undefined, width: number) {
-  const version = 'v0.21.7';
-  const m = (
-    config as (Config & { getModel?: () => unknown }) | undefined
-  )?.getModel?.();
-  const model =
-    (typeof m === 'string' ? m : (m as { id?: string } | undefined)?.id) ??
-    'qwen';
-  const cwd = process.cwd().split('/').slice(-2).join('/');
-  const cols = Math.max(width - 2, 1);
+// Faithful port of the original ink Header (components/Header.tsx): a
+// single-border info panel with 4 lines — title(+version), blank spacer,
+// auth|model(+hint), directory. Same data sources as the original.
+function buildBanner(config: Config | undefined, _width: number) {
+  let versionLabel = '';
+  try {
+    const cliPkg = nodePath.join(
+      nodePath.dirname(process.argv[1]),
+      '..',
+      'package.json',
+    );
+    const v = (JSON.parse(readFileSync(cliPkg, 'utf8')) as { version?: string })
+      .version;
+    versionLabel = v ? (/^\d/.test(v) ? `v${v}` : v) : '';
+  } catch {
+    versionLabel = '';
+  }
+  const cfg = config as unknown as
+    | {
+        getContentGeneratorConfig?: () =>
+          | { authType?: string; baseUrl?: string; apiKeyEnvKey?: string }
+          | undefined;
+        getModelDisplayName?: () => string;
+        getTargetDir?: () => string;
+      }
+    | undefined;
+  const cg = cfg?.getContentGeneratorConfig?.();
+  const model = cfg?.getModelDisplayName?.() ?? 'qwen';
+  const targetDir = cfg?.getTargetDir?.() ?? process.cwd();
+  // auth label (mirrors AppHeader.getAuthDisplayType)
+  let authLabel = '';
+  try {
+    if (cg?.authType) {
+      const matched = findProviderByCredentials(cg.baseUrl, cg.apiKeyEnvKey);
+      authLabel =
+        (matched && resolveMetadataKey(matched) && matched.label) ||
+        (cg.authType === 'qwen-oauth' ? 'Qwen OAuth' : 'API Key');
+    }
+  } catch {
+    authLabel = '';
+  }
+  const authModelText = authLabel ? `${authLabel} | ${model}` : model;
+  const hint = ' (/model to change)';
+  const path = tildeifyPath(targetDir);
   return (
-    <box flexDirection="column" marginLeft={1} marginRight={1} flexShrink={0}>
-      <text fg={C.accent}>
-        {LOGO} Qwen Code {version}
-      </text>
-      <text fg={C.dim}>{'model: ' + model + '   ' + cwd}</text>
-      <text fg={C.dim}>{'─'.repeat(cols)}</text>
+    <box
+      flexDirection="column"
+      borderStyle="single"
+      marginLeft={1}
+      marginRight={1}
+      flexShrink={0}
+    >
+      <text fg={C.accent}>{`>_ Qwen Code (${versionLabel})`}</text>
+      <text> </text>
+      <text fg={C.dim}>{authModelText + hint}</text>
+      <text fg={C.dim}>{path}</text>
     </box>
   );
 }
