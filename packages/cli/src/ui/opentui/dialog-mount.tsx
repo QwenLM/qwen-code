@@ -44,6 +44,10 @@ import {
 } from './dialogs-extensions.js';
 import { OpenTuiMcpDialog } from './dialogs-mcp.js';
 import {
+  OpenTuiStatsDialog,
+  OpenTuiSkillsDialog,
+} from './dialogs-stats-skills.js';
+import {
   addPermissionRule,
   applyModelSelection,
   applyThemeSelection,
@@ -347,6 +351,12 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           getServerTools={(server) => getMcpServerTools(config, server.name)}
           onClose={onClose}
         />
+      )}
+      {dialog.dialog === 'stats' && (
+        <OpenTuiStatsDialog config={config} onClose={onClose} />
+      )}
+      {dialog.dialog === 'skills_manage' && (
+        <OpenTuiSkillsDialog config={config} onClose={onClose} />
       )}
     </box>
   );

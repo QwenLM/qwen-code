@@ -153,14 +153,16 @@ function ToolCard(props: {
         paddingLeft={1}
         backgroundColor={hover ? C.hover : undefined}
       >
-        <text fg={iconColor}>{icon} </text>
-        <text fg={C.text} attributes={1}>
-          {toolDisplayName(item.title)}
-        </text>
-        <text fg={C.dim}>
-          {` ${toolDescription(item.title, item.args ?? '')}${suffix}`}
-        </text>
-        {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
+        <box flexDirection="row">
+          <text fg={iconColor}>{icon} </text>
+          <text fg={C.text} attributes={1}>
+            {toolDisplayName(item.title)}
+          </text>
+          <text fg={C.dim}>
+            {` ${toolDescription(item.title, item.args ?? '')}${suffix}`}
+          </text>
+          {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
+        </box>
       </box>
       {expanded && item.args && (
         <box paddingLeft={3}>
@@ -923,7 +925,15 @@ function App({
     `→ ${footerProject}` +
     (footerBranch ? ` · git:(${footerBranch})` : '') +
     (footerModel ? ` · ${footerModel}` : '');
-  const footerLine2 = `${approvalModeLabel(String(approvalMode ?? ''))} mode (shift + tab to cycle)`;
+  const modeName = approvalModeLabel(String(approvalMode ?? ''));
+  const modeColor =
+    modeName === 'YOLO'
+      ? C.red
+      : modeName === 'AUTO'
+        ? C.green
+        : modeName === 'PLAN'
+          ? C.accent
+          : C.dim;
 
   return (
     <box flexDirection="column" width={width} height="100%">
@@ -954,12 +964,14 @@ function App({
                   paddingLeft={1}
                   marginTop={1}
                 >
-                  <text fg={C.accent} attributes={1}>
-                    {'> '}
-                  </text>
-                  <text fg={C.accent} attributes={1}>
-                    {item.text}
-                  </text>
+                  <box flexDirection="row">
+                    <text fg={C.accent} attributes={1}>
+                      {'> '}
+                    </text>
+                    <text fg={C.accent} attributes={1}>
+                      {item.text}
+                    </text>
+                  </box>
                 </box>
               );
             case 'thinking': {
@@ -972,7 +984,7 @@ function App({
                     ? 'Thought briefly'
                     : `Thought for ${formatDuration(th.durationMs)}`;
               const label = !th.done
-                ? 'Thinking…'
+                ? `Thinking…${elapsed ? ` (${elapsed}s)` : ''}`
                 : (completedLabel ?? 'Thought');
               const hint = !th.done
                 ? ''
@@ -1062,7 +1074,10 @@ function App({
         {/* footer */}
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
           <text fg={C.dim}>{footerLine1}</text>
-          <text fg={C.dim}>{footerLine2}</text>
+          <box flexDirection="row">
+            <text fg={modeColor}>{`${modeName} mode`}</text>
+            <text fg={C.dim}>{' (shift + tab to cycle)'}</text>
+          </box>
         </box>
       </scrollbox>
 

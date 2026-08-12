@@ -42,6 +42,8 @@ export type MountedDialog =
   | { dialog: 'permissions' }
   | { dialog: 'extensions_manage' }
   | { dialog: 'mcp' }
+  | { dialog: 'stats' }
+  | { dialog: 'skills_manage' }
   | {
       dialog: 'model';
       mode: ModelDialogMode;
@@ -115,6 +117,10 @@ export function resolveDialogRequest(
       return { kind: 'mount', dialog: { dialog: 'extensions_manage' } };
     case 'mcp':
       return { kind: 'mount', dialog: { dialog: 'mcp' } };
+    case 'stats':
+      return { kind: 'mount', dialog: { dialog: 'stats' } };
+    case 'skills_manage':
+      return { kind: 'mount', dialog: { dialog: 'skills_manage' } };
     case 'model':
       return {
         kind: 'mount',
@@ -139,11 +145,9 @@ export function resolveDialogRequest(
     case 'hooks':
     case 'rewind':
     case 'diff':
-    case 'stats':
     case 'arena':
     case 'subagent_create':
     case 'subagent_list':
-    case 'skills_manage':
       return {
         kind: 'unsupported',
         message: `The '${request.dialog}' dialog is not yet available in the OpenTUI renderer.`,

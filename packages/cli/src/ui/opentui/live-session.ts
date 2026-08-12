@@ -20,6 +20,7 @@
  * feature parity + regression are complete.
  */
 
+import { appendFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { SendMessageType } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
@@ -62,7 +63,18 @@ export async function* livePromptEvents(
     promptId,
     sendMessageOptions,
   );
+  const dbg = process.env['QWEN_OPENTUI_DEBUG'];
   for await (const ev of stream) {
+    if (dbg) {
+      try {
+        appendFileSync(
+          '/tmp/opentui-events.log',
+          `${(ev as { type?: string }).type}\n`,
+        );
+      } catch {
+        /* ignore */
+      }
+    }
     for (const neutral of map(ev)) yield neutral;
   }
 }

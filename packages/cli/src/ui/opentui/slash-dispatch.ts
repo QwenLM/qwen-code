@@ -43,6 +43,14 @@ export async function loadInteractiveCommands(
   config: Config | null,
   signal?: AbortSignal,
 ): Promise<readonly SlashCommand[]> {
+  // Skill/MCP/project commands need the config fully initialized (the skill
+  // manager is created in initialize()); without this /skills errors and
+  // skill commands are missing from /-completion.
+  try {
+    await config?.initialize();
+  } catch {
+    /* proceed with partial commands */
+  }
   const loaders = [
     new McpPromptLoader(config),
     new BuiltinCommandLoader(config),
