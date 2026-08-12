@@ -120,8 +120,10 @@ const MAX_DIR_ENTRIES = 10_000;
  * run (the mtime freshness filter accepts any writer). `MAX_REPORT_BYTES`
  * bounds each file, but nothing else bounded the COUNT — thousands of
  * 2 MiB reports are multi-GB of live strings and minutes of CPU past the
- * outer tool timeout. Past the cap the evidence block discloses the
- * omission like the other caps.
+ * outer tool timeout. Past the cap the run's note discloses the sampling
+ * (`sampledEvidence`) instead of refusing certification: the parsed
+ * reports are still real evidence, and a green-but-huge reactor run must
+ * not read as an uncertified failure.
  */
 const MAX_FRESH_REPORTS = 1_000;
 
@@ -991,11 +993,11 @@ function freshTestSummaries(
   // the same root prefix, so absolute and relative order agree.
   fresh.sort();
   const summaries: MavenTestSummary[] = [];
-  // Fresh reports the parser REFUSED (oversized or unreadable) are
-  // unknown evidence too: the count cap fails closed by design, and a parse
-  // rejection must not fail open where the cap fails closed — a masked exit
-  // 0 over one oversized failing report would otherwise read green. A
-  // zero-suite file read in full is the opposite — known-empty, no gap.
+  // Fresh reports the parser REFUSED (oversized, unreadable, or malformed
+  // in a shape that can swallow failure bodies) are unknown evidence, and
+  // unlike the count cap they fail closed: a disclosed gap there is one a
+  // PR can weaponize to hide a failing report. A zero-suite file read in
+  // full is the opposite — known-empty, no gap.
   let rejected = 0;
   for (const path of fresh.slice(0, MAX_FRESH_REPORTS)) {
     const parsed = parseTestReport(root, path);
@@ -1719,9 +1721,9 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
  * The output before any executed test phase. Surefire marks test execution's
  * start — the `T E S T S` banner and the per-class `[INFO] Running` lines —
  * and a test's own stdout reaches the captured output only at or after them:
- * wording the acquisition carve-out accepts as Maven's own (launch,
- * dependency, disk) precedes them on every run where Maven itself printed it
- * before the tests started.
+ * the acquisition carve-out's source-failure suppression reads only this
+ * range, because test stdout can echo compiler-error shapes, and an echo
+ * must not hide a real acquisition failure behind "the PR broke the build".
  */
 function preTestPhaseOutput(output: string): string {
   const kept: string[] = [];
@@ -2110,23 +2112,28 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         'nothing and no other scope was guessed.',
     );
   }
-  // Reports past the evidence cap were never parsed, reports the parser
-  // rejected were never read, and a truncated sweep never saw some reports
-  // at all: the failure status of all three is UNKNOWN, and certifying a
-  // clean pass over unknown evidence reads a failed run green exactly as
-  // dropping it did. Fail closed instead.
+  // Reports past the count cap were never parsed — disclosure, not denial:
+  // the parsed reports are still real evidence, and refusing certification
+  // over the unread remainder failed closed on exactly the large reactors
+  // this adapter targets (Surefire writes one report per test CLASS, so a
+  // green reactor-wide run reported as an uncertified failure and every
+  // Test Plan claim read unchecked). The note below names the sampling.
+  // Reports the parser REJECTED and truncated sweeps stay fail-closed:
+  // rejection also covers malformed XML whose shape can swallow failure
+  // bodies, and a truncated sweep's freshness baseline is incomplete — a
+  // disclosed gap there is one a PR can weaponize to hide a failing
+  // report, so the run refuses certification like the other unread states.
   // The trim's rescue cap dropping failure-evidence lines is the same
-  // epistemic state as the fresh-report gaps: classification read an output
-  // whose verdict-relevant lines may be gone — refuse to certify exactly
-  // like them. A `-l`/`--log-file` setting in `.mvn/maven.config` is the
-  // same state from the other side: the scans read an output the setting
-  // redirected away.
+  // epistemic state — classification read an output whose verdict-relevant
+  // lines may be gone. A `-l`/`--log-file` setting in `.mvn/maven.config`
+  // is the same state from the other side: the scans read an output the
+  // setting redirected away.
   const evidenceCapped =
-    fresh.unparsed > 0 ||
     fresh.rejected > 0 ||
     fresh.truncated ||
     result.rescueOverflow === true ||
     logFileConfig;
+  const sampledEvidence = fresh.unparsed > 0;
   // A skip setting (`-DskipTests`/`-Dmaven.test.skip=true` in
   // `.mvn/maven.config`, or a POM `<skipTests>`) lets `mvn test` exit 0
   // having executed ZERO tests, and Surefire's skip path emits none of the
@@ -2140,31 +2147,35 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // relocated `<reportsDirectory>` the sweep cannot see, and are printed
   // even under `testFailureIgnore`: when they record failures the zero exit
   // did not fail on, the run is not clean even with zero reports on disk.
-  // Deliberately NOT gated on the exit code: a failing module is
-  // `[ERROR]`-framed at a non-zero exit too, and the acquisition carve-out
-  // below must not launder those executed test failures into infrastructure
-  // when the sweep misses the failing XML — stdout evidence of executed
-  // failing tests is source-side.
+  // As POSITIVE exit-0 failure evidence the scan is gated like the other
+  // framed scans below (`!framingUntrusted`): Surefire echoes test stdout
+  // verbatim, and a plugin-integration test printing a child build's
+  // failing summary otherwise flipped a fully green run whose fresh reports
+  // were green to failed. With visible fresh reports a real
+  // testFailureIgnore run ALSO writes failing XML (`freshFailures`), so the
+  // ungated reading survives only where no reports are visible at all —
+  // the relocated-reports shape it exists for. The interrupted-run notes
+  // and the acquisition suppression below keep their ungated readings:
+  // neither manufactures a pass off them.
   const stdoutTestFailures = hasStdoutTestFailure(result.output);
   // A NON-EMPTY wrapper can still exit 0 without launching Maven (a stub
   // `#!/bin/sh` edit keeps the exec bit): zero fresh reports AND zero
   // Maven-framed output means the build never started — "never ran", not
   // "tested nothing". Enumerating wrapper shapes misses the next spelling;
   // classifying the run does not.
+  // A diff-modified wrapper CAN forge both channels — but when the run did
+  // produce fresh reports or Maven-framed output, "never ran" asserts a
+  // false contradiction of a build that demonstrably ran: a plain
+  // `.mvn/wrapper/` bump runs the whole reactor green and still landed
+  // here. The evidence decides, whatever the launcher's history — and a
+  // stub wrapper edited by the diff still fails this check (it produces
+  // neither channel).
   const neverRan =
     result.exitCode === 0 &&
     !result.timedOut &&
     !testsSuppressed &&
-    // A PR-modified wrapper is a PR-controlled script executed with write
-    // access to the worktree: it can print `[INFO]` lines AND write fresh
-    // Surefire XML between the snapshot and the sweep, and the freshness
-    // filter accepts any writer during the run — nothing about the run's
-    // evidence can prove a build started, so refuse certification outright.
-    // With an unmodified launcher, zero fresh reports AND zero Maven-framed
-    // output still mean the build never started — "never ran", not
-    // "tested nothing".
-    (executedWrapperChanged ||
-      (summaries.length === 0 && !hasMavenFramedLine(result.output)));
+    summaries.length === 0 &&
+    !hasMavenFramedLine(result.output);
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -2179,33 +2190,37 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // success otherwise), so absent that setting the whole-output framing
   // matches are test output, not Maven's own verdict — the same prelude
   // defense isLaunchFailure applies, extended to the remaining scans.
-  // The Surefire stdout summary scan is the deliberate exception: the
-  // relocated-failing-report shape it exists to catch carries no other
-  // signal, so it stays ungated (the exit-0 note arm words the cause
-  // accordingly).
   const framingUntrusted =
     result.exitCode === 0 &&
     summaries.length > 0 &&
     !freshFailures &&
     !failNeverConfig;
   // A failing exit carries no exit-0 forgery premise — Maven DOES frame its
-  // own failures there — but test stdout echoes the same framing: the wording
-  // arms therefore read only the output before any test phase started, where
-  // Maven's own launch, dependency, and disk failures precede every test
-  // echo. Exit-0 scans keep the whole output.
-  const wordingOutput =
+  // own failures there — and the acquisition scans below read the WHOLE
+  // output: `-pl <mod> -am` builds AND tests the upstream modules first, so
+  // the first `[INFO] Running` line prints long before the changed module
+  // is even resolved, and a dependency-resolution, launch, or disk death
+  // after it is still the run's own death. Cutting at the first test phase
+  // filed a transient registry outage (and a mid-command ENOSPC) as a
+  // defect in the PR. Exit-0 scans read the whole output too, gated by
+  // `framingUntrusted` against forged test-stdout framing.
+  // The ONE scan that keeps the prelude-only reading is the source-failure
+  // suppression inside the acquisition carve-out: test stdout can echo
+  // compiler-error shapes, and an echo must not hide a real acquisition
+  // failure behind "the PR broke the build".
+  const preludeOutput =
     result.exitCode === 0 ? result.output : preTestPhaseOutput(result.output);
   const swallowedFailure =
     result.exitCode === 0 &&
     !result.timedOut &&
     !freshFailures &&
     (testsSuppressed ||
-      stdoutTestFailures ||
       (!framingUntrusted &&
-        (isSourceFailure(wordingOutput) ||
-          isDependencyFailure(wordingOutput) ||
-          isLaunchFailure(wordingOutput) ||
-          isGoalFailure(wordingOutput))));
+        (stdoutTestFailures ||
+          isSourceFailure(result.output) ||
+          isDependencyFailure(result.output) ||
+          isLaunchFailure(result.output) ||
+          isGoalFailure(result.output))));
   const ok =
     result.exitCode === 0 &&
     !result.timedOut &&
@@ -2219,7 +2234,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const acquisitionFailure =
     !ok &&
     !freshFailures &&
-    !isSourceFailure(wordingOutput) &&
+    !isSourceFailure(preludeOutput) &&
     // Executed failing tests record themselves in the stdout summaries even
     // when the sweep misses their XML: dependency-flavored assertion text
     // (`Connection refused`, `Unknown host`) otherwise matches the
@@ -2231,10 +2246,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // defense: with green fresh reports and no fail-never, framed wording is
     // forged test stdout, and an exit-0 acquisition finding off it would
     // launder the run.
-    ((((isLaunchFailure(wordingOutput) &&
+    ((((isLaunchFailure(result.output) &&
       !executedWrapperChanged &&
       !(executable === 'mvn' && platformWrapperChanged)) ||
-      (isDependencyFailure(wordingOutput) && !dependencyInputsChanged)) &&
+      (isDependencyFailure(result.output) && !dependencyInputsChanged)) &&
       !framingUntrusted) ||
       // Shape-classified, not wording-classified: bash/dash localize
       // these diagnostics under a non-English LANG, so the match keys on
@@ -2376,12 +2391,6 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       'setting is swallowing them. Treat these as test failures, not a pass.';
   } else if (!ok && result.exitCode === 0 && evidenceCapped) {
     const gapReasons: string[] = [];
-    if (fresh.unparsed > 0) {
-      gapReasons.push(
-        `${fresh.unparsed} fresh Surefire/Failsafe report(s) exceeded the ` +
-          `${MAX_FRESH_REPORTS}-report evidence cap and were not parsed`,
-      );
-    }
     if (fresh.rejected > 0) {
       gapReasons.push(
         `${fresh.rejected} fresh report(s) could not be parsed (oversized or unreadable)`,
@@ -2416,22 +2425,18 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       '`<skipTests>`) suppressed the entire test phase, so nothing was tested. ' +
       'Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0 && neverRan) {
-    report.note = executedWrapperChanged
-      ? `\`${result.command}\` exited 0, but the wrapper it executed is changed ` +
-        'by the diff — a PR-modified wrapper can print Maven output and write fresh ' +
-        'Surefire/Failsafe reports itself, so ' +
-        (summaries.length > 0
-          ? 'neither its output nor its fresh reports prove a build ran'
-          : 'with no fresh reports, nothing proves a build ran') +
-        '. Treat this as an unverified run, not a pass.'
-      : `\`${result.command}\` exited 0 without starting Maven — no fresh reports` +
-        ' and no Maven output at all, so the build never ran and nothing was verified (an empty or ' +
-        'stub wrapper passes the launch gates and exits 0' +
-        (quietConfig
-          ? ', or a `-q`/`--quiet` (or single-dash `-quiet`) setting in `.mvn/maven.config` ' +
-            'suppressed every line Maven prints, which also silences a run that skipped its tests'
-          : '') +
-        '). Treat this as an unverified run, not a pass.';
+    report.note =
+      `\`${result.command}\` exited 0 without starting Maven — no fresh reports` +
+      ' and no Maven output at all, so the build never ran and nothing was verified (an empty or ' +
+      'stub wrapper passes the launch gates and exits 0' +
+      (executedWrapperChanged
+        ? ' — and the wrapper this run executed is changed by the diff'
+        : '') +
+      (quietConfig
+        ? ', or a `-q`/`--quiet` (or single-dash `-quiet`) setting in `.mvn/maven.config` ' +
+          'suppressed every line Maven prints, which also silences a run that skipped its tests'
+        : '') +
+      '). Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0) {
     report.note = failNeverConfig
       ? `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
@@ -2460,6 +2465,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `Maven test passed with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
       `${totals.errors} errors, ${totals.skipped} skipped across ${summaries.length} report(s).`;
+  }
+  if (sampledEvidence) {
+    report.note +=
+      ` Evidence sampled: ${fresh.unparsed} fresh Surefire/Failsafe report(s) ` +
+      `exceeded the ${MAX_FRESH_REPORTS}-report parse cap and were not parsed — ` +
+      'the verdict stands on the parsed reports only.';
   }
   if (!reactorWide) {
     report.note +=

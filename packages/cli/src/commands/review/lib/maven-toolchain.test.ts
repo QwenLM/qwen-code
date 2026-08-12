@@ -1014,8 +1014,11 @@ describe('maven toolchain adapter', () => {
       '[maven-test-report] 20 more clean project rollup(s) omitted: ' +
         'tests=19, failures=0, errors=0, skipped=0',
     );
-    // 100 kept rollup lines pass one test each; the omitted batch passes 19.
-    expect(observedTestCounts(report)).toEqual([119]);
+    // 100 kept rollup lines pass one test each; the omitted batch passes
+    // 19. The second reading is the changed module's (`mod0`) subtotal —
+    // emitted beside the reactor-wide sum so a count claim scoped to the
+    // changed modules can settle on either.
+    expect(observedTestCounts(report)).toEqual([119, 1]);
   });
 
   it('carries clamped passed totals in the failing omission marker', () => {
@@ -1046,8 +1049,10 @@ describe('maven toolchain adapter', () => {
       '[maven-test-report] 3 more failing project rollup(s) omitted: ' +
         'tests=2, failures=0, errors=0, skipped=0',
     );
-    // 100 kept failing rollups pass one test each; the omitted batch passes 2.
-    expect(observedTestCounts(report)).toEqual([102]);
+    // 100 kept failing rollups pass one test each; the omitted batch
+    // passes 2. The second reading is the changed module's (`mod0`)
+    // subtotal, emitted beside the reactor-wide sum.
+    expect(observedTestCounts(report)).toEqual([102, 1]);
   });
 
   it('caps the clean per-project rollup lines', () => {
@@ -2089,12 +2094,15 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.evidenceCapped).toBe(true);
   }, 20_000);
 
-  it('fails closed past the fresh-report evidence cap, and discloses the omission', () => {
+  it('discloses sampling past the fresh-report parse cap instead of failing a green run', () => {
     // The mtime freshness filter accepts any writer, so the PR's own
-    // tests control how many reports exist at parse time. Past the cap
-    // the parse stops; the reports beyond it carry UNKNOWN failure
-    // status, so the run must not certify a clean pass over them — the
-    // evidence block discloses the omission and the verdict fails closed.
+    // tests control how many reports exist at parse time. Surefire
+    // writes one report per test CLASS, so a reactor-wide run on a large
+    // reactor produces more fresh reports than the parse cap — and the
+    // parsed reports are still real evidence: failing closed over the
+    // unread remainder read a fully green run as an uncertified failure
+    // and ruled every Test Plan claim unchecked. The cap now discloses
+    // the sampling and the green verdict stands.
     writeReactor();
 
     const report = runAdapter(['core/src/Main.java'], {
@@ -2113,8 +2121,10 @@ describe('maven toolchain adapter', () => {
       },
     });
 
-    expect(report.ok).toBe(false);
-    expect(report.note).toContain('not certified as a pass');
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+    expect(report.note).toContain('Evidence sampled: 5 fresh');
+    expect(report.note).toContain('1000-report parse cap');
     expect(report.test[0]?.output).toContain(
       '5 more fresh report(s) not parsed',
     );
@@ -3289,29 +3299,37 @@ describe('maven toolchain adapter', () => {
     },
   );
 
-  it('reads a PR-modified stub wrapper printing fake framing as never run', () => {
-    // A wrapper the PR itself modifies is executed deliberately and can
-    // print `[INFO] BUILD SUCCESS` itself: framed output alone cannot
-    // prove Maven ran there — fresh reports must, or the run fails closed.
+  it('classifies a PR-modified wrapper run by its evidence, not its history', () => {
+    // A wrapper the PR modifies CAN forge framing and reports — but when
+    // the run produces them, "never ran" asserts a false contradiction of
+    // a build that demonstrably ran: a plain `.mvn/wrapper/` bump runs
+    // the whole reactor green and must not read as never run. The
+    // evidence decides, whatever the launcher's history.
     writeReactor();
     writeExecutedWrapper();
 
-    const report = runAdapter([executedWrapperName, 'core/src/Main.java'], {
+    const framed = runAdapter([executedWrapperName, 'core/src/Main.java'], {
       exec: (command) =>
         result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' }),
     });
+    expect(framed.ok).toBe(true);
+    expect(framed.test[0]?.neverRan).toBeUndefined();
 
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.neverRan).toBe(true);
-    expect(report.note).toContain('changed by the diff');
+    // The evidence-based check still catches the stub twin: a modified
+    // wrapper that produces NEITHER fresh reports nor Maven output never
+    // started a build, and the note names the diff's part in it.
+    const silent = runAdapter([executedWrapperName, 'core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+    expect(silent.ok).toBe(false);
+    expect(silent.test[0]?.neverRan).toBe(true);
+    expect(silent.note).toContain('changed by the diff');
   });
 
-  it('reads a PR-modified wrapper writing fresh reports as never run', () => {
-    // Fresh reports are the evidence the stub twin demands — but a
-    // PR-modified wrapper runs with write access to the worktree and can
-    // write them itself between the snapshot and the sweep, and the
-    // freshness filter accepts any writer during the run. Nothing about
-    // the run's evidence can prove a build started there.
+  it('reads a PR-modified wrapper writing fresh green reports as a real run', () => {
+    // The sibling twin: fresh reports plus framed output are the evidence
+    // of a build that ran — classifying the run "never ran" over them
+    // asserted a false contradiction for the ordinary wrapper-bump case.
     writeReactor();
     writeExecutedWrapper();
 
@@ -3330,11 +3348,53 @@ describe('maven toolchain adapter', () => {
       },
     });
 
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.neverRan).toBe(true);
-    expect(report.note).toContain('changed by the diff');
-    expect(report.note).toContain('fresh reports');
-    expect(report.note).not.toContain('Maven test passed');
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.neverRan).toBeUndefined();
+    expect(report.note).toContain('Maven test passed');
+  });
+
+  it('does not fail a green run when a test echoes a failing Surefire summary', () => {
+    // Surefire echoes test stdout verbatim: a plugin-integration test
+    // that prints a child build's failing summary records it in the
+    // captured output of a fully green run. With visible green fresh
+    // reports the echoed summary is test output, not Maven's verdict —
+    // positive failure evidence it becomes only where no reports are
+    // visible at all (the relocated-`<reportsDirectory>` shape).
+    writeReactor();
+
+    const green = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0',
+        });
+      },
+    });
+    expect(green.ok).toBe(true);
+    expect(green.test[0]?.swallowedFailure).toBeUndefined();
+    expect(green.note).toContain('Maven test passed');
+
+    // The relocated-reports twin keeps its defense: with no visible
+    // reports, the stdout summary is the only signal.
+    const relocated = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0',
+        }),
+    });
+    expect(relocated.ok).toBe(false);
+    expect(relocated.test[0]?.swallowedFailure).toBe(true);
   });
 
   it('detects single-dash long fail-never and quiet spellings in maven.config', () => {
@@ -3390,15 +3450,17 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('Maven test passed');
   });
 
-  it('does not read test-stdout infrastructure wording at a failing exit as environmental', () => {
-    // On a failing exit Maven frames its own errors, so the exit-0
-    // forgery premise cannot apply — but test stdout echoes the same
-    // framing once tests run. Wording after the first test-phase marker is
-    // an echo: the carve-out reads only the output before the tests
-    // started.
+  it('reads post-test-phase disk and dependency deaths at a failing exit as infrastructure', () => {
+    // `-pl <mod> -am` builds AND tests the upstream modules first, so the
+    // first `[INFO] Running` line prints long before the changed module
+    // resolves — a dependency-resolution or disk death AFTER it is still
+    // the run's own death, and cutting the scan at the first test phase
+    // filed a transient outage (and a mid-command ENOSPC) as a defect in
+    // the PR. A failing exit carries no exit-0 forgery premise, so the
+    // acquisition scans read the whole output.
     writeReactor();
 
-    const forged = runAdapter(['core/src/Main.java'], {
+    const afterTests = runAdapter(['core/src/Main.java'], {
       exec: (command) =>
         result(command, {
           exitCode: 1,
@@ -3407,10 +3469,10 @@ describe('maven toolchain adapter', () => {
             '[ERROR] simulated ENOSPC: No space left on device',
         }),
     });
-    expect(forged.test[0]?.infrastructure).toBeUndefined();
-    expect(forged.note).toContain('Correlate compiler or test errors');
+    expect(afterTests.test[0]?.infrastructure).toBe(true);
+    expect(afterTests.note).toContain('infrastructure evidence');
 
-    // The same wording BEFORE any test phase is Maven's own.
+    // The same wording BEFORE any test phase is Maven's own, unchanged.
     const genuine = runAdapter(['core/src/Main.java'], {
       exec: (command) =>
         result(command, {

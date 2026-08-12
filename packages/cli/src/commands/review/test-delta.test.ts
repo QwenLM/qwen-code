@@ -379,6 +379,40 @@ describe('runTestDelta', () => {
     expect(r.note).toContain('Maven lifecycle commands');
   });
 
+  it('reads the exit-0 Maven verdict flags as failures, not an all-clear', () => {
+    // The adapter marks these runs ok:false at exit 0 — a fail-never
+    // setting swallowing failures, a skip setting suppressing the phase,
+    // a wrapper that never started Maven, evidence the adapter refused to
+    // certify. Reading "no PR-side test command failed" off the exit
+    // codes alone would state the opposite of build-test's verdict. The
+    // commands are still never re-executed (the npm rerun grammar), but
+    // they join the disclosure instead of the reassuring all-clear.
+    for (const flag of [
+      { swallowedFailure: true },
+      { testsSuppressed: true },
+      { neverRan: true },
+      { evidenceCapped: true },
+    ] as const) {
+      const ran: string[] = [];
+      const r = runWith(
+        [
+          cmd({
+            command: './mvnw --batch-mode --no-transfer-progress test',
+            exitCode: 0,
+            ...flag,
+          }),
+        ],
+        (command) => {
+          ran.push(command);
+          return cmd({ command, output: '' });
+        },
+      );
+      expect(ran).toEqual([]);
+      expect(r.note).not.toContain('no PR-side test command failed');
+      expect(r.note).toContain('outside the npm rerun grammar');
+    }
+  });
+
   it('reruns both shapes build-test actually emits', () => {
     const ran: string[] = [];
     runWith(

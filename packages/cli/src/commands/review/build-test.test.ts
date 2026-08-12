@@ -216,10 +216,14 @@ describe('runBuildTest', () => {
     });
   });
 
-  it('fails closed when npm and Maven both apply at the root', () => {
+  it('prefers npm and discloses the Maven half when both apply at the root', () => {
+    // Running NOTHING at all on this shape shipped a broken JS build
+    // through review with zero evidence — npm is what a review verified
+    // here before the Maven adapter existed, so it runs, and the note
+    // discloses the Maven half a green npm run must not certify.
     writeFileSync(
       join(root, 'package.json'),
-      JSON.stringify({ scripts: { build: 'tsc' } }),
+      JSON.stringify({ name: 'polyglot', scripts: { build: 'exit 0' } }),
     );
     writeFileSync(join(root, 'pom.xml'), '<project/>');
     writePlan(['src/a.ts']);
@@ -227,15 +231,22 @@ describe('runBuildTest', () => {
     const rep = runBuildTest({
       plan: planPath,
       worktree: root,
-      timeout: 5,
+      timeout: 60,
       install: false,
+      exec: (command) => ({
+        command,
+        exitCode: 0,
+        seconds: 1,
+        timedOut: false,
+        output: '',
+      }),
     });
 
-    expect(rep.toolchain).toBe('unsupported');
-    expect(rep.build).toEqual([]);
-    expect(rep.test).toEqual([]);
-    expect(rep.note).toContain('Both npm and Maven apply');
-    expect(rep.note).toContain('will not guess');
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.build.length).toBeGreaterThan(0);
+    expect(rep.ok).toBe(true);
+    expect(rep.note).toContain('Maven also applies');
+    expect(rep.note).toContain('NOT verified');
   });
 
   it('coerces fractional and zero deadlines at the spawn boundary', () => {
@@ -1224,6 +1235,28 @@ describe('runBuildTest', () => {
       'y'.repeat(9000);
     const trimmed = trimOutput(input);
     expect(trimmed.text).toContain(evidence);
+    expect(trimmed.evidenceDropped).toBe(false);
+  });
+
+  it('keeps the skipped-tests marker when benign matches outgrow the rescue cap', () => {
+    // The marker carries a VERDICT (suppression), not a count: with benign
+    // matches filling the 40 rescue slots, the benign classification
+    // dropped every `Tests are skipped.` line from the rescued middle
+    // while `evidenceDropped` stayed false — and the adapter certified a
+    // run that tested zero. As evidence, the marker takes a slot ahead of
+    // benign lines.
+    const marker = '[INFO] Tests are skipped.';
+    const benign = Array.from(
+      { length: 50 },
+      () => '[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0',
+    ).join('\n');
+    const input =
+      'head\n' +
+      'x'.repeat(3000) +
+      `\n${benign}\n${marker}\n` +
+      'y'.repeat(9000);
+    const trimmed = trimOutput(input);
+    expect(trimmed.text).toContain(marker);
     expect(trimmed.evidenceDropped).toBe(false);
   });
 

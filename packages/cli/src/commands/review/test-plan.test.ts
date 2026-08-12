@@ -429,6 +429,48 @@ describe('observedTestCounts', () => {
     ).toEqual([8919]);
   });
 
+  it('emits the changed-module subtotal beside the -am reactor total', () => {
+    // `-pl <modules> -am` also tests the UPSTREAM closure: a count claim
+    // about the changed modules must be able to match their subtotal, not
+    // only the reactor-wide sum — "42 tests pass" for module `core`
+    // otherwise reads `differs` against a 187 total that includes
+    // upstream `common`'s 145.
+    const scoped = {
+      test: [
+        {
+          command:
+            './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+          exitCode: 0,
+          seconds: 10,
+          timedOut: false,
+          maven: { lifecycle: 'test', modules: ['core'], alsoMake: true },
+          output:
+            '[maven-test-report] common (12 report(s)): tests=145, failures=0, errors=0, skipped=0\n' +
+            '[maven-test-report] core (4 report(s)): tests=42, failures=0, errors=0, skipped=0',
+        },
+      ],
+    } as unknown as BuildTestReport;
+    expect(observedTestCounts(scoped)).toEqual([187, 42]);
+
+    // A reactor-wide run carries no module list: the total is the only
+    // reading.
+    const reactorWide = {
+      test: [
+        {
+          command: './mvnw --batch-mode --no-transfer-progress test',
+          exitCode: 0,
+          seconds: 10,
+          timedOut: false,
+          maven: { lifecycle: 'test', modules: null, alsoMake: false },
+          output:
+            '[maven-test-report] common (12 report(s)): tests=145, failures=0, errors=0, skipped=0\n' +
+            '[maven-test-report] core (4 report(s)): tests=42, failures=0, errors=0, skipped=0',
+        },
+      ],
+    } as unknown as BuildTestReport;
+    expect(observedTestCounts(reactorWide)).toEqual([187]);
+  });
+
   it('counts no tests from an interrupted or infrastructure-classified run', () => {
     // An interrupted run's partial counts must not adjudicate a count claim
     // — the same exclusion finished() applies to command claims.
@@ -1243,13 +1285,15 @@ describe('runTestPlan', () => {
         ).toEqual([]);
       }
 
-      // The bare deep spelling is a path-shaped span: it must still extract
-      // as a command and never leak a path claim.
+      // The bare deep spelling is a FILENAME claim about the tree: the
+      // command reading can never settle (no phase to compare against any
+      // recorded run), and the path reading is the verification the token
+      // actually is.
       const bare = extractClaims('## Test Plan\n\nRan `../../mvnw.cmd`');
       expect(
-        bare.some((c) => c.kind === 'command' && c.text === '../../mvnw.cmd'),
+        bare.some((c) => c.kind === 'path' && c.text === '../../mvnw.cmd'),
       ).toBe(true);
-      expect(bare.filter((c) => c.kind === 'path')).toEqual([]);
+      expect(bare.filter((c) => c.kind === 'command')).toEqual([]);
     });
 
     it('matches bare Maven wrapper spellings to a scoped lifecycle run', () => {
@@ -1488,31 +1532,40 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toContain('fresh Surefire/Failsafe reports');
     });
 
-    it('does not settle a bare Maven runner claim from a module-scoped run', () => {
-      // `./mvnw` alone carries no lifecycle: prefix-matching it would
-      // certify or deny the WHOLE wrapper run from one module's test.
-      const bt = {
-        build: [],
-        test: [mavenCmd()],
-      } as unknown as BuildTestReport;
-      const r = run('## Test Plan\n\nRan `./mvnw`', [], bt);
-      const claim = r.claims.find((c) => c.text === './mvnw');
-      expect(claim?.verdict).toBe('unchecked');
-      expect(claim?.note).toContain('Maven command was not run');
-      // The bare runner token is not a path claim either.
+    it('verifies a bare wrapper token as a path claim, not an unsettleable command', () => {
+      // `./mvnw` alone carries no lifecycle: the command reading can
+      // never settle, and it used to suppress the path verification the
+      // token actually is — "added `./mvnw`" is a claim about the tree.
+      // As a path claim it reproduces when the wrapper is in the tree...
+      writeFileSync(join(dir, 'mvnw'), '#!/bin/sh\n');
+      const present = run('## Test Plan\n\nAdded `./mvnw`');
+      expect(verdictOf(present.claims, './mvnw')).toBe('reproduces');
       expect(
-        r.claims.filter((c) => c.kind === 'path' && c.text === './mvnw'),
+        present.claims.filter(
+          (c) => c.kind === 'command' && c.text === './mvnw',
+        ),
       ).toEqual([]);
+
+      // ...and contradicts when the tree does not hold it.
+      rmSync(join(dir, 'mvnw'));
+      const absent = run('## Test Plan\n\nAdded `./mvnw`');
+      expect(verdictOf(absent.claims, './mvnw')).toBe('contradicted');
     });
 
     it('gives Maven wording to Maven claims whose final token is not a lifecycle', () => {
-      for (const command of ['mvn', 'mvn test -Dtest=ChangedTest']) {
+      for (const command of ['mvn test -Dtest=ChangedTest']) {
         const r = run(`## Test Plan\n\nRan \`${command}\``);
         const claim = r.claims.find((c) => c.text === command);
         expect(claim?.verdict).toBe('unchecked');
         expect(claim?.note).toContain('Maven command was not run');
         expect(claim?.note).not.toContain('npm script');
       }
+
+      // A bare runner token naming no work is no claim at all: the
+      // command reading can never settle, and without a `./` or path
+      // shape there is no filename reading either.
+      const bare = run('## Test Plan\n\nRan `mvn`');
+      expect(bare.claims.filter((c) => c.text === 'mvn')).toEqual([]);
     });
 
     it('settles a multi-token Maven lifecycle claim on its final phase', () => {
@@ -2259,6 +2312,27 @@ describe('runTestPlan', () => {
       );
       expect(verdictOf(different.claims, "./mvnw -pl 'my module' test")).toBe(
         'unchecked',
+      );
+    });
+
+    it('settles adjacent-quote -pl selectors shell-quote joins into one word', () => {
+      // A selector whose quoting does not open on a token boundary —
+      // `core","other`'s adjacent quotes — leaked past a whitespace-split
+      // walker as separate tokens and settled the wrong module set (or
+      // fell through to a false "was not run by this review"). A shell
+      // joins them into one word, and the claim parses like a shell.
+      const recorded = {
+        build: [],
+        test: [mavenCmd({ modules: ['core', 'other'] })],
+      } as unknown as BuildTestReport;
+
+      const adjacent = run(
+        '## Test Plan\n\nRan `./mvnw -pl core","other test`',
+        [],
+        recorded,
+      );
+      expect(verdictOf(adjacent.claims, './mvnw -pl core","other test')).toBe(
+        'reproduces',
       );
     });
 
@@ -3296,6 +3370,34 @@ describe('runTestPlan', () => {
       expect(claim?.verdict).toBe('differs');
       expect(claim?.observed).toBe('472 passed');
       expect(r.claims.some((c) => c.verdict === 'contradicted')).toBe(false);
+    });
+
+    it('reproduces a changed-module count on the -am subtotal, not only the reactor total', () => {
+      // `-pl core -am` also tests the upstream closure: the claim "42
+      // tests passed" for `core` matches the changed-module subtotal even
+      // though the reactor-wide sum is 187 — both readings are emitted,
+      // and either settles the claim.
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+            exitCode: 0,
+            seconds: 10,
+            timedOut: false,
+            maven: { lifecycle: 'test', modules: ['core'], alsoMake: true },
+            output:
+              '[maven-test-report] common (12 report(s)): tests=145, failures=0, errors=0, skipped=0\n' +
+              '[maven-test-report] core (4 report(s)): tests=42, failures=0, errors=0, skipped=0',
+          },
+        ],
+      } as unknown as BuildTestReport;
+
+      const r = run('## Test Plan\n\n42 tests passed', [], bt);
+      expect(verdictOf(r.claims, '42 tests passed')).toBe('reproduces');
+      const total = run('## Test Plan\n\n187 tests passed', [], bt);
+      expect(verdictOf(total.claims, '187 tests passed')).toBe('reproduces');
     });
 
     it('is unchecked when no suite reported a count', () => {

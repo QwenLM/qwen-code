@@ -106,12 +106,16 @@ export interface CommandResult {
    */
   swallowedFailure?: boolean;
   /**
-   * Part of the command's fresh test-report evidence was never read (past
-   * the parse cap, rejected by the parser, or unseen past a truncated
-   * sweep), so the adapter refused to certify the run: `test-plan` must
-   * not settle a Test Plan claim against it. Exit-code independent — on an
-   * exit-0 run it withholds a pass; on a non-zero exit the exit remains
-   * definitive.
+   * The command's verdict cannot stand on its evidence: fresh reports the
+   * parser rejected or a truncated sweep never saw, the output trim
+   * dropped failure-evidence lines past its rescue cap, or a
+   * `.mvn/maven.config` log-file setting redirected the build output away
+   * from every scan. The adapter refused to certify the run, and
+   * `test-plan` must not settle a Test Plan claim against it. Exit-code
+   * independent — on an exit-0 run it withholds a pass; on a non-zero exit
+   * the exit remains definitive. (Reports past the parse CAP are the
+   * opposite: disclosed in the note, because the parsed reports remain
+   * evidence.)
    */
   evidenceCapped?: boolean;
   /**
@@ -121,11 +125,10 @@ export interface CommandResult {
    */
   testsSuppressed?: boolean;
   /**
-   * The command exited 0 but cannot prove the toolchain started: with an
-   * unmodified launcher, no fresh reports and no toolchain output (a stub
-   * wrapper); a diff-modified launcher always lands here, because it can
-   * forge both. The run verified nothing, and `test-plan` must not rule a
-   * claim reproduced against it.
+   * The command exited 0 but cannot prove the toolchain started: no fresh
+   * reports and no toolchain output (an empty or stub wrapper passes the
+   * launch gates and exits 0). The run verified nothing, and `test-plan`
+   * must not rule a claim reproduced against it.
    */
   neverRan?: boolean;
   /**
@@ -298,21 +301,22 @@ export function trimOutput(s: string): {
       isSourceFailureLine(stripped) ||
       isGoalFailureLine(stripped) ||
       isDiskFailureLine(stripped) ||
-      isFailingSurefireSummaryLine(stripped)
+      isFailingSurefireSummaryLine(stripped) ||
+      // The adapter's testsSuppressed guard reads the skip marker from this
+      // trimmed output; a large reactor's trailing Reactor Summary pushes
+      // every `Tests are skipped.` line into the omitted middle, and losing
+      // it certifies a run that tested zero. The marker carries a verdict
+      // (suppression), so it takes an evidence slot — benign matches must
+      // not exhaust the cap and drop it while `evidenceDropped` stays
+      // false.
+      isTestsSkippedLine(stripped)
     ) {
       matched.push({ line, index, evidence: true });
       return;
     }
-    // The adapter's testsSuppressed guard reads the skip marker from this
-    // trimmed output; a large reactor's trailing Reactor Summary pushes
-    // every `Tests are skipped.` line into the omitted middle, and losing
-    // it certifies a run that tested zero. Green Surefire summaries and
-    // runner summaries carry counts, never verdicts.
-    if (
-      isSurefireSummaryLine(stripped) ||
-      isTestsSkippedLine(stripped) ||
-      RUNNER_SUMMARY_RE.test(stripped)
-    ) {
+    // Green Surefire summaries and runner summaries carry counts, never
+    // verdicts.
+    if (isSurefireSummaryLine(stripped) || RUNNER_SUMMARY_RE.test(stripped)) {
       matched.push({ line, index, evidence: false });
     }
   });
@@ -498,22 +502,17 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   );
   if (!adapter) {
     if (applicable.length > 1) {
-      return {
-        toolchain: 'unsupported',
-        affected: [],
-        buildSet: [],
-        widenedWith: [],
-        install: null,
-        build: [],
-        test: [],
-        ok: true,
-        timedOut: [],
-        note:
-          'Both npm and Maven apply at the repository root. build-test will not ' +
-          'guess which toolchain owns this diff, so it ran nothing — report the ' +
-          'ambiguity as a handoff instead of substituting ad hoc build or test ' +
-          'commands.',
-      };
+      // Both toolchains apply at the root. Preferring npm preserves what a
+      // review verified on this shape before the Maven adapter existed —
+      // running NOTHING at all shipped a broken JS build through review
+      // with zero evidence. The note discloses the Maven half so a green
+      // npm run never certifies it.
+      const report = npmToolchainAdapter.run(runArgs);
+      report.note +=
+        ' Mixed root: Maven also applies at the repository root (pom.xml), but ' +
+        'this run executed the npm toolchain only — Maven-built modules were ' +
+        'NOT verified here.';
+      return report;
     }
     // A root package.json marks an npm-shaped repo that npm's own gate refused
     // (an unmodeled workspace glob, workspaces that resolve to no package, or

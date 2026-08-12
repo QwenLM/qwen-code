@@ -277,9 +277,21 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     );
   }
 
-  // Failed for real: a timeout is an infrastructure result and reruns as one.
+  // Failed for real: a timeout is an infrastructure result and reruns as
+  // one. Maven's exit-0 verdict flags are failures too — the adapter marks
+  // the report ok:false with them, and reading "no PR-side test command
+  // failed" off exit codes alone would state the opposite of build-test's
+  // verdict for a run that swallowed failures or tested nothing. They are
+  // still never re-executed (the npm rerun grammar below), but they join
+  // the disclosure instead of the reassuring all-clear.
   const failed = (report.test ?? []).filter(
-    (t) => !t.timedOut && t.exitCode !== 0,
+    (t) =>
+      !t.timedOut &&
+      (t.exitCode !== 0 ||
+        t.swallowedFailure === true ||
+        t.testsSuppressed === true ||
+        t.neverRan === true ||
+        t.evidenceCapped === true),
   );
   if (failed.length === 0) {
     return empty(

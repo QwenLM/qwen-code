@@ -45,6 +45,7 @@
 // author can apply. It is the same disclosed-but-not-capping treatment
 // `script-lint` gives a deferred checker, for the same reason.
 
+import { parse as parseShellQuote } from 'shell-quote';
 import type { CommandModule } from 'yargs';
 import {
   existsSync,
@@ -375,13 +376,19 @@ export function extractClaims(section: string): Array<{
     // A unified diff pasted into the Test Plan (the template's Evidence
     // section invites it) is not a set of path claims about the tree.
     if (/^(?:diff --git|---|\+\+\+|@@)\s/.test(span)) continue;
-    if (RUNNER_RE.test(span) || MAVEN_RUNNER_RE.test(span)) {
+    // A bare Maven runner token WITHOUT a lifecycle phase (`./mvnw`) is a
+    // FILENAME, not a command claim: the command reading can never settle
+    // (no phase to compare against any recorded run) and it suppressed the
+    // path verification the same token actually is — "added `./mvnw`" is a
+    // claim about the tree. Spans naming any work beyond the runner stay
+    // commands; a work this review never runs reads `unchecked` there.
+    const mavenCommand =
+      MAVEN_RUNNER_RE.test(span) && span.split(/\s+/).length > 1;
+    if (RUNNER_RE.test(span) || mavenCommand) {
       push('command', span);
     }
     if (PATH_RE.test(span)) {
-      // A bare Maven runner token (`./mvnw`) is a command, not a claim
-      // about the tree, even though its spelling happens to match PATH_RE.
-      if (isPathClaim(span) && !MAVEN_RUNNER_RE.test(span)) push('path', span);
+      if (isPathClaim(span)) push('path', span);
       continue;
     }
     // Paths named as ARGUMENTS of a command line. A Test Plan's most checkable
@@ -472,8 +479,8 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // suite, and its partial counts must not adjudicate a count claim. A
     // fail-never run that swallowed failures is the same — the field's
     // contract forbids ruling any claim reproduced against it — and so is a
-    // run whose evidence the adapter refused to certify: its parsed subset
-    // is partial by definition.
+    // run whose evidence the adapter refused to certify: part of it was
+    // never read.
     if (
       cmd.timedOut ||
       cmd.exitCode === null ||
@@ -492,7 +499,7 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // vitest separates with ` | `, jest with `, `.
     const re = /^\s*Tests:?\s+(?:\d+\s+\w+\s*[,|]\s*)*(\d+)\s+passed/gim;
     const mavenRe =
-      /^\[maven-test-report\]\s+.+?:\s+tests=(\d+),\s+failures=(\d+),\s+errors=(\d+),\s+skipped=(\d+)$/gim;
+      /^\[maven-test-report\]\s+(.+?):\s+tests=(\d+),\s+failures=(\d+),\s+errors=(\d+),\s+skipped=(\d+)$/gim;
     // Strip ANSI SGR sequences first. A real runner writes its summary through
     // a color-enabled pipe, so the kept text reads
     // `Tests\x1b[2m  \x1b[22m\x1b[1m3 failed\x1b[22m…` — the codes sit BETWEEN
@@ -516,20 +523,47 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
         saw = true;
       }
     }
+    // `-pl <modules> -am` also tests the UPSTREAM closure, and one rollup
+    // line per project records it. A count claim about the changed modules
+    // must be able to match their SUBTOTAL, not only the reactor-wide sum —
+    // "42 tests pass" for module `core` otherwise reads `differs` against
+    // a 187 total that includes upstream `common`'s 145, even though the
+    // `-am` carve-out exists precisely because upstream evidence is out of
+    // the claim's scope. Collect the per-project lines and emit both
+    // readings; ruleCount settles on either.
+    const moduleSet = cmd.maven?.modules ?? null;
+    let moduleSubtotal = 0;
+    let sawModuleLine = false;
     if (isMavenCommand) {
       while ((m = mavenRe.exec(text))) {
         // Surefire does not guarantee tests >= failures + errors + skipped
         // (class-level @Disabled and rerunFailingTestsCount reruns both perturb
         // it), and this sum spans every report of the command: one negative
         // value would silently cancel legitimate counts from its neighbours.
-        total += Math.max(
+        const passed = Math.max(
           0,
-          Number(m[1]) - Number(m[2]) - Number(m[3]) - Number(m[4]),
+          Number(m[2]) - Number(m[3]) - Number(m[4]) - Number(m[5]),
         );
+        total += passed;
         saw = true;
+        // The rollup lines append ` (N report(s))` to the project dir;
+        // strip it to compare against the recorded module names. The
+        // omitted-rollup marker lines carry no module attribution and
+        // never match a `-pl` module name, so they stay in the total only.
+        if (moduleSet !== null) {
+          const project = m[1].replace(
+            / \(\d+ (?:failing )?report\(s\)\)$/,
+            '',
+          );
+          if (moduleSet.includes(project)) {
+            moduleSubtotal += passed;
+            sawModuleLine = true;
+          }
+        }
       }
     }
     if (saw) counts.push(total);
+    if (sawModuleLine && moduleSubtotal !== total) counts.push(moduleSubtotal);
   }
   return counts;
 }
@@ -773,54 +807,72 @@ const MAVEN_SINGLE_DASH_LONGS = new Set([
 
 function normalizeMavenSingleDashLongTokens(tokens: string[]): string[] {
   return tokens.map((token) => {
-    // One layer of surrounding quotes hides the flag from the head check
-    // exactly like it hides it from the scope guards below; the rewrite
-    // returns the UNQUOTED word, so a quote spanning a flag=value pair
-    // with a space survives as one token for every walker downstream.
-    const inner = unquoteToken(token);
-    const eq = inner.indexOf('=');
-    const head = eq === -1 ? inner : inner.slice(0, eq);
+    const eq = token.indexOf('=');
+    const head = eq === -1 ? token : token.slice(0, eq);
     if (
       head.length > 2 &&
       head.startsWith('-') &&
       !head.startsWith('--') &&
       MAVEN_SINGLE_DASH_LONGS.has(head.slice(1))
     ) {
-      return `-${inner}`;
+      return `-${token}`;
     }
-    return inner;
+    return token;
   });
 }
 
 /**
- * The tokens of a Maven command line that are not consumed as flag values —
- * quote-aware like mavenPlModules, so a quoted selector is one value.
+ * shell-quote's parse() reduced to plain strings — the same word-splitting
+ * a shell performs: quoted selectors arrive as one unquoted word (a quote
+ * spanning a flag=value pair with a space, adjacent quoting like
+ * `-pl core","other`, backslash escapes, and the `'\''` apostrophe dance
+ * all resolve), and control operators and glob patterns survive as their
+ * literal text so the grammar below treats them like any other unmodeled
+ * token. `$NAME` references stay literal instead of expanding to empty.
+ */
+function shellTokens(text: string): string[] {
+  const literalEnv = (name: string): string => `$${name}`;
+  // shellQuotePath's `'\''` dance for dirs with an apostrophe is the ONE
+  // escape sequence claims carry: substitute it before the parse, because
+  // the parse runs with escaping disabled — backslashes elsewhere are
+  // Windows path separators (`-pl .\core`), not shell escapes, and must
+  // survive as literal text for the module-dir normalization below.
+  const danced = text.replace(/'\\''/g, '\u0001');
+  return parseShellQuote(danced, literalEnv, { escape: '\u0000' })
+    .map((entry): string => {
+      // eslint-disable-next-line no-control-regex -- the dance sentinel is the character under test
+      if (typeof entry === 'string') return entry.replace(/\u0001/g, "'");
+      if (typeof entry === 'object' && entry !== null) {
+        if ('pattern' in entry && typeof entry.pattern === 'string') {
+          return entry.pattern;
+        }
+        if ('op' in entry && typeof entry.op === 'string') return entry.op;
+      }
+      return '';
+    })
+    .filter((token) => token.length > 0);
+}
+
+/**
+ * The tokens of a Maven command line that are not consumed as flag values.
+ * shellTokens already resolved the quoting, so a space-separated value
+ * flag consumes exactly the next token and the attached `<flag>=<value>`
+ * form carries its value in-token.
  */
 function mavenPositionalTokens(tokens: string[]): string[] {
   const positional: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    // A quoted flag (`"-l"`) is the same flag once its quote layer is
-    // stripped: matching raw tokens let it bypass value consumption and
-    // its value would be read as a positional phase. Positionals are
-    // pushed unquoted for the same reason — `"clean"` names the same
-    // phase as `clean`.
-    const token = unquoteToken(tokens[i]);
+    const token = tokens[i];
     if (MAVEN_VALUE_FLAGS.has(token)) {
       i += 1;
-      if (tokens[i] !== undefined) i = skipQuotedTail(tokens, i, tokens[i]);
       continue;
     }
-    // The attached `<flag>=<value>` form of EVERY value flag carries the
-    // same quoted value in-token: the split broke it at the space, so
-    // consume through the closing quote here too, or a phase-looking word
-    // inside the value (`-l='a test -B'`) would leak into the positionals.
     const eq = token.indexOf('=');
     if (
       eq > 0 &&
       token.startsWith('-') &&
       MAVEN_VALUE_FLAGS.has(token.slice(0, eq))
     ) {
-      i = skipQuotedTail(tokens, i, token.slice(eq + 1));
       continue;
     }
     positional.push(token);
@@ -836,21 +888,11 @@ function mavenPositionalTokens(tokens: string[]): string[] {
  */
 function mavenDanglingValueFlag(tokens: string[]): boolean {
   for (let i = 0; i < tokens.length; i++) {
-    const token = unquoteToken(tokens[i]);
-    if (MAVEN_VALUE_FLAGS.has(token)) {
-      const next = tokens[i + 1];
-      if (next === undefined) return true;
+    // The attached `<flag>=<value>` form carries its value in-token, so
+    // only the space-separated spelling can dangle.
+    if (MAVEN_VALUE_FLAGS.has(tokens[i])) {
+      if (tokens[i + 1] === undefined) return true;
       i += 1;
-      i = skipQuotedTail(tokens, i, next);
-      continue;
-    }
-    const eq = token.indexOf('=');
-    if (
-      eq > 0 &&
-      token.startsWith('-') &&
-      MAVEN_VALUE_FLAGS.has(token.slice(0, eq))
-    ) {
-      i = skipQuotedTail(tokens, i, token.slice(eq + 1));
     }
   }
   return false;
@@ -880,65 +922,22 @@ function bareMavenLifecycle(command: string): string | null {
 /** True when a command carries `-am`/`--also-make` (upstream closure). */
 function mavenHasAlsoMake(tokens: string[]): boolean {
   for (let i = 0; i < tokens.length; i++) {
-    // A quoted flag (`"-am"`, `"-pl"`) is the same flag once its quote
-    // layer is stripped: comparing raw tokens let a quoted `-am` escape
-    // detection entirely.
-    const token = unquoteToken(tokens[i]);
-    // A quoted `-pl` selector can carry `-am` inside a module dir name
-    // (`-pl 'foo -am bar'` — spaces pass the POM entry gate); consume the
-    // whole selector so the split inside it is not read as the flag. The
-    // attached `-pl='foo -am bar'` form breaks the same way at the space,
-    // so it gets the same consumption.
-    if (
-      token === '-pl' ||
-      token === '--projects' ||
-      token.startsWith('-pl=') ||
-      token.startsWith('--projects=')
-    ) {
-      let raw: string | undefined;
-      if (token === '-pl' || token === '--projects') {
-        i += 1;
-        raw = tokens[i];
-      } else {
-        raw = token.slice(token.indexOf('=') + 1);
-      }
-      if (raw === undefined) break;
-      i = skipQuotedTail(tokens, i, raw);
+    const token = tokens[i];
+    // A `-pl` selector can carry `-am` inside a module dir name (`-pl 'foo
+    // -am bar'` — spaces pass the POM entry gate); shellTokens keeps the
+    // quoted selector one token and the space-separated spelling consumes
+    // the next one — either way the selector's interior is never read as
+    // the flag.
+    if (token === '-pl' || token === '--projects') {
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('-pl=') || token.startsWith('--projects=')) {
       continue;
     }
     if (token === '-am' || token === '--also-make') return true;
   }
   return false;
-}
-
-/**
- * A quoted shell word whose opening quote did not close inside its first
- * token (the whitespace split broke it): consume through the token carrying
- * the closing quote, and check AFTER advancing — a bare opening-quote token
- * (a value whose first word is empty, `-l ' x'` split at the space) ends in
- * its own quote and otherwise satisfies the exit before consuming anything.
- */
-function skipQuotedTail(tokens: string[], i: number, first: string): number {
-  const quote =
-    first.startsWith("'") || first.startsWith('"') ? first[0] : null;
-  if (quote === null || (first.length > 1 && first.endsWith(quote))) return i;
-  while (i + 1 < tokens.length) {
-    i += 1;
-    if (tokens[i].endsWith(quote)) break;
-  }
-  return i;
-}
-
-/** Strip one layer of matching surrounding quotes from a claim token. */
-function unquoteToken(token: string): string {
-  if (
-    token.length >= 2 &&
-    (token.startsWith("'") || token.startsWith('"')) &&
-    token.endsWith(token[0])
-  ) {
-    return token.slice(1, -1);
-  }
-  return token;
 }
 
 /** The module set of a command's `-pl`/`--projects` selector, sorted. */
@@ -949,48 +948,21 @@ function mavenPlModules(tokens: string[]): string[] | null {
   // m2 alone.
   const values: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    // A quoted flag token (`mvn "-pl" core`) is the same flag once its quote
-    // layer is stripped.
-    const token = unquoteToken(tokens[i]);
+    const token = tokens[i];
     let raw: string | undefined;
-    // Advance BEFORE reading, like the sibling token walkers: reading
-    // tokens[i + 1] here made the rejoin loop below push that same token
-    // again, duplicating the first word of every space-bearing selector.
+    // Advance BEFORE reading, like the sibling token walkers.
     if (token === '-pl' || token === '--projects') {
       i += 1;
       raw = tokens[i];
     } else if (token.startsWith('-pl=')) raw = token.slice('-pl='.length);
-    else if (token.startsWith('--projects='))
+    else if (token.startsWith('--projects=')) {
       raw = token.slice('--projects='.length);
+    }
     if (raw === undefined) continue;
-    // A module dir can carry a space (it passes the POM entry gate), so
-    // shellSelector wraps the selector in quotes, and the split above broke
-    // it into its first word — collapsing two different module sets that
-    // share one. Rejoin through the closing quote before splitting on `,` —
-    // checking AFTER the advance, or a bare opening-quote token satisfies
-    // the exit before anything is consumed.
-    const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
-    if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
-      const parts = [raw];
-      while (i + 1 < tokens.length) {
-        i += 1;
-        parts.push(tokens[i]);
-        if (tokens[i].endsWith(quote)) break;
-      }
-      raw = parts.join(' ');
-    }
-    let value: string;
-    if (quote !== null && raw.length > 1 && raw.endsWith(quote)) {
-      value = raw.slice(1, -1);
-    } else {
-      value = raw;
-    }
-    // Undo shellQuotePath's `'\''` dance for dirs with an apostrophe. The
-    // claim pipeline strips one quote layer from every token before this
-    // walker runs, so the space-separated spelling arrives with the dance
-    // exposed and no surrounding quote left to detect — apply it regardless.
-    value = value.replace(/'\\''/g, "'");
-    values.push(value);
+    // shellTokens already resolved the quoting — space-bearing selectors,
+    // adjacent quoting, and the `'\''` apostrophe dance all arrive as one
+    // plain unquoted word, so the value splits on `,` as-is.
+    values.push(raw);
   }
   if (values.length === 0) return null;
   const modules = [
@@ -998,14 +970,12 @@ function mavenPlModules(tokens: string[]): string[] | null {
       values
         .flatMap((value) => value.split(','))
         .map((module) => {
-          const trimmed = module.trim();
-          // Quoted and unquoted spellings compare equal.
-          const quoted = /^(['"])(.*)\1$/.exec(trimmed);
           // Windows backslash selectors (`.\core`) and trailing-slash
           // spellings (`core/`) name the same module dir as their POSIX
           // twins; normalize them so the claim can settle against the
           // recorded dir instead of silently discarding its evidence.
-          const unquoted = (quoted ? quoted[2] : trimmed)
+          const unquoted = module
+            .trim()
             .replace(/\\/g, '/')
             .replace(/\/+$/, '');
           // A `[groupId]:artifactId` coordinate selector names a different
@@ -1029,36 +999,6 @@ function mavenPlModules(tokens: string[]): string[] | null {
     ),
   ].sort();
   return modules.length > 0 ? modules : null;
-}
-
-/**
- * Collapse tokens a quote spans back into one shell word: the whitespace
- * split broke `"-settings=my settings.xml"` into three, and normalization
- * plus every scope walker below model the UNBROKEN word. The same rejoin
- * the `-pl` value walkers apply, applied to the whole claim once.
- */
-function rejoinQuotedTokens(tokens: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-    const quote =
-      token.startsWith("'") || token.startsWith('"') ? token[0] : null;
-    if (quote === null || (token.length > 1 && token.endsWith(quote))) {
-      out.push(token);
-      continue;
-    }
-    // Check AFTER the advance: a bare opening-quote token (a quoted value
-    // whose first word is empty) ends in its own quote and otherwise
-    // satisfies the exit immediately, leaking the interior fragments.
-    const parts = [token];
-    while (i + 1 < tokens.length) {
-      i += 1;
-      parts.push(tokens[i]);
-      if (tokens[i].endsWith(quote)) break;
-    }
-    out.push(parts.join(' '));
-  }
-  return out;
 }
 
 /**
@@ -1091,24 +1031,21 @@ function ruleCommand(
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
   const rawClaimed = text.trim();
-  // A quote spanning a flag=value pair with a space (`"-settings=my
-  // settings.xml"`, `"-Dfoo=bar baz"`) is ONE shell word; the whitespace
-  // split broke it, and normalization plus every scope walker below would
-  // read the fragments past their guards. Rejoin before anything parses
-  // the claim, and hand the TOKEN LIST to every walker — rejoining into a
-  // string and re-splitting would break the word again at its inner
-  // space. Maven's commons-cli ALSO accepts single-dash spellings of its
-  // long options; normalize them to the `--` forms so they cannot bypass
-  // the grammar below. Both applied to Maven claims only — the comparison
+  // shell-quote splits the claim like a shell would (see shellTokens):
+  // quoted flag=value pairs and selectors stay one word, so normalization
+  // and every scope walker below read the words a shell would hand Maven.
+  // Maven's commons-cli ALSO accepts single-dash spellings of its long
+  // options; normalize them to the `--` forms so they cannot bypass the
+  // grammar below. Both applied to Maven claims only — the comparison
   // against recorded commands is unaffected, because the adapter never
-  // renders those spellings.
+  // renders those spellings. `claimed` keeps the RAW text for the
+  // exact/prefix comparison against recorded command lines, which carry
+  // their own quoting from shellSelector.
   const mavenClaim = MAVEN_RUNNER_RE.test(rawClaimed);
   const claimTokenList = mavenClaim
-    ? normalizeMavenSingleDashLongTokens(
-        rejoinQuotedTokens(rawClaimed.split(/\s+/)),
-      )
+    ? normalizeMavenSingleDashLongTokens(shellTokens(rawClaimed))
     : rawClaimed.split(/\s+/);
-  const claimed = mavenClaim ? claimTokenList.join(' ') : rawClaimed;
+  const claimed = rawClaimed;
   // A workspace-scoped run (`npm run build --workspace=...`) still settles
   // the plan's bare command. Maven scopes before the lifecycle
   // (`./mvnw -pl core -am test`), so compare lifecycle phases there — but the
@@ -1221,10 +1158,9 @@ function ruleCommand(
     // The `-pl=` spelling is still reducible to a module set (the value is
     // in-token); only separator-less attached forms (`-plcore`) are not.
     (token.startsWith('-pl') && token !== '-pl' && !token.startsWith('-pl='));
-  // One layer of surrounding quotes is stripped before the scope checks:
-  // `mvn "-pl" core test` carries the same scoping as the unquoted spelling,
-  // and comparing raw tokens let a quoted flag bypass every guard here.
-  const claimTokens = claimTokenList.map(unquoteToken);
+  // shellTokens already stripped the quoting: `mvn "-pl" core test` carries
+  // the same scoping as the unquoted spelling.
+  const claimTokens = claimTokenList;
   // Lifecycle phases the claim names, in order: a multi-phase claim
   // (`clean test`) runs phases the recorded single-phase run never did.
   // Flag values are excluded: a module dir named `test` handed to `-pl` is
@@ -1329,8 +1265,8 @@ function ruleCommand(
   // A run this review itself classified as infrastructure (a timeout, a
   // spawn-level death, a Maven acquisition failure) is the same evidence the
   // build-test note disavowed as environmental — it must not settle a claim.
-  // Neither may a run whose fresh-report evidence the adapter refused to
-  // certify: its parsed subset is partial by definition.
+  // Neither may a run whose evidence the adapter refused to certify: part
+  // of it was never read.
   const finished = (c: CommandResult): boolean =>
     !c.timedOut &&
     c.exitCode !== null &&
@@ -1662,7 +1598,7 @@ function ruleCommand(
       };
     }
     // A run the adapter refused to certify settles nothing either way:
-    // name the cap rather than letting the claim fall through to the
+    // name the reason rather than letting the claim fall through to the
     // "not run" wording, which would misstate what happened.
     const capped = matches.find((c) => c.evidenceCapped);
     if (capped) {
@@ -1678,9 +1614,9 @@ function ruleCommand(
           verdict: 'contradicted',
           observed: `exit ${capped.exitCode}`,
           note:
-            `${runForm(capped).howItRan}, and it failed — part of its fresh ` +
-            'report evidence was never read (cap, parse rejection, or a truncated ' +
-            'sweep), but the non-zero exit is definitive',
+            `${runForm(capped).howItRan}, and it failed — part of its ` +
+            'evidence was never read (rejected or unseen fresh reports, the ' +
+            'trim rescue cap, or a log-file redirect), but the non-zero exit is definitive',
         };
       }
       // Cap-INDEPENDENT positive failure evidence is definitive the same
@@ -1717,10 +1653,10 @@ function ruleCommand(
           verdict: 'contradicted',
           observed,
           note:
-            `${runForm(capped).howItRan}, and ${cause} — part of its fresh ` +
-            'report evidence was never read (cap, parse rejection, or a ' +
-            'truncated sweep), but that withholds certification of a pass, ' +
-            'it does not excuse what the run DID record',
+            `${runForm(capped).howItRan}, and ${cause} — part of its ` +
+            'evidence was never read (rejected or unseen fresh reports, the ' +
+            'trim rescue cap, or a log-file redirect), but that withholds ' +
+            'certification of a pass, it does not excuse what the run DID record',
         };
       }
       return {
@@ -1728,8 +1664,8 @@ function ruleCommand(
         text,
         verdict: 'unchecked',
         note:
-          `${runForm(capped).howItRan}; part of its fresh report evidence ` +
-          'was never read (cap, parse rejection, or a truncated sweep), so the run was not certified',
+          `${runForm(capped).howItRan}; part of its evidence was never ` +
+          'read (rejected or unseen fresh reports, the trim rescue cap, or a log-file redirect), so the run was not certified',
       };
     }
 

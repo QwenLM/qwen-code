@@ -2096,15 +2096,16 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         'for what `build-test` runs — the `toolchain: "unsupported"` fallback ' +
         'below is the only sanctioned hand-run path',
     );
-    // The unsupported bullet's three steering rules: a fail-closed adapter
-    // result must not be replaced by an ad hoc command, a mixed root runs
-    // neither toolchain ad hoc, and a CI-named command lifts neither rule.
+    // The unsupported bullet's steering rules: a fail-closed adapter
+    // result must not be replaced by an ad hoc command, the mixed-root
+    // note names the Maven half the npm run did not verify (and forbids
+    // filling it ad hoc), and a CI-named command lifts neither rule.
     // Reverting the bullet to the old precedence list left all tests green
     // before these pins.
     expect(p).toContain(
       'do not replace that fail-closed result with an ad hoc Maven command',
     );
-    expect(p).toContain('do not run either toolchain ad hoc');
+    expect(p).toContain('do not run Maven ad hoc to fill the gap');
     expect(p).toContain('does **not** lift the two rules above');
   });
 
