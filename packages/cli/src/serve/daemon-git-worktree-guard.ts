@@ -2179,6 +2179,9 @@ async function evaluateCommandWithCwd(
           allExport,
           definedBodies: new Map(definedBodies),
           gitShapedNames: new Set(gitShapedNames),
+          // A subshell inherits `export -f` functions too; copy so its own
+          // definitions and removals die with it.
+          exportedFunctions: new Set(exportedFunctions),
         },
       );
       if (nested.denial) {
@@ -2196,25 +2199,39 @@ async function evaluateCommandWithCwd(
         restoreShellState(subshellCwds.pop());
         subshellDepth--;
       }
-      // Removal builtins retract earlier definitions: `unset -f`/`unalias`
-      // drop a function/alias, `export -n -f` clears the export attribute.
+      // Removal builtins retract earlier definitions, but only the real
+      // builtin does: a function shadowing `unset`/`unalias`/`export` runs
+      // instead, so those fall through to the shadow dispatch below and remove
+      // nothing. `unalias` touches only aliases; `unset -f` (or a bare
+      // `unset NAME`, which falls back to the function when no variable
+      // shadows it) touches only functions; `unset` has no `-a` option, so it
+      // never clears wholesale — mis-modelling any of these would drop a live
+      // relocating shadow and allow the command.
       const removalProgram = readProgramWord(run);
-      if (removalProgram === 'unset' || removalProgram === 'unalias') {
-        const isFunctions =
-          removalProgram === 'unalias' ||
-          run.some((token) => token.text === '-f');
-        const clearAll = run.some(
-          (token) => token.text === '-a' || token.text === '-af',
-        );
-        if (clearAll) {
-          definedBodies.clear();
-          gitShapedNames.clear();
-        } else {
+      if (
+        (removalProgram === 'unset' || removalProgram === 'unalias') &&
+        !definedBodies.has(removalProgram)
+      ) {
+        const removesAliases = removalProgram === 'unalias';
+        const removesVariablesOnly =
+          !removesAliases && run.some((token) => token.text === '-v');
+        if (
+          removesAliases &&
+          run.some((token) => token.text === '-a' || token.text === '-af')
+        ) {
+          // `unalias -a` clears every alias but leaves functions intact.
+          for (const [name, entry] of [...definedBodies]) {
+            if (entry.alias) definedBodies.delete(name);
+          }
+        } else if (!removesVariablesOnly) {
           for (const token of run.slice(1)) {
             if (token.text.startsWith('-')) continue;
-            // `unalias` always removes an alias; `unset` removes a function
-            // only with `-f` — both captured by `isFunctions`.
-            if (isFunctions) {
+            const entry = definedBodies.get(token.text);
+            if (removesAliases) {
+              if (entry?.alias) definedBodies.delete(token.text);
+            } else if (!entry?.alias) {
+              // `unset -f NAME` / bare `unset NAME`: a function and its
+              // git/export attributes, never an alias.
               definedBodies.delete(token.text);
               gitShapedNames.delete(token.text);
               exportedFunctions.delete(token.text);
@@ -2225,6 +2242,7 @@ async function evaluateCommandWithCwd(
       }
       if (
         removalProgram === 'export' &&
+        !definedBodies.has('export') &&
         run.some((token) => token.text === '-n') &&
         run.some((token) => token.text === '-f')
       ) {
@@ -2325,13 +2343,15 @@ async function evaluateCommandWithCwd(
                   }
                 : analysis.importsExportedFunctions
                   ? {
-                      // Only bash imports `export -f` functions.
+                      // Only bash imports `export -f` functions. A `-c`
+                      // subprocess is a separate process: copy the set so a
+                      // child `unset -f` cannot retract the parent's exports.
                       definedBodies: new Map(
                         [...definedBodies].filter(([name]) =>
                           exportedFunctions.has(name),
                         ),
                       ),
-                      exportedFunctions,
+                      exportedFunctions: new Set(exportedFunctions),
                     }
                   : {}),
             },

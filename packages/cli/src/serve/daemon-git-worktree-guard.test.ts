@@ -2039,6 +2039,36 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
+  // Removal builtins must retract a shadow only the way the real shell does:
+  // mis-modelling one drops a live relocating function and allows the command.
+  it.each([
+    // `unset` has no `-a` option: the command errors, the function survives.
+    () => `pwn() { git -C ${plainOutsidePath} reset --hard; }; unset -a; pwn`,
+    // `unalias -a` clears aliases, never functions.
+    () => `pwn() { git -C ${plainOutsidePath} reset --hard; }; unalias -a; pwn`,
+    // A function shadowing `unset` runs `:` instead of the builtin, so the
+    // removal never happens and the shadow stays live.
+    () =>
+      `pwn() { git -C ${plainOutsidePath} reset --hard; }; unset() { :; }; unset -f pwn; pwn`,
+    // A `-c` subprocess is a separate process: its `unset -f` cannot retract
+    // the parent's exported function.
+    () =>
+      `pwn() { git -C ${plainOutsidePath} reset --hard; }; export -f pwn; bash -c "unset -f pwn"; bash -c pwn`,
+    // A command substitution inherits the exported function too.
+    () =>
+      `evil() { git -C ${plainOutsidePath} reset --hard; }; export -f evil; echo $(bash -c 'evil')`,
+  ])(
+    'does not let a mis-modelled removal drop a live relocating shadow %#',
+    async (build) => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
   it('keeps a live compatible shadow modelled', async () => {
     await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
     const guard = createDaemonToolGuard();
