@@ -42,6 +42,7 @@ try {
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
+  testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
@@ -195,6 +196,25 @@ function testDesktopReleaseSigningWorkflow() {
     workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'") <
       workflow.indexOf("name: 'Build desktop installers'"),
     'vendor binaries must be signed before Tauri builds installers',
+  );
+}
+
+function testUpdaterMirrorConfiguration() {
+  assert.deepEqual(tauriConfig.plugins?.updater?.endpoints, [
+    'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/desktop/latest/desktop-latest.json',
+    'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest/desktop-latest.json',
+  ]);
+  const main = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
+    'utf8',
+  );
+  assert.match(
+    main,
+    /const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs\(3\);/,
+  );
+  assert.match(
+    main,
+    /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
   );
 }
 
@@ -383,6 +403,34 @@ function testUpdateManifest(directory) {
     assert.equal(
       manifest.platforms[platform].url,
       `https://github.com/QwenLM/qwen-code/releases/download/desktop-v0.1.0/${encodeURIComponent(artifact)}`,
+    );
+  }
+
+  execFileSync(process.execPath, [
+    manifestScript,
+    '--assets',
+    assets,
+    '--repository',
+    'QwenLM/qwen-code',
+    '--tag',
+    'desktop-v0.1.0',
+    '--version',
+    '0.1.0',
+    '--base-url',
+    'https://mirror.example/desktop/v0.1.0/',
+    '--output',
+    output,
+  ]);
+  const mirrorManifest = JSON.parse(fs.readFileSync(output, 'utf8'));
+  for (const [platform, artifact] of [
+    ['darwin-aarch64', artifacts[0]],
+    ['darwin-x86_64', artifacts[1]],
+    ['windows-x86_64', artifacts[2]],
+    ['linux-x86_64', artifacts[3]],
+  ]) {
+    assert.equal(
+      mirrorManifest.platforms[platform].url,
+      `https://mirror.example/desktop/v0.1.0/${encodeURIComponent(artifact)}`,
     );
   }
 
