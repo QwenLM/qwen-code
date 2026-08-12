@@ -77,7 +77,10 @@ describe('OmniClipVideoTool', () => {
     expect(tool.name).toBe(OMNI_CLIP_VIDEO_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
-      version: '1',
+      // Bumped with the `omniRole: 'clip'` annotation so pre-role cache
+      // entries and recorded executions cannot converge onto this
+      // fingerprint and keep reporting an excerpt as complete coverage.
+      version: '2',
       inputMediaTypes: ['video'],
       outputs: [
         {

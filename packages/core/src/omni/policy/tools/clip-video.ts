@@ -63,7 +63,12 @@ const TUNABLE_SCHEMA_PROPERTIES = {
 
 const DESCRIPTOR: MediaPolicyToolDescriptor = {
   kind: 'media_policy',
-  version: '1',
+  // '2': outputs now carry `metadata.omniRole: 'clip'`, which memory maps
+  // to `partial` coverage. Pre-'2' cache entries and recorded executions
+  // hold role-less outputs whose coverage was derived as `complete`;
+  // sharing a version would let them converge onto the same fingerprint
+  // and keep reporting a temporal excerpt as complete footage.
+  version: '2',
   inputMediaTypes: ['video'],
   outputs: [
     {

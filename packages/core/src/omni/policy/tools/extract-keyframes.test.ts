@@ -103,7 +103,11 @@ describe('OmniExtractKeyframesTool', () => {
     expect(tool.name).toBe(OMNI_EXTRACT_KEYFRAMES_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
-      version: '1',
+      // Bumped with the `omniRole: 'keyframe'` annotation so pre-role
+      // cache entries and recorded executions cannot converge onto this
+      // fingerprint and keep reporting sampled frames as complete visual
+      // coverage.
+      version: '2',
       inputMediaTypes: ['video'],
       outputs: [
         {

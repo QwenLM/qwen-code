@@ -80,7 +80,13 @@ const TUNABLE_SCHEMA_PROPERTIES = {
 
 const DESCRIPTOR: MediaPolicyToolDescriptor = {
   kind: 'media_policy',
-  version: '1',
+  // '2': outputs now carry `metadata.omniRole: 'keyframe'`, which memory
+  // maps to `sampled` coverage. Pre-'2' cache entries and recorded
+  // executions hold role-less outputs whose coverage was derived as
+  // `complete`; sharing a version would let them converge onto the same
+  // fingerprint and keep reporting sampled frames as complete visual
+  // coverage — the model would answer about footage it never saw.
+  version: '2',
   inputMediaTypes: ['video'],
   outputs: [
     {
