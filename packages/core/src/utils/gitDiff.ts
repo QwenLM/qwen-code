@@ -304,9 +304,30 @@ export async function fetchGitDiff(
     // listing: the latter can hold thousands of ignored paths the detail gate
     // never limits, and every extra ls-tree chunk is one more serial
     // round-trip that can fail the whole branch diff closed.
-    const candidates = classifiablePaths
-      .map(stripTrailingDirSlash)
-      .filter((filePath) => phantomCandidatePaths.has(filePath));
+    const strippedClassifiable = classifiablePaths.map(stripTrailingDirSlash);
+    const directCandidates = strippedClassifiable.filter((filePath) =>
+      phantomCandidatePaths.has(filePath),
+    );
+    const directSet = new Set(directCandidates);
+    // A baseline-tracked gitlink whose leftover directory is no longer an
+    // embedded repository (its `.git` deleted) never appears in the untracked
+    // listing itself: `ls-files --others` lists its files individually
+    // (`sub/file.txt`) while the phantom candidate is the ancestor path
+    // (`sub`), which the exact-string match above never relates. Add those
+    // ancestor phantom candidates so the baseline probe can resolve their
+    // mode; only a commit-mode (gitlink) hit becomes a collision — a plain
+    // blob deleted in favor of a same-named directory is a real deletion.
+    const ancestorCandidates: string[] = [];
+    for (const phantomPath of phantomCandidatePaths) {
+      if (directSet.has(phantomPath)) continue;
+      const prefix = `${phantomPath}/`;
+      if (
+        strippedClassifiable.some((filePath) => filePath.startsWith(prefix))
+      ) {
+        ancestorCandidates.push(phantomPath);
+      }
+    }
+    const candidates = [...directCandidates, ...ancestorCandidates];
     trackedAtBase = await classifyPathsTrackedAtBase(
       gitRoot,
       comparison.untrackedBaseRef,
@@ -314,10 +335,25 @@ export async function fetchGitDiff(
     );
     if (trackedAtBase === null) return null;
     const tracked = trackedAtBase;
-    filteredUntrackedPaths = rawUntrackedPaths.filter(
-      (filePath) => !tracked.has(stripTrailingDirSlash(filePath)),
+    const ancestorSet = new Set(ancestorCandidates);
+    collisionPaths = candidates.filter(
+      (filePath) =>
+        tracked.has(filePath) &&
+        (!ancestorSet.has(filePath) || tracked.get(filePath) === '160000'),
     );
-    collisionPaths = candidates.filter((filePath) => tracked.has(filePath));
+    // Descendants of a gitlink collision are covered by its single opaque
+    // row: exclude them from the all-added untracked accounting, or the
+    // deletion is double-counted (phantom row plus per-file additions).
+    const gitlinkCollisionPrefixes = collisionPaths
+      .filter((filePath) => tracked.get(filePath) === '160000')
+      .map((filePath) => `${filePath}/`);
+    filteredUntrackedPaths = rawUntrackedPaths.filter((filePath) => {
+      const stripped = stripTrailingDirSlash(filePath);
+      return (
+        !tracked.has(stripped) &&
+        !gitlinkCollisionPrefixes.some((prefix) => stripped.startsWith(prefix))
+      );
+    });
   }
   // Without classification (non-branch modes, or branch mode past the
   // fast-path threshold) every untracked path counts as an addition. A
@@ -990,8 +1026,13 @@ async function isUntrackedWorktreePath(
   // matches every descendant path (an untracked `a/x` would otherwise make
   // `a` test true and reroute a real deletion of the file `a`), and the
   // `:(literal)` magic keeps glob metacharacters in the name from matching
-  // sibling files.
-  return splitNulDelimited(out).includes(relPath);
+  // sibling files. Both sides normalize the trailing slash `ls-files
+  // --others` uses to collapse an untracked embedded repository (`sub/`) —
+  // it still denotes the directory itself, not a descendant.
+  const normalized = stripTrailingDirSlash(relPath);
+  return splitNulDelimited(out).some(
+    (entry) => stripTrailingDirSlash(entry) === normalized,
+  );
 }
 
 /** Cut patch hunks at `MAX_LINES_PER_FILE` content lines, mirroring

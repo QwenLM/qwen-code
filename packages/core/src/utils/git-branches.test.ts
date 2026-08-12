@@ -939,6 +939,97 @@ describe('gitCheckout concurrent serialization (R9-2)', () => {
       }
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'serializes concurrent checkouts spelled through different cwds of one repository (R11-7)',
+    async () => {
+      // The queue keys on repository identity, not the raw request cwd: git
+      // operations from a workspace-contained subdirectory act on the same
+      // HEAD and reflog as the root, so two cwd spellings of one repository
+      // must share one queue or the crossfire guarded above slips through a
+      // per-cwd key. The serialization is asserted deterministically: a
+      // post-checkout hook records concurrent executions, which the queue
+      // guarantees cannot happen because it holds each checkout — hook
+      // included — until completion.
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/feature');
+      git(dir, 'fetch', '-q', 'origin');
+      const sub = path.join(dir, 'subdir');
+      fs.mkdirSync(sub);
+      const overlap = path.join(dir, '.git', 'overlap');
+      const marker = path.join(dir, '.git', 'in-hook');
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        `#!/bin/sh\nif [ -f "${marker}" ]; then : > "${overlap}"; fi\n: > "${marker}"\nsleep 0.3\nrm -f "${marker}"\nexit 0\n`,
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const results = await Promise.allSettled([
+        gitCheckout(dir, 'feature'),
+        gitCheckout(sub, 'origin/feature'),
+      ]);
+
+      expect(currentBranch(dir)).toBe('feature');
+      for (const result of results) {
+        expect(result.status).toBe('fulfilled');
+        if (result.status === 'fulfilled') {
+          expect(result.value).toEqual({ branch: 'feature', detached: false });
+        }
+      }
+      expect(fs.existsSync(overlap)).toBe(false);
+    },
+  );
+});
+
+describe('gitCheckout landing verification read failures (R11-2)', () => {
+  it.skipIf(process.platform === 'win32')(
+    'does not roll back a landed checkout when a verification read fails',
+    async () => {
+      // The checkout lands, the post-checkout hook fails, and the landing
+      // verification's `rev-parse HEAD` then fails transiently (injected via
+      // a git wrapper that trips only after the hook marks the repo). A
+      // swallowed read used to compare as "HEAD is not on the target" and
+      // roll back the landed switch; the tri-state verification must skip
+      // the rollback and rethrow the hook error instead.
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'second');
+      // Tag the FIRST commit so a rollback to master (now one commit ahead)
+      // is distinguishable from the landed detached HEAD.
+      git(dir, 'tag', 'v1.0', 'HEAD~1');
+      const tagCommit = git(dir, 'rev-parse', 'v1.0').trim();
+      const marker = path.join(dir, '.git', 'verify-marker');
+      const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitwrap-'));
+      tmpRoots.push(binDir);
+      const realGit = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      fs.writeFileSync(
+        path.join(binDir, 'git'),
+        `#!/bin/sh\nif [ -f "${marker}" ] && [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then\n  exit 1\nfi\nexec "${realGit}" "$@"\n`,
+      );
+      fs.chmodSync(path.join(binDir, 'git'), 0o755);
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        `#!/bin/sh\n: > "${marker}"\nexit 1\n`,
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      await expect(
+        gitCheckout(dir, 'v1.0', {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        }),
+      ).rejects.toThrow();
+
+      // The landed switch survives: HEAD stays detached on the tag commit
+      // instead of being rolled back to master.
+      expect(headSha(dir)).toBe(tagCommit);
+      expect(() => git(dir, 'symbolic-ref', 'HEAD')).toThrow();
+    },
+  );
 });
 
 describe('gitCheckout fully qualified refs (R6-19)', () => {

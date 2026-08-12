@@ -984,6 +984,58 @@ describe('fetchGitDiff', () => {
     expect(row?.isDeleted).toBeUndefined();
     expect(row?.isUntracked).toBeUndefined();
     expect(result?.perFileStats.has('sub/')).toBe(false);
+
+    // The single-file endpoint must agree: `ls-files --others` collapses the
+    // leftover embedded repo to a trailing-slash `sub/` entry, and without
+    // normalizing it the phantom-deletion reroute never fires and serves
+    // full-deletion hunks against the opaque (non-deleted) list row.
+    const hunks = await fetchGitDiffHunksForFile(repo, 'sub', undefined, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(hunks).toBeNull();
+  });
+
+  it('re-accounts a de-submodulized gitlink collision listed as individual files', async () => {
+    // The baseline tracks a gitlink at `sub`; the current branch untracked it
+    // (`git rm --cached`) and the leftover directory is no longer an embedded
+    // repository (its `.git` deleted), so `ls-files --others` lists its files
+    // individually (`sub/file.txt`) while the phantom candidate is the
+    // ancestor path `sub` — an ancestor-vs-descendant mismatch no trailing-
+    // slash strip reconciles. Without ancestor matching the path
+    // double-counts: a phantom deletion row plus per-file additions. The
+    // collision must fold into one opaque row.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await fs.mkdir(path.join(repo, 'sub'));
+    const sub = path.join(repo, 'sub');
+    await git(sub, 'init', '-q');
+    await git(sub, 'config', 'user.email', 'test@example.com');
+    await git(sub, 'config', 'user.name', 'Test');
+    await git(sub, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(sub, 'file.txt'), 'nested\n');
+    await git(sub, 'add', '.');
+    await git(sub, 'commit', '-q', '-m', 'nested');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base with gitlink');
+    await git(repo, 'branch', 'baseline');
+    await git(repo, 'rm', '-q', '--cached', 'sub');
+    await git(repo, 'commit', '-q', '-m', 'untrack gitlink');
+    await fs.rm(path.join(sub, '.git'), { recursive: true, force: true });
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+
+    expect(result?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 0,
+      linesRemoved: 0,
+    });
+    const row = result?.perFileStats.get('sub');
+    expect(row).toMatchObject({ isBinary: true });
+    expect(row?.isDeleted).toBeUndefined();
+    expect(result?.perFileStats.has('sub/file.txt')).toBe(false);
   });
 
   it('keeps an embedded repo the baseline does not track as one untracked row', async () => {
