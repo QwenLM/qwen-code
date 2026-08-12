@@ -40,9 +40,10 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
 });
 
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
+const writeStderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: writeStdoutSpy,
-  writeStderrLine: vi.fn(),
+  writeStderrLine: writeStderrSpy,
 }));
 vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
@@ -96,6 +97,7 @@ beforeEach(() => {
   ghMock.mockClear();
   ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
+  writeStderrSpy.mockClear();
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
@@ -1088,5 +1090,54 @@ describe('submit receipt (producer half of the audit contract)', () => {
     const tmpDir = join(dir, '.qwen', 'tmp');
     const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
     expect(leftovers).toEqual([]);
+  });
+});
+
+// The link back to what was just written. GitHub's Create Review response
+// carries `html_url` — the deep link to the review — and submit relays it in
+// both channels, because a summary without it leaves the user to reassemble
+// the PR address by hand. Best-effort like the receipt: a response without it
+// (or an unparseable one) must never fail a review that DID post, and never
+// invents a link either.
+describe('the posted-review link', () => {
+  const authorizedPost = (over: Record<string, unknown> = {}) =>
+    args({ userAuthorized: true, ...over });
+  const stdoutJson = () =>
+    JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string);
+
+  let savedCwd: string;
+  beforeEach(() => {
+    savedCwd = process.cwd();
+    process.chdir(dir);
+  });
+  afterEach(() => process.chdir(savedCwd));
+
+  it('relays html_url in the stdout JSON and the Posted line', () => {
+    const url =
+      'https://github.com/QwenLM/qwen-code/pull/6771#pullrequestreview-42';
+    ghMock.mockImplementationOnce(() =>
+      JSON.stringify({ id: 42, html_url: url }),
+    );
+    runSubmit(authorizedPost());
+    expect(stdoutJson()).toMatchObject({ posted: true, url });
+    const postedLine = writeStderrSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(url);
+  });
+
+  it('omits url when the response carries none — a link is relayed, never built', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    expect(stdoutJson().posted).toBe(true);
+    expect('url' in stdoutJson()).toBe(false);
+  });
+
+  it('still reports posted:true when the response is unparseable', () => {
+    // ghMock's default return is '' — JSON.parse throws, and both the receipt
+    // and the link ride the same best-effort read of a post that succeeded.
+    runSubmit(authorizedPost());
+    expect(stdoutJson().posted).toBe(true);
+    expect('url' in stdoutJson()).toBe(false);
   });
 });

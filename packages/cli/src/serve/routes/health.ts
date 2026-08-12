@@ -7,65 +7,26 @@
 import { gradeActiveWorkCoverage } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { getDemoHtml } from '../demo.js';
 import { isDeepHealthQuery } from '../health-query.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { ServeOptions } from '../types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
-interface CreateHealthDemoRoutesDeps {
+interface CreateHealthRoutesDeps {
   opts: Pick<ServeOptions, 'hostname' | 'requireAuth'>;
-  getPort: () => number;
   workspaceRegistry: WorkspaceRegistry;
   getActiveSseCount: () => number;
   getRateLimiter: () => RateLimiterInstance | undefined;
 }
 
-interface HealthDemoRoutes {
+interface HealthRoutes {
   exposeHealthPreAuth: boolean;
   register(app: Application): void;
 }
 
-export function createHealthDemoRoutes(
-  deps: CreateHealthDemoRoutesDeps,
-): HealthDemoRoutes {
-  const {
-    opts,
-    getPort,
-    workspaceRegistry,
-    getActiveSseCount,
-    getRateLimiter,
-  } = deps;
-
-  // --- Demo page: mirrors the `/health` loopback-gating pattern.
-  // On loopback binds, registered BEFORE bearerAuth so browsers can
-  // reach the page via address-bar navigation (which cannot attach
-  // Authorization headers). On non-loopback binds, registered AFTER
-  // bearerAuth — an unauthenticated `/demo` on a public interface
-  // would leak the full API surface (route enumeration + interactive
-  // console), far more than `/health`'s `{"status":"ok"}`.
-  // X-Frame-Options: DENY + CSP frame-ancestors 'none' prevent
-  // clickjacking — a malicious site embedding the demo in an iframe
-  // could trick a user into performing daemon actions via transparent
-  // overlay (the iframe's same-origin fetches bypass CORS).
-  const demoHandler = (_req: Request, res: Response) => {
-    try {
-      res
-        .type('html')
-        .set('X-Frame-Options', 'DENY')
-        .set(
-          'Content-Security-Policy',
-          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
-        )
-        .send(getDemoHtml(getPort()));
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({ error: 'Failed to render demo page' });
-    }
-  };
+export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
+  const { opts, workspaceRegistry, getActiveSseCount, getRateLimiter } = deps;
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -202,7 +163,6 @@ export function createHealthDemoRoutes(
     exposeHealthPreAuth,
     register(app: Application): void {
       app.get('/health', healthHandler);
-      app.get('/demo', demoHandler);
     },
   };
 }
