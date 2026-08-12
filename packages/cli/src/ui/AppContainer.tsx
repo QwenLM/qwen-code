@@ -3648,6 +3648,18 @@ export const AppContainer = (props: AppContainerProps) => {
           clearPendingStateRef.current();
           historyManager.loadHistory(truncatedUi);
 
+          // Re-arm the latch iff the rewound history no longer contains the
+          // announcement. Rewinding to a turn before files were attached
+          // filters the INFO out while the files stay in the system prompt,
+          // so the next prompt must re-announce; rewinding to a turn at/after
+          // the announcement keeps the INFO and must not duplicate it.
+          contextFilesAnnouncedRef.current = !truncatedUi.some(
+            (item) =>
+              item.type === MessageType.INFO &&
+              typeof item.text === 'string' &&
+              item.text.startsWith('Read context files:'),
+          );
+
           refreshStatic();
 
           if (userItem.type === 'user' && userItem.text) {
