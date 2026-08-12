@@ -6,6 +6,7 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
@@ -13,6 +14,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import type {
   CancelNotification,
+  Client,
   PromptRequest,
   SetSessionModelRequest,
   SetSessionModelResponse,
@@ -37,7 +39,7 @@ import {
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
-import type { AcpChannel } from './channel.js';
+import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -126,13 +128,14 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
-  MID_TURN_RECONCILIATION_RING_SIZE,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -249,6 +252,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function safeTransportFailureCode(error: unknown): string | undefined {
+  if (!isRecord(error)) return undefined;
+  const code = error['code'];
+  return typeof code === 'string' && /^[a-z0-9_.-]{1,64}$/iu.test(code)
+    ? code
+    : undefined;
+}
+
 function sessionSourceRequestMeta(
   sourceType: string | undefined,
   sourceId: string | undefined,
@@ -263,6 +274,21 @@ function sessionSourceRequestMeta(
     : {};
 }
 
+/**
+ * Only the daemon's authenticated channel-worker path can populate the
+ * user-facing display projection. Every other source echoes its prompt content
+ * verbatim. Single source of truth for the echo, pending-entry text, and child
+ * metadata so their `''`/undefined semantics cannot drift apart.
+ */
+function getChannelPromptDisplayText(
+  entry: Pick<SessionEntry, 'sourceType'>,
+  displayText: string | undefined,
+): string | undefined {
+  return entry.sourceType === 'channel' && typeof displayText === 'string'
+    ? displayText
+    : undefined;
+}
+
 function isDefinitiveAcpRequestError(error: unknown): boolean {
   if (error instanceof RequestError) return true;
   if (!isRecord(error)) return false;
@@ -271,6 +297,337 @@ function isDefinitiveAcpRequestError(error: unknown): boolean {
     Number.isInteger(error['code']) &&
     typeof error['message'] === 'string'
   );
+}
+
+class LogSafeAcpRequestError extends RequestError {
+  constructor(
+    code: number,
+    message: string,
+    data: unknown,
+    private readonly reservePreparedResponse?: (value: unknown) => void,
+  ) {
+    super(code, message, data);
+  }
+
+  override toResult<T>() {
+    const result = super.toResult<T>();
+    if ('error' in result) {
+      Object.defineProperty(result.error, inspect.custom, {
+        configurable: true,
+        value: () => ({ code: result.error.code, payloadOmitted: true }),
+      });
+      try {
+        this.reservePreparedResponse?.(result.error);
+      } catch {
+        // The guard already retired the transport. The ACP SDK does not await
+        // its message dispatcher, so throwing from toResult would be unhandled.
+      }
+    }
+    return result;
+  }
+}
+
+const MAX_LOG_SAFE_ACP_ERROR_DETAILS_CHARS = 1_024;
+const MAX_LOG_SAFE_ACP_ERROR_KIND_CHARS = 128;
+const MAX_LOG_SAFE_ACP_ERROR_HINT_CHARS = 512;
+
+function logSafeAcpErrorDetails(
+  error: unknown,
+): { details: string } | undefined {
+  const details =
+    error instanceof Error
+      ? error.message
+      : isRecord(error) && typeof error['message'] === 'string'
+        ? error['message']
+        : undefined;
+  if (!details) return undefined;
+  return {
+    details:
+      details.length <= MAX_LOG_SAFE_ACP_ERROR_DETAILS_CHARS
+        ? details
+        : `${details.slice(0, MAX_LOG_SAFE_ACP_ERROR_DETAILS_CHARS)}…`,
+  };
+}
+
+function boundedAcpErrorString(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars)}…`;
+}
+
+function logSafeRequestErrorMessage(code: number): string {
+  switch (code) {
+    case -32700:
+      return 'Parse error';
+    case -32600:
+      return 'Invalid request';
+    case -32601:
+      return 'Method not found';
+    case -32602:
+      return 'Invalid params';
+    case -32603:
+      return 'Internal error';
+    case -32000:
+      return 'Authentication required';
+    case -32002:
+      return 'Resource not found';
+    default:
+      return 'ACP client request failed';
+  }
+}
+
+function logSafeRequestErrorData(data: unknown): unknown {
+  if (!isRecord(data) || typeof data['errorKind'] !== 'string') {
+    return undefined;
+  }
+  const status = data['status'];
+  const hint = data['hint'];
+  return {
+    errorKind: boundedAcpErrorString(
+      data['errorKind'],
+      MAX_LOG_SAFE_ACP_ERROR_KIND_CHARS,
+    ),
+    ...(typeof status === 'number' && Number.isFinite(status)
+      ? { status }
+      : {}),
+    ...(typeof hint === 'string'
+      ? {
+          hint: boundedAcpErrorString(hint, MAX_LOG_SAFE_ACP_ERROR_HINT_CHARS),
+        }
+      : {}),
+  };
+}
+
+class AcpInboundHandlerLimitError extends Error {
+  readonly code = 'acp_handler_limit_exceeded';
+
+  constructor(
+    readonly maxActiveHandlers: number,
+    readonly maxActiveHandlerBytes: number,
+    readonly requiredBytes: number,
+    readonly availableBytes: number,
+  ) {
+    super('ACP inbound handler capacity exceeded');
+    this.name = 'AcpInboundHandlerLimitError';
+  }
+}
+
+function estimateAcpHandlerBytes(value: unknown, limitBytes: number): number {
+  let bytes = 0;
+  const stack: unknown[] = [value];
+  const seen = new WeakSet<object>();
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === null) {
+      bytes += 4;
+    } else if (typeof current === 'string') {
+      bytes += Buffer.byteLength(current) + 2;
+    } else if (typeof current === 'number') {
+      bytes += 24;
+    } else if (typeof current === 'boolean') {
+      bytes += 5;
+    } else if (Array.isArray(current)) {
+      if (seen.has(current)) return limitBytes + 1;
+      seen.add(current);
+      bytes += 2 + Math.max(0, current.length - 1);
+      if (bytes + current.length > limitBytes) return limitBytes + 1;
+      for (let index = current.length - 1; index >= 0; index--) {
+        stack.push(current[index]);
+      }
+    } else if (isRecord(current)) {
+      if (seen.has(current)) return limitBytes + 1;
+      seen.add(current);
+      const entries = Object.entries(current);
+      bytes += 2 + Math.max(0, entries.length - 1);
+      for (const [key, entryValue] of entries) {
+        bytes += Buffer.byteLength(key) + 3;
+        stack.push(entryValue);
+      }
+    } else {
+      bytes += 4;
+    }
+    if (bytes > limitBytes) return limitBytes + 1;
+  }
+  return Math.max(1, bytes);
+}
+
+class AcpInboundHandlerAdmission {
+  private activeHandlers = 0;
+  private activeBytes = 0;
+
+  constructor(private readonly guard: AcpChannelTransportGuard) {}
+
+  async run<T>(params: unknown, operation: () => Promise<T>): Promise<T> {
+    const envelopeBytes = Math.min(2_048, this.guard.maxActiveHandlerBytes);
+    const requiredBytes =
+      envelopeBytes +
+      estimateAcpHandlerBytes(
+        params,
+        Math.max(0, this.guard.maxActiveHandlerBytes - envelopeBytes),
+      );
+    const availableBytes = Math.max(
+      0,
+      this.guard.maxActiveHandlerBytes - this.activeBytes,
+    );
+    if (
+      this.activeHandlers >= this.guard.maxActiveHandlers ||
+      requiredBytes > availableBytes
+    ) {
+      const error = new AcpInboundHandlerLimitError(
+        this.guard.maxActiveHandlers,
+        this.guard.maxActiveHandlerBytes,
+        requiredBytes,
+        availableBytes,
+      );
+      this.guard.fail(error);
+      throw error;
+    }
+    this.activeHandlers++;
+    this.activeBytes += requiredBytes;
+    try {
+      return await operation();
+    } finally {
+      this.activeHandlers--;
+      this.activeBytes -= requiredBytes;
+    }
+  }
+}
+
+async function withLogSafeAcpError<T>(
+  operation: () => Promise<T>,
+  reservePreparedResponse?: (value: unknown) => void,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof RequestError) {
+      const code = Number.isFinite(error.code) ? error.code : -32603;
+      throw new LogSafeAcpRequestError(
+        code,
+        logSafeRequestErrorMessage(code),
+        logSafeRequestErrorData(error.data),
+        reservePreparedResponse,
+      );
+    }
+    throw new LogSafeAcpRequestError(
+      -32603,
+      'Internal error',
+      logSafeAcpErrorDetails(error),
+      reservePreparedResponse,
+    );
+  }
+}
+
+function createLogSafeAcpClient(
+  client: Client,
+  transportGuard: AcpChannelTransportGuard,
+): Client {
+  const admission = new AcpInboundHandlerAdmission(transportGuard);
+  const runNotification = <T>(params: unknown, operation: () => Promise<T>) =>
+    withLogSafeAcpError(() => admission.run(params, operation));
+  const runRequest = <T>(params: unknown, operation: () => Promise<T>) =>
+    withLogSafeAcpError(
+      () =>
+        admission.run(params, async () => {
+          const result = await operation();
+          transportGuard.reservePreparedResponse(result ?? null);
+          return result;
+        }),
+      transportGuard.reservePreparedResponse,
+    );
+  return {
+    requestPermission: (params) =>
+      runRequest(params, () => client.requestPermission(params)),
+    sessionUpdate: (params) =>
+      runNotification(params, () => client.sessionUpdate(params)),
+    writeTextFile: client.writeTextFile
+      ? (params) => runRequest(params, () => client.writeTextFile!(params))
+      : undefined,
+    readTextFile: client.readTextFile
+      ? (params) => runRequest(params, () => client.readTextFile!(params))
+      : undefined,
+    createTerminal: client.createTerminal
+      ? (params) => runRequest(params, () => client.createTerminal!(params))
+      : undefined,
+    terminalOutput: client.terminalOutput
+      ? (params) => runRequest(params, () => client.terminalOutput!(params))
+      : undefined,
+    releaseTerminal: client.releaseTerminal
+      ? (params) =>
+          runRequest(
+            params,
+            async () => (await client.releaseTerminal!(params)) ?? {},
+          )
+      : undefined,
+    waitForTerminalExit: client.waitForTerminalExit
+      ? (params) =>
+          runRequest(params, () => client.waitForTerminalExit!(params))
+      : undefined,
+    killTerminal: client.killTerminal
+      ? (params) =>
+          runRequest(
+            params,
+            async () => (await client.killTerminal!(params)) ?? {},
+          )
+      : undefined,
+    extMethod: client.extMethod
+      ? (method, params) =>
+          runRequest(params, () => client.extMethod!(method, params))
+      : undefined,
+    extNotification: client.extNotification
+      ? (method, params) =>
+          runNotification(params, () => client.extNotification!(method, params))
+      : undefined,
+  };
+}
+
+const OUTBOUND_GUARDED_CONNECTION_METHODS = new Set<PropertyKey>([
+  'initialize',
+  'newSession',
+  'loadSession',
+  'unstable_forkSession',
+  'unstable_listSessions',
+  'unstable_resumeSession',
+  'setSessionMode',
+  'unstable_setSessionModel',
+  'setSessionConfigOption',
+  'authenticate',
+  'prompt',
+  'cancel',
+  'extMethod',
+  'extNotification',
+]);
+
+function createOutboundGuardedConnection(
+  connection: ClientSideConnection,
+  transportGuard: AcpChannelTransportGuard,
+): ClientSideConnection {
+  const wrappers = new Map<
+    PropertyKey,
+    (...args: unknown[]) => Promise<unknown>
+  >();
+  return new Proxy(connection, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (
+        typeof value !== 'function' ||
+        !OUTBOUND_GUARDED_CONNECTION_METHODS.has(property)
+      ) {
+        return value;
+      }
+      let wrapper = wrappers.get(property);
+      if (!wrapper) {
+        wrapper = async (...args: unknown[]) => {
+          const release = transportGuard.reserveOutboundOperation(args);
+          try {
+            return await Reflect.apply(value, target, args);
+          } finally {
+            release();
+          }
+        };
+        wrappers.set(property, wrapper);
+      }
+      return wrapper;
+    },
+  });
 }
 
 function getCanonicalModelId(response: unknown, fallback: string): string {
@@ -474,6 +831,12 @@ interface ChannelInfo {
   restoreSettlementOverdue: boolean;
   /** Grace timers armed at restore abandonment, keyed by session id. */
   restoreSettlementTimers: Map<string, NodeJS.Timeout>;
+  /** Transport guard fired before the child process exited. */
+  transportFailed: boolean;
+  /** The transport guard, rather than an existing teardown, condemned it. */
+  transportFailureInitiatedTeardown: boolean;
+  /** Safe bounded code retained for telemetry; never the raw error message. */
+  transportFailureCode?: string;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -497,7 +860,7 @@ interface ChannelInfo {
    * 10s) would attach to a transport about to close, landing the
    * caller with a sessionId that 404s on every follow-up request.
    *
-   * **Set-sites (5)** — any new teardown path MUST call into one of
+   * **Set-sites (6)** — any new teardown path MUST call into one of
    * these or replicate the pattern:
    *
    *   1. `ensureChannel`: `initialize`-failure catch.
@@ -511,6 +874,7 @@ interface ChannelInfo {
    *      a resolved timeout <= 0, or on timer expiry) /
    *      `reapPendingEmptyChannel` perform the actual set.
    *   5. `shutdown`: bulk-mark every entry in `aliveChannels`.
+   *   6. `ensureChannel`: a channel-level transport-failure signal.
    *
    * **BkUyD invariant (why we don't clear `channelInfo` here)**:
    * `killAllSync` must still find the channel during the SIGTERM
@@ -1012,6 +1376,7 @@ function echoPromptToSessionBus(
   req: PromptRequest,
   promptId: string,
   originatorClientId: string | undefined,
+  displayText: string | undefined,
 ): void {
   // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
   // ACP type contract — read it directly so a future SDK bump that
@@ -1023,15 +1388,31 @@ function echoPromptToSessionBus(
   // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
   if (!Array.isArray(prompt) || prompt.length === 0) return;
+  let displayTextPublished = false;
   const serverTimestamp = Date.now();
-  const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
+  const echoPrompt = prompt.slice(0, MAX_ECHO_CONTENT_BLOCKS);
+  if (
+    displayText &&
+    !echoPrompt.some((part) => isRecord(part) && part['type'] === 'text')
+  ) {
+    const textPart = prompt
+      .slice(MAX_ECHO_CONTENT_BLOCKS)
+      .find((part) => isRecord(part) && part['type'] === 'text');
+    if (textPart) echoPrompt[echoPrompt.length - 1] = textPart;
+  }
+  const blockCount = echoPrompt.length;
   for (let i = 0; i < blockCount; i += 1) {
-    const part = prompt[i];
+    const part = echoPrompt[i];
     if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
-    // Every `ContentBlock` variant (text, image, audio, resource) is
-    // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
-    // accepts any `content` shape; rich rendering of non-text blocks is
-    // the consumer's responsibility.
+    let displayPart = part;
+    if (displayText !== undefined && part.type === 'text') {
+      if (displayTextPublished) continue;
+      displayTextPublished = true;
+      if (!displayText) continue;
+      displayPart = { ...part, text: displayText };
+    }
+    // Non-text blocks are published verbatim. Channel text uses the display
+    // projection so hidden model context never reaches transcript consumers.
     try {
       entry.events.publish({
         type: 'session_update',
@@ -1040,7 +1421,7 @@ function echoPromptToSessionBus(
           sessionId: req.sessionId,
           update: {
             sessionUpdate: 'user_message_chunk',
-            content: part,
+            content: displayPart,
             // `_meta` lives inside the `update` object rather than at
             // envelope level. `_meta` is a standard JSON-RPC/MCP extension
             // field permitted alongside spec fields, the SDK normalizer
@@ -2169,6 +2550,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  function channelUnavailableReject(
+    channel: AcpChannel,
+    context: string,
+  ): Promise<never> {
+    const unavailable = channel.transportFailed
+      ? Promise.race([channel.exited, channel.transportFailed])
+      : channel.exited;
+    const reject = () => {
+      throw new BridgeChannelClosedError(context);
+    };
+    return unavailable.then(reject, reject);
+  }
+
   async function killChannelWithLog(
     ci: ChannelInfo,
     context?: string,
@@ -2557,9 +2951,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     {
       connection: ClientSideConnection;
       promise: Promise<void>;
+      wait: Promise<void>;
+      rejectUnavailable: () => void;
       refreshBootstrap: boolean;
     }
   >();
+  const clearInFlightExtensionRefreshes = (
+    connection: ClientSideConnection,
+  ) => {
+    for (const [sessionId, refresh] of inFlightExtensionRefreshes) {
+      if (refresh.connection === connection) {
+        refresh.rejectUnavailable();
+        inFlightExtensionRefreshes.delete(sessionId);
+      }
+    }
+  };
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -3006,7 +3412,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             applyActiveWorkSnapshot(currentInfo, snapshot);
           },
         );
-        connection = new ClientSideConnection(() => client, channel.stream);
+        const rawConnection = new ClientSideConnection(
+          () =>
+            channel.transportGuard
+              ? createLogSafeAcpClient(client, channel.transportGuard)
+              : client,
+          channel.stream,
+        );
+        connection = channel.transportGuard
+          ? createOutboundGuardedConnection(
+              rawConnection,
+              channel.transportGuard,
+            )
+          : rawConnection;
       } catch (error) {
         try {
           channel.killSync();
@@ -3053,11 +3471,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         unsettledAbandonedRestores: new Set(),
         restoreSettlementOverdue: false,
         restoreSettlementTimers: new Map(),
+        transportFailed: false,
+        transportFailureInitiatedTeardown: false,
         isDying: false,
         isQuarantined: false,
         handshakeComplete: false,
       };
       infoRef.current = info;
+      const markTransportFailed = (error: unknown) => {
+        if (!info.isDying) {
+          info.transportFailureInitiatedTeardown = true;
+        }
+        info.transportFailed = true;
+        info.transportFailureCode = safeTransportFailureCode(error);
+        info.isDying = true;
+        clearInFlightExtensionRefreshes(info.connection);
+      };
+      void channel.transportFailed?.then(
+        markTransportFailed,
+        markTransportFailed,
+      );
       aliveChannels.add(info);
       // Belt-and-suspenders leak detection. The set is intentionally
       // multi-entry to cover the `killSession`-then-`spawnOrAttach`
@@ -3097,6 +3530,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // the SIGTERM grace window — even if a concurrent `spawnOrAttach`
       // has already reassigned `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
+        clearInFlightExtensionRefreshes(info.connection);
         if (channelInfo === info) cancelIdleTimer();
         if (info.workspaceMcpDiscoveryTimer) {
           clearTimeout(info.workspaceMcpDiscoveryTimer);
@@ -3131,7 +3565,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // but daemon stays up) still logs — there's no upstream
         // context line in that flow, and the message confirms the
         // cleanup actually ran.
-        const channelExitExpected = shuttingDown || info.isDying;
+        const channelExitExpected =
+          shuttingDown ||
+          (info.isDying && !info.transportFailureInitiatedTeardown);
         if (info.handshakeComplete) {
           telemetry.metrics?.channelLifecycle('exit', channelExitExpected);
         }
@@ -3139,12 +3575,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           telemetry.event('channel.exited', {
             'qwen-code.daemon.channel.exit_code': exitInfo?.exitCode ?? -1,
             'qwen-code.daemon.channel.session_count': sessions.length,
+            'qwen-code.daemon.channel.transport_failed': info.transportFailed,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown':
+              info.transportFailureInitiatedTeardown,
+            ...(info.transportFailureCode
+              ? {
+                  'qwen-code.daemon.channel.transport_error_code':
+                    info.transportFailureCode,
+                }
+              : {}),
             ...(exitInfo?.signalCode
               ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
               : {}),
           });
           writeStderrLine(
-            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}, ${sessions.length} session(s) torn down)`,
           );
         }
         for (const sid of sessions) {
@@ -3212,26 +3657,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               initTimeoutMs - (Date.now() - startupStartedAt),
             );
             const response = await withTimeout(
-              connection.initialize({
-                protocolVersion: PROTOCOL_VERSION,
-                _meta: {
-                  [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
-                    v: ACTIVE_WORK_HEARTBEAT_VERSION,
-                    intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+              Promise.race([
+                connection.initialize({
+                  protocolVersion: PROTOCOL_VERSION,
+                  _meta: {
+                    [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+                      v: ACTIVE_WORK_HEARTBEAT_VERSION,
+                      intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+                    },
+                    [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+                      v: CHANNEL_STARTUP_PROFILE_VERSION,
+                    },
+                    [PRIVATE_PARENT_CAPABILITY_META_KEY]:
+                      privateParentCapability,
                   },
-                  [CHANNEL_STARTUP_PROFILE_META_KEY]: {
-                    v: CHANNEL_STARTUP_PROFILE_VERSION,
+                  clientCapabilities: {
+                    fs: {
+                      readTextFile: delegateReadTextFileToClient,
+                      writeTextFile: true,
+                    },
                   },
-                  [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
-                },
-                clientCapabilities: {
-                  fs: {
-                    readTextFile: delegateReadTextFileToClient,
-                    writeTextFile: true,
-                  },
-                },
-                clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-              }),
+                  clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+                }),
+                channelUnavailableReject(channel, 'during initialize'),
+              ]),
               remainingStartupMs,
               'initialize',
             );
@@ -3300,6 +3749,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           () => undefined,
         );
         throw err;
+      }
+
+      if (info.isDying) {
+        await channel.kill().catch(() => {});
+        throw new BridgeChannelClosedError('during initialize');
       }
 
       // Late-shutdown re-check: if shutdown flipped during the
@@ -3405,6 +3859,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       },
       ensureChannel,
     );
+    if (ci.isDying) {
+      throw new BridgeChannelClosedError('before newSession');
+    }
     ci.sessionSpawnsInFlight++;
     if (requestedSessionId !== undefined) {
       // A caller-supplied id can legitimately reuse an id after an abandoned
@@ -3449,17 +3906,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 : {}),
             });
             const response = await withTimeout(
-              ci.connection.newSession(
-                worktree
-                  ? {
-                      ...request,
-                      _meta: {
-                        ...(isRecord(request._meta) ? request._meta : {}),
-                        [WORKTREE_MCP_DEFER_META_KEY]: true,
-                      },
-                    }
-                  : request,
-              ),
+              Promise.race([
+                ci.connection.newSession(
+                  worktree
+                    ? {
+                        ...request,
+                        _meta: {
+                          ...(isRecord(request._meta) ? request._meta : {}),
+                          [WORKTREE_MCP_DEFER_META_KEY]: true,
+                        },
+                      }
+                    : request,
+                ),
+                channelUnavailableReject(ci.channel, 'during newSession'),
+              ]),
               initTimeoutMs,
               'newSession',
             );
@@ -3494,6 +3954,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ci.emptyReapPending = true;
         }
         throw err;
+      }
+
+      // Let an already-settled transport failure publish its synchronous
+      // lifecycle marker before installing a session from a response that was
+      // admitted immediately ahead of the fatal frame.
+      await Promise.resolve();
+      if (ci.isDying) {
+        throw new BridgeChannelClosedError('after newSession');
       }
 
       // Late-shutdown re-check (BUy4U): shutdown() may have flipped
@@ -3960,12 +4428,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     mode: ApprovalMode,
     clientId: string,
-  ): Promise<void> {
+  ): Promise<ApprovalMode> {
     try {
-      await applyApprovalMode(entry, mode, false, clientId);
+      const result = await applyApprovalMode(entry, mode, false, clientId);
+      return result.previous;
     } catch (err) {
       await rollbackAttachRegistration(entry, clientId);
       throw err;
+    }
+  }
+
+  async function rollbackApprovalModeForRejectedAttach(
+    entry: SessionEntry,
+    previous: ApprovalMode,
+    clientId: string,
+  ): Promise<void> {
+    if (byId.get(entry.sessionId) !== entry) return;
+    try {
+      await applyApprovalMode(entry, previous, false, clientId);
+    } catch (err) {
+      writeStderrLine(
+        `attach: failed to restore approval mode for session ${entry.sessionId}: ${extractErrorMessage(err)}`,
+      );
     }
   }
 
@@ -4007,7 +4491,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   /**
    * Lazy-init the per-session `transportClosedReject` promise that
    * `sendPrompt` / `setSessionModel` / `applyModelServiceId` race their
-   * ACP calls against. ONE listener is attached to `channel.exited`
+   * ACP calls against. ONE unavailable race is attached to the channel
    * over the session's lifetime (the first caller "wins" and creates
    * the promise; subsequent callers reuse it) — a per-call attach
    * would grow Node's listener list linearly with prompt count on
@@ -4017,11 +4501,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    */
   const getTransportClosedReject = (entry: SessionEntry): Promise<never> => {
     if (!entry.transportClosedReject) {
-      entry.transportClosedReject = entry.channel.exited.then(() => {
-        throw new BridgeChannelClosedError(
-          `mid-request (session ${entry.sessionId})`,
-        );
-      });
+      entry.transportClosedReject = channelUnavailableReject(
+        entry.channel,
+        `mid-request (session ${entry.sessionId})`,
+      );
     }
     return entry.transportClosedReject;
   };
@@ -4062,6 +4545,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   };
 
+  const assertAttachableSessionEntry = (
+    sessionId: string,
+    entry: SessionEntry,
+  ): void => {
+    if (byId.get(sessionId) !== entry) {
+      throw new SessionNotFoundError(
+        sessionId,
+        'The session channel is unavailable; retry after teardown completes',
+      );
+    }
+    if (isClosingOrAuthorizingClose(entry)) {
+      throw new SessionNotFoundError(
+        sessionId,
+        'The session is closing; retry after close completes',
+        'session_closing',
+      );
+    }
+    const owner = channelInfoForEntry(entry);
+    if (!owner || owner.isDying) {
+      throw new SessionNotFoundError(
+        sessionId,
+        'The session channel is unavailable; retry after teardown completes',
+      );
+    }
+  };
+
   const assertLivePromptEntry = (
     sessionId: string,
     entry: SessionEntry,
@@ -4075,9 +4584,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
-      info.statusClosedReject = info.channel.exited.then(() => {
-        throw new BridgeChannelClosedError('mid-request (workspace status)');
-      });
+      info.statusClosedReject = channelUnavailableReject(
+        info.channel,
+        'mid-request (workspace status)',
+      );
     }
     return info.statusClosedReject;
   };
@@ -5117,6 +5627,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
+        const eventEpoch = entry.events.epoch;
         const seenCursors = new Set<string>();
         let emptyPageCount = 0;
         let cursor: string | undefined;
@@ -5154,12 +5665,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId
         ) {
           return {
             compactedReplay: page.events,
             liveJournal: [],
             lastEventId,
+            eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),
             ...(page.replayError !== undefined
               ? { replayError: page.replayError }
@@ -5305,17 +5818,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const existing = byId.get(req.sessionId);
     if (existing) {
-      // `isClosingOrAuthorizingClose`, not bare `closing`: this is an admission
-      // path like attach/prompt/rewind, so a conditional close being confirmed
-      // must refuse it too. Otherwise a client attaches inside the round trip
-      // and the teardown it raced destroys the Session under it.
-      if (isClosingOrAuthorizingClose(existing)) {
-        throw new SessionNotFoundError(
-          req.sessionId,
-          'The session is closing; retry after close completes',
-          'session_closing',
-        );
-      }
+      assertAttachableSessionEntry(req.sessionId, existing);
       const replayFields =
         historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(existing, historyPageSize)
@@ -5328,21 +5831,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (byId.get(req.sessionId) !== existing) {
-        throw new SessionNotFoundError(req.sessionId);
-      }
-      if (isClosingOrAuthorizingClose(existing)) {
-        throw new SessionNotFoundError(
-          req.sessionId,
-          'The session is closing; retry after close completes',
-          'session_closing',
-        );
-      }
+      assertAttachableSessionEntry(req.sessionId, existing);
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(existing, req.approvalMode, clientId);
+        const previousApprovalMode = await applyApprovalModeForAttach(
+          existing,
+          req.approvalMode,
+          clientId,
+        );
+        try {
+          assertAttachableSessionEntry(req.sessionId, existing);
+        } catch (error) {
+          await rollbackApprovalModeForRejectedAttach(
+            existing,
+            previousApprovalMode,
+            clientId,
+          );
+          await rollbackAttachRegistration(existing, clientId);
+          throw error;
+        }
       }
       return {
         sessionId: existing.sessionId,
@@ -5427,6 +5936,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'the agent child likely crashed during session restore — retry to restore the session',
         );
       }
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        inFlight.coalesceState.count--;
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw error;
+      }
       // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
       // already initialized it from coalesceState.count synchronously
       // when the IIFE registered the entry. Spread `restored` so the
@@ -5437,7 +5953,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `coalesceState.count`, so only the ledger is updated here.
       recordAttachRef(entry, clientId);
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
+        const previousApprovalMode = await applyApprovalModeForAttach(
+          entry,
+          req.approvalMode,
+          clientId,
+        );
+        try {
+          assertAttachableSessionEntry(restored.sessionId, entry);
+        } catch (error) {
+          await rollbackApprovalModeForRejectedAttach(
+            entry,
+            previousApprovalMode,
+            clientId,
+          );
+          await rollbackAttachRegistration(entry, clientId);
+          throw error;
+        }
       }
       return {
         ...restored,
@@ -5637,6 +6168,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const promise = (async (): Promise<BridgeRestoredSession> => {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       const restoreChannel = await ensureChannel();
+      if (restoreChannel.isDying) {
+        throw new BridgeChannelClosedError(`before session/${action}`);
+      }
       ci = restoreChannel;
       restoreChannel.pendingRestoreIds.add(req.sessionId);
       // Mark this id as in-flight restore BEFORE the ACP
@@ -5648,18 +6182,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // them. Cleared in the matching `finally` below.
       restoreChannel.client.markRestoreInFlight(req.sessionId);
       // Restore is a low-frequency one-shot path, so we register a
-      // fresh `channel.exited` listener per call instead of going
+      // fresh channel-unavailable race per call instead of going
       // through `getTransportClosedReject` (which exists to keep
       // sendPrompt's per-session listener count at 1 over the
       // session's lifetime). The listener is bound to this restore's
       // race only — once the race settles, no new awaits attach to
       // it, so there's no listener leak across restores.
-      const transportClosed = restoreChannel.channel.exited.then(() => {
-        throw new BridgeChannelClosedError(`during session/${action}`);
-      });
+      const transportClosed = channelUnavailableReject(
+        restoreChannel.channel,
+        `during session/${action}`,
+      );
       // Suppress the dangling rejection if `withTimeout` wins the
       // race below: `transportClosed` then stays pending, and a
-      // later `channel.exited` settle fires the inner `throw` with
+      // later channel-unavailable settle fires the inner `throw` with
       // no observer attached. Node 22 logs `unhandledRejection`;
       // under `--unhandled-rejections=throw` (common in container
       // deployments) the daemon process crashes. The `Promise.race`
@@ -5834,17 +6369,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const racedEntry = byId.get(req.sessionId);
       if (racedEntry) {
         restoreEvents.close();
-        // Same admission rule as the two checks above. This branch had no
-        // closing guard at all, so it could also attach to a Session already
-        // tearing down — narrower than the conditional-close window this PR
-        // introduced, but the same defect, and the fix is the same predicate.
-        if (isClosingOrAuthorizingClose(racedEntry)) {
-          throw new SessionNotFoundError(
-            req.sessionId,
-            'The session is closing; retry after close completes',
-            'session_closing',
-          );
-        }
+        assertAttachableSessionEntry(req.sessionId, racedEntry);
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -5852,13 +6377,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const clientId = registerClient(racedEntry, req.clientId);
         recordAttachRef(racedEntry, clientId);
         if (req.approvalMode) {
+          let previousApprovalMode: ApprovalMode;
           try {
-            await applyApprovalMode(
+            const result = await applyApprovalMode(
               racedEntry,
               req.approvalMode,
               false,
               clientId,
             );
+            previousApprovalMode = result.previous;
           } catch (err) {
             await rollbackAttachRegistration(
               racedEntry,
@@ -5866,6 +6393,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               1 + coalesceState.count,
             );
             throw err;
+          }
+          try {
+            assertAttachableSessionEntry(req.sessionId, racedEntry);
+          } catch (error) {
+            await rollbackApprovalModeForRejectedAttach(
+              racedEntry,
+              previousApprovalMode,
+              clientId,
+            );
+            await rollbackAttachRegistration(
+              racedEntry,
+              clientId,
+              1 + coalesceState.count,
+            );
+            throw error;
           }
         }
         return {
@@ -5948,9 +6490,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
+      assertAttachableSessionEntry(req.sessionId, entry);
       const clientId = registerClient(entry, req.clientId);
       if (req.approvalMode) {
         await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
+        assertAttachableSessionEntry(req.sessionId, entry);
       }
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -6557,13 +7101,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (effectiveScope === 'single') {
         const existing = defaultEntry;
         if (existing) {
-          if (isClosingOrAuthorizingClose(existing)) {
-            throw new SessionNotFoundError(
-              existing.sessionId,
-              'The session is closing; retry after close completes',
-              'session_closing',
-            );
-          }
+          assertAttachableSessionEntry(existing.sessionId, existing);
           // BRSCi: bump attach counter BEFORE any await so the
           // spawn-owner's disconnect reaper (server.ts:
           // `requireZeroAttaches: true`) sees this attach even when
@@ -6607,12 +7145,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            await applyApprovalModeForAttach(
+            previousApprovalMode = await applyApprovalModeForAttach(
               existing,
               req.approvalMode,
               clientId,
             );
+          }
+          try {
+            assertAttachableSessionEntry(existing.sessionId, existing);
+          } catch (error) {
+            if (previousApprovalMode !== undefined) {
+              await rollbackApprovalModeForRejectedAttach(
+                existing,
+                previousApprovalMode,
+                clientId,
+              );
+            }
+            await rollbackAttachRegistration(existing, clientId);
+            throw error;
           }
           return {
             sessionId: existing.sessionId,
@@ -6648,7 +7200,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // the first sync step after `await inFlight`. Doing the
           // model-switch await first re-opens the race.
           const attachedEntry = byId.get(session.sessionId);
-          if (attachedEntry) attachedEntry.attachCount++;
           // BX9_U: even with the BRSCi bump-before-await ordering,
           // there are still adversarial paths where the entry could
           // be torn down between `await inFlight` resolving and our
@@ -6664,6 +7215,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               'the agent child likely crashed during initialization — retry to spawn a new session',
             );
           }
+          assertAttachableSessionEntry(session.sessionId, attachedEntry);
+          attachedEntry.attachCount++;
           const clientId = registerClient(attachedEntry, req.clientId);
           recordAttachRef(attachedEntry, clientId);
           if (req.modelServiceId) {
@@ -6677,12 +7230,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            await applyApprovalModeForAttach(
+            previousApprovalMode = await applyApprovalModeForAttach(
               attachedEntry,
               req.approvalMode,
               clientId,
             );
+          }
+          try {
+            assertAttachableSessionEntry(session.sessionId, attachedEntry);
+          } catch (error) {
+            if (previousApprovalMode !== undefined) {
+              await rollbackApprovalModeForRejectedAttach(
+                attachedEntry,
+                previousApprovalMode,
+                clientId,
+              );
+            }
+            await rollbackAttachRegistration(attachedEntry, clientId);
+            throw error;
           }
           return {
             ...session,
@@ -6898,12 +7465,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
+      const channelDisplayText = getChannelPromptDisplayText(
+        entry,
+        context?.promptDisplayText,
+      );
+      const pendingText =
+        channelDisplayText === undefined
+          ? extractPromptText(req.prompt)
+          : channelDisplayText ||
+            (req.prompt.some(
+              (block) => isRecord(block) && block['type'] === 'image',
+            )
+              ? '[image]'
+              : '');
       const pendingEntry: PendingPromptEntry = {
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
         ...(isPromotedMidTurn ? { promotedMidTurn: true } : {}),
-        text: extractPromptText(req.prompt),
+        text: pendingText,
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
       };
@@ -7101,6 +7681,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
+                  const promptDisplayText = channelDisplayText;
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -7109,6 +7690,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
@@ -7119,6 +7701,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (promptDisplayText !== undefined) {
+                    meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
+                      promptDisplayText;
                   }
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
@@ -7173,6 +7759,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       promptRequest,
                       pendingEntry.promptId,
                       originatorClientId,
+                      channelDisplayText,
                     );
                   }
                 } catch (echoErr) {
@@ -7811,22 +8398,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
             );
             try {
-              await withWorkspaceControl(ci, () =>
-                withTimeout(
-                  Promise.race([
-                    ci.connection.extMethod(
-                      SERVE_CONTROL_EXT_METHODS.sessionClose,
-                      {
-                        sessionId: result.newSessionId,
-                        cwd: boundWorkspace,
-                      },
-                    ),
-                    getChannelClosedReject(ci),
-                  ]),
-                  initTimeoutMs,
-                  'branchSession cleanup',
-                ),
-              );
+              if (!ci.isDying) {
+                await withWorkspaceControl(ci, () =>
+                  withTimeout(
+                    Promise.race([
+                      ci.connection.extMethod(
+                        SERVE_CONTROL_EXT_METHODS.sessionClose,
+                        {
+                          sessionId: result.newSessionId,
+                          cwd: boundWorkspace,
+                        },
+                      ),
+                      channelUnavailableReject(
+                        ci.channel,
+                        'during branchSession cleanup',
+                      ),
+                    ]),
+                    initTimeoutMs,
+                    'branchSession cleanup',
+                  ),
+                );
+              }
             } catch (cleanupErr) {
               writeStderrLine(
                 `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
@@ -8677,6 +9269,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         refreshBootstrap: boolean,
       ) => {
         let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+        let created = false;
         if (
           !inFlight ||
           inFlight.connection !== entry.connection ||
@@ -8691,27 +9284,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               },
             );
           })();
+          let rejectUnavailable!: () => void;
+          const unavailable = new Promise<never>((_resolve, reject) => {
+            rejectUnavailable = () =>
+              reject(
+                new BridgeChannelClosedError('refreshExtensionsForAllSessions'),
+              );
+          });
           inFlight = {
             connection: entry.connection,
             promise,
+            wait: Promise.race([
+              withTimeout(
+                promise,
+                30_000,
+                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              ),
+              unavailable,
+            ]),
+            rejectUnavailable,
             refreshBootstrap,
           };
           inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
-          const clear = () => {
-            if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
-              inFlightExtensionRefreshes.delete(entry.sessionId);
-            }
-          };
-          void promise.then(clear, clear);
+          created = true;
         }
-        await Promise.race([
-          withTimeout(
-            inFlight.promise,
-            30_000,
-            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-          ),
-          getTransportClosedReject(entry),
-        ]);
+        const clear = () => {
+          if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
+            inFlightExtensionRefreshes.delete(entry.sessionId);
+          }
+        };
+        if (created) void inFlight.promise.then(clear, clear);
+        await inFlight.wait;
       };
 
       const results = await Promise.all(
@@ -9691,9 +10294,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : output;
 
         try {
-          await entry.connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
-            { sessionId, command, output: historyOutput, exitCode },
+          await withTimeout(
+            Promise.race([
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
+                { sessionId, command, output: historyOutput, exitCode },
+              ),
+              getTransportClosedReject(entry),
+            ]),
+            initTimeoutMs,
+            'sessionShellHistory',
           );
         } catch (err) {
           writeServeDebugLine(

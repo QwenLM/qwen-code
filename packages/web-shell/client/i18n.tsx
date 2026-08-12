@@ -1214,6 +1214,10 @@ const EN: Messages = {
   'sidebar.newWorktreeTask': 'New worktree task',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.sessionSource': 'Session source',
+  'sidebar.sessionSource.tasks': 'Tasks',
+  'sidebar.sessionSource.channels': 'Channels',
+  'sidebar.channelType.other': 'Other channels',
   'sidebar.live': 'Live',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
@@ -1460,7 +1464,6 @@ const EN: Messages = {
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
-  'compact.hint': 'Press Ctrl+O to show full tool output',
   'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
@@ -1962,6 +1965,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
   'goal.check': 'Goal check',
   'goal.cleared': 'Goal cleared',
@@ -2490,9 +2494,9 @@ const EN: Messages = {
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
-    `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `Running ${v?.count ?? 0} tools: ${v?.name ?? 'tool'}`
+      : `Running ${v?.name ?? 'tool'}`,
   'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
@@ -2602,10 +2606,19 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
+  'channels.editor.section.session': 'Session',
   'channels.editor.section.access': 'Access policy',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
   'channels.editor.environmentReference': '$ENV_VAR supported',
+  'channels.editor.field.sessionScope': 'Session scope',
+  'channels.editor.field.sessionScope.description':
+    'Controls which incoming conversations share one agent session.',
+  'channels.editor.field.sessionScope.option.user': 'Per user and chat',
+  'channels.editor.field.sessionScope.option.thread': 'Per thread',
+  'channels.editor.field.sessionScope.option.chat_thread':
+    'Per chat and thread',
+  'channels.editor.field.sessionScope.option.single': 'One shared session',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
   'channels.editor.field.wecom.botId': 'Bot ID',
@@ -4009,6 +4022,10 @@ const ZH: Messages = {
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.sessionSource': '会话来源',
+  'sidebar.sessionSource.tasks': '任务',
+  'sidebar.sessionSource.channels': '频道',
+  'sidebar.channelType.other': '其他频道',
   'sidebar.live': 'Live',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
@@ -4237,7 +4254,6 @@ const ZH: Messages = {
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
-  'compact.hint': '按 Ctrl+O 显示完整工具输出',
   'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
@@ -4694,6 +4710,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
   'goal.check': '目标检查',
   'goal.cleared': '目标已清除',
@@ -5187,9 +5204,9 @@ const ZH: Messages = {
   'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
-    `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `正在执行 ${v?.count ?? 0} 个工具：${v?.name ?? '工具'}`
+      : `正在执行 ${v?.name ?? '工具'}`,
   'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
@@ -5292,10 +5309,18 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
+  'channels.editor.section.session': '会话',
   'channels.editor.section.access': '准入策略',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
   'channels.editor.environmentReference': '支持 $ENV_VAR',
+  'channels.editor.field.sessionScope': '会话作用域',
+  'channels.editor.field.sessionScope.description':
+    '控制哪些来源的消息共享同一个 Agent 会话。',
+  'channels.editor.field.sessionScope.option.user': '按用户和对话',
+  'channels.editor.field.sessionScope.option.thread': '按话题',
+  'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
+  'channels.editor.field.sessionScope.option.single': '整个频道共享',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',

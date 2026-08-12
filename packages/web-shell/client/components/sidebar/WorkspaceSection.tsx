@@ -8,6 +8,8 @@ import {
 } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonChannelsSnapshot,
+  DaemonChannelTypeCatalog,
   DaemonSessionGroup,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
@@ -17,16 +19,14 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
-import {
-  SESSION_LIST_PAGE_SIZE,
-  WEB_SHELL_SESSION_SOURCE_TYPE,
-} from '../../constants/sessions';
+import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
+import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
 import type { SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
@@ -73,7 +73,8 @@ interface WorkspaceSectionProps {
   noSessionsLabel: string;
   loadErrorLabel: string;
   organizationEnabled: boolean;
-  sourceMetadataEnabled?: boolean;
+  sourceType?: string;
+  channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
   formatTime: (iso: string) => string;
   searchQuery?: string;
@@ -115,7 +116,8 @@ export function WorkspaceSection({
   noSessionsLabel,
   loadErrorLabel,
   organizationEnabled,
-  sourceMetadataEnabled = false,
+  sourceType,
+  channelGroupingEnabled = false,
   ungroupedLabel,
   formatTime,
   searchQuery = '',
@@ -135,6 +137,10 @@ export function WorkspaceSection({
   onOpenCommit,
 }: WorkspaceSectionProps) {
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
+  const [channelCatalog, setChannelCatalog] = useState<{
+    catalog: DaemonChannelTypeCatalog;
+    snapshot: DaemonChannelsSnapshot;
+  }>();
   const [internalExpanded, setInternalExpanded] = useState(false);
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
     readWorkspaceCollapsedGroupIds(workspace.id),
@@ -142,10 +148,12 @@ export function WorkspaceSection({
   const [actionsVisible, setActionsVisible] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
+  const channelCatalogLoadRequestId = useRef(0);
   const { t } = useI18n();
   const expanded = controlledExpanded ?? internalExpanded;
   const readOnly = !workspace.primary && !workspace.trusted;
   const disabled = workspace.primary && !workspace.trusted;
+  const searchActive = searchQuery.trim().length > 0;
 
   // A workspace always starts collapsed, including the primary workspace.
   useEffect(() => {
@@ -173,15 +181,13 @@ export function WorkspaceSection({
       options: {
         pageSize: SESSION_LIST_PAGE_SIZE,
         archiveState: 'active',
-        ...(sourceMetadataEnabled
-          ? { sourceType: WEB_SHELL_SESSION_SOURCE_TYPE }
-          : {}),
+        ...(sourceType ? { sourceType } : {}),
         ...(organizationEnabled
           ? { view: 'organized' as const, group: 'all' }
           : {}),
       },
     }),
-    [organizationEnabled, sourceMetadataEnabled, workspace.cwd],
+    [organizationEnabled, sourceType, workspace.cwd],
   );
   const sessionsResult = useSessionCatalogQuery(client, sessionsQuery, {
     autoLoad: true,
@@ -192,6 +198,7 @@ export function WorkspaceSection({
     page: sessionsPage,
     reload: reloadSessions,
     stale: sessionsStale,
+    loading: sessionsLoading,
   } = sessionsResult;
   const sessionsActive = sessionsEnabled && sessionsVisible;
   const previousSessionsActiveRef = useRef(sessionsActive);
@@ -222,7 +229,12 @@ export function WorkspaceSection({
   }, [sessionsResult.error, workspace.cwd]);
 
   useEffect(() => {
-    if (!renderSessions || disabled || !organizationEnabled) {
+    if (
+      !renderSessions ||
+      disabled ||
+      !organizationEnabled ||
+      channelGroupingEnabled
+    ) {
       setGroups([]);
       return;
     }
@@ -240,12 +252,57 @@ export function WorkspaceSection({
       cancelled = true;
     };
   }, [
+    channelGroupingEnabled,
     client,
     disabled,
     organizationEnabled,
     reloadToken,
     renderSessions,
     workspace.cwd,
+  ]);
+
+  const loadChannelCatalog = useCallback(async () => {
+    if (disabled || readOnly || !channelGroupingEnabled) return;
+    const requestId = ++channelCatalogLoadRequestId.current;
+    try {
+      const workspaceClient = client.workspaceByCwd(workspace.cwd);
+      const [catalog, snapshot] = await Promise.all([
+        workspaceClient.workspaceChannelTypes(),
+        workspaceClient.workspaceChannels(),
+      ]);
+      if (requestId === channelCatalogLoadRequestId.current) {
+        setChannelCatalog({ catalog, snapshot });
+      }
+    } catch (err) {
+      // Keep the last known catalog across a transient failure; the next
+      // poll tick retries.
+      console.warn('[WorkspaceSection] channel catalog load failed:', err);
+    }
+  }, [channelGroupingEnabled, client, disabled, readOnly, workspace.cwd]);
+
+  useEffect(() => {
+    if (!renderSessions || disabled || readOnly || !channelGroupingEnabled) {
+      channelCatalogLoadRequestId.current += 1;
+      setChannelCatalog(undefined);
+      return;
+    }
+    if (!expanded && !searchActive) return;
+    void loadChannelCatalog();
+    // The catalog rides its own tick so instances added or removed while a
+    // section is expanded reach the grouping logic without a collapse cycle.
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void loadChannelCatalog();
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [
+    channelGroupingEnabled,
+    disabled,
+    expanded,
+    loadChannelCatalog,
+    readOnly,
+    reloadToken,
+    renderSessions,
+    searchActive,
   ]);
 
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
@@ -319,7 +376,8 @@ export function WorkspaceSection({
   }, [excludePinned, searchQuery, sessions]);
 
   const groupedSessions = useMemo(() => {
-    if (!organizationEnabled || groups.length === 0) return null;
+    if (!organizationEnabled || channelGroupingEnabled || groups.length === 0)
+      return null;
     const assigned = new Set<string>();
     const sections = groups.map((group) => {
       const items = visibleSessions.filter(
@@ -334,7 +392,20 @@ export function WorkspaceSection({
         (session) => !assigned.has(session.sessionId),
       ),
     };
-  }, [groups, organizationEnabled, visibleSessions]);
+  }, [channelGroupingEnabled, groups, organizationEnabled, visibleSessions]);
+
+  const channelSessionGroups = useMemo(
+    () =>
+      channelGroupingEnabled && channelCatalog
+        ? groupSessionsByChannelType(
+            visibleSessions,
+            channelCatalog.catalog,
+            channelCatalog.snapshot.instances,
+            t('sidebar.channelType.other'),
+          )
+        : null,
+    [channelCatalog, channelGroupingEnabled, t, visibleSessions],
+  );
 
   return (
     <div className={styles.section}>
@@ -416,8 +487,35 @@ export function WorkspaceSection({
                 {loadErrorLabel}
               </div>
             ) : visibleSessions.length === 0 ? (
-              <div className={styles.empty}>{noSessionsLabel}</div>
-            ) : groupedSessions ? (
+              // A source switch swaps the query key; until the new source's
+              // page settles there is no data yet, so the "no sessions" notice
+              // would flash for a whole fetch round-trip.
+              sessionsLoading && sessionsPage === undefined ? null : (
+                <div className={styles.empty}>{noSessionsLabel}</div>
+              )
+            ) : channelSessionGroups ? (
+              <>
+                {channelSessionGroups.map((group) => (
+                  <SessionGroupSection
+                    id={group.id}
+                    key={group.id}
+                    label={group.label}
+                    count={group.sessions.length}
+                    expanded={!collapsedGroupIds.has(group.id)}
+                    onToggle={() => {
+                      setCollapsedGroupIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(group.id)) next.delete(group.id);
+                        else next.add(group.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    {group.sessions.map((session) => renderSession(session))}
+                  </SessionGroupSection>
+                ))}
+              </>
+            ) : groupedSessions && !channelGroupingEnabled ? (
               <>
                 {groupedSessions.sections.map(({ group, sessions }) => (
                   <SessionGroupSection
