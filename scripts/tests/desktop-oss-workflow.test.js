@@ -65,19 +65,51 @@ describe('Desktop OSS mirror workflow', () => {
     expect(latest).toContain("--prefix 'desktop/latest'");
     expect(latest).toContain('dist/desktop/desktop-latest.json');
     expect(latest).not.toContain('.dmg');
+
+    const verifyIndex = sync.indexOf(
+      "name: 'Verify versioned assets on Aliyun OSS'",
+    );
+    expect(verifyIndex).toBeGreaterThan(0);
+    expect(verifyIndex).toBeLessThan(
+      sync.indexOf("name: 'Publish latest manifest to Aliyun OSS'"),
+    );
     expect(
-      sync.indexOf("name: 'Verify versioned assets on Aliyun OSS'"),
+      getWorkflowStep(sync, 'Verify versioned assets on Aliyun OSS'),
+    ).toContain('sha256sum -c SHA256SUMS.txt');
+    expect(
+      getWorkflowStep(sync, 'Verify latest manifest on Aliyun OSS'),
+    ).toContain('cmp ');
+  });
+
+  it('checks the GitHub stable version before changing the OSS feed', () => {
+    const sync = getWorkflowJob(syncWorkflow, 'sync');
+    const check = getWorkflowStep(
+      sync,
+      'Confirm latest manifest matches GitHub stable feed',
+    );
+    expect(check).toContain("gh release download 'desktop-latest'");
+    expect(check).toContain('test "$actual" = "$expected"');
+    expect(check).toContain(
+      'expected="$(jq -r \'.version\' dist/desktop/desktop-latest.json)"',
+    );
+    expect(check).toContain(
+      'actual="$(jq -r \'.version\' "$directory/desktop-latest.json")"',
+    );
+    expect(
+      sync.indexOf(
+        "name: 'Confirm latest manifest matches GitHub stable feed'",
+      ),
     ).toBeLessThan(
       sync.indexOf("name: 'Publish latest manifest to Aliyun OSS'"),
     );
   });
 
-  it('checks the GitHub stable version before changing the OSS feed', () => {
-    const check = getWorkflowStep(
-      getWorkflowJob(syncWorkflow, 'sync'),
-      'Confirm latest manifest matches GitHub stable feed',
-    );
-    expect(check).toContain("gh release download 'desktop-latest'");
-    expect(check).toContain('test "$actual" = "$expected"');
+  it('sync workflow validates stable-only releases in the reusable job', () => {
+    expect(syncWorkflow).not.toContain('pull_request:');
+    const sync = getWorkflowJob(syncWorkflow, 'sync');
+    const resolve = getWorkflowStep(sync, 'Resolve release');
+    expect(resolve).toContain('^[0-9]+\\.[0-9]+\\.[0-9]+$');
+    expect(resolve).toContain("!= 'artifact'");
+    expect(resolve).toContain("!= 'release'");
   });
 });

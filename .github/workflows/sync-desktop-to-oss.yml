@@ -35,7 +35,7 @@ concurrency:
 jobs:
   sync:
     name: 'Mirror Qwen Code Desktop to Aliyun OSS'
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
     environment:
@@ -102,9 +102,12 @@ jobs:
           for asset in Qwen-Code-Desktop-arm64.dmg Qwen-Code-Desktop-x64.dmg; do
             test -f "$asset" || { echo "::error::Missing Desktop installer $asset"; exit 1; }
           done
-          find . -maxdepth 1 -name '*_x64-setup.exe' -print -quit | grep -q .
-          find . -maxdepth 1 -name '*.AppImage' -print -quit | grep -q .
-          find . -maxdepth 1 -name '*.deb' -print -quit | grep -q .
+          find . -maxdepth 1 -name '*_x64-setup.exe' -print -quit | grep -q . \
+            || { echo "::error::Missing Desktop installer matching *_x64-setup.exe"; exit 1; }
+          find . -maxdepth 1 -name '*.AppImage' -print -quit | grep -q . \
+            || { echo "::error::Missing Desktop installer matching *.AppImage"; exit 1; }
+          find . -maxdepth 1 -name '*.deb' -print -quit | grep -q . \
+            || { echo "::error::Missing Desktop installer matching *.deb"; exit 1; }
           rm -f desktop-latest.json SHA256SUMS.txt
           node ../../.github/scripts/create-desktop-update-manifest.mjs \
             --assets . \
