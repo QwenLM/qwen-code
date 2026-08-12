@@ -290,7 +290,10 @@ function createRemotePtyHostHandle({
       }).catch(() => {
         child?.kill(allowedSignal);
       });
-      if (!child) {
+      // SIGINT is non-terminal (the worker can trap it and survive), so do
+      // not optimistically resolve the exit tracker for it — let the
+      // remote exit poller observe whether the worker actually exits.
+      if (!child && allowedSignal !== 'SIGINT') {
         exitTracker.resolve({ exitCode: 1 });
       }
     },
