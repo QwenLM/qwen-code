@@ -510,124 +510,1095 @@ export class SessionMessageHandler extends BaseMessageHandler {
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
-    const trimmedText = stripZeroWidthSpï^{¶‰žËkºwµç_HØ]Ú
-ØY\œ›ÜŠHÂˆÙÙÙ\‹Ø\›Šˆ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—HÙ\ÜÚ[Û‹ÛØY˜Z[Y\Ú[™È˜[˜XÚÎ‰ËˆØY\œ›Ü‹ˆ
-NÂ‚ˆËÈÚXÚÈ›Üˆ]][XØ][Û‹ÜÙ\ÜÚ[Ûˆ^\˜][Ûˆ\œ›ÜœÂˆYˆ
-\ËœÚÝ[›Û\]]
-ØY\œ›ÜŠJHÂˆËÈÚÝÈH[Ü™H\Ù\‹YœšY[™H\œ›ÜˆY\ÜØYÙH›Üˆ^\™YÙ\ÜÚ[ÛœÂˆ]ØZ]\Ëœ›Û\]]
-ˆ	Ö[Ý\ˆÙ\ÜÚ[Ûˆ\È^\™YÜˆ\È[˜[YˆX\ÙHÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈÝÚ]ÚÙ\ÜÚ[ÛœË‰Ëˆ
-NÂ‚ˆËÈÙ[™HÜXÚYšXÈ\œ›ÜˆÈHÙXšY]È›Üˆ™]\ˆRH[™[™Âˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘^\™Y	Ëˆ]NˆÈY\ÜØYÙNˆ	ÔÙ\ÜÚ[Ûˆ^\™YˆX\ÙH]][XØ]HYØZ[‹‰ÈKˆJNÂˆ™]\›ŽÂˆB‚ˆËÈ˜[˜XÚÎˆÜ™X]H™]ÈÙ\ÜÚ[Û‚ˆÛÛœÝY\ÜØYÙ\ÈH]ØZ]\Ë˜YÙ[X[˜YÙ\‹™Ù]Ù\ÜÚ[Û“Y\ÜØYÙ\ÊÙ\ÜÚ[Û’Y
-NÂ‚ˆËÈYˆÙH\™HÛÛ›™XÝYžHÈÜ™X]HHœ™\ÚPÔÙ\ÜÚ[ÛˆÛÈ\Ù\ˆØ[ˆ[\˜XÝˆYˆ
-\Ë˜YÙ[X[˜YÙ\‹š\ÐÛÛ›™XÝY
-HÂˆžHÂˆ]ØZ]\Ë˜YÙ[X[˜YÙ\‹˜Ü™X]S™]ÔÙ\ÜÚ[ÛŠÛÜšÚ[™Ñ\‹Âˆ›Ü˜ÙS™]ÎˆYKˆJNÂ‚ˆËÈÙY\HšY]ÙYÙ\ÜÚ[ÛˆY[]H[YÛ™YÚ]Ú]HÙXšY]ÈÙY\ÂˆËÈ
-H\˜Ú]™YÙ\ÜÚ[Û’Y
-KˆH]™HPÔÙ\ÜÚ[Ûˆ]™\ÈÛ‚ˆËÈYÙ[X[˜YÙ\‹˜Ý\œ™[Ù\ÜÚ[Û’YÈHÞ[˜Ë[Û‹Yš\œÝ[Y\ÜØYÙH]ˆËÈ
-ÙYHÝ™X[Q[™[™\ŠHÚ[›\›ÝÚY\ÈÈHPÔYÛ˜ÙBˆËÈH\Ù\ˆXÝX[HÙ[™ÈHY\ÜØYÙKˆÙ][™ÈÝ\œ™[ÛÛ™\œØ][Û’YˆËÈÈH™]ÈPÔY\™HÛÝ[\Þ[˜ÈH˜XÚÙ[™œ›ÛHHÙXšY]ÂˆËÈ[™Ø]\ÙH™[˜[YKÙ[]KÝ]K]\]H›ÝÜÈÈ\™Ù]HÜ›Û™ÂˆËÈÙ\ÜÚ[Ûˆ\š[™ÈH˜[˜XÚÈÚ[™ÝË‚ˆ\Ë\]PÝ\œ™[ÛÛ™\œØ][Û’Y
-Ù\ÜÚ[Û’Y
-NÂ‚ˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ü]Ù[”Ù\ÜÚ[Û”ÝÚ]ÚY	Ëˆ]NˆÈÙ\ÜÚ[Û’YY\ÜØYÙ\ËÙ\ÜÚ[ÛŽˆÙ\ÜÚ[Û‘]Z[ÈKˆJNÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û“ØYÛÛ\]IËˆ]NˆÈÙ\ÜÚ[Û’YKˆJNÂ‚ˆËÈÛ›HÚÝÈHØXÚHØ\›š[™ÈYˆÙHXÝX[H™[˜XÚÈÈØØ[ØXÚBˆËÈ[™Y‰ÝÝXØÙ\ÜÙ[HØYšXHPÔˆËÈÚXÚÈYˆÙH[H™[˜XÚÈžHÚXÚÚ[™ÈYˆØY\œ›Üˆ\È›Ý[Ý[™Yš[™YˆËÈ[™Yˆ]	ÜÈ›ÝHÝXØÙ\ÜÙ[™\ÜÛœÙH]ÛÚÜÈZÙH[ˆ\œ›Ü‚ˆYˆ
-ˆØY\œ›Üˆ	‰‚ˆ\[ÙˆØY\œ›ÜˆOOH	ÛØš™XÝ	È	‰‚ˆJ	Ü™\Ý[	È[ˆØY\œ›ÜŠBˆ
-HÂˆœØÛÙKÚ[™ÝËœÚÝÕØ\›š[™ÓY\ÜØYÙJˆ	ÔÙ\ÜÚ[Ûˆ™\ÝÜ™Yœ›ÛHØØ[ØXÚKˆÛÛYHÛÛ^X^H™H[˜ÛÛ\]K‰Ëˆ
-NÂˆBˆHØ]Ú
-Ü™X]Q\œ›ÜŠHÂˆÙÙÙ\‹™\œ›ÜŠˆ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H˜Z[YÈÜ™X]HÙ\ÜÚ[ÛŽ‰ËˆÜ™X]Q\œ›Ü‹ˆ
-NÂ‚ˆËÈÚXÚÈ›Üˆ]][XØ][Û‹ÜÙ\ÜÚ[Ûˆ^\˜][Ûˆ\œ›ÜœÈ[ˆÙ\ÜÚ[ÛˆÜ™X][Û‚ˆYˆ
-\ËœÚÝ[›Û\]]
-Ü™X]Q\œ›ÜŠJHÂˆËÈÚÝÈH[Ü™H\Ù\‹YœšY[™H\œ›ÜˆY\ÜØYÙH›Üˆ^\™YÙ\ÜÚ[ÛœÂˆ]ØZ]\Ëœ›Û\]]
-ˆ	Ö[Ý\ˆÙ\ÜÚ[Ûˆ\È^\™YÜˆ\È[˜[YˆX\ÙHÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈÝÚ]ÚÙ\ÜÚ[ÛœË‰Ëˆ
-NÂ‚ˆËÈÙ[™HÜXÚYšXÈ\œ›ÜˆÈHÙXšY]È›Üˆ™]\ˆRH[™[™Âˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘^\™Y	Ëˆ]NˆÂˆY\ÜØYÙNˆ	ÔÙ\ÜÚ[Ûˆ^\™YˆX\ÙH]][XØ]HYØZ[‹‰ËˆKˆJNÂˆ™]\›ŽÂˆB‚ˆ›ÝÈÜ™X]Q\œ›ÜŽÂˆBˆH[ÙHÂˆËÈÙ™›[™HšY]ÈÛ›Bˆ\Ë\]PÝ\œ™[ÛÛ™\œØ][Û’Y
-Ù\ÜÚ[Û’Y
-NÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ü]Ù[”Ù\ÜÚ[Û”ÝÚ]ÚY	Ëˆ]NˆÈÙ\ÜÚ[Û’YY\ÜØYÙ\ËÙ\ÜÚ[ÛŽˆÙ\ÜÚ[Û‘]Z[ÈKˆJNÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û“ØYÛÛ\]IËˆ]NˆÈÙ\ÜÚ[Û’YKˆJNÂˆœØÛÙKÚ[™ÝËœÚÝÕØ\›š[™ÓY\ÜØYÙJˆ	ÔÚÝÚ[™ÈØXÚYÙ\ÜÚ[ÛˆÛÛ[ˆÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈ[\˜XÝÚ]HRK‰Ëˆ
-NÂˆBˆBˆHØ]Ú
-\œ›ÜŠHÂˆÙÙÙ\‹™\œ›ÜŠ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H˜Z[YÈÝÚ]ÚÙ\ÜÚ[ÛŽ‰Ë\œ›ÜŠNÂ‚ˆËÈØY™[HÛÛ™\\œ›ÜˆÈÝš[™ÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆËÈÚXÚÈ›Üˆ]][XØ][Û‹ÜÙ\ÜÚ[Ûˆ^\˜][Ûˆ\œ›ÜœÂˆYˆ
-\ËœÚÝ[›Û\]]
-\œ›ÜŠJHÂˆËÈÚÝÈH[Ü™H\Ù\‹YœšY[™H\œ›ÜˆY\ÜØYÙH›Üˆ^\™YÙ\ÜÚ[ÛœÂˆ]ØZ]\Ëœ›Û\]]
-ˆ	Ö[Ý\ˆÙ\ÜÚ[Ûˆ\È^\™YÜˆ\È[˜[YˆX\ÙHÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈÝÚ]ÚÙ\ÜÚ[ÛœË‰Ëˆ
-NÂ‚ˆËÈÙ[™HÜXÚYšXÈ\œ›ÜˆÈHÙXšY]È›Üˆ™]\ˆRH[™[™Âˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘^\™Y	Ëˆ]NˆÈY\ÜØYÙNˆ	ÔÙ\ÜÚ[Ûˆ^\™YˆX\ÙH]][XØ]HYØZ[‹‰ÈKˆJNÂˆH[ÙHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈÝÚ]ÚÙ\ÜÚ[ÛŽˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆBˆB‚ˆÊŠ‚ˆ
-ˆ[™HÙ]]Ù[ˆÙ\ÜÚ[ÛœÈ™\]Y\Ýˆ
-‹Âˆš]˜]H\Þ[˜È[™QÙ]]Ù[”Ù\ÜÚ[ÛœÊˆÝ\œÛÜÎˆ[X™\‹ˆÚ^™OÎˆ[X™\‹ˆ
-Nˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆËÈYÙYÚ[ˆÜÜÚX›NÈ˜[È˜XÚÈÈ[\ÝYˆPÔ›ÝÝ\ÜYˆÛÛœÝYÙHH]ØZ]\Ë˜YÙ[X[˜YÙ\‹™Ù]Ù\ÜÚ[Û“\ÝYÙY
-ÂˆÝ\œÛÜ‹ˆÚ^™KˆJNÂˆÛÛœÝ\[™H\[ÙˆÝ\œÛÜˆOOH	Û[X™\‰ÎÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ü]Ù[”Ù\ÜÚ[Û“\Ý	Ëˆ]NˆÂˆÙ\ÜÚ[ÛœÎˆYÙKœÙ\ÜÚ[ÛœËˆ™^Ý\œÛÜŽˆYÙK›™^Ý\œÛÜ‹ˆ\Ó[Ü™NˆYÙKš\Ó[Ü™Kˆ\[™ˆKˆJNÂˆHØ]Ú
-\œ›ÜŠHÂˆÙÙÙ\‹™\œ›ÜŠ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H˜Z[YÈÙ]Ù\ÜÚ[ÛœÎ‰Ë\œ›ÜŠNÂ‚ˆËÈØY™[HÛÛ™\\œ›ÜˆÈÝš[™ÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆËÈÚXÚÈ›Üˆ]][XØ][Û‹ÜÙ\ÜÚ[Ûˆ^\˜][Ûˆ\œ›ÜœÂˆYˆ
-\ËœÚÝ[›Û\]]
-\œ›ÜŠJHÂˆËÈÚÝÈH[Ü™H\Ù\‹YœšY[™H\œ›ÜˆY\ÜØYÙH›Üˆ^\™YÙ\ÜÚ[ÛœÂˆ]ØZ]\Ëœ›Û\]]
-ˆ	Ö[Ý\ˆÙ\ÜÚ[Ûˆ\È^\™YÜˆ\È[˜[YˆX\ÙHÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈšY]ÈÙ\ÜÚ[ÛœË‰Ëˆ
-NÂ‚ˆËÈÙ[™HÜXÚYšXÈ\œ›ÜˆÈHÙXšY]È›Üˆ™]\ˆRH[™[™Âˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘^\™Y	Ëˆ]NˆÈY\ÜØYÙNˆ	ÔÙ\ÜÚ[Ûˆ^\™YˆX\ÙH]][XØ]HYØZ[‹‰ÈKˆJNÂˆH[ÙHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈÙ]Ù\ÜÚ[ÛœÎˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆBˆB‚ˆÊŠ‚ˆ
-ˆ[™HØ[˜Ù[Ý™X[Z[™È™\]Y\Ýˆ
-‹Âˆš]˜]H\Þ[˜È[™PØ[˜Ù[Ý™X[Z[™Ê
-Nˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆÙÙÙ\‹›ÙÊ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—HØ[˜Ù[[™ÈÝ™X[Z[™Ë‹‹‰ÊNÂ‚ˆËÈØ[˜Ù[HÝ\œ™[Ý™X[Z[™ÈÜ\˜][Ûˆ[ˆHYÙ[X[˜YÙ\‚ˆ]ØZ]\Ë˜YÙ[X[˜YÙ\‹˜Ø[˜Ù[Ý\œ™[›Û\
+    const trimmedText = stripZeroWidthSpaces(text).trim();
+    const hasAttachments = (attachments?.length ?? 0) > 0;
+    if (!trimmedText && !hasAttachments) {
+      logger.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
 
-NÂ‚ˆËÈ\ÙHÙ[™Ý™X[Q[™È[˜ÛYH™\]Y\ÝY›Üˆ›Ü\ˆÛÜœ™[][Û‚ˆ\ËœÙ[™Ý™X[Q[™
-	Ý\Ù\—ØØ[˜Ù[Y	ÊNÂ‚ˆÙÙÙ\‹›ÙÊ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—HÝ™X[Z[™ÈØ[˜Ù[YÝXØÙ\ÜÙ[IÊNÂˆHØ]Ú
-Ù\œ›ÜŠHÂˆÙÙÙ\‹›ÙÊ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—HÝ™X[Z[™ÈØ[˜Ù[Y
-[\œ\Y
-IÊNÂ‚ˆËÈ\ÙHÙ[™Ý™X[Q[™
-Ú]\XØ]HÝX\™
-HÈ[˜ÛYH™\]Y\ÝYˆ\ËœÙ[™Ý™X[Q[™
-	Ý\Ù\—ØØ[˜Ù[Y	ÊNÂˆBˆB‚ˆÊŠ‚ˆ
-ˆ[™H™\Ý[YHÙ\ÜÚ[Ûˆ™\]Y\Ýˆ
-‹Âˆš]˜]H\Þ[˜È[™T™\Ý[YTÙ\ÜÚ[ÛŠÙ\ÜÚ[Û’YˆÝš[™ÊNˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆËÈYˆ›ÝÛÛ›™XÝYÙ™™\ˆÈ]][XØ]HÜˆšY]ÈÙ™›[™BˆYˆ
-]\Ë˜YÙ[X[˜YÙ\‹š\ÐÛÛ›™XÝY
-HÂˆÛÛœÝÚÚXÙHH]ØZ]\Ëœ›Û\]]Ü“Ù™›[™Jˆ	Ö[ÝH\™H›Ý]][XØ]YˆÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈ[H™\ÝÜ™H\ÈÙ\ÜÚ[Û‹ÜˆšY]È]Ù™›[™K‰Ëˆ
-NÂ‚ˆYˆ
-ÚÚXÙHOOH	ÛÙ™›[™IÊHÂˆÛÛœÝY\ÜØYÙ\ÈBˆ]ØZ]\Ë˜YÙ[X[˜YÙ\‹™Ù]Ù\ÜÚ[Û“Y\ÜØYÙ\ÊÙ\ÜÚ[Û’Y
-NÂˆ\Ë\]PÝ\œ™[ÛÛ™\œØ][Û’Y
-Ù\ÜÚ[Û’Y
-NÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ü]Ù[”Ù\ÜÚ[Û”ÝÚ]ÚY	Ëˆ]NˆÈÙ\ÜÚ[Û’YY\ÜØYÙ\ÈKˆJNÂˆœØÛÙKÚ[™ÝËœÚÝÒ[™›Ü›X][Û“Y\ÜØYÙJˆ	ÔÚÝÚ[™ÈØXÚYÙ\ÜÚ[ÛˆÛÛ[ˆÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈ[\˜XÝÚ]HRK‰Ëˆ
-NÂˆ™]\›ŽÂˆH[ÙHYˆ
-ÚÚXÙHOOH	Ø]]	ÊHÂˆ™]\›ŽÂˆBˆB‚ˆËÈžHPÔØYš\œÝˆžHÂˆËÈ™KXÛX\ˆRHÛÈ™\^YY\]\È\[™Y\Ø\™Âˆ\Ë\]PÝ\œ™[ÛÛ™\œØ][Û’Y
-Ù\ÜÚ[Û’Y
-NÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ü]Ù[”Ù\ÜÚ[Û”ÝÚ]ÚY	Ëˆ]NˆÈÙ\ÜÚ[Û’YY\ÜØYÙ\Îˆ×HKˆJNÂ‚ˆ]ØZ]\Ë˜YÙ[X[˜YÙ\‹›ØYÙ\ÜÚ[Û•šXPXÜ
-Ù\ÜÚ[Û’Y
-NÂ‚ˆËÈ™\Ù]]H›YÈÚ[ˆ™\Ý[Z[™ÈÙ\ÜÚ[ÛœÂˆ\Ëš\Õ]TÙ]H˜[ÙNÂ‚ˆËÈÝXØÙ\ÜÙ[HØYYÙ\ÜÚ[Û‹™]\›ˆX\›HÈ]›ÚY˜[˜XÚÈÙÚXÂˆ]ØZ]\Ëš[™QÙ]]Ù[”Ù\ÜÚ[ÛœÊ
-NÂˆ™]\›ŽÂˆHØ]Ú
-XÜ\œ›ÜŠHÂˆËÈÚXÚÈ›Üˆ]][XØ][Û‹ÜÙ\ÜÚ[Ûˆ^\˜][Ûˆ\œ›ÜœÂˆYˆ
-\ËœÚÝ[›Û\]]
-XÜ\œ›ÜŠJHÂˆËÈÚÝÈH[Ü™H\Ù\‹YœšY[™H\œ›ÜˆY\ÜØYÙH›Üˆ^\™YÙ\ÜÚ[ÛœÂˆ]ØZ]\Ëœ›Û\]]
-ˆ	Ö[Ý\ˆÙ\ÜÚ[Ûˆ\È^\™YÜˆ\È[˜[YˆX\ÙHÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈ™\Ý[YHÙ\ÜÚ[ÛœË‰Ëˆ
-NÂ‚ˆËÈÙ[™HÜXÚYšXÈ\œ›ÜˆÈHÙXšY]È›Üˆ™]\ˆRH[™[™Âˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘^\™Y	Ëˆ]NˆÈY\ÜØYÙNˆ	ÔÙ\ÜÚ[Ûˆ^\™YˆX\ÙH]][XØ]HYØZ[‹‰ÈKˆJNÂˆ™]\›ŽÂˆBˆB‚ˆ]ØZ]\Ëš[™QÙ]]Ù[”Ù\ÜÚ[ÛœÊ
-NÂˆHØ]Ú
-\œ›ÜŠHÂˆÙÙÙ\‹™\œ›ÜŠ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H˜Z[YÈ™\Ý[YHÙ\ÜÚ[ÛŽ‰Ë\œ›ÜŠNÂ‚ˆËÈØY™[HÛÛ™\\œ›ÜˆÈÝš[™ÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆËÈÚXÚÈ›Üˆ]][XØ][Û‹ÜÙ\ÜÚ[Ûˆ^\˜][Ûˆ\œ›ÜœÂˆYˆ
-\ËœÚÝ[›Û\]]
-\œ›ÜŠJHÂˆËÈÚÝÈH[Ü™H\Ù\‹YœšY[™H\œ›ÜˆY\ÜØYÙH›Üˆ^\™YÙ\ÜÚ[ÛœÂˆ]ØZ]\Ëœ›Û\]]
-ˆ	Ö[Ý\ˆÙ\ÜÚ[Ûˆ\È^\™YÜˆ\È[˜[YˆX\ÙHÛÛ™šYÝ\™H[Ý\ˆ›ÝšY\ˆÈ™\Ý[YHÙ\ÜÚ[ÛœË‰Ëˆ
-NÂ‚ˆËÈÙ[™HÜXÚYšXÈ\œ›ÜˆÈHÙXšY]È›Üˆ™]\ˆRH[™[™Âˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘^\™Y	Ëˆ]NˆÈY\ÜØYÙNˆ	ÔÙ\ÜÚ[Ûˆ^\™YˆX\ÙH]][XØ]HYØZ[‹‰ÈKˆJNÂˆH[ÙHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈ™\Ý[YHÙ\ÜÚ[ÛŽˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆBˆB‚ˆÊŠ‚ˆ
-ˆ[™H[]HÙ\ÜÚ[Ûˆ™\]Y\Ýˆ
-‹Âˆš]˜]H\Þ[˜È[™Q[]T]Ù[”Ù\ÜÚ[ÛŠÙ\ÜÚ[Û’YˆÝš[™ÊNˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆYˆ
-ˆÙ\ÜÚ[Û’YOOH\Ë˜Ý\œ™[ÛÛ™\œØ][Û’YˆÙ\ÜÚ[Û’YOOH\Ë˜YÙ[X[˜YÙ\‹˜Ý\œ™[Ù\ÜÚ[Û’Yˆ
-HÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	ÐØ[››Ý[]HHÝ\œ™[XÝ]™HÙ\ÜÚ[Û‹‰ÈKˆJNÂˆ™]\›ŽÂˆB‚ˆÛÛœÝÝXØÙ\ÜÈH]ØZ]\Ë˜YÙ[X[˜YÙ\‹™[]TÙ\ÜÚ[ÛŠÙ\ÜÚ[Û’Y
-NÂˆYˆ
-ÝXØÙ\ÜÊHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û‘[]Y	Ëˆ]NˆÈÙ\ÜÚ[Û’YKˆJNÂˆH[ÙHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	Ñ˜Z[YÈ[]HÙ\ÜÚ[Û‹‰ÈKˆJNÂˆBˆHØ]Ú
-\œ›ÜŠHÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈ[]HÙ\ÜÚ[ÛŽˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆB‚ˆÊŠ‚ˆ
-ˆ[™H™[˜[YHÙ\ÜÚ[Ûˆ™\]Y\Ýˆ
-‹Âˆš]˜]H\Þ[˜È[™T™[˜[YT]Ù[”Ù\ÜÚ[ÛŠˆÙ\ÜÚ[Û’YˆÝš[™Ëˆ]NˆÝš[™Ëˆ
-Nˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆÛÛœÝš[[YY]HH]Kš[J
-Kœ™\XÙJÖ×——JËÙË	È	ÊNÂˆYˆ
-]š[[YY]JHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	ÔX\ÙH›ÝšYHH˜[YK‰ÈKˆJNÂˆ™]\›ŽÂˆBˆËÈX]Ú\ÈÑTÔÒSÓ—ÕUWÓPVÓS‘Õœ›ÛH]Ù[‹XÛÙKÜ]Ù[‹XÛÙKXÛÜ™KÜÙ\ÜÚ[Û”Ù\šXÙBˆYˆ
-š[[YY]K›[™ÝˆŒ
-HÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	Ó˜[YH\ÈÛÈÛ™ËˆX^[][HŒÚ\˜XÝ\œË‰ÈKˆJNÂˆ™]\›ŽÂˆB‚ˆÛÛœÝÝXØÙ\ÜÈH]ØZ]\Ë˜YÙ[X[˜YÙ\‹œ™[˜[YTÙ\ÜÚ[ÛŠˆÙ\ÜÚ[Û’Yˆš[[YY]Kˆ
-NÂˆYˆ
-ÝXØÙ\ÜÊHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û”™[˜[YY	Ëˆ]NˆÈÙ\ÜÚ[Û’Y]Nˆš[[YY]HKˆJNÂˆYˆ
-Ù\ÜÚ[Û’YOOH\Ë˜Ý\œ™[ÛÛ™\œØ][Û’Y
-HÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	ÜÙ\ÜÚ[Û•]U\]Y	Ëˆ]NˆÈÙ\ÜÚ[Û’Y]Nˆš[[YY]HKˆJNÂˆBˆH[ÙHÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	Ñ˜Z[YÈ™[˜[YHÙ\ÜÚ[Û‹‰ÈKˆJNÂˆBˆHØ]Ú
-\œ›ÜŠHÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈ™[˜[YHÙ\ÜÚ[ÛŽˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆB‚ˆÊŠ‚ˆ
-ˆÙ]\›Ý˜[[ÙHšXHYÙ[
-PÔÙ\ÜÚ[Û‹ÜÙ]Û[ÙJBˆ
-‹Âˆš]˜]H\Þ[˜È[™TÙ]\›Ý˜[[ÙJ]OÎˆÂˆ[ÙRYÎˆ\›Ý˜[[ÙU˜[YNÂˆJNˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆÛÛœÝ[ÙRYH]OË›[ÙRY	ÙY˜][	ÎÂˆ]ØZ]\Ë˜YÙ[X[˜YÙ\‹œÙ]\›Ý˜[[ÙQœ›ÛUZJ[ÙRY
-NÂˆËÈ›È^XÚ]™\ÜÛœÙH™YYYÈÙX•šY]È\Ý[œÈ›Üˆ[ÙPÚ[™ÙYˆHØ]Ú
-\œ›ÜŠHÂˆÙÙÙ\‹™\œ›ÜŠ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H˜Z[YÈÙ][ÙN‰Ë\œ›ÜŠNÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈÙ][ÙNˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆB‚ˆÊŠ‚ˆ
-ˆÙ][Ù[šXHYÙ[
-PÔÙ\ÜÚ[Û‹ÜÙ]Û[Ù[
-Bˆ
-ˆ\Ü^\È”ÐÛÙH˜]]™H›ÝYšXØ][ÛœÈÛˆÝXØÙ\ÜÈÜˆ˜Z[\™K‚ˆ
-‹Âˆš]˜]H\Þ[˜È[™TÙ][Ù[
-]OÎˆÈ[Ù[YÎˆÝš[™ÈJNˆ›ÛZ\ÙO›ÚYˆÂˆžHÂˆÛÛœÝ[Ù[YH]OË›[Ù[YÂˆYˆ
-[[Ù[Y
-HÂˆ›ÝÈ™]È\œ›ÜŠ	Ó[Ù[Q\È™\]Z\™Y	ÊNÂˆBˆËÈY™[œÚ]™HÝX\™ˆ™Y\ÙH›Û‹\[[YH]Ù[ˆÐ]][Ù[È[ˆØ\ÙHHRBˆËÈ\Èž\\ÜÙY
-›ÙÜ˜[[X]XÈØ[Ý[HÙXšY]Ë™\ÝÜ™YÙ\ÜÚ[ÛŠK‚ˆYˆ
-\Ñ\ØÛÛ[YY[Ù[
-[Ù[Y
-JHÂˆÙÙÙ\‹Ø\›Šˆ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H™Z™XÝY\ØÛÛ[YY[Ù[	Ëˆ[Ù[Yˆ
-NÂˆÛÛœÝY\ÜØYÙHH˜Z[YÈÝÚ]Ú[Ù[ˆ	ÑTÐÓÓ•S•QQÓQTÔÐQÑTË˜›ØÚÙY\œ›ÜŸXÂˆœØÛÙKÚ[™ÝËœÚÝÑ\œ›Ü“Y\ÜØYÙJY\ÜØYÙJNÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙHKˆJNÂˆ™]\›ŽÂˆBˆ]ØZ]\Ë˜YÙ[X[˜YÙ\‹œÙ][Ù[œ›ÛUZJ[Ù[Y
-NÂˆ›ÚYœØÛÙKÚ[™ÝËœÚÝÒ[™›Ü›X][Û“Y\ÜØYÙJˆ[Ù[ÝÚ]ÚYÎˆ	Û[Ù[YXˆ
-NÂˆHØ]Ú
-\œ›ÜŠHÂˆÛÛœÝ\œ›Ü“\ÙÈH\Ë™Ù]\œ›Ü“Y\ÜØYÙJ\œ›ÜŠNÂˆÙÙÙ\‹™\œ›ÜŠ	ÖÔÙ\ÜÚ[Û“Y\ÜØYÙR[™\—H˜Z[YÈÙ][Ù[‰Ë\œ›ÜŠNÂˆœØÛÙKÚ[™ÝËœÚÝÑ\œ›Ü“Y\ÜØYÙJ˜Z[YÈÝÚ]Ú[Ù[ˆ	Ù\œ›Ü“\ÙßX
-NÂˆ\ËœÙ[™ÕÙX•šY]ÊÂˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ˜Z[YÈÙ][Ù[ˆ	Ù\œ›Ü“\ÙßXKˆJNÂˆBˆBŸB
+    try {
+      const exportFormat = parseExportSlashCommand(trimmedText);
+      if (exportFormat) {
+        await this.handleExportCommand(exportFormat);
+        return;
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    let displayText = trimmedText ? text : '';
+    let promptText = text;
+    if (context && context.length > 0) {
+      const contextParts = context
+        .map((ctx) => {
+          if (ctx.startLine && ctx.endLine) {
+            return `${ctx.value}#${ctx.startLine}${ctx.startLine !== ctx.endLine ? `-${ctx.endLine}` : ''}`;
+          }
+          return ctx.value;
+        })
+        .join('\n');
+
+      promptText = `${contextParts}\n\n${text}`;
+    }
+
+    const {
+      formattedText,
+      displayText: updatedDisplayText,
+      savedImageCount,
+      promptImages,
+    } = await processImageAttachments(promptText, attachments);
+    for (const ctx of context ?? []) {
+      const mimeType = ctx.isImage
+        ? getDisplayableImageMimeType(ctx.value)
+        : undefined;
+      if (mimeType) {
+        promptImages.push({
+          path: ctx.value,
+          name: ctx.name,
+          mimeType,
+        });
+      }
+    }
+    promptText = formattedText;
+    displayText = updatedDisplayText;
+
+    if (hasAttachments && !trimmedText && savedImageCount === 0) {
+      const errorMsg =
+        'Failed to attach the pasted image. Nothing was sent. Please paste the image again.';
+      logger.warn('[SessionMessageHandler]', errorMsg);
+      vscode.window.showErrorMessage(errorMsg);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    // Ensure we have an active conversation
+    if (!this.currentConversationId) {
+      logger.log(
+        '[SessionMessageHandler] No active conversation, creating one...',
+      );
+      try {
+        const newConv = await this.conversationStore.createConversation();
+        this.updateCurrentConversationId(newConv.id);
+        this.sendToWebView({
+          type: 'conversationLoaded',
+          data: newConv,
+        });
+      } catch (error) {
+        const errorMsg = `Failed to create conversation: ${this.getErrorMessage(error)}`;
+        logger.error('[SessionMessageHandler]', errorMsg);
+        vscode.window.showErrorMessage(errorMsg);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+    }
+
+    if (!this.currentConversationId) {
+      const errorMsg =
+        'Failed to create conversation. Please restart the extension.';
+      logger.error('[SessionMessageHandler]', errorMsg);
+      vscode.window.showErrorMessage(errorMsg);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    let editRestoreSnapshot: Conversation | null = null;
+    let editStoreMutationApplied = false;
+    let editAcpMutationApplied = false;
+    let editAcpHistorySnapshot: unknown[] | null = null;
+
+    if (editTargetTurnIndex !== undefined) {
+      if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
+        const errorMsg = 'Invalid message edit target.';
+        logger.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!this.agentManager.isConnected) {
+        await this.promptAuth(
+          'You need to configure your provider to use Qwen Code.',
+        );
+        return;
+      }
+
+      if (!this.agentManager.currentSessionId) {
+        try {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+          const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+          await this.agentManager.createNewSession(workingDir);
+        } catch (createErr) {
+          logger.error(
+            '[SessionMessageHandler] Failed to create session before editing message:',
+            createErr,
+          );
+          const errorMsg = this.getErrorMessage(createErr);
+          if (this.shouldPromptAuth(createErr)) {
+            await this.promptAuth(
+              'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
+            );
+            return;
+          }
+          vscode.window.showErrorMessage(
+            `Failed to create session: ${errorMsg}`,
+          );
+          return;
+        }
+      }
+
+      try {
+        editRestoreSnapshot = await this.captureConversationSnapshot(
+          this.currentConversationId,
+        );
+      } catch (error) {
+        logger.error(
+          '[SessionMessageHandler] Failed to capture edit restore snapshot:',
+          error,
+        );
+        const errorMsg = this.getErrorMessage(error);
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!editRestoreSnapshot) {
+        logger.warn(
+          '[SessionMessageHandler] Local conversation snapshot missing before edit; continuing with ACP rewind only.',
+        );
+      }
+
+      try {
+        if (editRestoreSnapshot) {
+          const truncated = await this.conversationStore.truncateFromUserTurn(
+            this.currentConversationId,
+            editTargetTurnIndex,
+          );
+          if (!truncated) {
+            throw new Error('Conversation not found for edit target.');
+          }
+          editStoreMutationApplied = true;
+        }
+
+        const rewindResult =
+          await this.agentManager.rewindSession(editTargetTurnIndex);
+        editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
+        editAcpMutationApplied = true;
+
+        this.sendToWebView({
+          type: 'conversationRewound',
+          data: { targetTurnIndex: editTargetTurnIndex },
+        });
+      } catch (error) {
+        if (editAcpMutationApplied && editAcpHistorySnapshot) {
+          try {
+            await this.agentManager.restoreSessionHistory(
+              editAcpHistorySnapshot,
+            );
+          } catch (restoreError) {
+            logger.warn(
+              '[SessionMessageHandler] Failed to restore ACP history after rewind failure:',
+              restoreError,
+            );
+          }
+        }
+        if (editStoreMutationApplied) {
+          await this.restoreConversationSnapshot(editRestoreSnapshot);
+        }
+        const errorMsg = this.getErrorMessage(error);
+        logger.error(
+          '[SessionMessageHandler] Failed to rewind session:',
+          error,
+        );
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+    }
+
+    // Check if this is the first message
+    let isFirstMessage = false;
+    if (editTargetTurnIndex !== undefined) {
+      isFirstMessage = editTargetTurnIndex === 0;
+    } else {
+      try {
+        const conversation = await this.conversationStore.getConversation(
+          this.currentConversationId,
+        );
+        isFirstMessage = !conversation || conversation.messages.length === 0;
+      } catch (error) {
+        logger.error(
+          '[SessionMessageHandler] Failed to check conversation:',
+          error,
+        );
+      }
+    }
+
+    // Generate title for first message, but only if it hasn't been set yet
+    if (isFirstMessage && !this.isTitleSet) {
+      this.sendToWebView({
+        type: 'sessionTitleUpdated',
+        data: {
+          sessionId: this.currentConversationId,
+          title: displayText,
+        },
+      });
+      this.isTitleSet = true; // Mark title as set
+    }
+
+    // Save user message
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: displayText,
+      timestamp: Date.now(),
+    };
+
+    try {
+      await this.conversationStore.addMessage(
+        this.currentConversationId,
+        userMessage,
+      );
+    } catch (error) {
+      logger.error(
+        '[SessionMessageHandler] Failed to save user message:',
+        error,
+      );
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          logger.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
+
+      const errorMsg = this.getErrorMessage(error);
+      vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
+
+    this.sendToWebView({
+      type: 'message',
+      data: { ...userMessage, fileContext },
+    });
+
+    // Check if agent is connected
+    if (!this.agentManager.isConnected) {
+      logger.warn('[SessionMessageHandler] Agent not connected');
+
+      // Show non-modal notification with Configure button
+      await this.promptAuth(
+        'You need to configure your provider to use Qwen Code.',
+      );
+      return;
+    }
+
+    // Ensure an ACP session exists before sending prompt
+    if (!this.agentManager.currentSessionId) {
+      try {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+        await this.agentManager.createNewSession(workingDir);
+      } catch (createErr) {
+        logger.error(
+          '[SessionMessageHandler] Failed to create session before sending message:',
+          createErr,
+        );
+        const errorMsg = this.getErrorMessage(createErr);
+        if (this.shouldPromptAuth(createErr)) {
+          await this.promptAuth(
+            'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
+          );
+          return;
+        }
+        vscode.window.showErrorMessage(`Failed to create session: ${errorMsg}`);
+        return;
+      }
+    }
+
+    // Send to agent
+    //
+    // Generate a unique requestId so the webview can correlate
+    // streamStart/streamEnd and discard stale events.
+    this.requestCounter += 1;
+    this.currentRequestId = `req-${this.requestCounter}-${Date.now()}`;
+    this.streamEndSent = false;
+
+    // Capture locally so that if a newer handleSendMessage() overwrites
+    // the shared fields while we are awaiting, our sendStreamEnd calls
+    // will detect the mismatch and silently no-op instead of emitting
+    // a streamEnd tagged with the newer request's ID.
+    const myRequestId = this.currentRequestId;
+
+    try {
+      this.resetStreamContent();
+
+      this.sendToWebView({
+        type: 'streamStart',
+        data: {
+          timestamp: Date.now(),
+          requestId: myRequestId,
+        },
+      });
+
+      await this.agentManager.sendMessage(
+        buildPromptBlocks(promptText, promptImages),
+      );
+
+      // Save assistant message
+      if (this.currentStreamContent && this.currentConversationId) {
+        const assistantMessage: ChatMessage = {
+          role: 'assistant',
+          content: this.currentStreamContent,
+          timestamp: Date.now(),
+        };
+        await this.conversationStore.addMessage(
+          this.currentConversationId,
+          assistantMessage,
+        );
+      }
+
+      this.sendStreamEnd(undefined, myRequestId);
+
+      // After first message, sync ACP session ID to webview for session list highlighting
+      const acpSessionId = this.agentManager.currentSessionId;
+      if (acpSessionId && acpSessionId !== this.currentConversationId) {
+        const previousConversationId = this.currentConversationId;
+        if (previousConversationId) {
+          const renamed = await this.conversationStore.renameConversationId(
+            previousConversationId,
+            acpSessionId,
+          );
+          if (!renamed) {
+            logger.warn(
+              '[SessionMessageHandler] Failed to align conversation store with ACP session id:',
+              previousConversationId,
+              acpSessionId,
+            );
+            return;
+          }
+        }
+        this.updateCurrentConversationId(acpSessionId);
+        this.sendToWebView({
+          type: 'sessionTitleUpdated',
+          data: {
+            sessionId: acpSessionId,
+            title:
+              displayText.substring(0, 50) +
+              (displayText.length > 50 ? '...' : ''),
+          },
+        });
+      }
+    } catch (error) {
+      logger.error('[SessionMessageHandler] Error sending message:', error);
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          logger.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after send failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
+
+      const err = error as unknown as Error;
+      // Safely convert error to string
+      const errorMsg = this.getErrorMessage(error);
+      const lower = errorMsg.toLowerCase();
+
+      // Suppress user-cancelled/aborted errors (ESC/Stop button)
+      const isAbortLike =
+        (err && (err as Error).name === 'AbortError') ||
+        lower.includes('abort') ||
+        lower.includes('aborted') ||
+        lower.includes('request was aborted') ||
+        lower.includes('canceled') ||
+        lower.includes('cancelled') ||
+        lower.includes('user_cancelled');
+
+      if (isAbortLike) {
+        // Do not show VS Code error popup for intentional cancellations.
+        // Ensure the webview knows the stream ended due to user action.
+        this.sendStreamEnd('user_cancelled', myRequestId);
+        return;
+      }
+      // Check for session not found error and handle it appropriately
+      if (
+        errorMsg.includes('Session not found') ||
+        this.shouldPromptAuth(error)
+      ) {
+        // Show a more user-friendly error message for expired sessions
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
+        );
+
+        // Send a specific error to the webview for better UI handling
+        this.sendToWebView({
+          type: 'sessionExpired',
+          data: { message: 'Session expired. Please authenticate again.' },
+        });
+        this.sendStreamEnd('session_expired', myRequestId);
+      } else {
+        const isTimeoutError =
+          lower.includes('timeout') || lower.includes('timed out');
+        if (isTimeoutError) {
+          // Note: session_prompt no longer has a timeout, so this should rarely occur
+          // This path may still be hit for other methods (initialize, etc.) or network-level timeouts
+          logger.warn(
+            '[SessionMessageHandler] Request timed out; suppressing popup',
+          );
+
+          const timeoutMessage: ChatMessage = {
+            role: 'assistant',
+            content:
+              'Request timed out. This may be due to a network issue. Please try again.',
+            timestamp: Date.now(),
+          };
+
+          // Send a timeout message to the WebView
+          this.sendToWebView({
+            type: 'message',
+            data: timeoutMessage,
+          });
+          this.sendStreamEnd('timeout', myRequestId);
+        } else {
+          // Handling of Non-Timeout Errors
+          vscode.window.showErrorMessage(`Error sending message: ${errorMsg}`);
+          this.sendToWebView({
+            type: 'error',
+            data: { message: errorMsg },
+          });
+          this.sendStreamEnd('error', myRequestId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle new Qwen session request
+   */
+  private async handleNewQwenSession(): Promise<void> {
+    try {
+      logger.log('[SessionMessageHandler] Creating new Qwen session...');
+
+      // Ensure connection (auth) before creating a new session
+      if (!this.agentManager.isConnected) {
+        const proceeded = await this.promptAuth(
+          'You need to configure your provider before creating a new session.',
+        );
+        if (!proceeded) {
+          return;
+        }
+      }
+
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+
+      await this.agentManager.createNewSession(workingDir, { forceNew: true });
+      this.updateCurrentConversationId(null);
+
+      this.sendToWebView({
+        type: 'conversationCleared',
+        data: {},
+      });
+
+      // Reset title flag when creating a new session
+      this.isTitleSet = false;
+    } catch (error) {
+      logger.error(
+        '[SessionMessageHandler] Failed to create new session:',
+        error,
+      );
+
+      // Safely convert error to string
+      const errorMsg = this.getErrorMessage(error);
+      // Check for authentication/session expiration errors
+      if (this.shouldPromptAuth(error)) {
+        // Show a more user-friendly error message for expired sessions
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to create a new session.',
+        );
+
+        // Send a specific error to the webview for better UI handling
+        this.sendToWebView({
+          type: 'sessionExpired',
+          data: { message: 'Session expired. Please authenticate again.' },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: `Failed to create new session: ${errorMsg}` },
+        });
+      }
+    }
+  }
+
+  /**
+   * Handle switch Qwen session request
+   */
+  private async handleSwitchQwenSession(sessionId: string): Promise<void> {
+    try {
+      logger.log('[SessionMessageHandler] Switching to session:', sessionId);
+
+      // If not connected yet, offer to authenticate or view offline
+      if (!this.agentManager.isConnected) {
+        const choice = await this.promptAuthOrOffline(
+          'You are not authenticated. Configure your provider to fully restore this session, or view it offline.',
+        );
+
+        if (choice === 'offline') {
+          // Show messages from local cache only
+          const messages =
+            await this.agentManager.getSessionMessages(sessionId);
+          this.updateCurrentConversationId(sessionId);
+          this.sendToWebView({
+            type: 'qwenSessionSwitched',
+            data: { sessionId, messages },
+          });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
+          vscode.window.showInformationMessage(
+            'Showing cached session content. Configure your provider to interact with the AI.',
+          );
+          return;
+        } else if (choice !== 'auth') {
+          // User dismissed; clear loading state
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
+          return;
+        }
+      }
+
+      // Get session details (includes cwd and filePath when using ACP)
+      let sessionDetails: Record<string, unknown> | null = null;
+      try {
+        const allSessions = await this.agentManager.getSessionList();
+        sessionDetails =
+          allSessions.find(
+            (s: { id?: string; sessionId?: string }) =>
+              s.id === sessionId || s.sessionId === sessionId,
+          ) || null;
+      } catch (err) {
+        logger.log(
+          '[SessionMessageHandler] Could not get session details:',
+          err,
+        );
+      }
+
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+
+      // Try to load session via ACP (now we should be connected)
+      try {
+        // Set current id and clear UI first so replayed updates append afterwards
+        this.updateCurrentConversationId(sessionId);
+        this.sendToWebView({
+          type: 'qwenSessionSwitched',
+          data: { sessionId, messages: [], session: sessionDetails },
+        });
+
+        const loadResponse = await this.agentManager.loadSessionViaAcp(
+          sessionId,
+          (sessionDetails?.cwd as string | undefined) || undefined,
+        );
+        logger.log(
+          '[SessionMessageHandler] session/load succeeded (per ACP spec result is null; actual history comes via session/update):',
+          loadResponse,
+        );
+
+        // Reset title flag when switching sessions
+        this.isTitleSet = false;
+
+        // Notify webview that session history has finished loading
+        this.sendToWebView({
+          type: 'sessionLoadComplete',
+          data: { sessionId },
+        });
+
+        // Successfully loaded session, return early to avoid fallback logic
+        return;
+      } catch (loadError) {
+        logger.warn(
+          '[SessionMessageHandler] session/load failed, using fallback:',
+          loadError,
+        );
+
+        // Check for authentication/session expiration errors
+        if (this.shouldPromptAuth(loadError)) {
+          // Show a more user-friendly error message for expired sessions
+          await this.promptAuth(
+            'Your session has expired or is invalid. Please configure your provider to switch sessions.',
+          );
+
+          // Send a specific error to the webview for better UI handling
+          this.sendToWebView({
+            type: 'sessionExpired',
+            data: { message: 'Session expired. Please authenticate again.' },
+          });
+          return;
+        }
+
+        // Fallback: create new session
+        const messages = await this.agentManager.getSessionMessages(sessionId);
+
+        // If we are connected, try to create a fresh ACP session so user can interact
+        if (this.agentManager.isConnected) {
+          try {
+            await this.agentManager.createNewSession(workingDir, {
+              forceNew: true,
+            });
+
+            // Keep the viewed session identity aligned with what the webview sees
+            // (the archived sessionId). The live ACP session lives on
+            // agentManager.currentSessionId; the sync-on-first-message path
+            // (see streamEnd handler) will flip both sides to the ACP id once
+            // the user actually sends a message. Setting currentConversationId
+            // to the new ACP id here would desync the backend from the webview
+            // and cause rename/delete/title-update flows to target the wrong
+            // session during the fallback window.
+            this.updateCurrentConversationId(sessionId);
+
+            this.sendToWebView({
+              type: 'qwenSessionSwitched',
+              data: { sessionId, messages, session: sessionDetails },
+            });
+            this.sendToWebView({
+              type: 'sessionLoadComplete',
+              data: { sessionId },
+            });
+
+            // Only show the cache warning if we actually fell back to local cache
+            // and didn't successfully load via ACP
+            // Check if we truly fell back by checking if loadError is not null/undefined
+            // and if it's not a successful response that looks like an error
+            if (
+              loadError &&
+              typeof loadError === 'object' &&
+              !('result' in loadError)
+            ) {
+              vscode.window.showWarningMessage(
+                'Session restored from local cache. Some context may be incomplete.',
+              );
+            }
+          } catch (createError) {
+            logger.error(
+              '[SessionMessageHandler] Failed to create session:',
+              createError,
+            );
+
+            // Check for authentication/session expiration errors in session creation
+            if (this.shouldPromptAuth(createError)) {
+              // Show a more user-friendly error message for expired sessions
+              await this.promptAuth(
+                'Your session has expired or is invalid. Please configure your provider to switch sessions.',
+              );
+
+              // Send a specific error to the webview for better UI handling
+              this.sendToWebView({
+                type: 'sessionExpired',
+                data: {
+                  message: 'Session expired. Please authenticate again.',
+                },
+              });
+              return;
+            }
+
+            throw createError;
+          }
+        } else {
+          // Offline view only
+          this.updateCurrentConversationId(sessionId);
+          this.sendToWebView({
+            type: 'qwenSessionSwitched',
+            data: { sessionId, messages, session: sessionDetails },
+          });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
+          vscode.window.showWarningMessage(
+            'Showing cached session content. Configure your provider to interact with the AI.',
+          );
+        }
+      }
+    } catch (error) {
+      logger.error('[SessionMessageHandler] Failed to switch session:', error);
+
+      // Safely convert error to string
+      const errorMsg = this.getErrorMessage(error);
+      // Check for authentication/session expiration errors
+      if (this.shouldPromptAuth(error)) {
+        // Show a more user-friendly error message for expired sessions
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to switch sessions.',
+        );
+
+        // Send a specific error to the webview for better UI handling
+        this.sendToWebView({
+          type: 'sessionExpired',
+          data: { message: 'Session expired. Please authenticate again.' },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: `Failed to switch session: ${errorMsg}` },
+        });
+      }
+    }
+  }
+
+  /**
+   * Handle get Qwen sessions request
+   */
+  private async handleGetQwenSessions(
+    cursor?: number,
+    size?: number,
+  ): Promise<void> {
+    try {
+      // Paged when possible; falls back to full list if ACP not supported
+      const page = await this.agentManager.getSessionListPaged({
+        cursor,
+        size,
+      });
+      const append = typeof cursor === 'number';
+      this.sendToWebView({
+        type: 'qwenSessionList',
+        data: {
+          sessions: page.sessions,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+          append,
+        },
+      });
+    } catch (error) {
+      logger.error('[SessionMessageHandler] Failed to get sessions:', error);
+
+      // Safely convert error to string
+      const errorMsg = this.getErrorMessage(error);
+      // Check for authentication/session expiration errors
+      if (this.shouldPromptAuth(error)) {
+        // Show a more user-friendly error message for expired sessions
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to view sessions.',
+        );
+
+        // Send a specific error to the webview for better UI handling
+        this.sendToWebView({
+          type: 'sessionExpired',
+          data: { message: 'Session expired. Please authenticate again.' },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: `Failed to get sessions: ${errorMsg}` },
+        });
+      }
+    }
+  }
+
+  /**
+   * Handle cancel streaming request
+   */
+  private async handleCancelStreaming(): Promise<void> {
+    try {
+      logger.log('[SessionMessageHandler] Canceling streaming...');
+
+      // Cancel the current streaming operation in the agent manager
+      await this.agentManager.cancelCurrentPrompt();
+
+      // Use sendStreamEnd to include requestId for proper correlation
+      this.sendStreamEnd('user_cancelled');
+
+      logger.log('[SessionMessageHandler] Streaming cancelled successfully');
+    } catch (_error) {
+      logger.log('[SessionMessageHandler] Streaming cancelled (interrupted)');
+
+      // Use sendStreamEnd (with duplicate guard) to include requestId
+      this.sendStreamEnd('user_cancelled');
+    }
+  }
+
+  /**
+   * Handle resume session request
+   */
+  private async handleResumeSession(sessionId: string): Promise<void> {
+    try {
+      // If not connected, offer to authenticate or view offline
+      if (!this.agentManager.isConnected) {
+        const choice = await this.promptAuthOrOffline(
+          'You are not authenticated. Configure your provider to fully restore this session, or view it offline.',
+        );
+
+        if (choice === 'offline') {
+          const messages =
+            await this.agentManager.getSessionMessages(sessionId);
+          this.updateCurrentConversationId(sessionId);
+          this.sendToWebView({
+            type: 'qwenSessionSwitched',
+            data: { sessionId, messages },
+          });
+          vscode.window.showInformationMessage(
+            'Showing cached session content. Configure your provider to interact with the AI.',
+          );
+          return;
+        } else if (choice !== 'auth') {
+          return;
+        }
+      }
+
+      // Try ACP load first
+      try {
+        // Pre-clear UI so replayed updates append afterwards
+        this.updateCurrentConversationId(sessionId);
+        this.sendToWebView({
+          type: 'qwenSessionSwitched',
+          data: { sessionId, messages: [] },
+        });
+
+        await this.agentManager.loadSessionViaAcp(sessionId);
+
+        // Reset title flag when resuming sessions
+        this.isTitleSet = false;
+
+        // Successfully loaded session, return early to avoid fallback logic
+        await this.handleGetQwenSessions();
+        return;
+      } catch (acpError) {
+        // Check for authentication/session expiration errors
+        if (this.shouldPromptAuth(acpError)) {
+          // Show a more user-friendly error message for expired sessions
+          await this.promptAuth(
+            'Your session has expired or is invalid. Please configure your provider to resume sessions.',
+          );
+
+          // Send a specific error to the webview for better UI handling
+          this.sendToWebView({
+            type: 'sessionExpired',
+            data: { message: 'Session expired. Please authenticate again.' },
+          });
+          return;
+        }
+      }
+
+      await this.handleGetQwenSessions();
+    } catch (error) {
+      logger.error('[SessionMessageHandler] Failed to resume session:', error);
+
+      // Safely convert error to string
+      const errorMsg = this.getErrorMessage(error);
+      // Check for authentication/session expiration errors
+      if (this.shouldPromptAuth(error)) {
+        // Show a more user-friendly error message for expired sessions
+        await this.promptAuth(
+          'Your session has expired or is invalid. Please configure your provider to resume sessions.',
+        );
+
+        // Send a specific error to the webview for better UI handling
+        this.sendToWebView({
+          type: 'sessionExpired',
+          data: { message: 'Session expired. Please authenticate again.' },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: `Failed to resume session: ${errorMsg}` },
+        });
+      }
+    }
+  }
+
+  /**
+   * Handle delete session request
+   */
+  private async handleDeleteQwenSession(sessionId: string): Promise<void> {
+    try {
+      if (
+        sessionId === this.currentConversationId ||
+        sessionId === this.agentManager.currentSessionId
+      ) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Cannot delete the current active session.' },
+        });
+        return;
+      }
+
+      const success = await this.agentManager.deleteSession(sessionId);
+      if (success) {
+        this.sendToWebView({
+          type: 'sessionDeleted',
+          data: { sessionId },
+        });
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Failed to delete session.' },
+        });
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to delete session: ${errorMsg}` },
+      });
+    }
+  }
+
+  /**
+   * Handle rename session request
+   */
+  private async handleRenameQwenSession(
+    sessionId: string,
+    title: string,
+  ): Promise<void> {
+    try {
+      const trimmedTitle = title.trim().replace(/[\r\n]+/g, ' ');
+      if (!trimmedTitle) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Please provide a name.' },
+        });
+        return;
+      }
+      // Matches SESSION_TITLE_MAX_LENGTH from @qwen-code/qwen-code-core/sessionService
+      if (trimmedTitle.length > 200) {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Name is too long. Maximum 200 characters.' },
+        });
+        return;
+      }
+
+      const success = await this.agentManager.renameSession(
+        sessionId,
+        trimmedTitle,
+      );
+      if (success) {
+        this.sendToWebView({
+          type: 'sessionRenamed',
+          data: { sessionId, title: trimmedTitle },
+        });
+        if (sessionId === this.currentConversationId) {
+          this.sendToWebView({
+            type: 'sessionTitleUpdated',
+            data: { sessionId, title: trimmedTitle },
+          });
+        }
+      } else {
+        this.sendToWebView({
+          type: 'error',
+          data: { message: 'Failed to rename session.' },
+        });
+      }
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to rename session: ${errorMsg}` },
+      });
+    }
+  }
+
+  /**
+   * Set approval mode via agent (ACP session/set_mode)
+   */
+  private async handleSetApprovalMode(data?: {
+    modeId?: ApprovalModeValue;
+  }): Promise<void> {
+    try {
+      const modeId = data?.modeId || 'default';
+      await this.agentManager.setApprovalModeFromUi(modeId);
+      // No explicit response needed; WebView listens for modeChanged
+    } catch (error) {
+      logger.error('[SessionMessageHandler] Failed to set mode:', error);
+      const errorMsg = this.getErrorMessage(error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to set mode: ${errorMsg}` },
+      });
+    }
+  }
+
+  /**
+   * Set model via agent (ACP session/set_model)
+   * Displays VSCode native notifications on success or failure.
+   */
+  private async handleSetModel(data?: { modelId?: string }): Promise<void> {
+    try {
+      const modelId = data?.modelId;
+      if (!modelId) {
+        throw new Error('Model ID is required');
+      }
+      // Defensive guard: refuse non-runtime Qwen OAuth models in case the UI
+      // is bypassed (programmatic call, stale webview, restored session).
+      if (isDiscontinuedModel(modelId)) {
+        logger.warn(
+          '[SessionMessageHandler] Rejected discontinued model',
+          modelId,
+        );
+        const message = `Failed to switch model: ${DISCONTINUED_MESSAGES.blockedError}`;
+        vscode.window.showErrorMessage(message);
+        this.sendToWebView({
+          type: 'error',
+          data: { message },
+        });
+        return;
+      }
+      await this.agentManager.setModelFromUi(modelId);
+      void vscode.window.showInformationMessage(
+        `Model switched to: ${modelId}`,
+      );
+    } catch (error) {
+      const errorMsg = this.getErrorMessage(error);
+      logger.error('[SessionMessageHandler] Failed to set model:', error);
+      vscode.window.showErrorMessage(`Failed to switch model: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to set model: ${errorMsg}` },
+      });
+    }
+  }
+}

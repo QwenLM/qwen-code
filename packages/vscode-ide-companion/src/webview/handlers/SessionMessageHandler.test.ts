@@ -522,235 +522,855 @@ describe('SessionMessageHandler', () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSessionßx¶‰žËkºwµçH[ØÚÔ›ØÙ\ÜÒ[XYÙP]XÚY[Ë›[ØÚÔ™\ÛÛ™Y˜[YJÂˆ›Ü›X]Y^ˆ	ÙY]Y›Û\	Ëˆ\Ü^U^ˆ	ÙY]Y›Û\	ËˆØ]™Y[XYÙPÛÝ[ˆˆ›Û\[XYÙ\Îˆ×KˆJNÂ‚ˆÛÛœÝ\ÝÜžP™Y›Ü™T™]Ú[™HÞÈ›ÛNˆ	Ý\Ù\‰Ë\ÎˆÞÈ^ˆ	Ùš\œÝ	ÈWHWNÂˆÛÛœÝÜšYÚ[˜[ÛÛ™\œØ][ÛˆHÂˆYˆ	ÜÙ\ÜÚ[Û‹LIËˆ]Nˆ	Ñ^\Ý[™ÈÙ\ÜÚ[Û‰ËˆY\ÜØYÙ\ÎˆÂˆÈ›ÛNˆ	Ý\Ù\‰È\ÈÛÛœÝÛÛ[ˆ	Ùš\œÝ	Ë[Y\Ý[\ˆHKˆÈ›ÛNˆ	Ø\ÜÚ\Ý[	È\ÈÛÛœÝÛÛ[ˆ	Ùš\œÝ™\IË[Y\Ý[\ˆˆKˆÈ›ÛNˆ	Ý\Ù\‰È\ÈÛÛœÝÛÛ[ˆ	ÜÙXÛÛ™	Ë[Y\Ý[\ˆÈKˆKˆÜ™X]Y]ˆKˆ\]Y]ˆËˆNÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆ™]Ú[™Ù\ÜÚ[ÛŽˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJÈ\ÝÜžP™Y›Ü™T™]Ú[™JKˆ™\ÝÜ™TÙ\ÜÚ[Û’\ÝÜžNˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJ[™Yš[™Y
-KˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJÜšYÚ[˜[ÛÛ™\œØ][ÛŠKˆYY\ÜØYÙNˆšK™›Š
-K›[ØÚÔ™Z™XÝY˜[YJ™]È\œ›ÜŠ	ÜÝÜ˜YÙH˜Z[Y	ÊJKˆ™\XÙSY\ÜØYÙ\ÎˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJYJKˆ[˜Ø]Qœ›ÛU\Ù\•\›ŽˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJYJKˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÙY]Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ÙY]Y›Û\	Ëˆ\™Ù]\›’[™^ˆKˆKˆJNÂ‚ˆ^XÝ
-YÙ[X[˜YÙ\‹œ™\ÝÜ™TÙ\ÜÚ[Û’\ÝÜžJKÒ]™P™Y[Ø[YÚ]
-ˆ\ÝÜžP™Y›Ü™T™]Ú[™ˆ
-NÂˆ^XÝ
-ÛÛ™\œØ][Û”ÝÜ™Kœ™\XÙSY\ÜØYÙ\ÊKÒ]™P™Y[Ø[YÚ]
-ˆ	ÜÙ\ÜÚ[Û‹LIËˆÜšYÚ[˜[ÛÛ™\œØ][Û‹›Y\ÜØYÙ\Ëˆ
-NÂˆ^XÝ
-YÙ[X[˜YÙ\‹œÙ[™Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue({
+        id: 'session-1',
+        title: 'Existing session',
+        messages: [
+          { role: 'user', content: 'first', timestamp: 1 },
+          { role: 'assistant', content: 'first reply', timestamp: 2 },
+          { role: 'user', content: 'second', timestamp: 3 },
+        ],
+        createdAt: 1,
+        updatedAt: 3,
+      }),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
 
-NÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	ÜÝÜ˜YÙH˜Z[Y	ÈKˆJNÂˆJNÂ‚ˆ]
-	Ü™Z™XÝÈY]ÝX›Z\ÜÚ[ÛœÈÚ][˜[Y\™Ù]\›ˆ[™^\ÉË\Þ[˜È
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
 
-HOˆÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆ™]Ú[™Ù\ÜÚ[ÛŽˆšK™›Š
-Kˆ™\ÝÜ™TÙ\ÜÚ[Û’\ÝÜžNˆšK™›Š
-KˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-Kˆ™\XÙSY\ÜØYÙ\ÎˆšK™›Š
-Kˆ[˜Ø]Qœ›ÛU\Ù\•\›ŽˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÙY]Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ÙY]Y›Û\	Ëˆ\™Ù]\›’[™^ˆLKˆKˆJNÂ‚ˆ^XÝ
-YÙ[X[˜YÙ\‹œ™]Ú[™Ù\ÜÚ[ÛŠK››ÝÒ]™P™Y[Ø[Y
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
 
-NÂˆ^XÝ
-YÙ[X[˜YÙ\‹œÙ[™Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
+    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
+      'session-1',
+      1,
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationRewound',
+      data: { targetTurnIndex: 1 },
+    });
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: 'edited prompt' },
+    ]);
+    expect(
+      conversationStore.truncateFromUserTurn.mock.invocationCallOrder[0],
+    ).toBeLessThan(agentManager.rewindSession.mock.invocationCallOrder[0]);
+    expect(agentManager.rewindSession.mock.invocationCallOrder[0]).toBeLessThan(
+      agentManager.sendMessage.mock.invocationCallOrder[0],
+    );
+  });
 
-NÂˆ^XÝ
-ÛÛ™\œØ][Û”ÝÜ™K[˜Ø]Qœ›ÛU\Ù\•\›ŠK››ÝÒ]™P™Y[Ø[Y
+  it('restores the edited conversation snapshot when replacement send fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
 
-NÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	Ò[˜[YY\ÜØYÙHY]\™Ù]‰ÈKˆJNÂˆJNÂ‚ˆ]
-	ÚÙY\ÈÝ\œ™[ÛÛ™\œØ][Û’Y[YÛ™YÚ]H\˜Ú]™YÙ\ÜÚ[Û’YÚ[ˆÙ\ÜÚ[Û‹ÛØY˜[È˜XÚÈÈH™]ÈPÔÙ\ÜÚ[Û‰Ë\Þ[˜È
+    const originalConversation = {
+      id: 'session-1',
+      title: 'Existing session',
+      messages: [
+        { role: 'user' as const, content: 'first', timestamp: 1 },
+        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+        { role: 'user' as const, content: 'second', timestamp: 3 },
+        { role: 'assistant' as const, content: 'second reply', timestamp: 4 },
+      ],
+      createdAt: 1,
+      updatedAt: 4,
+    };
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockRejectedValue(new Error('send failed')),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(originalConversation),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
 
-HOˆÂˆÛÛœÝ\˜Ú]™YÙ\ÜÚ[Û’YH	Ø\˜Ú]™Y\Ù\ÜÚ[Û‰ÎÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÛÛXXÜ\Ù\ÜÚ[Û‰ËˆÙ]Ù\ÜÚ[Û“\ÝˆšBˆ™›Š
-Bˆ›[ØÚÔ™\ÛÛ™Y˜[YJÞÈYˆ\˜Ú]™YÙ\ÜÚ[Û’YÝÙˆ	ËÝÛÜšÜÜXÙIÈWJKˆØYÙ\ÜÚ[Û•šXPXÜˆšBˆ™›Š
-Bˆ›[ØÚÔ™Z™XÝY˜[YJ™]È\œ›ÜŠ	ÜÙ\ÜÚ[Ûˆ›Ý›Ý[™ÛˆÙ\™\‰ÊJKˆÙ]Ù\ÜÚ[Û“Y\ÜØYÙ\ÎˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJ×JKˆÜ™X]S™]ÔÙ\ÜÚ[ÛŽˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJ	Û™]ËXXÜ\Ù\ÜÚ[Û‰ÊKˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ[ˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÝÚ]Ú]Ù[”Ù\ÜÚ[Û‰Ëˆ]NˆÈÙ\ÜÚ[Û’Yˆ\˜Ú]™YÙ\ÜÚ[Û’YKˆJNÂ‚ˆËÈ˜XÚÙ[™]˜XÚÙYÝ\œ™[Ù\ÜÚ[Ûˆ]\ÝX]ÚHÙ\ÜÚ[Û’YHÙXšY]ÈÙY\ËˆËÈÝ\Ú\ÙH™[˜[YKÙ[]KÝ]K]\]H›ÝÜÈÚ[\™Ù]HÜ›Û™ÈÙ\ÜÚ[Û‚ˆËÈ\š[™ÈH˜[˜XÚÈÚ[™ÝÈ
-ÙYHˆÌÌLÈ™]šY]ÊK‚ˆ^XÝ
-[™\‹™Ù]Ý\œ™[ÛÛ™\œØ][Û’Y
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
 
-JKÐ™J\˜Ú]™YÙ\ÜÚ[Û’Y
-NÂˆ^XÝ
-YÙ[X[˜YÙ\‹˜Ü™X]S™]ÔÙ\ÜÚ[ÛŠKÒ]™P™Y[Ø[Y
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
 
-NÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-ˆ^XÝ›Øš™XÝÛÛZ[š[™ÊÂˆ\Nˆ	Ü]Ù[”Ù\ÜÚ[Û”ÝÚ]ÚY	Ëˆ]Nˆ^XÝ›Øš™XÝÛÛZ[š[™ÊÈÙ\ÜÚ[Û’Yˆ\˜Ú]™YÙ\ÜÚ[Û’YJKˆJKˆ
-NÂˆJNÂ‚ˆ]
-	Ù›Ü˜Ù\ÈHœ™\ÚPÔÙ\ÜÚ[ÛˆÚ[ˆHÙXšY]È™\]Y\ÝÈH™]ÈÙ\ÜÚ[Û‰Ë\Þ[˜È
+    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: [{ text: 'first' }] },
+    ]);
+    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
+      'session-1',
+      originalConversation.messages,
+    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationLoaded',
+      data: originalConversation,
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'send failed' },
+    });
+  });
 
-HOˆÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÜ™X]S™]ÔÙ\ÜÚ[ÛŽˆšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJ	ÜÙ\ÜÚ[Û‹L‰ÊKˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ØÛÛ™\œØ][Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	Û™]Ô]Ù[”Ù\ÜÚ[Û‰ËˆJNÂ‚ˆ^XÝ
-[™\‹™Ù]Ý\œ™[ÛÛ™\œØ][Û’Y
+  it('continues edits with ACP-only rewind when no local snapshot exists', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
 
-JKÐ™S[
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      getSessionMessages: vi.fn().mockResolvedValue([]),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn(),
+      truncateFromUserTurn: vi.fn(),
+      upsertConversation: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
 
-NÂˆ^XÝ
-YÙ[X[˜YÙ\‹˜Ü™X]S™]ÔÙ\ÜÚ[ÛŠKÒ]™P™Y[Ø[YÚ]
-	ËÝÛÜšÜÜXÙIËÂˆ›Ü˜ÙS™]ÎˆYKˆJNÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	ØÛÛ™\œØ][ÛÛX\™Y	Ëˆ]NˆßKˆJNÂˆJNÂ‚ˆ]
-	Ú[\˜Ù\ÈÙ^Ü[[™\Ù\ÈH”ÐÛÙH^Ü›ÝÈ[œÝXYÙˆÙ[™[™ÈH›Û\	Ë\Þ[˜È
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
 
-HOˆÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ]Ù\ÜÚ[Û“\ÝˆšBˆ™›Š
-Bˆ›[ØÚÔ™\ÛÛ™Y˜[YJÞÈÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËÝÙˆ	ËÝÛÜšÜÜXÙIÈWJKˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ[™Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ËÙ^Ü[	ËˆKˆJNÂ‚ˆ^XÝ
-[ØÚÑ^ÜÙ\ÜÚ[Û•Ñš[JKÒ]™P™Y[Ø[YÚ]
-ÂˆÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÝÙˆ	ËÝÛÜšÜÜXÙIËˆ›Ü›X]ˆ	Ú[	ËˆJNÂˆ^XÝ
-ÛÛ™\œØ][Û”ÝÜ™K˜YY\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
 
-NÂˆ^XÝ
-YÙ[X[˜YÙ\‹œÙ[™Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationRewound',
+      data: { targetTurnIndex: 1 },
+    });
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: 'edited prompt' },
+    ]);
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'sessionTitleUpdated',
+      data: {
+        sessionId: 'session-1',
+        title: 'edited prompt',
+      },
+    });
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'error',
+      data: expect.objectContaining({
+        message: 'Failed to capture conversation state before editing.',
+      }),
+    });
+  });
 
-NÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	ÛY\ÜØYÙIËˆ]Nˆ^XÝ›Øš™XÝÛÛZ[š[™ÊÂˆ›ÛNˆ	Ø\ÜÚ\Ý[	ËˆÛÛ[‚ˆ	ÔÙ\ÜÚ[Ûˆ^ÜYÈSˆÙ^Üš[Jš[N‹ËËÝÛÜšÜÜXÙKÙ^Üš[
-IËˆJKˆJNÂˆJNÂ‚ˆ]
-	Ü™Y™\œÈHXÝ]™HPÔÙ\ÜÚ[ÛˆYÝ™\ˆHØØ[ÛÛ™\œØ][ÛˆYÚ[ˆ^Ü[™ÉË\Þ[˜È
+  it('recovers a missing edit snapshot from persisted session messages', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
 
-HOˆÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ]Ù\ÜÚ[Û“\ÝˆšBˆ™›Š
-Bˆ›[ØÚÔ™\ÛÛ™Y˜[YJÞÈÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËÝÙˆ	ËÝÛÜšÜÜXÙIÈWJKˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ØÛÛ—ÛØØ[ÌLŒÉËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ[™Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ËÙ^Ü[	ËˆKˆJNÂ‚ˆ^XÝ
-[ØÚÑ^ÜÙ\ÜÚ[Û•Ñš[JKÒ]™P™Y[Ø[YÚ]
-ÂˆÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÝÙˆ	ËÝÛÜšÜÜXÙIËˆ›Ü›X]ˆ	Ú[	ËˆJNÂˆ^XÝ
-YÙ[X[˜YÙ\‹œÙ[™Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    const persistedMessages = [
+      { role: 'user' as const, content: 'first', timestamp: 1 },
+      { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+      { role: 'user' as const, content: 'second', timestamp: 3 },
+    ];
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      getSessionMessages: vi.fn().mockResolvedValue(persistedMessages),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn(),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+      upsertConversation: vi.fn().mockResolvedValue(undefined),
+    };
+    const sendToWebView = vi.fn();
 
-NÂˆJNÂ‚ˆ]
-	Ü™\ÜÈ˜\™HÙ^Ü\ÈHZ\ÜÚ[™ÈÝX˜ÛÛ[X[™[œÝXYÙˆ^Ü[™ÉË\Þ[˜È
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
 
-HOˆÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ]Ù\ÜÚ[Û“\ÝˆšK™›Š
-KˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ[™Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ËÙ^Ü	ËˆKˆJNÂ‚ˆ^XÝ
-[ØÚÑ^ÜÙ\ÜÚ[Û•Ñš[JK››ÝÒ]™P™Y[Ø[Y
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
 
-NÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆÛÛ[X[™	ËÙ^Ü	È™\]Z\™\ÈHÝX˜ÛÛ[X[™ˆˆKˆJNÂˆ^XÝ
-YÙ[X[˜YÙ\‹œÙ[™Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    expect(agentManager.getSessionMessages).toHaveBeenCalledWith('session-1');
+    expect(conversationStore.upsertConversation).toHaveBeenCalledWith({
+      id: 'session-1',
+      title: 'first',
+      messages: persistedMessages,
+      createdAt: 1,
+      updatedAt: 3,
+    });
+    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
+      'session-1',
+      1,
+    );
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: 'edited prompt' },
+    ]);
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Failed to capture conversation state before editing.' },
+    });
+  });
 
-NÂˆJNÂ‚ˆ]
-	Ü™\ÜÈ^Ü˜Z[\™\È˜XÚÈÈH\Ù\‰Ë\Þ[˜È
+  it('restores the edited conversation snapshot when ACP rewind fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
 
-HOˆÂˆ[ØÚÑ^ÜÙ\ÜÚ[Û•Ñš[K›[ØÚÔ™Z™XÝY˜[YJ™]È\œ›ÜŠ	Ù\ÚÈ[	ÊJNÂ‚ˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ]Ù\ÜÚ[Û“\ÝˆšBˆ™›Š
-Bˆ›[ØÚÔ™\ÛÛ™Y˜[YJÞÈÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËÝÙˆ	ËÝÛÜšÜÜXÙIÈWJKˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ[™Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ËÙ^ÜY	ËˆKˆJNÂ‚ˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	Ù\œ›Ü‰Ëˆ]NˆÈY\ÜØYÙNˆ	Ñ˜Z[YÈ^ÜÙ\ÜÚ[ÛŽˆ\ÚÈ[	ÈKˆJNÂˆ^XÝ
-YÙ[X[˜YÙ\‹œÙ[™Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    const originalConversation = {
+      id: 'session-1',
+      title: 'Existing session',
+      messages: [
+        { role: 'user' as const, content: 'first', timestamp: 1 },
+        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+        { role: 'user' as const, content: 'second', timestamp: 3 },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+    };
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockRejectedValue(new Error('rewind failed')),
+      restoreSessionHistory: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(originalConversation),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
 
-NÂˆJNÂ‚ˆ]
-	Ù[˜ÛÙ\È^ÜYš[H[šÜÈ™Y›Ü™H™[™\š[™ÈX\šÙÝÛ‰Ë\Þ[˜È
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
 
-HOˆÂˆ[ØÚÑ^ÜÙ\ÜÚ[Û•Ñš[K›[ØÚÔ™\ÛÛ™Y˜[YJÂˆš[[˜[YNˆ	Ù^ÜJKš[	Ëˆ\šNˆÈœÔ]ˆ	ËÝÛÜšÜÜXÙKÙ^ÜJKš[	ÈKˆJNÂ‚ˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ]Ù\ÜÚ[Û“\ÝˆšBˆ™›Š
-Bˆ›[ØÚÔ™\ÛÛ™Y˜[YJÞÈÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËÝÙˆ	ËÝÛÜšÜÜXÙIÈWJKˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ[™Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ËÙ^Ü[	ËˆKˆJNÂ‚ˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	ÛY\ÜØYÙIËˆ]Nˆ^XÝ›Øš™XÝÛÛZ[š[™ÊÂˆ›ÛNˆ	Ø\ÜÚ\Ý[	ËˆÛÛ[‚ˆ	ÔÙ\ÜÚ[Ûˆ^ÜYÈSˆÙ^ÜJKš[Jš[N‹ËËÝÛÜšÜÜXÙKÙ^Ü	LŒILŽKš[
-IËˆJKˆJNÂˆJNÂ‚ˆ\ØÜšX™J	Ú[™TÙ][Ù[8 %\ØÛÛ[YY[Ù[Y™[œÚ]™H˜[Y][Ûˆ
-\ÜÝYHÌÍÍJIË
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
 
-HOˆÂˆ]
-	Ü™Z™XÝÈH›Û‹\[[YH]Ù[ˆÐ]][Ù[[™Ý\™˜XÙ\È[ˆ\œ›Ü‰Ë\Þ[˜È
+    expect(agentManager.restoreSessionHistory).not.toHaveBeenCalled();
+    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
+      'session-1',
+      originalConversation.messages,
+    );
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'rewind failed' },
+    });
+  });
 
-HOˆÂˆÛÛœÝÙ][Ù[œ›ÛUZHHšK™›Š
-NÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ][Ù[œ›ÛUZKˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆßH\È™]™\‹ˆ[ˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ][Ù[	Ëˆ]NˆÈ[Ù[Yˆ	Ü]Ù[ŒËXÛÙ\‹\\Ê]Ù[‹[Ø]]
-IÈKˆJNÂ‚ˆ^XÝ
-Ù][Ù[œ›ÛUZJK››ÝÒ]™P™Y[Ø[Y
+  it('restores store and ACP history when saving the edited user message fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
 
-NÂˆ^XÝ
-[ØÚÔÚÝÑ\œ›Ü“Y\ÜØYÙJKÒ]™P™Y[Ø[YÚ]
-ˆ^XÝœÝš[™ÐÛÛZ[š[™Êˆ	Ô]Ù[ˆÐ]]œ™YHY\ˆØ\È\ØÛÛ[YYÛˆŒ‹LLMIËˆ
-Kˆ
-NÂˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	Ù\œ›Ü‰Ëˆ]Nˆ^XÝ›Øš™XÝÛÛZ[š[™ÊÂˆY\ÜØYÙNˆ^XÝœÝš[™ÐÛÛZ[š[™Ê	Ù\ØÛÛ[YY	ÊKˆJKˆJNÂˆJNÂ‚ˆ]
-	Ø[ÝÜÈH[[YH]Ù[ˆÐ]]Û˜\ÚÝÈ\ÜÈ›ÝYÚ	Ë\Þ[˜È
+    const historyBeforeRewind = [{ role: 'user', parts: [{ text: 'first' }] }];
+    const originalConversation = {
+      id: 'session-1',
+      title: 'Existing session',
+      messages: [
+        { role: 'user' as const, content: 'first', timestamp: 1 },
+        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+        { role: 'user' as const, content: 'second', timestamp: 3 },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+    };
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({ historyBeforeRewind }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(originalConversation),
+      addMessage: vi.fn().mockRejectedValue(new Error('storage failed')),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
 
-HOˆÂˆÛÛœÝÙ][Ù[œ›ÛUZHHšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJ[™Yš[™Y
-NÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ][Ù[œ›ÛUZKˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆßH\È™]™\‹ˆ[ˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ][Ù[	Ëˆ]NˆÂˆ[Ù[Yˆ	É[[Y_]Ù[‹[Ø]]]Ù[ŒËXÛÙ\‹\\Ê]Ù[‹[Ø]]
-IËˆKˆJNÂ‚ˆ^XÝ
-Ù][Ù[œ›ÛUZJKÒ]™P™Y[Ø[YÚ]
-ˆ	É[[Y_]Ù[‹[Ø]]]Ù[ŒËXÛÙ\‹\\Ê]Ù[‹[Ø]]
-IËˆ
-NÂˆ^XÝ
-[ØÚÔÚÝÑ\œ›Ü“Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
 
-NÂˆJNÂ‚ˆ]
-	Ü\ÜÙ\È›ÝYÚÝ\‹\›ÝšY\ˆ[Ù[È
-™YÜ™\ÜÚ[Ûˆ8 %›È˜[ÙHÜÚ]]™\ÊIË\Þ[˜È
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
 
-HOˆÂˆÛÛœÝÙ][Ù[œ›ÛUZHHšK™›Š
-K›[ØÚÔ™\ÛÛ™Y˜[YJ[™Yš[™Y
-NÂˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ][Ù[œ›ÛUZKˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆßH\È™]™\‹ˆ[ˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ][Ù[	Ëˆ]NˆÈ[Ù[Yˆ	ÙÜM
-Ü[˜ZJIÈKˆJNÂ‚ˆ^XÝ
-Ù][Ù[œ›ÛUZJKÒ]™P™Y[Ø[YÚ]
-	ÙÜM
-Ü[˜ZJIÊNÂˆ^XÝ
-[ØÚÔÚÝÑ\œ›Ü“Y\ÜØYÙJK››ÝÒ]™P™Y[Ø[Y
+    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith(
+      historyBeforeRewind,
+    );
+    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
+      'session-1',
+      originalConversation.messages,
+    );
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'storage failed' },
+    });
+  });
 
-NÂˆJNÂˆJNÂˆ]
-	Ü™\Ù\™\ÈHš]™K[]\ˆÛÛÛˆ[ˆÚ[™ÝÜÈ^ÜYš[H[šÜÉË\Þ[˜È
+  it('rejects edit submissions with invalid target turn indexes', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn(),
+      restoreSessionHistory: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn(),
+      truncateFromUserTurn: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
 
-HOˆÂˆ[ØÚÑ^ÜÙ\ÜÚ[Û•Ñš[K›[ØÚÔ™\ÛÛ™Y˜[YJÂˆš[[˜[YNˆ	Ùš[K›Y	Ëˆ\šNˆÈœÔ]ˆ	Ñ—\ZØXÚ˜Wš[K›Y	ÈKˆJNÂ‚ˆÛÛœÝYÙ[X[˜YÙ\ˆHÂˆ\ÐÛÛ›™XÝYˆYKˆÝ\œ™[Ù\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ]Ù\ÜÚ[Û“\ÝˆšBˆ™›Š
-Bˆ›[ØÚÔ™\ÛÛ™Y˜[YJÞÈÙ\ÜÚ[Û’Yˆ	ÜÙ\ÜÚ[Û‹LIËÝÙˆ	ËÝÛÜšÜÜXÙIÈWJKˆÙ[™Y\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÛÛ™\œØ][Û”ÝÜ™HHÂˆÜ™X]PÛÛ™\œØ][ÛŽˆšK™›Š
-KˆÙ]ÛÛ™\œØ][ÛŽˆšK™›Š
-KˆYY\ÜØYÙNˆšK™›Š
-KˆNÂˆÛÛœÝÙ[™ÕÙX•šY]ÈHšK™›Š
-NÂ‚ˆÛÛœÝ[™\ˆH™]ÈÙ\ÜÚ[Û“Y\ÜØYÙR[™\ŠˆYÙ[X[˜YÙ\ˆ\È™]™\‹ˆÛÛ™\œØ][Û”ÝÜ™H\È™]™\‹ˆ	ÜÙ\ÜÚ[Û‹LIËˆÙ[™ÕÙX•šY]Ëˆ
-NÂ‚ˆ]ØZ][™\‹š[™JÂˆ\Nˆ	ÜÙ[™Y\ÜØYÙIËˆ]NˆÂˆ^ˆ	ËÙ^ÜY	ËˆKˆJNÂ‚ˆ^XÝ
-Ù[™ÕÙX•šY]ÊKÒ]™P™Y[Ø[YÚ]
-Âˆ\Nˆ	ÛY\ÜØYÙIËˆ]Nˆ^XÝ›Øš™XÝÛÛZ[š[™ÊÂˆ›ÛNˆ	Ø\ÜÚ\Ý[	ËˆÛÛ[‚ˆ	ÔÙ\ÜÚ[Ûˆ^ÜYÈQˆÙš[K›YJš[N‹ËËÑ‹Ø\ZØXÚ˜KÙš[K›Y
-IËˆJKˆJNÂˆJNÂŸJNÂ
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: -1,
+      },
+    });
+
+    expect(agentManager.rewindSession).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Invalid message edit target.' },
+    });
+  });
+
+  it('keeps currentConversationId aligned with the archived sessionId when session/load falls back to a new ACP session', async () => {
+    const archivedSessionId = 'archived-session';
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'old-acp-session',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ id: archivedSessionId, cwd: '/workspace' }]),
+      loadSessionViaAcp: vi
+        .fn()
+        .mockRejectedValue(new Error('session not found on server')),
+      getSessionMessages: vi.fn().mockResolvedValue([]),
+      createNewSession: vi.fn().mockResolvedValue('new-acp-session'),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'switchQwenSession',
+      data: { sessionId: archivedSessionId },
+    });
+
+    // Backend-tracked current session must match the sessionId the webview sees,
+    // otherwise rename/delete/title-update flows will target the wrong session
+    // during the fallback window (see PR #3093 review).
+    expect(handler.getCurrentConversationId()).toBe(archivedSessionId);
+    expect(agentManager.createNewSession).toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'qwenSessionSwitched',
+        data: expect.objectContaining({ sessionId: archivedSessionId }),
+      }),
+    );
+  });
+
+  it('forces a fresh ACP session when the webview requests a new session', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      createNewSession: vi.fn().mockResolvedValue('session-2'),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'newQwenSession',
+    });
+
+    expect(handler.getCurrentConversationId()).toBeNull();
+    expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
+      forceNew: true,
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationCleared',
+      data: {},
+    });
+  });
+
+  it('intercepts /export html and uses the VSCode export flow instead of sending a prompt', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export html',
+      },
+    });
+
+    expect(mockExportSessionToFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      cwd: '/workspace',
+      format: 'html',
+    });
+    expect(conversationStore.addMessage).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to HTML: [export.html](file:///workspace/export.html)',
+      }),
+    });
+  });
+
+  it('prefers the active ACP session id over the local conversation id when exporting', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conv_local_123',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export html',
+      },
+    });
+
+    expect(mockExportSessionToFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      cwd: '/workspace',
+      format: 'html',
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports bare /export as a missing subcommand instead of exporting', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export',
+      },
+    });
+
+    expect(mockExportSessionToFile).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: "Command '/export' requires a subcommand." },
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports export failures back to the user', async () => {
+    mockExportSessionToFile.mockRejectedValue(new Error('disk full'));
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export md',
+      },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Failed to export session: disk full' },
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('encodes exported file links before rendering markdown', async () => {
+    mockExportSessionToFile.mockResolvedValue({
+      filename: 'export a).html',
+      uri: { fsPath: '/workspace/export a).html' },
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export html',
+      },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to HTML: [export a).html](file:///workspace/export%20a%29.html)',
+      }),
+    });
+  });
+
+  describe('handleSetModel â€” discontinued model defensive validation (Issue #3745)', () => {
+    it('rejects a non-runtime Qwen OAuth model and surfaces an error', async () => {
+      const setModelFromUi = vi.fn();
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        setModelFromUi,
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        {} as never,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'setModel',
+        data: { modelId: 'qwen3-coder-plus(qwen-oauth)' },
+      });
+
+      expect(setModelFromUi).not.toHaveBeenCalled();
+      expect(mockShowErrorMessage).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Qwen OAuth free tier was discontinued on 2026-04-15',
+        ),
+      );
+      expect(sendToWebView).toHaveBeenCalledWith({
+        type: 'error',
+        data: expect.objectContaining({
+          message: expect.stringContaining('discontinued'),
+        }),
+      });
+    });
+
+    it('allows a runtime Qwen OAuth snapshot to pass through', async () => {
+      const setModelFromUi = vi.fn().mockResolvedValue(undefined);
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        setModelFromUi,
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        {} as never,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'setModel',
+        data: {
+          modelId: '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+        },
+      });
+
+      expect(setModelFromUi).toHaveBeenCalledWith(
+        '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
+      );
+      expect(mockShowErrorMessage).not.toHaveBeenCalled();
+    });
+
+    it('passes through other-provider models (regression â€” no false positives)', async () => {
+      const setModelFromUi = vi.fn().mockResolvedValue(undefined);
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        setModelFromUi,
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        {} as never,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'setModel',
+        data: { modelId: 'gpt-4(openai)' },
+      });
+
+      expect(setModelFromUi).toHaveBeenCalledWith('gpt-4(openai)');
+      expect(mockShowErrorMessage).not.toHaveBeenCalled();
+    });
+  });
+  it('preserves the drive-letter colon in Windows exported file links', async () => {
+    mockExportSessionToFile.mockResolvedValue({
+      filename: 'file.md',
+      uri: { fsPath: 'D:\\aplikacja\\file.md' },
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export md',
+      },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to MD: [file.md](file:///D:/aplikacja/file.md)',
+      }),
+    });
+  });
+});
