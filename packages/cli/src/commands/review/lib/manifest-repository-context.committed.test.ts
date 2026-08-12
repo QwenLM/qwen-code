@@ -217,17 +217,32 @@ describe('committed review context manifest', () => {
   });
 
   it('stays under the resolved-file bound when every rule co-matches', () => {
-    const probes = expectedManifest.rules.flatMap((rule) =>
-      rule.paths.map(probeFor),
-    );
+    const probes = expectedManifest.rules.map((rule) => {
+      const wildcardPattern = rule.paths.find((pattern) =>
+        /[?*]/.test(pattern),
+      );
+      expect(
+        wildcardPattern,
+        'every rule needs a synthetic wildcard probe for the union test',
+      ).toBeDefined();
+      const probe = probeFor(wildcardPattern as string);
+      expect(
+        existsSync(join(repoRoot, probe)),
+        'union probes must not be real changed files excluded from relatedPaths',
+      ).toBe(false);
+      return probe;
+    });
     const context = provideForRepo(probes);
     expect(context).not.toBeNull();
 
-    // At this revision the real provider resolves 115/128 files, leaving 13
-    // slots. The manifest grammar has no negation globs, and hooks/** is the
-    // fastest-growing remaining group, so this bound is the deliberate alarm
-    // for future rebalancing rather than permission to truncate the result.
-    expect(context?.relatedPaths).toHaveLength(115);
+    // The reviewed tree resolved 115/128 files, leaving 13 slots. Do not pin
+    // that exact count: the real provider intentionally scans the working tree,
+    // so harmless untracked files and normal source growth can change it. The
+    // synthetic, nonexistent changed paths above prevent changed-file exclusion
+    // from understating the union. The manifest grammar has no negation globs,
+    // and hooks/** is the fastest-growing remaining group, so this bound is the
+    // deliberate alarm for future rebalancing rather than permission to
+    // truncate the result.
     expect(context?.relatedPaths.length).toBeLessThanOrEqual(MAX_ARRAY_ITEMS);
   });
 
