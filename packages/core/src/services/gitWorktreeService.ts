@@ -316,6 +316,35 @@ export class GitWorktreeService {
   }
 
   /**
+   * Returns the repository's primary working tree path, or `null` when it
+   * cannot be determined. Unlike `getRepoTopLevel()` — which answers
+   * "which worktree is this cwd in" and so names a linked worktree's OWN
+   * root when run inside one — this always resolves the MAIN tree:
+   * `git worktree list --porcelain` lists the primary working tree first
+   * regardless of where in the repository it runs. Callers anchoring a
+   * check at the repository itself (not the current worktree) use this.
+   * A main-tree path containing a newline truncates to the first line;
+   * consumers fail closed on the bad anchor and the authoritative
+   * registration checks never consult this value.
+   */
+  async getMainWorktreePath(): Promise<string | null> {
+    try {
+      const out = await (
+        await this.getGit()
+      ).raw(['worktree', 'list', '--porcelain']);
+      const firstLine = out.split('\n', 1)[0]?.trim() ?? '';
+      if (!firstLine.startsWith('worktree ')) return null;
+      const mainPath = firstLine.slice('worktree '.length).trim();
+      return mainPath.length > 0 ? mainPath : null;
+    } catch (error) {
+      debugLogger.warn(
+        `getMainWorktreePath failed at ${this.sourceRepoPath}: ${error}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Checks if the source path is a git repository.
    */
   async isGitRepository(): Promise<boolean> {

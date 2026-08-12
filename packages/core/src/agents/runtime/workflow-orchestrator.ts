@@ -160,9 +160,10 @@ export function resolveConcurrencyLimit(
  * turns or 10 minutes routinely, and under the GOAL-terminal contract
  * hitting either shows up as a `null` element in `parallel()`: an agent that
  * silently went missing rather than one that visibly failed. So both are
- * operator-tunable via env, on the same pattern as the three other workflow
- * bounds (`QWEN_CODE_MAX_WORKFLOW_AGENTS`, `QWEN_CODE_WORKFLOW_STALL_SECONDS`,
- * `QWEN_CODE_MAX_WORKFLOW_SECONDS`), each clamped to a hard ceiling.
+ * operator-tunable via env, on the same env-override pattern as the other
+ * workflow bounds; like `QWEN_CODE_MAX_WORKFLOW_AGENTS` (and unlike
+ * `QWEN_CODE_WORKFLOW_STALL_SECONDS` / `QWEN_CODE_MAX_WORKFLOW_SECONDS`,
+ * which apply valid overrides verbatim), clamped to a hard ceiling.
  *
  * Three time bounds act on a dispatch and they are NOT redundant:
  *  - `stallMs` (60s default) — no *progress* for this long ⇒ abort + retry.

@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const stubs = vi.hoisted(() => ({
   make: () => ({
@@ -14,6 +17,7 @@ const stubs = vi.hoisted(() => ({
     })),
     isGitRepository: vi.fn(async () => true),
     getRepoTopLevel: vi.fn(async () => '/repo'),
+    getMainWorktreePath: vi.fn(async () => '/repo'),
     isRegisteredLinkedWorktree: vi.fn(async () => true),
     getRegisteredWorktreeBranch: vi.fn(async () => ({ branch: 'pr-7' })),
   }),
@@ -60,6 +64,49 @@ describe('resolveExternalWorktreeDir', () => {
   it('accepts an in-repository worktree whose name starts with two dots', async () => {
     const result = await resolveExternalWorktreeDir(config, '..hidden-wt');
     expect(result).toMatchObject({ path: '/repo/..hidden-wt' });
+  });
+
+  // From inside a linked worktree `--show-toplevel` answers with the
+  // worktree's own root. Containment must still anchor at the main working
+  // tree, or a registered sibling worktree — the documented review-pipeline
+  // setup — is spuriously refused.
+  it('accepts a sibling worktree when the parent runs inside a linked worktree', async () => {
+    svc.getRepoTopLevel.mockResolvedValue('/repo/.qwen/tmp/review-pr-1');
+    const insideWorktree = {
+      getTargetDir: () => '/repo/.qwen/tmp/review-pr-1',
+    } as unknown as Config;
+    const result = await resolveExternalWorktreeDir(
+      insideWorktree,
+      '../review-pr-1-base',
+    );
+    expect(result).toMatchObject({
+      path: '/repo/.qwen/tmp/review-pr-1-base',
+    });
+  });
+
+  // The containment comparison canonicalises both sides, so a symlink cannot
+  // straddle the repository boundary. Real temp dirs (not stubs) force the
+  // fs.realpath calls to actually run — with plain-string stubs both reject
+  // and the .catch() fallbacks degrade the check to string comparison.
+  it('refuses an in-repo symlink that canonicalizes outside the repository', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-pin-'));
+    try {
+      const repoDir = path.join(root, 'repo');
+      const outsideTarget = path.join(root, 'outside', 'wt');
+      await fs.mkdir(repoDir, { recursive: true });
+      await fs.mkdir(outsideTarget, { recursive: true });
+      await fs.symlink(outsideTarget, path.join(repoDir, 'link-wt'));
+      svc.getMainWorktreePath.mockResolvedValue(repoDir);
+      const localConfig = {
+        getTargetDir: () => repoDir,
+      } as unknown as Config;
+      const result = await resolveExternalWorktreeDir(localConfig, 'link-wt');
+      expect(result).toEqual({
+        error: expect.stringContaining('resolves outside this repository'),
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   // Pinning replaces the child's WorkspaceContext wholesale, so a path that

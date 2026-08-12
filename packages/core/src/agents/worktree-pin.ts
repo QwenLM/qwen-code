@@ -81,10 +81,18 @@ export async function resolveExternalWorktreeDir(
       error: `Cannot use ${label}: ${parentCwd} is not a git repository.`,
     };
   }
-  // Anchor at the repo top-level so the common-dir comparison inside
-  // getRegisteredWorktreeBranch is against the repository, not a monorepo
-  // subdirectory the parent happened to launch from.
-  const repoRoot = (await probe.getRepoTopLevel()) ?? parentCwd;
+  // Anchor at the repository's MAIN working tree. From inside a linked
+  // worktree (the normal state for /review-style pipelines)
+  // `--show-toplevel` answers with the worktree's own root, which would
+  // spuriously refuse registered sibling worktrees and mislabel the
+  // repository in the refusal below. The toplevel answer is the fallback
+  // when the worktree list cannot be read; either anchor also keeps the
+  // common-dir comparison inside getRegisteredWorktreeBranch against the
+  // repository, not a monorepo subdirectory the parent launched from.
+  const repoRoot =
+    (await probe.getMainWorktreePath()) ??
+    (await probe.getRepoTopLevel()) ??
+    parentCwd;
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
 

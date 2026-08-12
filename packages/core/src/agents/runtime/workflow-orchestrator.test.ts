@@ -1917,6 +1917,32 @@ describe('createProductionDispatch', () => {
     });
   });
 
+  // Resolver-level tests cannot catch a revert at the dispatch site: in a
+  // clean env the DEFAULT_* constants and the resolvers produce identical
+  // numbers, so the wiring test above stays green either way. Stub the env
+  // so the dispatched runConfig itself proves the resolver is wired in.
+  it('fast-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
+  });
+
   // T11: disallow SendMessage plus tools that break workflow return/cleanup
   // contracts.
   it('disallows workflow-only floor tools for workflow subagents', async () => {
@@ -2820,6 +2846,37 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await dispatch('hi', { model: 'qwen3-max' });
     // No agentType → ephemeral default config built, then opts.model applied.
     expect(calls[0].config.model).toBe('qwen3-max');
+  });
+
+  // Same wiring guard as the fast-path sibling above, for the override
+  // dispatch site: with a clean env the resolvers and the DEFAULT_*
+  // constants are indistinguishable, so only a stubbed env proves the
+  // runConfigOverrides handed to createAgentHeadless come from the
+  // resolvers.
+  it('override-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const helper = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      await createProductionDispatch(helper.config)('hi', {
+        model: 'qwen3-max',
+      });
+      expect(helper.calls[0]!.options?.runConfigOverrides).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
