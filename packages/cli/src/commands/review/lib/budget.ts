@@ -130,7 +130,7 @@ const SWEEP_FLOOR = 25;
 /**
  * The reverse-audit loop's full round cap (SKILL.md Step 5's "stop at the
  * plan's `reverseAuditRounds` cap"). The normal value; a huge diff gets
- * `HUGE_REVERSE_AUDIT_ROUNDS` instead. `retirement.ts` re-exports it.
+ * `HUGE_REVERSE_AUDIT_ROUNDS` instead. `compose-review` imports it directly.
  */
 export const MAX_REVERSE_AUDIT_ROUNDS = 5;
 
@@ -232,10 +232,13 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
 
 /**
  * The reverse-audit round cap a plan's budget carries, for every reader
- * that enforces or narrates it (the admission gate, the retirement
- * scheduler, the cold-check note). A plan without the field — an older
- * CLI — or a garbled value reads as the full cap: an old plan errs toward
- * more auditing, never less, exactly like every other budget fallback.
+ * that enforces or narrates it (the admission gate and the cold-check
+ * note, both in `agent-prompt`; the retirement scheduler deliberately
+ * ignores the cap — whether a scheduled cold check is allowed is the note
+ * composer's question, not the schedule's). A plan without the field — an
+ * older CLI — or a garbled value reads as the full cap: an old plan errs
+ * toward more auditing, never less, exactly like every other budget
+ * fallback.
  *
  * The accepted range is floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the
  * smallest cap the CLI ever writes. A value of one or two is out of band

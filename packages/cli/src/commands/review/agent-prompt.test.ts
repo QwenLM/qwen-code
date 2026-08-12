@@ -45,6 +45,7 @@ import {
   DEADLINE_ENV,
   RESERVE_ENV,
   COMPOSE_FLOOR_ENV,
+  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
 } from './lib/deadline.js';
@@ -2658,6 +2659,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   afterEach(() => {
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
+    delete process.env[TOOL_CONCURRENCY_ENV];
     process.exitCode = undefined;
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -3103,6 +3105,59 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // A refusal is not an admission.
     expect(readRoundStamps(plan)).toHaveLength(1);
   });
+
+  it('prices the 3B pair as one admission — round 2 bears the pair wall', () => {
+    // Round 2's build lands seconds after round 1's stamp, so nothing has
+    // measured a round yet; the price is both members' wall in waves of the
+    // tool-concurrency pool. PLAN has three chunks; at a 2-slot pool each
+    // round runs two waves and the pair three, so round 2 pays 3/2 of the
+    // round estimate — and the gate refuses it when the reserve plus that
+    // does not fit, even though round 1 (one estimate) just admitted.
+    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).some((st) => st.round === 1)).toBe(true);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    // Reserve 600 + pair price 2700 = 3300 > the 3000 remaining.
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    expect(readRoundStamps(plan)).toHaveLength(1);
+  });
+
+  it('admits the 3B pair when the reserve plus the pair wall fits', () => {
+    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3400);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).map((st) => st.round)).toEqual([1, 2]);
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('prices the pair at one round when the pool holds both fan-outs at once', () => {
+    // The default 10-slot pool holds all six auditors of PLAN's 3-chunk
+    // pair in one wave, so round 2 pays one round estimate — a flat 2x
+    // price would refuse this admission (reserve 600 + 3600 > 3000) and
+    // gut the pair's admission win near the deadline.
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).map((st) => st.round)).toEqual([1, 2]);
+  });
 });
 
 describe('per-chunk retirement — cold territories stop costing a round', () => {
@@ -3310,6 +3365,30 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(keysOf(2)).toHaveLength(3);
   });
 
+  it('the 3B pair: round 2 builds every chunk with round 1 still in flight (no round-1 transcripts)', () => {
+    // The convergence pair on 3B — the latency lever: rounds 1 and 2 are
+    // launched together, so round 2's builder runs BEFORE round 1's auditors
+    // have returned any transcript. Round 2 must still fan out to every chunk
+    // (the retirement schedule only reads history at k >= 3, so nothing here
+    // depends on round 1's records existing) and stamp its own admission, so
+    // the two rounds' auditors run concurrently instead of one round-wall
+    // apart. Pins the mechanism the SKILL 3B-pair orchestration relies on.
+    const r1 = runRound(1); // built, but no transcripts written for it
+    expect(r1).toContain('3 auditors required this round — one per chunk.');
+    const r2 = runRound(2); // round 1's transcripts don't exist yet at this point
+    expect(r2).toContain('3 auditors required this round — one per chunk.');
+    expect(r2).not.toContain('retirement:');
+    expect(keysOf(1)).toHaveLength(3);
+    expect(keysOf(2)).toHaveLength(3);
+    // Both admissions are stamped, so the deadline gate prices each and the
+    // clock advances a round per stamp.
+    const rounds = readRoundStamps(plan)
+      .map((s) => s.round)
+      .sort();
+    expect(rounds).toContain(1);
+    expect(rounds).toContain(2);
+  });
+
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
@@ -3445,6 +3524,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).toContain('2 auditors required this round');
     expect(out).toContain('chunk 13 — retired: dry in rounds 1 and 2');
     expect(out).toContain('certificate final');
+    // Pin the spelled cap number, not just the branch: a hardcoded `5-round
+    // cap leaves` in the note wording would otherwise ship silently and tell
+    // the orchestrator a false cap on exactly the huge-diff runs this targets.
+    expect(out).toContain('3-round cap leaves');
     expect(out).not.toContain('next cold check round 4');
   });
 
@@ -3472,6 +3555,19 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(msg).toContain('ROUND CAP');
     expect(msg).toContain('round cap is 3');
+    // The load-bearing tail rules — the same verify-only / compose-floor
+    // contract the budget message's test pins and SKILL.md's round-cap
+    // bullet mirrors; a reword that drops any of these silently loosens
+    // the termination contract, so pin each.
+    expect(msg).toContain('agent-prompt --role verify');
+    expect(msg).toContain('never a hand-rolled agent');
+    expect(msg).toContain('compose floor');
+    expect(msg).toContain('Do NOT re-verify findings already');
+    // The wait-bound and no-fresh-pass clauses too — the budget message's
+    // test pins the same two for the sibling refusal; one bounded-tail
+    // protocol, both pin both.
+    expect(msg).toContain('stop waiting on any verifier batch still out');
+    expect(msg).toContain('invent a fresh re-verification pass');
     // The marker is on disk so compose-review caps without the relay.
     expect(readBudgetStop(plan)?.cause).toBe('round-cap');
     expect(readBudgetStop(plan)?.cap).toBe(3);
@@ -3590,6 +3686,165 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // was never admitted, and must not skew the next admission's estimate.
     expect(readRecordedPrompts(plan).size).toBe(recordsBefore);
     expect(readRoundStamps(plan)).toHaveLength(stampsBefore);
+  });
+
+  it('huge cap: a converged past-cap round exits 5, not the cap — convergence outranks it', () => {
+    // The ordering the PR documents four times (the convergence check runs
+    // BEFORE the round-cap gate) with no test pin: hoisting the cap check
+    // above it survives the whole suite. Round 5 is past the cap of 3, but
+    // its schedule has converged (every chunk twice-dry, odd round → all
+    // skipped), so it must exit 5 CONVERGED with NO marker — not exit 4 at
+    // the cap. History that lands convergence on an odd past-cap round: 13/14
+    // dry in rounds 1-2 (retire at 3), 15 whiffs round 1 then goes dry in
+    // 2-3, so round 3 (odd) builds only 15 and nothing converges before 5.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY }); // 13,14 retired (odd → skipped); only 15 built
+    expect(keysOf(3)).toHaveLength(1);
+
+    const out = runRound(5); // 5 > cap 3, but the schedule has converged
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    // Convergence outranks the cap: no round-cap refusal, no marker written.
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('huge cap: a CONVERGED exit clears a stale same-run round-cap marker', () => {
+    // Retry-after-refusal: round 4 (even) is refused at the cap — every
+    // retired chunk is DUE a cold check, so the schedule is not converged and
+    // 4 > 3 refuses, writing the marker. The orchestrator then asks for round
+    // 5, which converges. Nothing else unlinks budget-stop.json, so without
+    // the converged-branch clear the stale marker caps a verdict that
+    // legitimately converged.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    runRound(4); // even → retired chunks due cold checks → not converged → cap refuses
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+
+    process.exitCode = undefined;
+    const out = runRound(5); // odd → all skipped → converged
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    // The marker channel is closed AND the relay channel is recalled: the
+    // refusal instructed the orchestrator to add the stop entry to
+    // unreviewedDimensions, and nothing but this sentence removes it once
+    // the marker (and with it compose-review's dedup splice) is gone.
+    expect(msg).toContain('remove it now — this convergence supersedes');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
+  });
+
+  it('huge cap: a CONVERGED exit clears a stale same-run time-budget marker too', () => {
+    // The clear is cause-blind, but both sibling clear tests produce their
+    // marker via the round-cap gate — a cause-conditional clear
+    // (`if (readBudgetStop(p)?.cause === 'round-cap') clearBudgetStop(p)`)
+    // passes them both and leaves a time-budget marker capping a verdict
+    // the audit legitimately converged. Cap 5 so even round 4 reaches the
+    // TIME gate instead of the cap gate: cold checks due → not converged →
+    // admitted at the cap, refused at the near deadline. Round 5 then
+    // converges and must clear the time-budget marker the same way.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 5 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    runRound(4); // even → not converged → 4 <= cap 5 → refused at the time gate
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+
+    process.exitCode = undefined;
+    const out = runRound(5); // odd → all skipped → converged, before any gate
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale time-budget marker is cleared
+  });
+
+  it('huge cap: a converged --chunk retry clears the stale cap marker too', () => {
+    // The --chunk gate threads the same convergence-first path with its own
+    // `args.plan`, but only the --all-chunks site's marker clear is pinned
+    // above: a converged per-chunk retry after a cap refusal must exit 5
+    // CONVERGED and clear the stale marker exactly like it, not exit 4 at
+    // the cap (the ordering) and not leave the marker capping a verdict the
+    // audit legitimately converged (the clear). Same retry-after-refusal
+    // history as the --all-chunks test.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    runRound(4); // even → retired chunks due cold checks → cap refuses
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+
+    process.exitCode = undefined;
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 5,
+    });
+    expect(process.exitCode).toBe(5);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(keysOf(5)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
   });
 
   it('a cold-check-only round is still built, admitted and stamped', () => {

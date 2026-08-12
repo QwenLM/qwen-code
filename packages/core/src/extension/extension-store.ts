@@ -245,6 +245,18 @@ export class ExtensionStore {
     this.lockPath = path.join(this.storeDir, 'lock');
   }
 
+  agentPluginDataRoot(extensionId: string): string {
+    if (!/^[a-f0-9]{64}$/.test(extensionId)) {
+      throw new Error(`Invalid extension id "${extensionId}".`);
+    }
+    return path.join(
+      this.storeDir,
+      'plugin-data',
+      'agent-plugins',
+      extensionId,
+    );
+  }
+
   async ensureInitialized(
     extensions: readonly ExtensionIdentity[],
   ): Promise<ExtensionStoreSnapshot> {

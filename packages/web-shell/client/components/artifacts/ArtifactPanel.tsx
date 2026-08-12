@@ -15,6 +15,7 @@ import { DownloadIcon } from 'lucide-react';
 import {
   ChevronRightIcon,
   CirclePlusIcon,
+  ImageIcon,
   Maximize2Icon,
   MessageCirclePlusIcon,
   Minimize2Icon,
@@ -146,6 +147,13 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'image';
+      title: string;
+      src: string;
+      alt?: string;
+    }
+  | {
+      id: string;
       kind: 'subagent';
       title: string;
       sessionId: string;
@@ -194,6 +202,12 @@ function isWorkspaceScopedTab(
     tab.kind === 'artifact' ||
     tab.kind === 'scheduled_task'
   );
+}
+
+function imageDownloadName(src: string): string {
+  const match = src.match(/^data:image\/([a-z0-9+.+-]+)/i);
+  const ext = (match?.[1] ?? 'png').split('+')[0].toLowerCase();
+  return `image.${ext}`;
 }
 
 export interface SideTaskListItem {
@@ -252,6 +266,7 @@ interface ArtifactPanelProps {
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  deferSubagentMount?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
   fullscreen?: boolean;
@@ -287,6 +302,7 @@ export function ArtifactPanel({
   onError,
   sessionWorkflowEnabled,
   onImageIngestionNotice,
+  deferSubagentMount = false,
   onClose,
   variant = 'docked',
   fullscreen = false,
@@ -398,6 +414,11 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'image' ? (
+                      <ImageIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : (
                       <TabScheduledTaskIcon />
                     )}
@@ -466,7 +487,7 @@ export function ArtifactPanel({
           {onToggleFullscreen && (
             <button
               type="button"
-              className={`${styles.iconButton} ${fullscreen ? styles.iconButtonActive : ''}`}
+              className={`${styles.iconButton} ${styles.fullscreenButton} ${fullscreen ? styles.iconButtonActive : ''}`}
               onClick={onToggleFullscreen}
               aria-label={t(
                 fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
@@ -678,15 +699,17 @@ export function ArtifactPanel({
             error={error}
           />
         ) : activeTab.kind === 'subagent' ? (
-          <SubagentDetail
-            sessionId={activeTab.sessionId}
-            rootToolCallId={activeTab.rootToolCallId}
-            initialRootTool={activeTab.rootTool}
-            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
-            onRightPanelOpen={onNestedRightPanelOpen}
-            onArtifactsChange={onNestedArtifactsChange}
-            onError={onError}
-          />
+          deferSubagentMount ? null : (
+            <SubagentDetail
+              sessionId={activeTab.sessionId}
+              rootToolCallId={activeTab.rootToolCallId}
+              initialRootTool={activeTab.rootTool}
+              workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+              onRightPanelOpen={onNestedRightPanelOpen}
+              onArtifactsChange={onNestedArtifactsChange}
+              onError={onError}
+            />
+          )
         ) : activeTab.kind === 'monitor' ? (
           <MonitorTaskDetail
             key={activeTab.id}
@@ -720,6 +743,23 @@ export function ArtifactPanel({
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             onImageIngestionNotice={onImageIngestionNotice}
           />
+        ) : activeTab.kind === 'image' ? (
+          <div className={styles.imagePreviewWrap}>
+            <img
+              src={activeTab.src}
+              alt={activeTab.alt ?? activeTab.title}
+              className={styles.imagePreview}
+            />
+            <a
+              className={styles.imageDownloadButton}
+              href={activeTab.src}
+              download={imageDownloadName(activeTab.src)}
+              aria-label={t('common.download')}
+              title={t('common.download')}
+            >
+              <DownloadIcon size={16} strokeWidth={1.8} />
+            </a>
+          </div>
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
