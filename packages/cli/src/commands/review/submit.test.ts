@@ -642,7 +642,60 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       expect(text).not.toContain('via Qwen Code /review');
       expect(text).not.toContain('qwen3.7-max');
     }
-    expect(inline).toBe('**[Suggestion]** tidy');
+    // The severity prefix goes with the footer: it is the same template.
+    expect(inline).toBe('tidy');
+  });
+
+  it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
+    const review = file('no-attribution-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** null deref when the list is empty',
+        },
+        {
+          path: 'a.ts',
+          line: 30,
+          body: '**[Suggestion]** tidy',
+        },
+      ],
+    });
+
+    withVerifyEnv(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    );
+
+    // Counted BEFORE the strip: one marked Critical in the payload still
+    // earns REQUEST_CHANGES.
+    expect(posted().event).toBe('REQUEST_CHANGES');
+    const [critical, suggestion] = posted().comments as Array<{
+      body: string;
+    }>;
+    expect(critical.body).toBe('null deref when the list is empty');
+    expect(suggestion.body).toBe('tidy');
+  });
+
+  it('attribution on keeps the severity prefixes in the posted bodies', () => {
+    const review = file('attribution-critical.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** null deref when the list is empty',
+        },
+      ],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review }), '0.21.3'));
+
+    const inline = (posted().comments as Array<{ body: string }>)[0].body;
+    expect(inline.startsWith('**[Critical]**')).toBe(true);
+    expect(posted().event).toBe('REQUEST_CHANGES');
   });
 
   it('the standing review.comment setting authorises a post without --comment in the args', () => {
@@ -722,7 +775,11 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     runSubmit(authorized({ review }), '0.21.3', { attribution: false });
 
-    expect(posted().comments[0].body).toBe(body);
+    // Attribution-off also strips the severity prefix; the assertion is on
+    // the rest of the body reaching GitHub byte-for-byte.
+    expect(posted().comments[0].body).toBe(
+      body.slice('**[Suggestion]** '.length),
+    );
   });
 
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {

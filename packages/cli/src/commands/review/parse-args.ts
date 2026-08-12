@@ -459,6 +459,16 @@ interface ParseArgsCliArgs {
 }
 
 /**
+ * The printed verdict: the parsed args plus the operator's presentation
+ * policy. `attribution` is not arg-derived, so it is not `parseReviewArgs`'
+ * job — the orchestrator reads it to pick Step 7's comment register (plain
+ * prose, no marker template, when the operator turned attribution off).
+ */
+export interface ParseArgsVerdict extends ParsedReviewArgs {
+  attribution: boolean;
+}
+
+/**
  * The standing defaults from `settings.json` (`review.effort`,
  * `review.comment`), resolved for `parseReviewArgs`: `auto` effort means the
  * built-in rule, so it maps to undefined — and so does any invalid value.
@@ -466,11 +476,12 @@ interface ParseArgsCliArgs {
  * configured value must not skip that normalization: `"Low"` unnormalized
  * misses the exact `effort === 'low'` comparisons the forcings run.
  */
-function reviewDefaultsFromSettings(): {
+function reviewDefaultsFromSettings(
+  review: ReturnType<typeof operatorReviewSettings>,
+): {
   effort?: ReviewEffort;
   comment?: boolean;
 } {
-  const review = operatorReviewSettings();
   return {
     effort:
       review.effort === undefined || review.effort === 'auto'
@@ -545,7 +556,11 @@ export const parseArgsCommand: CommandModule = {
       writeStderrLineSafe(bundleNotice);
     }
 
-    const parsed = parseReviewArgs(rawStr, reviewDefaultsFromSettings());
+    const settings = operatorReviewSettings();
+    const parsed: ParseArgsVerdict = {
+      ...parseReviewArgs(rawStr, reviewDefaultsFromSettings(settings)),
+      attribution: settings.attribution,
+    };
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

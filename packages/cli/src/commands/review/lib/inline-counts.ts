@@ -59,6 +59,25 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
 }
 
 /**
+ * The body with its leading severity marker removed — the shape an
+ * attribution-off (`review.attribution: false`) run POSTS, applied by
+ * `submit` after the verdict was counted from the marked payload.
+ *
+ * A body that was nothing but its marker is returned unchanged: stripping
+ * it would post an empty comment, and GitHub 422s the whole review over it.
+ */
+export function stripSeverityPrefix(body: string): string {
+  const trimmed = body.trimStart();
+  for (const prefix of [CRITICAL_PREFIX, SUGGESTION_PREFIX]) {
+    if (trimmed.startsWith(prefix)) {
+      const rest = trimmed.slice(prefix.length).replace(/^:?\s*/, '');
+      return rest === '' ? body : rest;
+    }
+  }
+  return body;
+}
+
+/**
  * The indices of drafted comments that open with NEITHER severity marker.
  *
  * `countInlineFindings` counts such a comment as nothing at all — which for a

@@ -457,7 +457,7 @@ describe('composeReview — the C/S table', () => {
 
   it('omits the footer entirely when attribution is off', () => {
     const r = composeReview(base({}), '0.21.2', false);
-    expect(r.body).toBe('No issues found. LGTM! ✅');
+    expect(r.body).toBe('No issues found.');
     expect(r.body).not.toContain(MODEL);
   });
 
@@ -465,7 +465,7 @@ describe('composeReview — the C/S table', () => {
     // Before the gate, an attribution-off run still died over the field the
     // footer — provably never rendered — names.
     const r = composeReview(base({ modelId: '' }), '0.21.2', false);
-    expect(r.body).toBe('No issues found. LGTM! ✅');
+    expect(r.body).toBe('No issues found.');
   });
 
   it('attribution off: a footer-unsafe modelId composes — nothing renders it', () => {
@@ -474,7 +474,15 @@ describe('composeReview — the C/S table', () => {
       '0.21.2',
       false,
     );
-    expect(r.body).toBe('No issues found. LGTM! ✅');
+    expect(r.body).toBe('No issues found.');
+  });
+
+  it('attribution off: the LGTM template collapses to the plain sentence', () => {
+    // The unattributed post carries none of the template's tells.
+    const r = composeReview(base({}), '0.21.2', false);
+    expect(r.body).not.toContain('LGTM');
+    expect(r.body).not.toContain('✅');
+    expect(r.body).not.toContain('⚠️');
   });
 
   it('attribution on: a missing modelId is still refused', () => {
@@ -507,6 +515,28 @@ describe('composeReview — the C/S table', () => {
     const r = composeReview(base({ bodyCriticals: ['whole-PR blocker X'] }));
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+
+  it('attribution off: a body Critical is quoted without the severity marker', () => {
+    const r = composeReview(
+      base({ bodyCriticals: ['whole-PR blocker X'] }),
+      '0.21.2',
+      false,
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('whole-PR blocker X');
+    expect(r.body).not.toContain('**[Critical]**');
+  });
+
+  it('attribution off: the cannot-tell list drops the severity markers too', () => {
+    const input = base({
+      cannotTellCriticals: ['a.ts:12 — could not confirm the guard'],
+    });
+    const on = composeReview(input);
+    expect(on.body).toContain('**[Critical]** a.ts:12');
+    const off = composeReview(input, '0.21.2', false);
+    expect(off.body).toContain('a.ts:12 — could not confirm the guard');
+    expect(off.body).not.toContain('**[Critical]**');
   });
 });
 
@@ -1109,6 +1139,29 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.body).toContain(
       '⚠️ Downgraded from Approve to Comment: self-PR; CI still running.',
     );
+  });
+
+  it('attribution off drops the warning glyph — the downgrade sentence itself stays', () => {
+    const r = composeReview(
+      base({
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: ['self-PR'],
+        },
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toContain('Downgraded from Approve to Comment: self-PR.');
+    expect(r.body).not.toContain('⚠️');
+  });
+
+  it('attribution off drops the glyph from the nothing-certified opener too', () => {
+    const r = composeReview(base({ planPath: undefined }), '0.21.2', false);
+    expect(r.body).toContain(
+      'This run could not certify that any of this diff was reviewed.',
+    );
+    expect(r.body).not.toContain('⚠️');
   });
 
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {

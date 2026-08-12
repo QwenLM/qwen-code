@@ -64,6 +64,7 @@ import {
   SUGGESTION_PREFIX,
   countInlineFindings,
   severityOf,
+  stripSeverityPrefix,
 } from './lib/inline-counts.js';
 import {
   footerVersion,
@@ -494,7 +495,17 @@ export function runSubmit(
     commit_id: payload.commit_id,
     event,
     body,
-    comments: payload.comments ?? [],
+    // Attribution-off strips the severity markers from the POSTED bodies —
+    // the one place the bracket-prefix template is visible. Everything above
+    // (counting, the unmarked gate, the ledger) already ran on the marked
+    // payload, so the verdict this post carries is unchanged.
+    comments: attribution
+      ? (payload.comments ?? [])
+      : (payload.comments ?? []).map((c) =>
+          typeof c.body === 'string'
+            ? { ...c, body: stripSeverityPrefix(c.body) }
+            : c,
+        ),
   };
 
   const target = `repos/${args.repo}/pulls/${args.pr}/reviews`;

@@ -19,6 +19,7 @@ import {
   parseArgsCommand,
   parseReviewArgs,
   tokenizeArgs,
+  type ParseArgsVerdict,
   type ParsedReviewArgs,
 } from './parse-args.js';
 import { reviewCommand } from '../review.js';
@@ -704,7 +705,7 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     reviewSettingsMock.mockReturnValue({});
   });
 
-  async function verdictFor(stdin: string): Promise<ParsedReviewArgs> {
+  async function verdictFor(stdin: string): Promise<ParseArgsVerdict> {
     fsState.stdin = stdin;
     await yargs(['parse-args', '--stdin'])
       .command(parseArgsCommand)
@@ -716,7 +717,7 @@ describe('parseArgsCommand — configured defaults wiring', () => {
       .parseAsync();
     const calls = vi.mocked(writeStdoutLine).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
-    return JSON.parse(String(calls[calls.length - 1][0])) as ParsedReviewArgs;
+    return JSON.parse(String(calls[calls.length - 1][0])) as ParseArgsVerdict;
   }
 
   it('a configured effort reaches the verdict through the handler', async () => {
@@ -730,6 +731,14 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     reviewSettingsMock.mockReturnValue({ comment: true });
     const got = await verdictFor('6711\n');
     expect(got.comment).toEqual({ requested: false, effective: true });
+  });
+
+  it('the verdict carries the operator attribution setting — Step 7 picks its comment register off it', async () => {
+    reviewSettingsMock.mockReturnValue({ attribution: false });
+    const got = await verdictFor('6711\n');
+    expect(got.attribution).toBe(false);
+    reviewSettingsMock.mockReturnValue({});
+    expect((await verdictFor('6711\n')).attribution).toBe(true);
   });
 
   it('normalizes a case-variant configured effort like the flag path', async () => {

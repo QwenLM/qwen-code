@@ -424,9 +424,13 @@ export function findRootId<
  * OPEN with the LGTM line and carry a relocated `**[Critical]**` blocker
  * below it, and a prefix match dropped exactly that body from the context
  * file, letting the re-check approve past the blocker.
+ *
+ * The `LGTM! ✅` half is optional: an attribution-off post (`review.attribution:
+ * false`) emits the bare `No issues found.` — same emptiness, no footer, and
+ * just as worthless to an agent reading the context file.
  */
 export const CANONICAL_LGTM_RE =
-  /^No issues found\.?\s*LGTM!?\s*(?:✅\s*)?(?:_— [^\n]{0,200} via Qwen Code \/review(?: \(v[^\n]{1,100}\))?_\s*)?$/i;
+  /^No issues found\.?\s*(?:LGTM!?\s*(?:✅\s*)?)?(?:_— [^\n]{0,200} via Qwen Code \/review(?: \(v[^\n]{1,100}\))?_\s*)?$/i;
 
 /**
  * Should this review-level summary be shown to agents?

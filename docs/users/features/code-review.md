@@ -183,7 +183,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 - Where the fix is a single localized edit, a ` ```suggestion ` block you can apply in one click
 - For Approve/Request changes verdicts: a review summary with the verdict
 - For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
-- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in `settings.json` to post without it
+- Model and CLI version attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review (v0.21.2)_); set `review.attribution` to `false` in `settings.json` to post without it — comments then read as plain reviewer prose, without the footer, the severity prefixes, or the template phrases (`LGTM! ✅`, `⚠️`) in the review body
 
 **What stays terminal-only:**
 

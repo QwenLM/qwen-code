@@ -358,7 +358,11 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  * count and a pointer instead of duplicating the untranslatable English
  * list — on #8388 that duplication alone doubled the body.
  */
-function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+function formatCannotTell(
+  cannotTell: string[],
+  pr: PrIdentity | null,
+  attribution: boolean,
+): Bi {
   const parsed = cannotTell.map((raw) => {
     // Entries render as one-line list items: an unindented newline ends a
     // list item (CommonMark), so a model-written entry spanning lines would
@@ -409,14 +413,17 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
     if (p.reason !== null) byReason.set(p.reason, group);
   }
   const lines: string[] = [];
+  // The marker is the attributed template's severity signal; an unattributed
+  // post lists the unresolved entries without it.
+  const marker = attribution ? `${CRITICAL_PREFIX} ` : '';
   for (const { reason, heads } of groups) {
     if (heads.length === 1) {
       lines.push(
-        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+        `- ${marker}${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
       );
     } else {
       lines.push(
-        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
+        `- ${marker}${heads.length} entries — ${reason}:`,
         ...heads.map((head) => `  - ${head}`),
       );
     }
@@ -1032,6 +1039,10 @@ function composeReviewBody(
     }
     footer = reviewFooter(modelId, cliVersion);
   }
+  // The warning glyph is part of the attributed template's look; an
+  // unattributed post drops it from every fixed clause (the sentences
+  // themselves disclose real events and stay).
+  const warn = attribution ? '⚠️ ' : '';
 
   // `C` counts every Critical the review posts anywhere — inline or body.
   // `S` counts every *confirmed* Suggestion — anchored or discarded: the
@@ -1421,11 +1432,20 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
+      : [
+          formatCannotTell(
+            cannotTell,
+            prIdentityFromPlan(input.planPath),
+            attribution,
+          ),
+        ];
 
-  // Model-written blockers: quoted as-is in both halves.
+  // Model-written blockers: quoted as-is in both halves. The marker is the
+  // attributed template's severity signal; an unattributed post quotes the
+  // blocker without it (the inline comments' prefixes go the same way in
+  // `submit`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => withMarker(l))
+    .map((l) => (attribution ? withMarker(l) : l))
     .map((l) => ({ en: l, zh: l }));
 
   const contextUnavailableClause: Bi = {
@@ -1448,8 +1468,8 @@ function composeReviewBody(
     uncoverable.length > 0;
   const coverageOpener: Bi | undefined = nothingCertified
     ? {
-        en: '⚠️ This run could not certify that any of this diff was reviewed.',
-        zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+        en: `${warn}This run could not certify that any of this diff was reviewed.`,
+        zh: `${warn}本次运行无法证明这个 diff 的任何部分经过了审查。`,
       }
     : hasCoverageGaps
       ? {
@@ -1492,14 +1512,14 @@ function composeReviewBody(
     : findingsFileUnreadable
       ? [
           {
-            en: '⚠️ The reverse-audit findings file could not be read at compose time, so this run cannot show its findings were verified.',
-            zh: '⚠️ 组合评审时无法读取反向审计发现文件，本次运行无法证明其发现已经过验证。',
+            en: `${warn}The reverse-audit findings file could not be read at compose time, so this run cannot show its findings were verified.`,
+            zh: `${warn}组合评审时无法读取反向审计发现文件，本次运行无法证明其发现已经过验证。`,
           },
         ]
       : [
           {
-            en: `⚠️ ${unverifiedTagCount} finding(s) still carried the \`— [unverified]\` tag when the loop ended — the verifier never ruled on them, and they are not confirmed.`,
-            zh: `⚠️ 循环结束时仍有 ${unverifiedTagCount} 条发现带着 \`— [unverified]\` 标记——验证者从未对它们作出裁决，它们不算已确认。`,
+            en: `${warn}${unverifiedTagCount} finding(s) still carried the \`— [unverified]\` tag when the loop ended — the verifier never ruled on them, and they are not confirmed.`,
+            zh: `${warn}循环结束时仍有 ${unverifiedTagCount} 条发现带着 \`— [unverified]\` 标记——验证者从未对它们作出裁决，它们不算已确认。`,
           },
         ];
 
@@ -1551,7 +1571,9 @@ function composeReviewBody(
       event,
       body: render(
         [
-          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          attribution
+            ? { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' }
+            : { en: 'No issues found.', zh: '未发现问题。' },
           ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
@@ -1582,8 +1604,8 @@ function composeReviewBody(
     const reasons = downgradeReasons.join('; ');
     const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
     clauses.push({
-      en: `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
-      zh: `⚠️ 已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
+      en: `${warn}Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
+      zh: `${warn}已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
     });
   }
 
