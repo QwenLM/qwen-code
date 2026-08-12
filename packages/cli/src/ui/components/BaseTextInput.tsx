@@ -28,7 +28,7 @@ import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
-import { cpSlice, cpLen } from '../utils/textUtils.js';
+import { cpSlice, cpLen, truncateToWidth } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
@@ -340,11 +340,14 @@ export const BaseTextInput = ({
 
   const columns = process.stdout.columns || 80;
   // Build the top border line: ─────── label ──
-  // Label takes: 1 space + text + 1 space + 2 trailing dashes = label.length + 4
-  const labelWidth = topRightLabel ? stringWidth(topRightLabel) + 4 : 0;
-  const dashCount = Math.max(1, columns - labelWidth);
-  const topBorderLine = topRightLabel
-    ? `${'─'.repeat(dashCount)} ${topRightLabel} ${'─'.repeat(2)}`
+  // Label takes 1 leading space, the text, 1 trailing space, and 2 dashes.
+  const renderedLabel = topRightLabel
+    ? truncateToWidth(topRightLabel, columns - 5)
+    : '';
+  const labelWidth = renderedLabel ? stringWidth(renderedLabel) + 4 : 0;
+  const dashCount = columns - labelWidth;
+  const topBorderLine = renderedLabel
+    ? `${'─'.repeat(dashCount)} ${renderedLabel} ${'─'.repeat(2)}`
     : '─'.repeat(columns);
 
   return (
