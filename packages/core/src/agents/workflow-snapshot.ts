@@ -377,7 +377,9 @@ async function readRegularFileNoFollow(
     handle = await fs.open(
       filePath,
       fsConstants.O_RDONLY |
-        (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW),
+        (process.platform === 'win32'
+          ? 0
+          : fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK),
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ELOOP') {

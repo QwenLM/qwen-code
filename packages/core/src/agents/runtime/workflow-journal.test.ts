@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -131,6 +131,39 @@ describe('WorkflowJournal', () => {
     expect(replay.results.get('k1')?.result).toEqual({ v: 9 });
     expect(replay.started.get('k1')).toHaveLength(1);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'opens existing journals nonblocking for reads and appends',
+    async () => {
+      const journalPath = path.join(dir, 'nonblocking', 'journal.jsonl');
+      const journal = new WorkflowJournal(journalPath);
+      await journal.append({ type: 'started', key: 'k1', agentId: '1' });
+      const realOpen = fs.open.bind(fs);
+      const flags: number[] = [];
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation((path, flag, mode) => {
+          if (typeof flag === 'number') flags.push(flag);
+          return realOpen(path, flag, mode);
+        });
+      try {
+        await journal.append({ type: 'started', key: 'k2', agentId: '2' });
+        await journal.load();
+      } finally {
+        openSpy.mockRestore();
+      }
+
+      expect(flags).toContain(
+        fsConstants.O_APPEND |
+          fsConstants.O_WRONLY |
+          fsConstants.O_NOFOLLOW |
+          fsConstants.O_NONBLOCK,
+      );
+      expect(flags).toContain(
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+    },
+  );
 
   it('load on a missing file returns empty maps', async () => {
     const j = new WorkflowJournal(path.join(dir, 'nope.jsonl'));

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs, type Dirent } from 'node:fs';
+import { constants as fsConstants, promises as fs, type Dirent } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -460,6 +460,35 @@ describe('durable workflow manifests', () => {
       manifest,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'opens a manifest nonblocking before validating the opened file',
+    async () => {
+      const config = fakeConfig(projectDir);
+      await writeWorkflowManifest(
+        config,
+        task({ runId: 'wf_a1b3', status: 'paused' }),
+        { args: null, journal: EMPTY_JOURNAL },
+      );
+      const realOpen = fs.open.bind(fs);
+      const flags: number[] = [];
+      const openSpy = vi
+        .spyOn(fs, 'open')
+        .mockImplementation((path, flag, mode) => {
+          if (typeof flag === 'number') flags.push(flag);
+          return realOpen(path, flag, mode);
+        });
+      try {
+        await readWorkflowManifest(config, 'wf_a1b3');
+      } finally {
+        openSpy.mockRestore();
+      }
+
+      expect(flags).toContain(
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+    },
+  );
 
   it('atomically replaces an existing manifest inode', async () => {
     const config = fakeConfig(projectDir);

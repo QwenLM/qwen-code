@@ -421,7 +421,9 @@ async function readJournalBytes(journalPath: string): Promise<Buffer> {
     handle = await fs.open(
       journalPath,
       fsConstants.O_RDONLY |
-        (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW),
+        (process.platform === 'win32'
+          ? 0
+          : fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK),
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -517,7 +519,9 @@ async function appendJournalLine(
     fsConstants.O_APPEND |
       fsConstants.O_WRONLY |
       (before ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL) |
-      (process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW),
+      (process.platform === 'win32'
+        ? 0
+        : fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK),
     0o600,
   );
   try {
