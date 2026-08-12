@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import MarkdownIt from 'markdown-it';
+
 // Defect-LAYER coverage for a diff that models an external executable system.
 //
 // The reverse audit's stop rule is "two consecutive dry rounds": no auditor
@@ -197,71 +199,55 @@ const LAYER_RECEIPT_LINE_RE =
 const LAYER_HINT_RE = /layer\s+walked/i;
 
 /**
- * CommonMark fenced-code tracking, biased toward SKIPPING so a QUOTED
- * `Layer walked:` marker never reads as a live receipt (the credit/release
- * direction). Openers are recognised GENEROUSLY — 0-3 spaces of indent, an
- * optional list-item prefix, then three or more backticks or tildes — and their
- * INDENT (the column the fence content lives at) is recorded. Closers are
- * recognised STRICTLY: the same fence character, at least the opening run
- * length, only whitespace after, AND an indent from the opener's indent to three
- * past it. A closer shallower than its opener is fence content, so a list-item
- * fence (`- ` + run) stays open until a closer at the list's content column; and
- * in general an unrecognised or too-shallow closer keeps the fence OPEN — more
- * skipping, the safe direction for every indent corner. A naive symmetric toggle
- * diverged four probe-verified ways, each releasing a quoted marker: a mismatched
- * char/run, a list-item opener, trailing content on the fence line, and a
- * too-shallow closer to a list-item fence.
+ * The one CommonMark tokenizer this module uses to LOCATE quoted regions. A
+ * hand-rolled fence/blockquote scanner diverged from the spec round after round
+ * — a second parser is a divergence hunt, and this skill's own lesson is that the
+ * oracle must come from the authority the code is modelling, not a self-consistent
+ * re-implementation. So it defers to `markdown-it`, the parser GitHub's own family
+ * uses. `html: true` so a raw-HTML block registers as a quoted block too.
  */
-function opensFence(
-  line: string,
-): { char: string; len: number; indent: number } | null {
-  const m = /^( {0,3})((?:[-*+]|\d{1,9}[.)]) +)?(`{3,}|~{3,})/.exec(line);
-  if (m === null) return null;
-  return {
-    char: m[3][0],
-    len: m[3].length,
-    indent: (m[1] + (m[2] ?? '')).length,
-  };
-}
+const MD = new MarkdownIt({ html: true });
 
-function closesFence(
-  line: string,
-  fence: { char: string; len: number; indent: number },
-): boolean {
-  const m = /^( *)(`{3,}|~{3,})[ \t]*$/.exec(line);
-  if (m === null) return false;
-  const indent = m[1].length;
-  return (
-    m[2][0] === fence.char &&
-    m[2].length >= fence.len &&
-    indent >= fence.indent &&
-    indent <= fence.indent + 3
-  );
+/**
+ * The 0-based source line indices inside a QUOTED block — fenced or indented
+ * code, an HTML block, or the span of a blockquote — from the block tokens'
+ * `.map` line ranges. A parser throw quotes nothing (an unreadable return still
+ * has its inline spans guarded by the receipt regex's no-leading-backtick rule).
+ */
+function quotedLines(text: string): Set<number> {
+  const quoted = new Set<number>();
+  let tokens: ReturnType<typeof MD.parse>;
+  try {
+    tokens = MD.parse(text, {});
+  } catch {
+    return quoted;
+  }
+  for (const t of tokens) {
+    if (
+      t.map &&
+      (t.type === 'fence' ||
+        t.type === 'code_block' ||
+        t.type === 'html_block' ||
+        t.type === 'blockquote_open')
+    ) {
+      for (let i = t.map[0]; i < t.map[1]; i++) quoted.add(i);
+    }
+  }
+  return quoted;
 }
 
 /**
- * The lines an auditor is USING, not quoting: fenced code (above), blockquotes,
- * and indented code blocks removed. Shared by the receipt parser and the opt-in
- * prose estimate so neither credits a layer from quoted text — the module's
- * "a return that QUOTES the marker is not USING it" invariant, in one place.
+ * The lines an auditor is USING, not quoting: every line outside a quoted block
+ * (`quotedLines`). Shared by the receipt parser and the opt-in prose estimate so
+ * neither credits a layer from quoted text — the module's "a return that QUOTES
+ * the marker is not USING it" invariant, deferred to the authoritative parser.
  */
 function* usedLines(finalText: string): Generator<string> {
-  let fence: { char: string; len: number; indent: number } | null = null;
-  for (const line of finalText.split(/\r?\n/)) {
-    if (fence) {
-      if (closesFence(line, fence)) fence = null;
-      continue;
-    }
-    const opened = opensFence(line);
-    if (opened) {
-      fence = opened;
-      continue;
-    }
-    // A blockquote is a quotation by definition; an indented code block (four or
-    // more leading spaces, or a leading tab) is quoted code.
-    if (/^[ \t]*>/.test(line)) continue;
-    if (/^(?: {4,}|\t)/.test(line)) continue;
-    yield line;
+  const src = finalText.replace(/\r\n?/g, '\n');
+  const quoted = quotedLines(src);
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!quoted.has(i)) yield lines[i];
   }
 }
 

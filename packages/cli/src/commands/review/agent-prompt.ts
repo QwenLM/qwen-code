@@ -554,7 +554,12 @@ export function buildChunkAgentPrompt(
     // gets within-territory finder coverage of the class; a divergence whose add
     // and check both live in this chunk's lines is this agent's. The cross-chunk
     // contract still falls to the reverse audit's layer receipts and invariant-c.
-    if (repositoryContext.domains.includes(MODELED_SYSTEM_DOMAIN)) {
+    // NOT for an unreachable chunk (as with the tool-budget block below): its one
+    // instruction is to return the exact `Uncoverable:` line and stop.
+    if (
+      !unreachable &&
+      repositoryContext.domains.includes(MODELED_SYSTEM_DOMAIN)
+    ) {
       parts.push(
         '',
         '## Modeled-executable-system lens — your territory',

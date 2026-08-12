@@ -145,27 +145,32 @@ describe('parseLayerReceipts', () => {
     ]).toEqual(['scope-propagation']);
   });
 
-  it('keeps a list-item fence open until a closer at its content column', () => {
-    // Round-4 probe: a fence opened after `- ` closes only at the list content
-    // column; a shallower closer is fence content, so the markers after it stay
-    // quoted. A too-shallow closer must not release them.
-    const listFence = [
-      '- ```',
-      'example text',
-      ' ```', // one space — shallower than the opener's content column → not a closer
-      'Layer walked: toctou — quoted',
-      'Layer walked: inheritance — quoted',
-      '```', // column 0 — still shallower than the opener → not a closer
-    ].join('\n');
-    expect(parseLayerReceipts(listFence).size).toBe(0);
-    // The content-column closer does close it, and a real receipt after counts.
-    const closed = [
-      '- ```',
-      'example text',
-      '  ```', // two spaces — reaches the list content column → closes
-      'Layer walked: scope-propagation — real',
-    ].join('\n');
-    expect([...parseLayerReceipts(closed)]).toEqual(['scope-propagation']);
+  it('defers quotation to the authority — constructs a hand-rolled scanner missed', () => {
+    // markdown-it owns which lines are quoted, so an HTML block, a tab-indented
+    // code line, and a nested blockquote each quote their markers — three of the
+    // "four more constructs" a hand-rolled fence toggle released, and the reason
+    // this stopped chasing CommonMark corners by hand.
+    expect(
+      parseLayerReceipts(
+        ['<div>', 'Layer walked: toctou — quoted', '</div>'].join('\n'),
+      ).size,
+    ).toBe(0);
+    expect(parseLayerReceipts('\tLayer walked: lexing — quoted').size).toBe(0);
+    expect(
+      parseLayerReceipts('> > Layer walked: expansion — quoted').size,
+    ).toBe(0);
+    // A real receipt in plain prose after a quoted block still counts.
+    expect([
+      ...parseLayerReceipts(
+        [
+          '<div>',
+          'x',
+          '</div>',
+          '',
+          'Layer walked: scope-propagation — real',
+        ].join('\n'),
+      ),
+    ]).toEqual(['scope-propagation']);
   });
 
   it('requires the colon — a colon-less shape is not a receipt', () => {

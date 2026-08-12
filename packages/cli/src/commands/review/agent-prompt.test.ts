@@ -242,7 +242,7 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     // On 3B the dimension agents are replaced by these per-territory ones, so
     // Agent 2's brief never reaches a chunk agent. A manifest-declared modeled
     // system arms the lens here, scoped to the chunk; an ordinary domain does not.
-    const chunkPlan = (domains: string[]) =>
+    const chunkPlan = (domains: string[], maxLineChars = 50) =>
       ({
         diffPathAbsolute: '/d.txt',
         chunks: [
@@ -252,7 +252,7 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
             endLine: 10,
             lines: 10,
             chars: 100,
-            maxLineChars: 50,
+            maxLineChars,
             oversized: false,
             files: [{ path: 'guard.ts', newStart: 1, newEnd: 9 }],
           },
@@ -278,6 +278,11 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(buildChunkAgentPrompt(chunkPlan(['compiler']), 1)).not.toContain(
       'Modeled-executable-system lens — your territory',
     );
+    // An UNREACHABLE chunk (a line longer than one read) gets only its
+    // Uncoverable instruction — not the lens (R4-5), same as the tool-budget block.
+    expect(
+      buildChunkAgentPrompt(chunkPlan([MODELED_SYSTEM_DOMAIN], 10_000_000), 1),
+    ).not.toContain('Modeled-executable-system lens — your territory');
   });
 });
 
