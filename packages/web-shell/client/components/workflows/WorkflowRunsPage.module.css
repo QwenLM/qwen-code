@@ -1,69 +1,9 @@
 .root {
-  width: min(100%, 1080px);
+  width: min(100%, 1160px);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-}
-
-.intro {
-  display: flex;
-  align-items: center;
   gap: 12px;
-  min-height: 78px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--secondary);
-}
-
-.introIcon {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--background);
-  color: var(--agent-blue-500);
-}
-
-.introIcon svg {
-  width: 19px;
-  height: 19px;
-}
-
-.introCopy {
-  min-width: 0;
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.introTitle {
-  color: var(--foreground);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.introDescription {
-  color: var(--muted-foreground);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.traceRail {
-  width: 184px;
-  max-width: 24vw;
-  flex: 0 1 auto;
-  fill: var(--background);
-  stroke: var(--agent-blue-500);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.5;
 }
 
 .tabs {
@@ -76,11 +16,11 @@
   justify-content: space-between;
   gap: 12px;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 8px;
+  padding: 2px 0 9px;
 }
 
 .content {
-  padding-top: 14px;
+  padding-top: 10px;
 }
 
 .loading,
@@ -97,7 +37,7 @@
 
 .savedList {
   display: grid;
-  gap: 10px;
+  gap: 6px;
 }
 
 .savedCard {
@@ -108,9 +48,9 @@
   align-items: center;
   gap: 12px;
   overflow: hidden;
-  padding: 12px 12px 12px 17px;
+  padding: 9px 10px 9px 14px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--background);
 }
 
@@ -118,7 +58,7 @@
   content: '';
   position: absolute;
   inset: 0 auto 0 0;
-  width: 4px;
+  width: 3px;
   background: var(--agent-blue-500);
 }
 
@@ -193,15 +133,7 @@
 
 @media (max-width: 640px) {
   .root {
-    gap: 14px;
-  }
-
-  .intro {
-    align-items: flex-start;
-  }
-
-  .traceRail {
-    display: none;
+    gap: 10px;
   }
 
   .toolbar {
@@ -216,13 +148,7 @@
   }
 
   .toolbar > button {
-    width: 32px;
     flex: 0 0 auto;
-    padding-inline: 7px;
-  }
-
-  .refreshLabel {
-    display: none;
   }
 
   .savedCard {

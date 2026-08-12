@@ -159,6 +159,21 @@ async function selectTab(container: HTMLElement, label: string) {
 }
 
 describe('WorkflowRunsPage', () => {
+  it('opens directly on compact workflow navigation', async () => {
+    const container = await renderPage({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [],
+    });
+
+    expect(container.textContent).not.toContain('Dynamic workflow traces');
+    expect(container.textContent).not.toContain('replay completed runs');
+    expect(
+      container.querySelector('button[aria-label="Refresh"]'),
+    ).not.toBeNull();
+  });
+
   it('separates active runs from saved and terminal history', async () => {
     const container = await renderPage({
       v: 1,

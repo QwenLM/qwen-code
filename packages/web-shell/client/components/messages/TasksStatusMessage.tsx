@@ -233,7 +233,11 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   );
 }
 
-function rowLabel(task: DaemonSessionTaskStatus, blocking: boolean): string {
+function rowLabel(
+  task: DaemonSessionTaskStatus,
+  blocking: boolean,
+  workflowOnly = false,
+): string {
   switch (task.kind) {
     case 'agent':
       // `blocking` comes from computeUserBlockingIds — an agent is tagged
@@ -247,7 +251,7 @@ function rowLabel(task: DaemonSessionTaskStatus, blocking: boolean): string {
     case 'monitor':
       return `[monitor] ${task.description}`;
     case 'workflow':
-      return `[workflow] ${task.label}`;
+      return workflowOnly ? task.label : `[workflow] ${task.label}`;
   }
 }
 
@@ -916,7 +920,11 @@ export function TasksStatusMessage({
                         {'↳ '}
                       </span>
                     )}
-                    {rowLabel(task, blockingIds.has(task.id))}
+                    {rowLabel(
+                      task,
+                      blockingIds.has(task.id),
+                      taskView !== 'all',
+                    )}
                     {orphanNote && (
                       <span className={styles.orphanNote}>
                         {' · '}
@@ -932,7 +940,7 @@ export function TasksStatusMessage({
                   </span>
                 </div>
                 {expanded && (
-                  <div className={styles.inlineDetail}>
+                  <div className={styles.inlineDetail} data-kind={task.kind}>
                     <TaskDetail
                       task={task}
                       t={t}
@@ -1548,7 +1556,7 @@ function TaskDetail({
         <span className={styles.secondary}>{subtitleParts.join(' · ')}</span>
       </div>
     </>
-  ) : compactFields.length > 0 ? (
+  ) : task.kind === 'workflow' ? null : compactFields.length > 0 ? (
     <div className={styles.compactSummary}>
       {compactFields
         .map((field) => `${field.label} ${field.value}`)

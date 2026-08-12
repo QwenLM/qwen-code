@@ -391,6 +391,13 @@
   overflow: hidden;
 }
 
+.embeddedPanel .inlineDetail[data-kind='workflow'] {
+  margin: 4px 0 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .embeddedPanel .detail {
   margin: 0;
   border-radius: 0;

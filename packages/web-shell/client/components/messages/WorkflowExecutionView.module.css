@@ -4,7 +4,7 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 10px;
   background: var(--background);
 }
 
@@ -14,9 +14,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 7px 10px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--primary) 5%, var(--background));
+  background: color-mix(in srgb, var(--muted) 24%, var(--background));
   color: var(--muted-foreground);
   font-size: 10px;
 }
@@ -40,13 +40,6 @@
   white-space: nowrap;
 }
 
-.historyMark {
-  color: var(--primary);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 700;
-}
-
 .cachedBadge {
   flex: 0 0 auto;
   padding: 2px 6px;
@@ -61,16 +54,18 @@
 .compareButton {
   flex: 0 0 auto;
   padding: 3px 7px;
-  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
+  border: 1px solid transparent;
   border-radius: 5px;
-  background: var(--background);
-  color: var(--foreground);
+  background: transparent;
+  color: var(--muted-foreground);
   cursor: pointer;
   font: inherit;
 }
 
 .compareButton:hover {
-  border-color: var(--primary);
+  border-color: var(--border);
+  background: var(--background);
+  color: var(--foreground);
 }
 
 .compareButton:disabled {
@@ -329,316 +324,14 @@
   color: var(--warning-color);
 }
 
-.replayBar {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: auto auto minmax(140px, 1fr);
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--primary) 4%, var(--background));
-}
-
-.replayMeta,
-.replayTransport {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-}
-
-.replayMeta {
-  color: var(--muted-foreground);
-  font-size: 9px;
-}
-
-.replayMeta strong {
-  color: var(--foreground);
-  font-size: 10px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.replayTime,
-.replayEventCount {
-  font-family: var(--font-mono);
-  white-space: nowrap;
-}
-
-.replayTime {
-  color: var(--primary);
-}
-
-.replayPlayButton,
-.replayEndButton {
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--background);
-  color: var(--foreground);
-  cursor: pointer;
-  font: inherit;
-  font-size: 9px;
-  white-space: nowrap;
-}
-
-.replayPlayButton {
-  border-color: color-mix(in srgb, var(--primary) 46%, var(--border));
-  color: var(--primary);
-}
-
-.replayPlayButton:hover,
-.replayEndButton:hover:not(:disabled) {
-  border-color: var(--primary);
-}
-
-.replayPlayButton:focus-visible,
-.replayEndButton:focus-visible,
-.replayMarker:focus-visible,
-.replayRail input:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
-  outline-offset: 2px;
-}
-
-.replayEndButton:disabled {
-  cursor: default;
-  opacity: 0.42;
-}
-
-.replayRail {
-  position: relative;
-  min-width: 0;
-  height: 24px;
-}
-
-.replayRail::before,
-.replayProgress {
-  position: absolute;
-  top: 11px;
-  right: 0;
-  left: 0;
-  height: 2px;
-  border-radius: 999px;
-  content: '';
-}
-
-.replayRail::before {
-  background: color-mix(in srgb, var(--muted-foreground) 26%, transparent);
-}
-
-.replayProgress {
-  right: auto;
-  background: var(--primary);
-  box-shadow: 0 0 7px color-mix(in srgb, var(--primary) 38%, transparent);
-}
-
-.replayMarkers {
-  position: absolute;
-  inset: 4px 6px;
-  z-index: 2;
-  pointer-events: none;
-}
-
-.replayMarker {
-  position: absolute;
-  top: 0;
-  width: 9px;
-  height: 16px;
-  padding: 0;
-  transform: translateX(-50%);
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  pointer-events: auto;
-}
-
-.replayMarker::after {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  width: 1px;
-  height: 8px;
-  background: color-mix(in srgb, var(--muted-foreground) 52%, transparent);
-  content: '';
-}
-
-.replayMarker[data-kind='phase']::after {
-  top: 1px;
-  height: 14px;
-  background: color-mix(in srgb, var(--primary) 72%, transparent);
-}
-
-.replayMarker[data-kind='approval']::after {
-  background: var(--warning-color);
-}
-
-.replayMarker[data-kind='log']::after {
-  background: color-mix(in srgb, var(--primary) 58%, transparent);
-}
-
-.replayMarker[data-kind='workflow']::after {
-  top: 0;
-  width: 2px;
-  height: 16px;
-  background: var(--foreground);
-}
-
-.replayMarker:hover::after,
-.replayMarker[aria-pressed='true']::after {
-  width: 2px;
-  background: var(--primary);
-  box-shadow: 0 0 5px color-mix(in srgb, var(--primary) 70%, transparent);
-}
-
-.replayRail input {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  width: 100%;
-  height: 24px;
-  margin: 0;
-  appearance: none;
-  background: transparent;
-  cursor: ew-resize;
-}
-
-.replayRail input::-webkit-slider-runnable-track {
-  height: 2px;
-  background: transparent;
-}
-
-.replayRail input::-webkit-slider-thumb {
-  width: 10px;
-  height: 16px;
-  margin-top: -7px;
-  appearance: none;
-  border: 2px solid var(--background);
-  border-radius: 4px;
-  background: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
-}
-
-.replayContext {
-  display: grid;
-  min-width: 0;
-  grid-column: 1 / -1;
-  grid-template-columns: auto minmax(120px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 9px;
-  padding-top: 7px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
-
-.replayContext > time {
-  color: var(--primary);
-  font-family: var(--font-mono);
-  font-size: 9px;
-}
-
-.replayContextCopy {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.replayContextCopy strong {
-  overflow: hidden;
-  font-size: 10px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.replayContextCopy small {
-  color: var(--muted-foreground);
-  font-size: 9px;
-  white-space: nowrap;
-}
-
-.replayEventDetail {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.replayEventDetail[data-severity='error'] {
-  color: var(--error-color);
-}
-
-.replayEventDetail[data-severity='warning'] {
-  color: var(--warning-color);
-}
-
-.replayOutput {
-  min-width: 0;
-  grid-column: 1 / -1;
-  padding-top: 7px;
-  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  font-size: 9px;
-}
-
-.replayOutput summary {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--foreground);
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.replayOutput summary small,
-.replayOutput > p {
-  color: var(--muted-foreground);
-  font-weight: 400;
-}
-
-.replayOutput > p {
-  margin: 7px 0 4px;
-}
-
-.replayOutput pre {
-  max-height: 96px;
-  margin: 0;
-  overflow: auto;
-  padding: 7px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--background);
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
-.replayRail input::-moz-range-track {
-  height: 2px;
-  background: transparent;
-}
-
-.replayRail input::-moz-range-thumb {
-  width: 8px;
-  height: 14px;
-  border: 2px solid var(--background);
-  border-radius: 4px;
-  background: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
-}
-
 .summary {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
-  gap: 6px 16px;
-  padding: 8px 12px;
+  gap: 5px 14px;
+  padding: 7px 12px;
   border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 16%, var(--background));
   color: var(--muted-foreground);
   font-family: var(--font-mono);
   font-size: 10px;
@@ -665,12 +358,12 @@
 .workbench {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) 230px;
+  grid-template-columns: minmax(0, 1fr) 224px;
 }
 
 .viewport {
   min-width: 0;
-  min-height: 250px;
+  min-height: 224px;
   overflow: auto;
   background:
     radial-gradient(
@@ -684,7 +377,7 @@
 .canvas {
   position: relative;
   min-width: 100%;
-  min-height: 250px;
+  min-height: 224px;
   background-image: radial-gradient(
     color-mix(in srgb, var(--muted-foreground) 20%, transparent) 0.7px,
     transparent 0.7px
@@ -714,14 +407,6 @@
 
 .lane[data-active='true'] .laneHeading strong {
   color: var(--agent-blue-400);
-}
-
-.lane[data-replay-completed='true'] .laneHeading strong {
-  color: var(--muted-foreground);
-}
-
-.lane[data-replay-future='true'] {
-  opacity: 0.34;
 }
 
 .laneHeading {
@@ -792,11 +477,6 @@
   stroke: var(--error-color);
 }
 
-.edge[data-replay-future='true'] {
-  opacity: 0.24;
-  stroke-dasharray: 3 6;
-}
-
 .node {
   --workflow-node-accent: var(--muted-foreground);
   position: absolute;
@@ -810,7 +490,7 @@
   border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--background) 96%, var(--muted));
-  box-shadow: 0 8px 18px color-mix(in srgb, black 18%, transparent);
+  box-shadow: 0 5px 14px color-mix(in srgb, black 14%, transparent);
   color: var(--foreground);
   cursor: pointer;
   text-align: left;
@@ -862,10 +542,6 @@
 .node[data-status='queued'],
 .node[data-status='cancelled'] {
   opacity: 0.62;
-}
-
-.node[data-replay-future='true'] {
-  opacity: 0.28;
 }
 
 .nodeState {
@@ -1060,23 +736,6 @@
 }
 
 @container (max-width: 680px) {
-  .replayBar {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .replayRail {
-    grid-column: 1 / -1;
-  }
-
-  .replayContext {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .replayEventDetail {
-    grid-column: 2;
-    text-align: left;
-  }
-
   .historyBar {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -1120,10 +779,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .replayPlayButton {
-    display: none;
-  }
-
   .node,
   .nodeState::after {
     animation-duration: 0.001ms !important;

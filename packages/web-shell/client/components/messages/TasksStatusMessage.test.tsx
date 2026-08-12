@@ -222,9 +222,7 @@ describe('TasksStatusMessage workflow details', () => {
     });
     const row = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"]'),
-    ).find((candidate) =>
-      candidate.textContent?.includes('[workflow] review-and-fix'),
-    );
+    ).find((candidate) => candidate.textContent?.includes('review-and-fix'));
 
     expect(row).toBeDefined();
     expect(row?.tabIndex).toBe(0);
@@ -241,6 +239,8 @@ describe('TasksStatusMessage workflow details', () => {
 
     expect(row?.getAttribute('aria-expanded')).toBe('true');
     expect(container.textContent).toContain('Review behavior regressions');
+    expect(container.textContent).not.toContain('Runtime 5s');
+    expect(container.textContent?.match(/120 tokens/gi)).toHaveLength(1);
   });
 
   it('closes filtered detail instead of selecting a different workflow', () => {
@@ -276,7 +276,7 @@ describe('TasksStatusMessage workflow details', () => {
     });
     const rowA = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"]'),
-    ).find((candidate) => candidate.textContent?.includes('[workflow] run-a'));
+    ).find((candidate) => candidate.textContent?.includes('run-a'));
     act(() => rowA?.click());
     expect(container.textContent).toContain('prompt-for-a');
 
@@ -304,7 +304,7 @@ describe('TasksStatusMessage workflow details', () => {
 
     const rowB = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"]'),
-    ).find((candidate) => candidate.textContent?.includes('[workflow] run-b'));
+    ).find((candidate) => candidate.textContent?.includes('run-b'));
     expect(rowB?.getAttribute('aria-expanded')).toBe('false');
     expect(container.textContent).not.toContain('prompt-for-a');
     expect(container.textContent).not.toContain('prompt-for-b');
@@ -469,7 +469,7 @@ describe('TasksStatusMessage workflow details', () => {
     });
     const rowA = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"]'),
-    ).find((candidate) => candidate.textContent?.includes('[workflow] run-a'));
+    ).find((candidate) => candidate.textContent?.includes('run-a'));
     act(() => rowA?.click());
     const pause = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),

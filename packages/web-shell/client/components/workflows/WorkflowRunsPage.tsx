@@ -11,7 +11,6 @@ import {
   HistoryIcon,
   PlayIcon,
   RefreshCwIcon,
-  WorkflowIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { TasksStatusMessage } from '../messages/TasksStatusMessage';
@@ -149,30 +148,6 @@ export function WorkflowRunsPage() {
 
   return (
     <div className={styles.root}>
-      <div className={styles.intro}>
-        <div className={styles.introIcon} aria-hidden="true">
-          <WorkflowIcon />
-        </div>
-        <div className={styles.introCopy}>
-          <div className={styles.introTitle}>{t('workflowRuns.heading')}</div>
-          <div className={styles.introDescription}>
-            {t('workflowRuns.subtitle')}
-          </div>
-        </div>
-        <svg
-          className={styles.traceRail}
-          viewBox="0 0 184 48"
-          aria-hidden="true"
-        >
-          <path d="M12 24h34M46 24 72 9h34M46 24l26 15h34M106 9l28 15h38M106 39l28-15" />
-          <circle cx="12" cy="24" r="4" />
-          <circle cx="46" cy="24" r="4" />
-          <circle cx="106" cy="9" r="4" />
-          <circle cx="106" cy="39" r="4" />
-          <circle cx="172" cy="24" r="5" />
-        </svg>
-      </div>
-
       <Tabs
         className={styles.tabs}
         value={tab}
@@ -199,16 +174,13 @@ export function WorkflowRunsPage() {
           <Button
             type="button"
             variant="outline"
-            size="sm"
+            size="icon-sm"
             onClick={() => void reload()}
             disabled={loading || !connection.sessionId}
             aria-label={t('workflowRuns.refresh')}
             title={t('workflowRuns.refresh')}
           >
-            <RefreshCwIcon data-icon="inline-start" />
-            <span className={styles.refreshLabel}>
-              {t('workflowRuns.refresh')}
-            </span>
+            <RefreshCwIcon />
           </Button>
         </div>
 
