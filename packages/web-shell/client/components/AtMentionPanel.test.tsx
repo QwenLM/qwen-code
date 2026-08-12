@@ -247,11 +247,15 @@ describe('AtMentionPanel', () => {
         label: 'Upload file',
         kind: 'upload',
         insertText: '',
+        description: 'Upload a file into this folder',
       },
     ];
     mount(menu);
 
     expect(document.body.textContent).toContain('Upload file');
+    expect(document.body.textContent).toContain(
+      'Upload a file into this folder',
+    );
     expect(document.body.querySelector('svg.lucide-upload')).not.toBeNull();
   });
 

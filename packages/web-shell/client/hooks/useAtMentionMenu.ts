@@ -1869,6 +1869,7 @@ export function useAtMentionMenu({
           changes: { from: current.from, to: current.to, insert: '' },
           selection: { anchor: current.from },
         });
+        const docAfterRemoval = view.state.doc;
         // Typed queries (`@src/`) browse a directory derived from the query
         // text without syncing fileDirectoryRef, so re-derive the same
         // directory the panel is displaying.
@@ -1877,9 +1878,11 @@ export function useAtMentionMenu({
           fileDirectoryRef.current,
         );
         onUploadRequest(dirPath, () => {
-          // The doc can change while the picker is open (e.g. a session
-          // switch); restoring past the end would throw.
-          if (current.from > view.state.doc.length) return;
+          if (
+            view.state.doc !== docAfterRemoval ||
+            current.from > view.state.doc.length
+          )
+            return;
           view.dispatch({
             changes: { from: current.from, insert: removedText },
             selection: { anchor: current.from + removedText.length },

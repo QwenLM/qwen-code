@@ -1349,6 +1349,9 @@ export const ChatEditor = memo(
     const maxUploadBytes =
       uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
       50 * 1024 * 1024;
+    const uploadTargetKey = `${sessionId ?? '<no-session>'}:${
+      uploadTarget?.targetKey ?? '<none>'
+    }`;
 
     // -- File upload ----------------------------------------------------------
     // The hook's cancel/reset granularity includes the session: ChatEditor is
@@ -1358,19 +1361,17 @@ export const ChatEditor = memo(
     const fileUpload = useFileUpload({
       client: uploadTarget?.client,
       maxBytes: maxUploadBytes,
-      targetKey: `${sessionId ?? '<no-session>'}:${
-        uploadTarget?.targetKey ?? '<none>'
-      }`,
+      targetKey: uploadTargetKey,
     });
 
     const triggerFilePicker = useCallback(
       (targetDir: string, restoreQuery?: () => void) => {
         uploadPickerTargetRef.current = targetDir;
-        uploadPickerTargetKeyRef.current = uploadTarget?.targetKey ?? '';
+        uploadPickerTargetKeyRef.current = uploadTargetKey;
         uploadPickerRestoreRef.current = restoreQuery;
         fileInputRef.current?.click();
       },
-      [uploadTarget?.targetKey],
+      [uploadTargetKey],
     );
 
     const core = useComposerCore({
@@ -1534,7 +1535,7 @@ export const ChatEditor = memo(
         if (
           files.length > 0 &&
           capturedKey !== '' &&
-          capturedKey === (uploadTarget?.targetKey ?? '')
+          capturedKey === uploadTargetKey
         ) {
           uploadFiles(files, targetDir, insertUploadReference);
         } else {
@@ -1544,7 +1545,7 @@ export const ChatEditor = memo(
           restore?.();
         }
       },
-      [uploadFiles, insertUploadReference, uploadTarget?.targetKey],
+      [uploadFiles, insertUploadReference, uploadTargetKey],
     );
     useEffect(() => {
       // React only wires `cancel` on <dialog>; the file input needs a native

@@ -266,6 +266,39 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('does not restore a removed mention into a different document', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@src/');
+    let restoreQuery: (() => void) | undefined;
+    const onUploadRequest = vi.fn(
+      (_targetDir: string, restore?: () => void) => {
+        restoreQuery = restore;
+      },
+    );
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+    setViewState(view, 'new session draft');
+
+    act(() => restoreQuery!());
+
+    expect(view.dispatch).toHaveBeenCalledOnce();
+  });
+
   it('uploads into the directory shown by a typed path query', async () => {
     vi.useFakeTimers();
     const view = makeView('@src/');

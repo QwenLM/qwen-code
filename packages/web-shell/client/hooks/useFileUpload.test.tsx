@@ -100,6 +100,7 @@ describe('useFileUpload', () => {
       'uploading',
       'pending',
     ]);
+    expect(latest!.isBusy).toBe(true);
 
     await act(async () => {
       gates[0].resolve({
@@ -124,6 +125,7 @@ describe('useFileUpload', () => {
       });
     });
     expect(latest!.uploads.map((u) => u.status)).toEqual(['done', 'done']);
+    expect(latest!.isBusy).toBe(false);
   });
 
   it('merges a second batch while the first is still in flight', async () => {

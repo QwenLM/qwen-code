@@ -2126,6 +2126,32 @@ describe('ChatEditor file upload gating', () => {
     expect(composerCoreState.addTags).not.toHaveBeenCalled();
   });
 
+  it('blocks a picker selection after switching sessions', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({ sessionId: 'session-a' });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+    const restore = vi.fn();
+    act(() => {
+      composerCoreState.onFileUploadRequest?.('docs', restore);
+    });
+
+    rerenderChatEditor(container, { sessionId: 'session-b' });
+    Object.defineProperty(input, 'files', {
+      value: [new File(['abc'], 'notes.txt')],
+      configurable: true,
+    });
+    act(() => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(restore).toHaveBeenCalledOnce();
+  });
+
   describe('qualified upload targeting', () => {
     const makeQualifiedWorkspace = (
       features: string[],

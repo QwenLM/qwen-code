@@ -33,6 +33,7 @@ function Harness({
   atWorkspaceCwd,
   commands,
   onImageIngestionNotice,
+  workspaceUploadBusy,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -48,6 +49,7 @@ function Harness({
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -62,6 +64,7 @@ function Harness({
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
+    workspaceUploadBusy,
   });
   latest = composer;
 
@@ -83,6 +86,7 @@ async function mount({
   atWorkspaceCwd,
   commands,
   onImageIngestionNotice,
+  workspaceUploadBusy,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -98,6 +102,7 @@ async function mount({
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -121,6 +126,7 @@ async function mount({
             atWorkspaceCwd={currentWorkspaceCwd}
             commands={commands}
             onImageIngestionNotice={onImageIngestionNotice}
+            workspaceUploadBusy={workspaceUploadBusy}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -266,6 +272,19 @@ describe('useComposerCore history and drafts', () => {
     mounted.rerender();
 
     expect(getItem).toHaveBeenCalledTimes(readsAfterMount);
+  });
+
+  it('blocks submission while an external ingestion lane is busy', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit, workspaceUploadBusy: true });
+
+    act(() => {
+      latest!.setText('review the upload');
+      latest!.submitText();
+    });
+
+    expect(latest!.canSubmit).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('falls back to legacy prompt history until the workspace has its own history', async () => {
