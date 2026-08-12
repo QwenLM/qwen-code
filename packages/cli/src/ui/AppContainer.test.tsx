@@ -94,6 +94,7 @@ import {
   StreamingState,
   ToolCallStatus,
 } from './types.js';
+import { ICON } from './constants.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
 import type { Content } from '@google/genai';
@@ -4393,7 +4394,9 @@ describe('AppContainer State Management', () => {
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites[0][0]).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
       unmount();
     });
 
@@ -4460,7 +4463,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Confirm tool execution';
       mockedUseGeminiStream.mockReturnValue({
-        streamingState: 'waitingForConfirmation',
+        streamingState: StreamingState.WaitingForConfirmation,
         submitQuery: vi.fn(),
         initError: null,
         pendingHistoryItems: [],
@@ -4486,7 +4489,7 @@ describe('AppContainer State Management', () => {
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites[0][0]).toBe(titleEscape('✳\uFE0E Qwen - workspace'));
       unmount();
     });
 
@@ -4538,7 +4541,9 @@ describe('AppContainer State Management', () => {
       expect(calledWith).toContain('\x1b]0;');
       expect(calledWith).toContain('\x1b]2;');
       expect(calledWith).toContain('\x07');
-      expect(calledWith).toBe(titleEscape('Qwen - workspace'));
+      expect(calledWith).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
       unmount();
     });
 
@@ -4585,7 +4590,9 @@ describe('AppContainer State Management', () => {
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites[0][0]).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
       unmount();
     });
 
