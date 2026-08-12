@@ -152,6 +152,52 @@ export const SystemMessage = memo(function SystemMessage({
         : taskStatus === 'cancelled'
           ? CircleMinusIcon
           : InfoIcon;
+
+  const taskKind =
+    isTaskNotification &&
+    typeof data === 'object' &&
+    data !== null &&
+    'kind' in data &&
+    typeof data.kind === 'string'
+      ? data.kind
+      : undefined;
+  const taskCommandLabel =
+    typeof data === 'object' &&
+    data !== null &&
+    'commandLabel' in data &&
+    typeof data.commandLabel === 'string'
+      ? data.commandLabel
+      : undefined;
+  const taskDescription =
+    typeof data === 'object' &&
+    data !== null &&
+    'description' in data &&
+    typeof data.description === 'string'
+      ? data.description
+      : undefined;
+  const taskEventCount =
+    typeof data === 'object' &&
+    data !== null &&
+    'eventCount' in data &&
+    typeof data.eventCount === 'number'
+      ? data.eventCount
+      : undefined;
+  const taskI18nText = (() => {
+    if (!taskKind || !taskStatus) return undefined;
+    const key = `notification.${taskKind}.${taskStatus}` as const;
+    if (taskKind === 'shell') {
+      return taskCommandLabel
+        ? t(key, { command: taskCommandLabel })
+        : undefined;
+    }
+    if (taskKind === 'monitor' || taskKind === 'agent') {
+      return taskDescription
+        ? t(key, { description: taskDescription, events: taskEventCount ?? 0 })
+        : undefined;
+    }
+    return undefined;
+  })();
+
   const renderedContent = preserveWhitespace ? (
     <pre>{content}</pre>
   ) : variant === 'info' ? (
@@ -160,17 +206,11 @@ export const SystemMessage = memo(function SystemMessage({
     <pre>{content}</pre>
   );
 
-  return (
-    <div
-      className={`${styles.message} ${styles[variant]} ${
-        preserveWhitespace ? styles.modelSwitch : ''
-      } ${isRecap ? styles.recap : ''} ${
-        isTaskNotification ? styles.noMarker : ''
-      }`}
-    >
-      <div className={styles.content}>
-        {isTaskNotification ? (
-          <div className={styles.notificationContent}>
+  if (isTaskNotification) {
+    return (
+      <div className={styles.notificationBubbleRow}>
+        <div className={styles.notificationBubbleColumn}>
+          <div className={styles.notificationBubble}>
             <span
               className={styles.notificationIcon}
               data-tone={taskNotificationTone}
@@ -180,11 +220,23 @@ export const SystemMessage = memo(function SystemMessage({
             >
               <TaskNotificationIcon aria-hidden="true" />
             </span>
-            <div className={styles.notificationText}>{renderedContent}</div>
+            <div className={styles.notificationText}>
+              {taskI18nText ?? content}
+            </div>
           </div>
-        ) : (
-          renderedContent
-        )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`${styles.message} ${styles[variant]} ${
+        preserveWhitespace ? styles.modelSwitch : ''
+      } ${isRecap ? styles.recap : ''}`}
+    >
+      <div className={styles.content}>
+        {renderedContent}
         {showRetryHint && onRetryClick && (
           <div className={styles.retryHint}>
             <button

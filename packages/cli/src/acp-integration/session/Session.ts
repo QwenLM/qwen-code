@@ -1031,11 +1031,31 @@ export interface BackgroundNotificationQueueItem {
   kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
   todoWorkChainId?: string;
+  /** Structured fields for i18n rendering on the frontend. */
+  structured?: {
+    description?: string;
+    commandLabel?: string;
+    eventCount?: number;
+    exitCode?: number;
+    droppedLines?: number;
+  };
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
+}
+
+/** Max length for a notification command/description label shown in the UI. */
+const NOTIFICATION_LABEL_MAX_LENGTH = 80;
+
+/** Collapse whitespace and truncate a task label for compact UI display. */
+function truncateNotificationLabel(label: string): string {
+  const normalized = label.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= NOTIFICATION_LABEL_MAX_LENGTH) {
+    return normalized;
+  }
+  return normalized.slice(0, NOTIFICATION_LABEL_MAX_LENGTH - 3) + '...';
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -6450,6 +6470,7 @@ export class Session implements SessionContext {
     backgroundRegistry.setStatusChangeCallback(this.#statusChangeCallback);
     backgroundRegistry.setNotificationCallback(
       (displayText, modelText, meta) => {
+        const entry = backgroundRegistry.get(meta.agentId);
         this.#enqueueBackgroundNotification({
           displayText,
           modelText,
@@ -6460,6 +6481,9 @@ export class Session implements SessionContext {
             this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
           toolUseId: meta.toolUseId,
           todoWorkChainId: meta.todoWorkChainId,
+          structured: entry
+            ? { description: truncateNotificationLabel(entry.description) }
+            : undefined,
         });
       },
     );
@@ -6470,6 +6494,7 @@ export class Session implements SessionContext {
         return;
       }
 
+      const entry = monitorRegistry.get(meta.monitorId);
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,
@@ -6483,11 +6508,19 @@ export class Session implements SessionContext {
           ),
         toolUseId: meta.toolUseId,
         todoWorkChainId: meta.todoWorkChainId,
+        structured: entry
+          ? {
+              description: truncateNotificationLabel(entry.description),
+              eventCount: meta.eventCount,
+              droppedLines: entry.droppedLines || undefined,
+            }
+          : undefined,
       });
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
+      const entry = shellRegistry.get(meta.shellId);
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,
@@ -6497,6 +6530,12 @@ export class Session implements SessionContext {
         continuesTodoStopGuardWorkChain:
           !this.todoStopGuardBackgroundBaseline.shells.has(meta.shellId),
         todoWorkChainId: meta.todoWorkChainId,
+        structured: entry
+          ? {
+              commandLabel: truncateNotificationLabel(entry.description),
+              exitCode: meta.exitCode,
+            }
+          : undefined,
       });
     });
 
@@ -6771,6 +6810,7 @@ export class Session implements SessionContext {
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
+                ...item.structured,
               });
           }
 
@@ -7021,6 +7061,7 @@ export class Session implements SessionContext {
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
+          ...item.structured,
         },
       },
     });

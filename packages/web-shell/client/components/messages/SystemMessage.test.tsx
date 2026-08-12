@@ -134,6 +134,62 @@ describe('SystemMessage — background notification label', () => {
   });
 });
 
+describe('SystemMessage — background notification i18n body', () => {
+  it('renders shell notifications with structured command via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'shell',
+          commandLabel: 'npm test',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台 Shell 已完成：npm test');
+    expect(container.textContent).not.toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+
+  it('renders agent notifications with structured description via i18n', () => {
+    const container = render(
+      <SystemMessage
+        content='Background agent "worker" completed.'
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'agent',
+          description: 'worker',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('后台智能体已完成：worker');
+  });
+
+  it('falls back to raw content when structured fields are absent', () => {
+    const container = render(
+      <SystemMessage
+        content='Background shell "npm test" completed.'
+        variant="info"
+        source="background_notification"
+        data={{ status: 'completed', kind: 'shell' }}
+      />,
+    );
+
+    expect(container.textContent).toContain(
+      'Background shell "npm test" completed.',
+    );
+  });
+});
+
 describe('SystemMessage — goal status activation', () => {
   const content = serializeGoalStatusMessage({
     kind: 'set',
