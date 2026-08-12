@@ -666,6 +666,10 @@ class Session {
           '[Session] Monitor notification turn failed after emitting a result:',
           error,
         );
+        const message = error instanceof Error ? error.message : String(error);
+        this.outputAdapter.emitSystemMessage('monitor_turn_failed', {
+          error: message,
+        });
         return;
       }
       throw error;

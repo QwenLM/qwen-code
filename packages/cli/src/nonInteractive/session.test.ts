@@ -904,7 +904,7 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
-  it('does not emit a second result when a monitor turn already reported one', async () => {
+  it('reports a monitor failure without emitting a second result', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start a monitor');
     let closeInput: (() => void) | undefined;
@@ -966,6 +966,66 @@ describe('runNonInteractiveStreamJson', () => {
     await sessionPromise;
 
     expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitSystemMessage).toHaveBeenCalledWith(
+      'monitor_turn_failed',
+      { error: 'provider error' },
+    );
+  });
+
+  it('emits an error result when a monitor turn fails before reporting one', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start a monitor');
+    let closeInput: (() => void) | undefined;
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+    runNonInteractiveMock
+      .mockImplementationOnce(async () => {
+        monitorCallback?.(
+          'Monitor event',
+          '<task-notification>failed turn</task-notification>',
+          {
+            monitorId: 'mon_error',
+            toolUseId: 'tool_mon_error',
+            status: 'running',
+          },
+        );
+      })
+      .mockRejectedValueOnce(new Error('provider error'));
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    });
+    closeInput?.();
+    await sessionPromise;
+
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'provider error',
+      }),
+    );
   });
 
   it('drops a queued running monitor event after cancellation', async () => {

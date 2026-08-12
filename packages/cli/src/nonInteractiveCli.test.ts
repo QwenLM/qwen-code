@@ -4209,6 +4209,16 @@ describe('runNonInteractive', () => {
       error: { message: expect.stringContaining('401') },
     });
     expect(results[0].error?.message).toContain('Incorrect API key provided');
+    expect(processStderrSpy).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(String(processStderrSpy.mock.calls[0]?.[0])),
+    ).toMatchObject({
+      error: {
+        type: 'AlreadyReportedError',
+        message: expect.stringContaining('401'),
+        code: 1,
+      },
+    });
   });
 
   it('emits an error result for API error events in stream-json mode', async () => {
@@ -4267,6 +4277,7 @@ describe('runNonInteractive', () => {
       error: { message: expect.stringContaining('401') },
     });
     expect(results[0].error?.message).toContain('Incorrect API key provided');
+    expect(processStderrSpy).not.toHaveBeenCalled();
   });
 
   it('does not run process-exit cleanup for API errors with a session-owned adapter', async () => {
@@ -4275,6 +4286,7 @@ describe('runNonInteractive', () => {
     );
     setupMetricsMock();
     const cleanup = vi.fn();
+    const onResultEmitted = vi.fn();
     registerCleanup(cleanup);
     const adapter = new StreamJsonOutputAdapter(mockConfig, false);
 
@@ -4298,11 +4310,12 @@ describe('runNonInteractive', () => {
         mockSettings,
         'Test input',
         'prompt-id-session-api-error',
-        { adapter },
+        { adapter, onResultEmitted },
       ),
     ).rejects.toBeInstanceOf(AlreadyReportedError);
 
     expect(cleanup).not.toHaveBeenCalled();
+    expect(onResultEmitted).toHaveBeenCalledOnce();
   });
 
   it('emits an error result for API error events while draining stream-json notifications', async () => {
