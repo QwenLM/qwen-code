@@ -23,6 +23,7 @@ function setWorkspace(path) {
 }
 
 function setStatus(kind, heading, message, failure = '') {
+  document.body.dataset.state = kind;
   title.textContent = heading;
   detail.textContent = message;
   pulse.className = `pulse ${kind === 'starting' ? '' : kind}`;

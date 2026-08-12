@@ -67,6 +67,7 @@ async function testBootstrapWorkspaceVisibility() {
     return elements[selector];
   };
   const listeners = {};
+  const body = { dataset: {} };
   let resolveBootstrapState;
   const tauri = {
     core: {
@@ -88,16 +89,21 @@ async function testBootstrapWorkspaceVisibility() {
   };
   vm.runInNewContext(
     fs.readFileSync(path.join(packageDir, 'bootstrap', 'bootstrap.js'), 'utf8'),
-    { document: { querySelector: element }, window: { __TAURI__: tauri } },
+    {
+      document: { body, querySelector: element },
+      window: { __TAURI__: tauri },
+    },
   );
   await new Promise((resolve) => setImmediate(resolve));
 
   listeners['runtime-starting']({
     payload: '/Users/example/Projects/qwen-code',
   });
+  assert.equal(body.dataset.state, 'starting');
   assert.equal(element('#workspace').hidden, true);
 
   listeners['runtime-failed']({ payload: 'runtime failed' });
+  assert.equal(body.dataset.state, 'error');
   assert.equal(element('#workspace').hidden, false);
   assert.equal(
     element('#workspace').textContent,
@@ -105,6 +111,7 @@ async function testBootstrapWorkspaceVisibility() {
   );
 
   element('#retry').listeners.click();
+  assert.equal(body.dataset.state, 'starting');
   assert.equal(element('#workspace').hidden, true);
 
   resolveBootstrapState({
