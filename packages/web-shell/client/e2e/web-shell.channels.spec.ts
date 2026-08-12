@@ -374,7 +374,7 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(
     page.getByRole('heading', { name: 'Edit DingTalk' }),
   ).toBeVisible();
-  await expect(page.getByLabel('Session scope')).toHaveText('Per thread');
+  await expect(page.getByLabel('By chat or thread')).toBeChecked();
   await expect(page.getByText('Ada', { exact: true })).toBeVisible();
   await expect(page.getByText('ABCD1234', { exact: true })).toBeVisible();
   await page
