@@ -22,6 +22,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
@@ -68,6 +69,7 @@ export interface UseBranchCommandOptions {
     'clearItems' | 'loadHistory' | 'addItem'
   >;
   startNewSession: (sessionId: string) => void;
+  clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
@@ -93,8 +95,14 @@ export interface UseBranchCommandResult {
 export function useBranchCommand(
   options: UseBranchCommandOptions,
 ): UseBranchCommandResult {
-  const { config, historyManager, startNewSession, setSessionName, remount } =
-    options;
+  const {
+    config,
+    historyManager,
+    startNewSession,
+    clearPendingState,
+    setSessionName,
+    remount,
+  } = options;
 
   const handleBranch = useCallback(
     async (name?: string) => {
@@ -104,7 +112,10 @@ export function useBranchCommand(
         historyManager.addItem(
           {
             type: 'error',
-            text: t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+            text: buildBackgroundWorkBlockedMessage(
+              config,
+              t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+            ),
           },
           Date.now(),
         );
@@ -208,6 +219,7 @@ export function useBranchCommand(
           collapsePreviewCount,
         );
         startNewSession(newSessionId);
+        clearPendingState?.();
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
@@ -294,6 +306,7 @@ export function useBranchCommand(
       config,
       historyManager,
       startNewSession,
+      clearPendingState,
       setSessionName,
       remount,
       options.settings.merged.ui?.history?.collapseOnResume,

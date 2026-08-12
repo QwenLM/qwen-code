@@ -117,6 +117,18 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import type { EmbeddedManagerPage } from '../plugins/manager-page';
 type Scope = 'user' | 'workspace';
+type InstallMethod = 'source' | 'archive';
+const MAX_EXTENSION_ARCHIVE_BYTES = 10 * 1024 * 1024;
+
+function isValidExtensionArchiveFilename(filename: string): boolean {
+  if (!/\.(?:zip|tar\.gz)$/i.test(filename)) return false;
+  if (new TextEncoder().encode(filename).length > 255) return false;
+  return !Array.from(filename).some((character) => {
+    const code = character.charCodeAt(0);
+    return character === '/' || character === '\\' || code < 32 || code === 127;
+  });
+}
+
 type ManagedExtensionEntry = DaemonExtensionEntry & {
   defaultActivation?: ExtensionActivationState;
   workspaceActivation?: 'inherit' | ExtensionActivationState;
@@ -443,7 +455,9 @@ export function ExtensionsManagerPage({
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
+  const [installMethod, setInstallMethod] = useState<InstallMethod>('source');
   const [installSource, setInstallSource] = useState('');
+  const [installArchive, setInstallArchive] = useState<File | null>(null);
   const [installing, setInstalling] = useState(false);
   const [pendingInstall, setPendingInstall] = useState<{
     operationId: string;
@@ -460,6 +474,7 @@ export function ExtensionsManagerPage({
   const uninstallInFlightNameRef = useRef<string | null>(null);
   const interactionOperationIdRef = useRef<string | null>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
+  const archiveInputRef = useRef<HTMLInputElement>(null);
   const returnFocusNameRef = useRef<string | null>(null);
   const [pendingMutation, setPendingMutation] = useState<{
     operationId: string;
@@ -917,10 +932,20 @@ export function ExtensionsManagerPage({
   );
 
   const installExtension = useCallback(() => {
-    const source = installSource.trim();
+    const source =
+      installMethod === 'archive'
+        ? installArchive
+          ? `upload:${installArchive.name}`
+          : ''
+        : installSource.trim();
     const clientId = connection.clientId;
     if (
       !source ||
+      (installMethod === 'archive' &&
+        (!installArchive ||
+          installArchive.size === 0 ||
+          installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES ||
+          !isValidExtensionArchiveFilename(installArchive.name))) ||
       !operationsRecovered ||
       pendingInstall ||
       pendingMutation ||
@@ -931,11 +956,24 @@ export function ExtensionsManagerPage({
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);
-    actions
-      .installExtension({ source, consent: true }, clientId)
+    const installingOperation =
+      installMethod === 'archive'
+        ? actions.installExtensionArchive(
+            {
+              archive: installArchive!,
+              filename: installArchive!.name,
+              consent: true,
+            },
+            clientId,
+          )
+        : actions.installExtension({ source, consent: true }, clientId);
+    installingOperation
       .then((result) => {
         setPendingInstall({ operationId: result.operationId, source });
         setInstallSource('');
+        setInstallArchive(null);
+        if (archiveInputRef.current) archiveInputRef.current.value = '';
+        setInstallMethod('source');
         setInstallOpen(false);
       })
       .catch((error: unknown) => {
@@ -946,6 +984,8 @@ export function ExtensionsManagerPage({
   }, [
     actions,
     connection.clientId,
+    installArchive,
+    installMethod,
     installSource,
     operationsRecovered,
     pendingInstall,
@@ -1114,6 +1154,21 @@ export function ExtensionsManagerPage({
     () => filterExtensions(extensions, query),
     [extensions, query],
   );
+
+  const archiveTooLarge =
+    installArchive !== null &&
+    installArchive.size > MAX_EXTENSION_ARCHIVE_BYTES;
+  const archiveEmpty = installArchive !== null && installArchive.size === 0;
+  const archiveInvalid =
+    installArchive !== null &&
+    !isValidExtensionArchiveFilename(installArchive.name);
+  const installInputReady =
+    installMethod === 'archive'
+      ? installArchive !== null &&
+        !archiveTooLarge &&
+        !archiveEmpty &&
+        !archiveInvalid
+      : Boolean(installSource.trim());
 
   const returnToList = useCallback(() => {
     returnFocusNameRef.current = selectedName;
@@ -1737,7 +1792,14 @@ export function ExtensionsManagerPage({
       <AlertDialog
         open={installOpen}
         onOpenChange={(open) => {
-          if (open || !installing) setInstallOpen(open);
+          if (open || !installing) {
+            setInstallOpen(open);
+            if (!open) {
+              setInstallMethod('source');
+              setInstallArchive(null);
+              if (archiveInputRef.current) archiveInputRef.current.value = '';
+            }
+          }
         }}
       >
         <AlertDialogContent size="middle">
@@ -1749,15 +1811,77 @@ export function ExtensionsManagerPage({
               {t('extensions.manage.installDescription')}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <Input
-            id="extension-source"
-            name="extension-source"
-            aria-label={t('extensions.manage.installDescription')}
-            autoComplete="off"
-            value={installSource}
-            onChange={(event) => setInstallSource(event.target.value)}
-            placeholder={t('extensions.manage.sourcePlaceholder')}
-          />
+          <Tabs
+            value={installMethod}
+            onValueChange={(value) => setInstallMethod(value as InstallMethod)}
+          >
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="source" disabled={installing}>
+                {t('extensions.manage.sourceTab')}
+              </TabsTrigger>
+              <TabsTrigger value="archive" disabled={installing}>
+                {t('extensions.manage.archiveTab')}
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="source" className="pt-3">
+              <Input
+                id="extension-source"
+                name="extension-source"
+                aria-label={t('extensions.manage.sourceTab')}
+                autoComplete="off"
+                value={installSource}
+                onChange={(event) => setInstallSource(event.target.value)}
+                placeholder={t('extensions.manage.sourcePlaceholder')}
+              />
+            </TabsContent>
+            <TabsContent value="archive" className="pt-3">
+              <div className="grid gap-2">
+                <Input
+                  ref={archiveInputRef}
+                  id="extension-archive"
+                  name="extension-archive"
+                  aria-label={t('extensions.manage.archiveSelect')}
+                  type="file"
+                  accept=".zip,.tar.gz,application/zip,application/gzip"
+                  disabled={installing}
+                  onChange={(event) =>
+                    setInstallArchive(event.target.files?.[0] ?? null)
+                  }
+                />
+                {installArchive ? (
+                  <div className="text-xs text-muted-foreground">
+                    {t('extensions.manage.archiveSelected', {
+                      name: installArchive.name,
+                    })}
+                  </div>
+                ) : null}
+                {archiveTooLarge ? (
+                  <Alert variant="destructive">
+                    <AlertCircleIcon />
+                    <AlertDescription>
+                      {t('extensions.manage.archiveTooLarge')}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+                {archiveEmpty ? (
+                  <Alert variant="destructive">
+                    <AlertCircleIcon />
+                    <AlertDescription>
+                      {t('extensions.manage.archiveEmpty')}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+                {archiveInvalid ? (
+                  <Alert variant="destructive">
+                    <AlertCircleIcon />
+                    <AlertDescription>
+                      {t('extensions.manage.archiveInvalid')}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+              </div>
+            </TabsContent>
+          </Tabs>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={installing}>
               {t('common.cancel')}
@@ -1767,7 +1891,7 @@ export function ExtensionsManagerPage({
                 installing ||
                 !operationsRecovered ||
                 Boolean(pendingInstall || pendingMutation || busyName) ||
-                !installSource.trim()
+                !installInputReady
               }
               onClick={installExtension}
             >

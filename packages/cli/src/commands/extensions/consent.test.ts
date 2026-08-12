@@ -104,6 +104,33 @@ describe('extensionConsentString', () => {
     expect(result).toContain('Extensions may introduce unexpected behavior');
   });
 
+  it('treats Agent Plugins as a native format while keeping safety details', () => {
+    const result = extensionConsentString(
+      {
+        name: 'portable-plugin',
+        version: '1.0.0',
+        mcpServers: { local: { command: 'node', args: ['server.js'] } },
+      },
+      [],
+      [
+        {
+          name: 'direct',
+          description: 'Direct skill',
+          level: 'extension',
+          filePath: '/test/direct/SKILL.md',
+          body: 'Instructions',
+        },
+      ],
+      [],
+      'AgentPlugins',
+    );
+
+    expect(result).not.toContain('Some features may not work perfectly');
+    expect(result).toContain('Extensions may introduce unexpected behavior');
+    expect(result).toContain('local');
+    expect(result).toContain('direct');
+  });
+
   it('should include MCP servers when present', () => {
     const config: ExtensionConfig = {
       name: 'test-extension',

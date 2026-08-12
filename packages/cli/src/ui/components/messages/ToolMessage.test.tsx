@@ -73,11 +73,17 @@ vi.mock('../AnsiOutput.js', () => ({
 vi.mock('../TerminalImage.js', () => ({
   TerminalImage: ({
     data,
+    image,
+    availableTerminalHeight,
   }: {
-    data: { filePath: string; mimeType: string };
+    data?: { filePath: string; mimeType: string };
+    image?: { mimeType: string };
+    availableTerminalHeight?: number;
   }) => (
     <Text>
-      MockTerminalImage:{data.filePath}:{data.mimeType}
+      {image
+        ? `MockTerminalImage:${image.mimeType}:height=${availableTerminalHeight ?? 'undef'}`
+        : `MockTerminalImage:${data?.filePath}:${data?.mimeType}:height=${availableTerminalHeight ?? 'undef'}`}
     </Text>
   ),
 }));
@@ -185,6 +191,43 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('ReadFile');
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('renders inline images returned by a tool', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+      />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png');
+  });
+
+  it('renders the number of omitted inline images', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} omittedImageCount={2} />,
+      StreamingState.Idle,
+    );
+
+    expect(lastFrame()).toContain('[+2 more images]');
+  });
+
+  it('shares the tool height budget across inline images', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        availableTerminalHeight={20}
+        images={[
+          { data: 'Zmlyc3Q=', mimeType: 'image/png' },
+          { data: 'c2Vjb25k', mimeType: 'image/png' },
+        ]}
+      />,
+      StreamingState.Responding,
+    );
+
+    expect(lastFrame()).toContain('MockTerminalImage:image/png:height=4');
   });
 
   it('always shows the vision bridge disclosure for a completed read', () => {
@@ -622,6 +665,80 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       expect(lastFrame()).toContain('?');
+    });
+
+    it('hides a tool description repeated in a plain-text Hook confirmation', () => {
+      const content = `DESCRIPTION_TOP \u200b${'middle '.repeat(40)} DESCRIPTION_TAIL`;
+      const escapedContent = JSON.stringify(content).replace(
+        '\u200b',
+        '\\u200b',
+      );
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${escapedContent}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      const frame = lastFrame();
+      const header = frame?.split('\n')[0];
+      expect(header).toContain('test-tool');
+      expect(header).not.toContain('DESCRIPTION_TOP');
+      expect(header).not.toContain('DESCRIPTION_TAIL');
+    });
+
+    it('does not hide a tool description absent from the Hook confirmation', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={`COMMAND_TOP ${'middle '.repeat(20)} COMMAND_TAIL`}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: 'A hook requires approval.',
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('COMMAND_TOP');
+      expect(lastFrame()).toContain('COMMAND_TAIL');
+    });
+
+    it('keeps a repeated string description when another argument is not shown', () => {
+      const content = 'visible content';
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content, destructive: true })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${JSON.stringify(content)}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={80}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('destructive');
     });
 
     it('shows - for Canceled status', () => {

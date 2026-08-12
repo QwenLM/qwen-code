@@ -1,9 +1,13 @@
 import type { SenderPolicy } from './types.js';
-import type { PairingStore } from './PairingStore.js';
+import type {
+  CreatePairingRequestResult,
+  PairingStore,
+} from './PairingStore.js';
 
 export interface SenderCheckResult {
   allowed: boolean;
-  pairingCode?: string | null; // set when pairing policy returns a code (null = cap reached)
+  /** Set when the pairing policy denies the sender. */
+  pairing?: CreatePairingRequestResult;
 }
 
 export class SenderGate {
@@ -57,11 +61,14 @@ export class SenderGate {
           return { allowed: true };
         }
         // Generate pairing code
-        const code = this.pairingStore?.createRequest(
+        const result = this.pairingStore?.createRequest(
           senderId,
           senderName || senderId,
         );
-        return { allowed: false, pairingCode: code ?? null };
+        return {
+          allowed: false,
+          pairing: result ?? { rejected: 'cap_reached' },
+        };
       }
       default:
         throw new Error(`Unknown sender policy: ${this.policy}`);

@@ -15,6 +15,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonSessionIdProtocolError,
   WorkspaceDaemonClient,
   DaemonSessionClient,
   asKnownDaemonEvent,
@@ -59,6 +60,12 @@ export {
   type DaemonChannelWorkerStartErrorResponse,
   type DaemonChannelConfigFieldKind,
   type DaemonChannelConfigFieldDescriptor,
+  type DaemonChannelConfigValueFieldDescriptor,
+  type DaemonChannelConfigPlainValueFieldDescriptor,
+  type DaemonChannelConfigEnumFieldDescriptor,
+  type DaemonChannelConfigNumberFieldDescriptor,
+  type DaemonChannelConfigObjectFieldDescriptor,
+  type DaemonChannelConfigNestedFieldDescriptor,
   type DaemonChannelTypeDescriptor,
   type DaemonChannelTypeCatalog,
   type DaemonChannelRuntimeState,
@@ -71,6 +78,7 @@ export {
   type DaemonChannelStartupRequest,
   type DaemonChannelMutationResult,
   type DaemonChannelPairingRequest,
+  type DaemonChannelPairingSubject,
   type DaemonChannelPairingRequestsSnapshot,
   type DaemonChannelPairingApprovalRequest,
   type DaemonChannelPairingApprovalResult,
@@ -94,6 +102,10 @@ export {
   type DaemonSettingsReloadedData,
   type DaemonSettingsReloadedEvent,
   type DaemonToolToggleResult,
+  type DaemonSkillBatchToggleError,
+  type DaemonSkillBatchToggleErrorCode,
+  type DaemonSkillBatchToggleItem,
+  type DaemonSkillBatchToggleResult,
   type DaemonSkillToggleActivation,
   type DaemonSkillToggleResult,
   type DaemonSkillScope,
@@ -311,6 +323,7 @@ export {
   type DaemonLiveSetupUpdate,
   type DaemonLiveState,
   type DaemonLiveStatus,
+  type DaemonSseConnectReason,
   type HeartbeatResult,
   type KnownDaemonEvent,
   type MCPServerConfigShape,
@@ -391,6 +404,11 @@ export type {
 export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
+export type {
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
 
 export type {

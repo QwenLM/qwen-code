@@ -18,6 +18,7 @@ import { LoopType } from '../telemetry/types.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
+  getToolCallRepeatKey,
 } from './loopDetectionService.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -2036,6 +2037,32 @@ describe('LoopDetectionService', () => {
         expect.objectContaining({
           loop_type: 'alternating_tool_call_pattern',
         }),
+      );
+    });
+  });
+
+  describe('getToolCallRepeatKey', () => {
+    it('resolves legacy aliases to the same key as the canonical name', () => {
+      // Extracting the repeat key also canonicalized legacy aliases, which
+      // widens every detector keyed off it — pin that equivalence so a
+      // future split between classification and keying cannot ship silent.
+      expect(getToolCallRepeatKey('task', { subagent_type: 'explore' })).toBe(
+        getToolCallRepeatKey('agent', { subagent_type: 'explore' }),
+      );
+      expect(getToolCallRepeatKey('replace', { file: 'a.ts' })).toBe(
+        getToolCallRepeatKey('edit', { file: 'a.ts' }),
+      );
+      expect(getToolCallRepeatKey('search_file_content', { q: 'x' })).toBe(
+        getToolCallRepeatKey('grep_search', { q: 'x' }),
+      );
+    });
+
+    it('is stable across object key order but not across different args', () => {
+      expect(getToolCallRepeatKey('read_file', { a: 1, b: 2 })).toBe(
+        getToolCallRepeatKey('read_file', { b: 2, a: 1 }),
+      );
+      expect(getToolCallRepeatKey('read_file', { a: 1 })).not.toBe(
+        getToolCallRepeatKey('read_file', { a: 2 }),
       );
     });
   });

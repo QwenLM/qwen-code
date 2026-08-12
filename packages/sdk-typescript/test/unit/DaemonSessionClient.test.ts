@@ -9,7 +9,17 @@ import {
   DaemonClient,
   DaemonPendingPromptLimitError,
 } from '../../src/daemon/DaemonClient.js';
-import { DaemonSessionClient } from '../../src/daemon/DaemonSessionClient.js';
+import {
+  DaemonSessionClient,
+  type DaemonSessionSubscribeOptions,
+} from '../../src/daemon/DaemonSessionClient.js';
+import { AutoReconnectTransport } from '../../src/daemon/AutoReconnectTransport.js';
+import {
+  DaemonTransportClosedError,
+  type DaemonTransport,
+  type DaemonTransportSubscribeOptions,
+  type DaemonTransportType,
+} from '../../src/daemon/DaemonTransport.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -99,6 +109,10 @@ function recordingFetch(
     },
   ) as unknown as typeof globalThis.fetch;
   return { fetch: fetchImpl, calls };
+}
+
+function requestPathEndsWith(req: CapturedRequest, suffix: string): boolean {
+  return new URL(req.url).pathname.endsWith(suffix);
 }
 
 function pendingPromptIds(session: DaemonSessionClient): string[] {
@@ -226,7 +240,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -242,7 +256,7 @@ describe('DaemonSessionClient', () => {
       /* empty */
     }
 
-    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
+    expect(new URL(calls[1]!.url).pathname).toBe('/session/s-1/events');
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
@@ -255,7 +269,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -271,7 +285,7 @@ describe('DaemonSessionClient', () => {
       /* empty */
     }
 
-    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
+    expect(new URL(calls[1]!.url).pathname).toBe('/session/s-1/events');
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
@@ -290,7 +304,7 @@ describe('DaemonSessionClient', () => {
           liveJournal: [{ id: 42, v: 1, type: 'session_update', data: {} }],
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -380,7 +394,7 @@ describe('DaemonSessionClient', () => {
           lastEventId: 99,
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -424,7 +438,7 @@ describe('DaemonSessionClient', () => {
           attached: false,
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -442,7 +456,7 @@ describe('DaemonSessionClient', () => {
     }
 
     expect(session.attached).toBe(false);
-    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
+    expect(new URL(calls[1]!.url).pathname).toBe('/session/s-1/events');
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
@@ -455,7 +469,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -471,7 +485,7 @@ describe('DaemonSessionClient', () => {
     }
 
     expect(session.lastEventId).toBeUndefined();
-    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
+    expect(new URL(calls[1]!.url).pathname).toBe('/session/s-1/events');
     expect(calls[1]?.headers['last-event-id']).toBeUndefined();
   });
 
@@ -694,6 +708,63 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/session%20with%2Fslash/pending-prompts/prompt%20with%2Fslash',
     );
     expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards stable mid-turn ids and the session clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { accepted: true, messageId: 'stable-1' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.enqueueMidTurnMessage('shared message', {
+        messageId: 'stable-1',
+      }),
+    ).resolves.toEqual({ accepted: true, messageId: 'stable-1' });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-message',
+    );
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      message: 'shared message',
+      messageId: 'stable-1',
+    });
+  });
+
+  it('forwards the mid-turn snapshot query with session and client ids', async () => {
+    const snapshot = {
+      messages: [{ messageId: 'mid-1', text: 'shared message' }],
+      settledMessageIds: ['mid-2'],
+      promotedMessageIds: ['mid-3'],
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, snapshot));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getMidTurnMessages()).resolves.toEqual(snapshot);
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages',
+    );
+    expect(calls[0]?.method).toBe('GET');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
@@ -924,7 +995,7 @@ describe('DaemonSessionClient', () => {
       | undefined;
     const encoder = new TextEncoder();
     const { fetch, calls } = recordingFetch((req) => {
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return pendingSseResponse(
           () => {},
           (controller) => {
@@ -960,7 +1031,9 @@ describe('DaemonSessionClient', () => {
     })().catch(() => {});
 
     await vi.waitFor(() => {
-      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      expect(
+        calls.filter((c) => requestPathEndsWith(c, '/events')),
+      ).toHaveLength(1);
     });
     const first = session
       .prompt({ prompt: [{ type: 'text', text: 'first' }] })
@@ -1001,7 +1074,7 @@ describe('DaemonSessionClient', () => {
       resolveCancel = resolve;
     });
     const { fetch, calls } = recordingFetch((req) => {
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return pendingSseResponse(
           () => {},
           (controller) => {
@@ -1036,9 +1109,9 @@ describe('DaemonSessionClient', () => {
     })().catch(() => {});
 
     await vi.waitFor(() => {
-      expect(calls.filter((call) => call.url.endsWith('/events'))).toHaveLength(
-        1,
-      );
+      expect(
+        calls.filter((call) => requestPathEndsWith(call, '/events')),
+      ).toHaveLength(1);
     });
     const promptAbort = new AbortController();
     const prompt = session
@@ -1071,7 +1144,7 @@ describe('DaemonSessionClient', () => {
       | undefined;
     const eventsAbort = new AbortController();
     const { fetch, calls } = recordingFetch((req) => {
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return pendingSseResponse(
           () => {},
           (controller) => {
@@ -1103,7 +1176,9 @@ describe('DaemonSessionClient', () => {
     })().catch(() => {});
 
     await vi.waitFor(() => {
-      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      expect(
+        calls.filter((c) => requestPathEndsWith(c, '/events')),
+      ).toHaveLength(1);
     });
     await expect(
       session.prompt({ prompt: [{ type: 'text', text: 'first' }] }),
@@ -1127,7 +1202,7 @@ describe('DaemonSessionClient', () => {
       let nextPromptId = 0;
       const encoder = new TextEncoder();
       const { fetch, calls } = recordingFetch((req) => {
-        if (req.url.endsWith('/session/s-1/events')) {
+        if (requestPathEndsWith(req, '/session/s-1/events')) {
           return pendingSseResponse(
             () => {},
             (controller) => {
@@ -1164,7 +1239,9 @@ describe('DaemonSessionClient', () => {
       })().catch(() => {});
 
       await vi.waitFor(() => {
-        expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+        expect(
+          calls.filter((c) => requestPathEndsWith(c, '/events')),
+        ).toHaveLength(1);
       });
       const first = session.prompt({
         prompt: [{ type: 'text', text: 'first' }],
@@ -1198,7 +1275,7 @@ describe('DaemonSessionClient', () => {
       | undefined;
     const encoder = new TextEncoder();
     const { fetch, calls } = recordingFetch((req) => {
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return new Response(
           new ReadableStream<Uint8Array>({
             start(controller) {
@@ -1237,7 +1314,9 @@ describe('DaemonSessionClient', () => {
     })().catch(() => {});
 
     await vi.waitFor(() => {
-      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      expect(
+        calls.filter((c) => requestPathEndsWith(c, '/events')),
+      ).toHaveLength(1);
     });
     const aborted = new AbortController();
     aborted.abort();
@@ -1277,7 +1356,7 @@ describe('DaemonSessionClient', () => {
     });
     const encoder = new TextEncoder();
     const { fetch, calls } = recordingFetch((req) => {
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return new Response(
           new ReadableStream<Uint8Array>({
             start(controller) {
@@ -1310,7 +1389,9 @@ describe('DaemonSessionClient', () => {
     })().catch(() => {});
 
     await vi.waitFor(() => {
-      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      expect(
+        calls.filter((c) => requestPathEndsWith(c, '/events')),
+      ).toHaveLength(1);
     });
     const prompt = session
       .prompt({ prompt: [{ type: 'text', text: 'late accept' }] })
@@ -1393,7 +1474,7 @@ describe('DaemonSessionClient', () => {
   it('tracks Last-Event-ID across event subscriptions', async () => {
     let eventCallCount = 0;
     const { fetch, calls } = recordingFetch((req) => {
-      if (!req.url.endsWith('/session/s-1/events')) {
+      if (!requestPathEndsWith(req, '/session/s-1/events')) {
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       }
       eventCallCount++;
@@ -1438,6 +1519,212 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('5');
   });
 
+  it('tracks accepted REST stream state separately from adjacent lineage', async () => {
+    const firstStreamId = '11111111-1111-4111-8111-111111111111';
+    const callerAccepted = vi.fn();
+    let eventCallCount = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (!requestPathEndsWith(req, '/session/s-1/events')) {
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      }
+      eventCallCount += 1;
+      const response = sseResponse('');
+      if (eventCallCount === 1) {
+        response.headers.set('x-qwen-sse-stream-id', firstStreamId);
+      }
+      return response;
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    for await (const _event of session.events({
+      clientId: 'spoofed-client',
+      previousSseStreamId: '22222222-2222-4222-8222-222222222222',
+      onSseStreamAccepted: callerAccepted,
+    } as unknown as DaemonSessionSubscribeOptions)) {
+      /* empty */
+    }
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    const eventCalls = calls.filter((call) =>
+      requestPathEndsWith(call, '/session/s-1/events'),
+    );
+    const firstUrl = new URL(eventCalls[0]!.url);
+    const secondUrl = new URL(eventCalls[1]!.url);
+    const thirdUrl = new URL(eventCalls[2]!.url);
+    expect(eventCalls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+    ]);
+    expect(firstUrl.searchParams.get('connectReason')).toBe('initial');
+    expect(firstUrl.searchParams.has('previousStreamId')).toBe(false);
+    expect(callerAccepted).not.toHaveBeenCalled();
+    expect(secondUrl.searchParams.get('connectReason')).toBe('resume');
+    expect(secondUrl.searchParams.get('previousStreamId')).toBe(firstStreamId);
+    // The second handshake was accepted by an old daemon (no response id):
+    // the next request remains a resume but must not claim stale lineage.
+    expect(thirdUrl.searchParams.get('connectReason')).toBe('resume');
+    expect(thirdUrl.searchParams.has('previousStreamId')).toBe(false);
+  });
+
+  it('forwards an explicit WebUI SSE connection reason', async () => {
+    const { fetch, calls } = recordingFetch(() => sseResponse(''));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    for await (const _event of session.events({
+      sseConnectReason: 'state_resync',
+    })) {
+      /* empty */
+    }
+
+    expect(new URL(calls[0]!.url).searchParams.get('connectReason')).toBe(
+      'state_resync',
+    );
+  });
+
+  it('clears accepted REST state across a switch to an ACP transport', async () => {
+    let transportType: DaemonTransportType = 'rest';
+    const subscribeCalls: DaemonTransportSubscribeOptions[] = [];
+    const transport: DaemonTransport = {
+      get type() {
+        return transportType;
+      },
+      supportsReplay: true,
+      connected: true,
+      async fetch() {
+        return jsonResponse(500, { error: 'unexpected fetch' });
+      },
+      async *subscribeEvents(_sessionId, opts) {
+        subscribeCalls.push(opts);
+        if (transportType === 'rest') {
+          opts.onSseStreamAccepted?.('11111111-1111-4111-8111-111111111111');
+        }
+        yield* [];
+      },
+      dispose() {},
+    };
+    const client = new DaemonClient({ baseUrl: 'http://daemon', transport });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    transportType = 'acp-http';
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    transportType = 'rest';
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(subscribeCalls[0]?.sseConnectReason).toBe('initial');
+    expect(subscribeCalls[1]?.sseConnectReason).toBe('initial');
+    expect(subscribeCalls[1]?.previousSseStreamId).toBeUndefined();
+    expect(subscribeCalls[1]?.onSseStreamAccepted).toBeTypeOf('function');
+    expect(subscribeCalls[2]?.sseConnectReason).toBe('initial');
+    expect(subscribeCalls[2]?.previousSseStreamId).toBeUndefined();
+  });
+
+  it('captures REST lineage when auto-reconnect falls back from ACP within one subscription', async () => {
+    const firstStreamId = '11111111-1111-4111-8111-111111111111';
+    const secondStreamId = '22222222-2222-4222-8222-222222222222';
+    let restSubscriptions = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (!requestPathEndsWith(req, '/session/s-1/events')) {
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      }
+      restSubscriptions += 1;
+      const response = sseResponse('');
+      response.headers.set(
+        'x-qwen-sse-stream-id',
+        restSubscriptions === 1 ? firstStreamId : secondStreamId,
+      );
+      return response;
+    });
+    const closedAcpTransport: DaemonTransport = {
+      type: 'acp-http',
+      supportsReplay: false,
+      connected: false,
+      async fetch() {
+        throw new DaemonTransportClosedError();
+      },
+      async *subscribeEvents() {
+        yield await Promise.reject(new DaemonTransportClosedError());
+      },
+      dispose() {},
+    };
+    const transport = new AutoReconnectTransport({
+      baseUrl: 'http://daemon',
+      fetch,
+      preferredType: 'acp-http',
+      initial: closedAcpTransport,
+      factory: async () => {
+        throw new Error('ACP reconnect unavailable');
+      },
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', transport });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(transport.type).toBe('rest');
+    expect(calls).toHaveLength(2);
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+    ]);
+    const firstUrl = new URL(calls[0]!.url);
+    const secondUrl = new URL(calls[1]!.url);
+    expect(firstUrl.searchParams.get('connectReason')).toBe('initial');
+    expect(firstUrl.searchParams.has('previousStreamId')).toBe(false);
+    expect(secondUrl.searchParams.get('connectReason')).toBe('resume');
+    expect(secondUrl.searchParams.get('previousStreamId')).toBe(firstStreamId);
+  });
+
   it('sends the load-seeded eventEpoch alongside the resume cursor (DAEMON-001)', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
@@ -1453,7 +1740,7 @@ describe('DaemonSessionClient', () => {
           liveJournal: [],
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -1484,7 +1771,7 @@ describe('DaemonSessionClient', () => {
           eventEpoch: 'epoch-resume',
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return sseResponse('');
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -1503,7 +1790,7 @@ describe('DaemonSessionClient', () => {
   it('learns the bus epoch from the response header and echoes it on reconnect (DAEMON-001)', async () => {
     let eventCallCount = 0;
     const { fetch, calls } = recordingFetch((req) => {
-      if (!req.url.endsWith('/session/s-1/events')) {
+      if (!requestPathEndsWith(req, '/session/s-1/events')) {
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       }
       eventCallCount++;
@@ -1545,7 +1832,7 @@ describe('DaemonSessionClient', () => {
   it('a header-learned epoch supersedes the seeded one (DAEMON-001)', async () => {
     let eventCallCount = 0;
     const { fetch, calls } = recordingFetch((req) => {
-      if (!req.url.endsWith('/session/s-1/events')) {
+      if (!requestPathEndsWith(req, '/session/s-1/events')) {
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       }
       eventCallCount++;
@@ -1803,7 +2090,7 @@ describe('DaemonSessionClient', () => {
       if (req.url.endsWith('/session/s-1/prompt')) {
         return jsonResponse(500, { error: 'boom' });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return jsonResponse(500, { error: 'stream failed' });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
@@ -1918,7 +2205,7 @@ describe('DaemonSessionClient clientId self-heal', () => {
           state: {},
         });
       }
-      if (req.url.endsWith('/session/s-1/events')) {
+      if (requestPathEndsWith(req, '/session/s-1/events')) {
         return pendingSseResponse(
           () => {},
           (controller) => {
@@ -1945,7 +2232,9 @@ describe('DaemonSessionClient clientId self-heal', () => {
       }
     })().catch(() => {});
     await vi.waitFor(() => {
-      expect(calls.filter((c) => c.url.endsWith('/events'))).toHaveLength(1);
+      expect(
+        calls.filter((c) => requestPathEndsWith(c, '/events')),
+      ).toHaveLength(1);
     });
 
     const promptPromise = session
