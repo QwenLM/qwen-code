@@ -34,6 +34,17 @@ export function getDefaultModelEnvVar(authType: string | undefined): string {
   }
 }
 
+/**
+ * Vertex AI has a keyless path, so pointing the user only at an API key
+ * variable sends them toward a placeholder value, which the Google SDK then
+ * treats as an Express mode key and the API rejects.
+ */
+function adcHint(authType: string | undefined): string {
+  return authType === 'vertex-ai'
+    ? ' Alternatively, set GOOGLE_CLOUD_PROJECT to authenticate with Application Default Credentials instead of an API key.'
+    : '';
+}
+
 export abstract class ModelConfigError extends Error {
   abstract readonly code: string;
 
@@ -58,7 +69,8 @@ export class StrictMissingCredentialsError extends ModelConfigError {
       `Missing credentials for modelProviders model '${modelName}'. ` +
         (envKey
           ? `Current configured envKey: '${envKey}'. Set that environment variable, or update modelProviders.${providerKey}[].envKey.`
-          : `Configure modelProviders.${providerKey}[].envKey and set that environment variable.`),
+          : `Configure modelProviders.${providerKey}[].envKey and set that environment variable.`) +
+        adcHint(authType),
     );
   }
 }
@@ -86,7 +98,8 @@ export class MissingApiKeyError extends ModelConfigError {
       `Missing API key for ${params.authType} auth. ` +
         `Current model: '${params.model || '(unknown)'}', baseUrl: '${params.baseUrl || '(default)'}'. ` +
         `Provide an API key via settings (security.auth.apiKey), ` +
-        `or set the environment variable '${params.envKey}'.`,
+        `or set the environment variable '${params.envKey}'.` +
+        adcHint(params.authType),
     );
   }
 }

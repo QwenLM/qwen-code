@@ -34,6 +34,8 @@ describe('validateAuthMethod', () => {
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_BASE_URL'];
     delete process.env['GOOGLE_API_KEY'];
+    delete process.env['GOOGLE_API_KEY_VERTEX'];
+    delete process.env['GOOGLE_CLOUD_PROJECT'];
     delete process.env['IDEALAB_KEY'];
     delete process.env['TOKEN_PLAN_KEY'];
   });
@@ -259,6 +261,32 @@ describe('validateAuthMethod', () => {
     process.env['GOOGLE_API_KEY_VERTEX'] = 'vertex-key';
 
     expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toBeNull();
+  });
+
+  it('should return null for USE_VERTEX_AI with a project and no API key', () => {
+    process.env['GOOGLE_CLOUD_PROJECT'] = 'my-project';
+
+    expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toBeNull();
+  });
+
+  it('should return null for a keyless USE_VERTEX_AI modelProviders entry when a project is set', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        env: { GOOGLE_CLOUD_PROJECT: 'my-project' },
+        model: { name: 'vertex-model' },
+        modelProviders: {
+          'vertex-ai': [{ id: 'vertex-model' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toBeNull();
+  });
+
+  it('should return an error for USE_VERTEX_AI with neither an API key nor a project', () => {
+    expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toContain(
+      'GOOGLE_API_KEY',
+    );
   });
 
   it('should use config.getModelsConfig().getModel() when Config is provided', () => {

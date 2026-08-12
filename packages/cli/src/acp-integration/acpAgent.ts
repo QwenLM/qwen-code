@@ -912,7 +912,10 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
   openai: ['OPENAI_API_KEY'],
   anthropic: ['ANTHROPIC_API_KEY'],
   gemini: ['GEMINI_API_KEY'],
-  'vertex-ai': ['GOOGLE_API_KEY'],
+  // GOOGLE_CLOUD_PROJECT is not an API key, but it is what selects Vertex's
+  // Application Default Credentials path, so its presence means auth is
+  // configured. This cell only tests presence; no value is read from it.
+  'vertex-ai': ['GOOGLE_API_KEY', 'GOOGLE_CLOUD_PROJECT'],
 };
 
 /**

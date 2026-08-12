@@ -309,9 +309,13 @@ export function validateAuthMethod(
   }
 
   if (authMethod === AuthType.USE_VERTEX_AI) {
-    const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
-    if (apiKeyError) {
-      return apiKeyError;
+    // A configured project means Application Default Credentials, which the
+    // Google SDK resolves without an API key.
+    if (!hasEnvValue(settings.merged, 'GOOGLE_CLOUD_PROJECT')) {
+      const apiKeyError = getApiKeyError(authMethod, settings.merged, config);
+      if (apiKeyError) {
+        return apiKeyError;
+      }
     }
 
     process.env['GOOGLE_GENAI_USE_VERTEXAI'] = 'true';

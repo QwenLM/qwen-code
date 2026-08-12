@@ -291,6 +291,21 @@ export interface ModelConfigValidationResult {
 }
 
 /**
+ * Vertex AI accepts Application Default Credentials in place of an API key:
+ * with a project configured and no key passed, the @google/genai client
+ * resolves ADC itself. Passing any key value instead switches the client to
+ * Vertex Express mode and disables ADC, so the key must stay absent.
+ */
+function usesVertexApplicationDefaultCredentials(
+  config: ContentGeneratorConfig,
+): boolean {
+  return (
+    config.authType === AuthType.USE_VERTEX_AI &&
+    !!process.env['GOOGLE_CLOUD_PROJECT']?.trim()
+  );
+}
+
+/**
  * Validate a resolved model configuration.
  * This is the single validation entry point used across Core.
  */
@@ -306,7 +321,7 @@ export function validateModelConfig(
   }
 
   // API key is required for all other auth types
-  if (!config.apiKey) {
+  if (!config.apiKey && !usesVertexApplicationDefaultCredentials(config)) {
     if (isStrictModelProvider) {
       errors.push(
         new StrictMissingCredentialsError(

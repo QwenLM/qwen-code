@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createContentGenerator,
   createContentGeneratorConfig,
   AuthType,
   preloadContentGenerator,
   resetPreloadedContentGenerator,
+  validateModelConfig,
 } from './contentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
@@ -728,5 +729,46 @@ describe('createContentGeneratorConfig', () => {
     expect(cfg.apiKey).toBeUndefined();
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+});
+
+describe('validateModelConfig - Vertex AI Application Default Credentials', () => {
+  const vertexConfig = {
+    authType: AuthType.USE_VERTEX_AI,
+    model: 'gemini-2.5-pro',
+  } as ContentGeneratorConfig;
+
+  beforeEach(() => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', '');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('accepts a keyless Vertex config when a project is configured', () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+
+    expect(validateModelConfig(vertexConfig).valid).toBe(true);
+    expect(validateModelConfig(vertexConfig, true).valid).toBe(true);
+  });
+
+  it('still requires credentials for Vertex when no project is configured', () => {
+    const result = validateModelConfig(vertexConfig);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].message).toContain('GOOGLE_API_KEY');
+    expect(result.errors[0].message).toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('does not extend the keyless path to the Gemini API auth type', () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+
+    const result = validateModelConfig({
+      authType: AuthType.USE_GEMINI,
+      model: 'gemini-2.5-pro',
+    } as ContentGeneratorConfig);
+
+    expect(result.valid).toBe(false);
   });
 });
