@@ -45,6 +45,8 @@ const runHandler = testEfficacyCommand.handler as unknown as Handler;
 
 let repo: string;
 let outside: string;
+let home: string;
+let savedEnv: NodeJS.ProcessEnv;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -163,6 +165,21 @@ process.stdout.write(JSON.stringify({
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
+  home = mkdtempSync(join(tmpdir(), 'efficacy-home-'));
+  writeFileSync(join(home, '.gitconfig'), '');
+
+  // Isolate the fixtures from the user's git environment, like
+  // git.integration.test.ts does. Without this the suite inherits whatever
+  // the host accumulated: a global `diff.external` kills every plain
+  // `git diff` in the helpers below ("external diff died" — seen on a
+  // persistent CI runner whose ~/.gitconfig a prior job had polluted),
+  // and a global `commit.gpgsign=true` fails commitAll for want of a key.
+  // The code under test spawns git with the ambient env, so setting
+  // process.env here reaches it too.
+  savedEnv = { ...process.env };
+  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+  process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
+  process.env['HOME'] = home;
   git(repo, 'init', '-q', '-b', 'main', '.');
   git(repo, 'config', 'core.autocrlf', 'false');
   const hooksDir = join(repo, '.git-hooks-disabled');
@@ -236,6 +253,8 @@ afterEach(() => {
   }
   rmSync(repo, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
+  process.env = savedEnv;
+  rmSync(home, { recursive: true, force: true });
 });
 
 describe('test-efficacy probe isolation (#6832)', () => {

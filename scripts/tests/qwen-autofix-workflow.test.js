@@ -6824,6 +6824,122 @@ exit 1
     expect(sanitizeStep).toContain('qwen-triage');
   });
 
+  it('scrubs exec-vector keys from the runner-user GLOBAL git config', () => {
+    // Run 31516789251: a stray `diff.external=global-driver` in the pool
+    // runner's ~/.gitconfig — planted by human-authored code an earlier job
+    // ran as this user — failed four per-hunk probe tests in every later
+    // verification gate on that host. The local sweep above never touches
+    // the global file, so the pollution outlived every job. Ordered after
+    // the local sweep (whose first-occurrence indices the assertions above
+    // rely on) and BEFORE the hooks resolution, so a planted global
+    // core.hooksPath is removed, not merely bypassed while resolving.
+    const localSweep = sanitizeStep.indexOf('--name-only --list');
+    const globalScrub = sanitizeStep.indexOf(
+      'git config --global --name-only --list',
+    );
+    const hooks = sanitizeStep.indexOf('--git-path hooks');
+    expect(globalScrub).toBeGreaterThan(localSweep);
+    expect(hooks).toBeGreaterThan(globalScrub);
+    // Functional: the extracted pipeline drops every command-execution key
+    // and keeps the routing/credential keys the pool image may own — the
+    // global file is infra territory, so this must stay a denylist.
+    const scrub = sanitizeStep.match(
+      /\{ git config --global --name-only --list[\s\S]*?--unset-all "\$key" 2>\/dev\/null \|\| true; done/,
+    )?.[0];
+    expect(scrub).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-global-scrub-'));
+    const cfg = join(dir, 'gitconfig');
+    writeFileSync(
+      cfg,
+      [
+        '[safe]',
+        '\tdirectory = /work',
+        '[http]',
+        '\tproxy = http://proxy:3128',
+        '[credential]',
+        '\thelper = store',
+        '[diff]',
+        '\texternal = global-driver',
+        '[diff "drv"]',
+        '\tcommand = evil',
+        '[core]',
+        '\tfsmonitor = evil',
+        '\thooksPath = /tmp/evil',
+        '\tautocrlf = false',
+        '[filter "x"]',
+        '\tsmudge = evil',
+        '[alias]',
+        '\tpwn = !evil',
+        '[includeIf "gitdir:/tmp/"]',
+        '\tpath = /tmp/evil.inc',
+        '[protocol "ext"]',
+        '\tallow = always',
+        '[submodule "s"]',
+        '\tupdate = !evil',
+        '',
+      ].join('\n'),
+    );
+    execFileSync('bash', ['-e', '-o', 'pipefail', '-c', scrub], {
+      env: { ...process.env, GIT_CONFIG_GLOBAL: cfg },
+      encoding: 'utf8',
+    });
+    const kept = execFileSync(
+      'git',
+      ['config', '--global', '--name-only', '--list'],
+      { env: { ...process.env, GIT_CONFIG_GLOBAL: cfg }, encoding: 'utf8' },
+    )
+      .trim()
+      .split('\n')
+      .sort();
+    rmSync(dir, { recursive: true, force: true });
+    expect(kept).toEqual([
+      'core.autocrlf',
+      'credential.helper',
+      'http.proxy',
+      'safe.directory',
+    ]);
+  });
+
+  it('runs both verification gates under a throwaway global git config', () => {
+    // Same incident, the gate-side guard: the gates re-run branch tests on
+    // the HOST, so runner ~/.gitconfig pollution failed tests the branch
+    // never caused, the rejection charged the round (package tests are
+    // A/B-exempt), and an 18-minute repair burned on a failure no repair
+    // can reach. Both gates redirect global config to a throwaway file so
+    // every child — vitest fixture repos included — is hermetic to the
+    // host, and a branch-authored `git config --global` dies with the run
+    // instead of poisoning the next one.
+    for (const gate of verificationGateBodies) {
+      const globalRedirect = gate.indexOf(
+        'export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"',
+      );
+      expect(gate).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      expect(globalRedirect).toBeGreaterThan(-1);
+      // Truncated per run: the repair leg must not inherit writes the first
+      // gate run's branch tests made into the throwaway file.
+      expect(gate).toContain(': > "${GIT_CONFIG_GLOBAL}"');
+      // Seeded with the workspace safe.directory the redirect just hid
+      // (actions/checkout wrote it into the real global config).
+      expect(gate.indexOf('safe.directory "$(pwd)"')).toBeGreaterThan(
+        globalRedirect,
+      );
+      // Before the deterministic checks, so they all see the redirect.
+      expect(globalRedirect).toBeLessThan(gate.indexOf('npm run build'));
+    }
+    // Before the FIRST git command in each gate, not merely before the
+    // checks: the committed-ref probe and dirty-tree asserts must live in
+    // the same config universe as everything after them.
+    expect(
+      reviewVerificationRunner.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('git diff --quiet "origin/${BRANCH}'),
+    );
+    const issueGate = verificationGateSteps[0] ?? '';
+    expect(
+      issueGate.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
+    ).toBeLessThan(issueGate.indexOf('git status --porcelain'));
+  });
+
   it('never invokes a local action before checkout', () => {
     // A `uses: './...'` local action resolves from $GITHUB_WORKSPACE, so
     // it only exists after a checkout — before one it fails on a clean

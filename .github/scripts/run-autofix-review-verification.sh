@@ -5,6 +5,24 @@ set -eo pipefail
 # environment from the caller. WORKDIR and BRANCH are job-level env;
 # GITHUB_OUTPUT and RUNNER_TEMP are runner-provided. None is defined here.
 
+# Deterministic verification must not read the RUNNER's git config: the
+# persistent pool accumulates state, and a leaked global exec knob fails
+# branch tests the branch never caused. Measured counterexample, run
+# 31516789251: a stray `diff.external=global-driver` in the runner user's
+# ~/.gitconfig killed four per-hunk probe tests in packages/cli on #8613 —
+# charged to the round (package tests are A/B-exempt), which burned the
+# 18-minute repair on a failure no repair can reach and ended the round as
+# a timeout. Every git this script or its checks spawn (vitest fixture
+# repos included) reads a per-run throwaway global config instead — seeded
+# with the workspace safe.directory actions/checkout put in the real one —
+# and no system config. The redirect also keeps a branch-authored
+# `git config --global` from writing durable state onto the host: it lands
+# in the throwaway file and dies with the run.
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+: > "${GIT_CONFIG_GLOBAL}"
+git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
 # agent that commits and then aborts. The failure handoff keys its

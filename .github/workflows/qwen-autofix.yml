@@ -791,6 +791,26 @@ jobs:
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # The runner USER's global config is the same exec surface: pool
+          # jobs run human-authored code (branch tests) as this user, and a
+          # stray `git config --global` outlives the job on the persistent
+          # pool. Measured: run 31516789251 found diff.external=global-driver
+          # in ~/.gitconfig, failing per-hunk probe tests in every later
+          # verification gate on this host. The gates read a throwaway global
+          # config now, so this scrub is host hygiene plus protection for
+          # THIS job's PAT-bearing git steps, which do read the real file.
+          # Denylist here, not the local allowlist above: the file belongs to
+          # the pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which
+          # arms the command-executing ext:: transport a kept url.insteadOf
+          # could redirect to). Guarded `|| true` twice: no global file and
+          # no match are both normal, and either would kill the step under
+          # the default `bash -e` + pipefail otherwise.
+          { git config --global --name-only --list 2>/dev/null || true; } \
+            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\.[^.]+\.(command|textconv)$|merge\.[^.]+\.driver$|filter\.|alias\.|sequence\.editor$|gpg\.program$|init\.templatedir$|submodule\.[^.]+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
           # unlinked, never swept — a recursive delete of a planted path is
@@ -1401,6 +1421,16 @@ jobs:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
         run: |-
           BRANCH="autofix/issue-${ISSUE}"
+
+          # Hermetic git config for the gate and every check it spawns, same
+          # rationale and shape as run-autofix-review-verification.sh (a
+          # leaked global exec knob on the persistent pool must not fail
+          # branch tests, and a branch-authored `git config --global` must
+          # not outlive the run) — edit the two copies together.
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+          : > "${GIT_CONFIG_GLOBAL}"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
 
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
@@ -3201,6 +3231,26 @@ jobs:
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # The runner USER's global config is the same exec surface: pool
+          # jobs run human-authored code (branch tests) as this user, and a
+          # stray `git config --global` outlives the job on the persistent
+          # pool. Measured: run 31516789251 found diff.external=global-driver
+          # in ~/.gitconfig, failing per-hunk probe tests in every later
+          # verification gate on this host. The gates read a throwaway global
+          # config now, so this scrub is host hygiene plus protection for
+          # THIS job's PAT-bearing git steps, which do read the real file.
+          # Denylist here, not the local allowlist above: the file belongs to
+          # the pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which
+          # arms the command-executing ext:: transport a kept url.insteadOf
+          # could redirect to). Guarded `|| true` twice: no global file and
+          # no match are both normal, and either would kill the step under
+          # the default `bash -e` + pipefail otherwise.
+          { git config --global --name-only --list 2>/dev/null || true; } \
+            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\.[^.]+\.(command|textconv)$|merge\.[^.]+\.driver$|filter\.|alias\.|sequence\.editor$|gpg\.program$|init\.templatedir$|submodule\.[^.]+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
           # unlinked, never swept — a recursive delete of a planted path is
@@ -3492,6 +3542,26 @@ jobs:
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # The runner USER's global config is the same exec surface: pool
+          # jobs run human-authored code (branch tests) as this user, and a
+          # stray `git config --global` outlives the job on the persistent
+          # pool. Measured: run 31516789251 found diff.external=global-driver
+          # in ~/.gitconfig, failing per-hunk probe tests in every later
+          # verification gate on this host. The gates read a throwaway global
+          # config now, so this scrub is host hygiene plus protection for
+          # THIS job's PAT-bearing git steps, which do read the real file.
+          # Denylist here, not the local allowlist above: the file belongs to
+          # the pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which
+          # arms the command-executing ext:: transport a kept url.insteadOf
+          # could redirect to). Guarded `|| true` twice: no global file and
+          # no match are both normal, and either would kill the step under
+          # the default `bash -e` + pipefail otherwise.
+          { git config --global --name-only --list 2>/dev/null || true; } \
+            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\.[^.]+\.(command|textconv)$|merge\.[^.]+\.driver$|filter\.|alias\.|sequence\.editor$|gpg\.program$|init\.templatedir$|submodule\.[^.]+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
           # unlinked, never swept — a recursive delete of a planted path is
