@@ -216,6 +216,7 @@ import {
   clearRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
+import { patchSessionRecord } from '../services/session-registry.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -3892,6 +3893,24 @@ export class Config {
           workDir,
           qwenVersion: cliVersion,
         });
+        // Keep the machine-wide session registry in step: this PID's
+        // record would otherwise point discovery at the previous
+        // transcript. Keyed by PID, so a swap is a patch rather than a
+        // delete-and-rewrite.
+        //
+        // This rides the sidecar's `runtimeStatusEnabled` gate rather
+        // than having its own. Not the same rule — the sidecar is gated
+        // because a short-lived process must not delete a sibling's
+        // file, and PID-keyed records have no such hazard — but the two
+        // lifecycles coincide, and the only divergence (sidecar write
+        // failed, registration succeeded) costs a stale `sessionId` in
+        // `ps --json` until exit.
+        //
+        // `name` is deliberately not patched: it is the handle a user
+        // just read out of `qwen sessions ps`, and re-deriving it here
+        // would rename a live session on every /clear for no gain — the
+        // directory it names has not changed.
+        await patchSessionRecord({ sessionId: newSessionId, cwd: workDir });
       });
     }
 
@@ -3941,6 +3960,11 @@ export class Config {
           qwenVersion: this.cliVersion ?? null,
         },
       );
+      // The registry's DIRECTORY column is how a user tells two live
+      // sessions apart, so a mid-session directory switch has to reach it
+      // too — otherwise `qwen sessions ps` keeps advertising the folder
+      // this session left.
+      await patchSessionRecord({ cwd: workDir });
     });
     await this.flushRuntimeStatusWrites();
   }

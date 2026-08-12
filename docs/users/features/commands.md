@@ -643,6 +643,7 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 | Command              | Description                       | Usage Examples                                               |
 | -------------------- | --------------------------------- | ------------------------------------------------------------ |
 | `qwen sessions list` | List recent conversation sessions | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| `qwen sessions ps`   | List sessions running right now   | `qwen sessions ps`, `qwen sessions ps --json`                |
 
 #### `qwen sessions list`
 
@@ -680,4 +681,43 @@ qwen sessions list --limit 50
 
 # Output as JSON for scripting
 qwen sessions list --json | jq .
+```
+
+#### `qwen sessions ps`
+
+Lists the Qwen Code sessions running on this machine right now. `sessions
+list` walks saved transcripts ("what have I worked on"); this walks the
+live-process registry ("what is running at this moment"). Records left
+behind by a killed session are swept as they are found.
+
+**Flags:**
+
+| Flag     | Type    | Default | Description                                     |
+| -------- | ------- | ------- | ----------------------------------------------- |
+| `--json` | boolean | `false` | Output as JSON Lines (one JSON object per line) |
+
+**Human-readable output (default):**
+
+A table with columns: NAME, PID, AGE, DIRECTORY.
+
+**JSON output (`--json`):**
+
+Outputs JSON Lines on stdout, newest session first. Each line is a JSON
+object with fields:
+
+```
+schemaVersion, pid, procStart, sessionId, cwd, name, startedAt, qwenVersion
+```
+
+Nothing else is written to stdout — an empty listing prints nothing at
+all — so `qwen sessions ps --json | jq .` is safe to script against.
+
+**Examples:**
+
+```bash
+# Show the other live sessions
+qwen sessions ps
+
+# Which directories are busy right now?
+qwen sessions ps --json | jq -r .cwd
 ```
