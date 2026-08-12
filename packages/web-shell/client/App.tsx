@@ -536,10 +536,12 @@ interface FailedPromptRetry {
 type CancelledRetryState =
   | {
       kind: 'failed-prompt';
+      attemptId: number;
       failed: FailedPrompt;
     }
   | {
       kind: 'turn-error';
+      attemptId: number;
       errorId: string;
       identity: TranscriptTurnErrorIdentity;
       text: string;
@@ -580,6 +582,27 @@ interface CancelledRetryEntry {
   state: CancelledRetryState;
 }
 
+function mergeCancelledRetryEntries(
+  current: readonly CancelledRetryEntry[],
+  incoming: readonly CancelledRetryEntry[],
+): CancelledRetryEntry[] {
+  return incoming.reduce<CancelledRetryEntry[]>(
+    (merged, candidate) => {
+      const existing = merged.find(
+        (entry) => entry.state.kind === candidate.state.kind,
+      );
+      if (existing && existing.state.attemptId >= candidate.state.attemptId) {
+        return merged;
+      }
+      return [
+        ...merged.filter((entry) => entry.state.kind !== candidate.state.kind),
+        candidate,
+      ];
+    },
+    [...current],
+  );
+}
+
 interface UnknownPromptAdmission {
   sessionId: string;
   messageId?: string;
@@ -600,7 +623,12 @@ function getLatestUserBlock(
 ): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (block?.kind === 'user') return block;
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification'
+    ) {
+      return block;
+    }
   }
   return undefined;
 }
@@ -608,12 +636,14 @@ function getLatestUserBlock(
 function matchesUserMessageIdentity(
   block: DaemonTranscriptBlock | undefined,
   identity: TranscriptUserMessageIdentity | undefined,
+  allowLocalId = false,
 ): boolean {
   if (!identity) return block === undefined;
   if (!block || block.kind !== 'user' || identity.block.kind !== 'user') {
     return false;
   }
   if (block === identity.block) return true;
+  if (allowLocalId && block.id === identity.block.id) return true;
   const expectedRecords = identity.block.sourceRecordIds;
   const currentRecords = block.sourceRecordIds;
   return (
@@ -628,10 +658,15 @@ function matchesUserMessageIdentity(
 function findUserMessageByIdentity(
   blocks: readonly DaemonTranscriptBlock[],
   identity: TranscriptUserMessageIdentity,
+  allowLocalId = false,
 ): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (block?.kind === 'user' && matchesUserMessageIdentity(block, identity)) {
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification' &&
+      matchesUserMessageIdentity(block, identity, allowLocalId)
+    ) {
       return block;
     }
   }
@@ -650,7 +685,10 @@ function getRetryableTurnError(
 ): DaemonTranscriptBlock | undefined {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
-    if (block?.kind === 'user') break;
+    if (block?.kind === 'user') {
+      if (block.meta?.['source'] === 'background_notification') continue;
+      break;
+    }
     if (block?.kind === 'error' && block.source === 'turn_error') {
       return block;
     }
@@ -684,11 +722,13 @@ function matchesTurnErrorIdentity(
 function retryTranscriptIdentityMatches(
   blocks: readonly DaemonTranscriptBlock[],
   transcriptIdentity: FailedPromptRetry['transcriptIdentity'],
+  allowLocalUserId = false,
 ): boolean {
   return transcriptIdentity.kind === 'failed-prompt'
     ? matchesUserMessageIdentity(
         getLatestUserBlock(blocks),
         transcriptIdentity.identity,
+        allowLocalUserId,
       )
     : matchesTurnErrorIdentity(
         getRetryableTurnError(blocks),
@@ -2454,6 +2494,7 @@ export function App({
   const cancelledRetryStatesRef = useRef(
     new Map<string, CancelledRetryEntry[]>(),
   );
+  const cancelledRetryAttemptRef = useRef(0);
   const [cancelledRetryRevision, setCancelledRetryRevision] = useState(0);
   const [unknownPromptAdmission, setUnknownPromptAdmission] =
     useState<UnknownPromptAdmission | null>(null);
@@ -2548,8 +2589,13 @@ export function App({
     const currentFailedBlock = findUserMessageByIdentity(
       store.getSnapshot().blocks,
       failed.identity,
+      failed.owner.snapshot.isCurrent(),
     );
-    const failedBlock = findUserMessageByIdentity(blocks, failed.identity);
+    const failedBlock = findUserMessageByIdentity(
+      blocks,
+      failed.identity,
+      failed.owner.snapshot.isCurrent(),
+    );
     if (failed.sessionId !== connection.sessionId || !currentFailedBlock) {
       updateFailedPrompt(null);
       return;
@@ -4067,9 +4113,59 @@ export function App({
     TranscriptTurnErrorIdentity | undefined
   >(undefined);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
+  const failedTurnErrorRetryRef = useRef<{
+    errorId: string;
+    text: string;
+    images?: PromptImage[];
+    inputAnnotations?: DaemonInputAnnotation[];
+    owner: CancelledRetryOwner;
+  } | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
+  const rearmFailedTurnErrorRetry = useCallback(
+    (
+      retryableTurnError: DaemonTranscriptBlock,
+      currentBlocks: readonly DaemonTranscriptBlock[],
+    ) => {
+      const failedRetry = failedTurnErrorRetryRef.current;
+      if (!failedRetry || retryableTurnError.id === failedRetry.errorId) {
+        return;
+      }
+      if (
+        !retryOwnerMatchesCurrent(
+          failedRetry.owner,
+          connectionRef.current.sessionId,
+          connectionRef.current.workspaceCwd,
+          composerSourceVersionRef.current,
+        )
+      ) {
+        failedTurnErrorRetryRef.current = null;
+        return;
+      }
+      if (
+        !currentBlocks.some(
+          (block) =>
+            block.kind === 'error' &&
+            block.source === 'turn_error' &&
+            block.id === failedRetry.errorId,
+        )
+      ) {
+        failedTurnErrorRetryRef.current = null;
+        return;
+      }
+      lastSubmittedPromptRef.current = failedRetry.text;
+      lastSubmittedImagesRef.current = failedRetry.images;
+      lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
+      lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
+      retryableTurnErrorIdRef.current = retryableTurnError.id;
+      retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
+      retriedTurnErrorIdRef.current = null;
+      failedTurnErrorRetryRef.current = null;
+      setShowRetryHint(true);
+    },
+    [],
+  );
   const retryOwnerRef = useRef<CancelledRetryOwner>({
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
@@ -4102,17 +4198,25 @@ export function App({
       ) {
         const currentStates =
           cancelledRetryStatesRef.current.get(logicalSessionKey) ?? [];
-        cancelledRetryStatesRef.current.set(logicalSessionKey, [
-          ...currentStates.filter(
-            (current) =>
-              !previousStates.some(
-                (previous) => previous.state.kind === current.state.kind,
-              ),
+        cancelledRetryStatesRef.current.set(
+          logicalSessionKey,
+          mergeCancelledRetryEntries(
+            currentStates,
+            previousStates.map((previous) => ({ state: previous.state })),
           ),
-          ...previousStates.map((previous) => ({ state: previous.state })),
-        ]);
+        );
         cancelledRetryStatesRef.current.delete(previousSessionKey);
       }
+      return;
+    }
+    if (
+      retryOwnerMatchesCurrent(
+        previousOwner,
+        connection.sessionId,
+        connection.workspaceCwd,
+        composerSourceVersionRef.current,
+      )
+    ) {
       return;
     }
     if (previousOwner.workspaceCwd === undefined && previousOwner.sessionKey) {
@@ -4132,6 +4236,7 @@ export function App({
     retryableTurnErrorIdRef.current = null;
     retryableTurnErrorIdentityRef.current = undefined;
     retriedTurnErrorIdRef.current = null;
+    failedTurnErrorRetryRef.current = null;
     setShowRetryHint(false);
   }, [
     connection.sessionId,
@@ -4174,6 +4279,17 @@ export function App({
             ...failed,
             messageId: rehydratedMessage.id,
             identity: { block: rehydratedMessage },
+          };
+          state.failed = failed;
+        } else if (
+          latestUserMessage &&
+          (latestUserMessage.id !== failed.messageId ||
+            latestUserMessage !== failed.identity.block)
+        ) {
+          failed = {
+            ...failed,
+            messageId: latestUserMessage.id,
+            identity: { block: latestUserMessage },
           };
           state.failed = failed;
         }
@@ -4224,15 +4340,15 @@ export function App({
       ) {
         return;
       }
-      const states = [
-        ...(
-          cancelledRetryStatesRef.current.get(resolvedSessionKey) ?? []
-        ).filter((current) => current.state.kind !== state.kind),
-        {
-          ...(owner.workspaceCwd === undefined ? { owner } : {}),
-          state,
-        },
-      ];
+      const states = mergeCancelledRetryEntries(
+        cancelledRetryStatesRef.current.get(resolvedSessionKey) ?? [],
+        [
+          {
+            ...(owner.workspaceCwd === undefined ? { owner } : {}),
+            state,
+          },
+        ],
+      );
       cancelledRetryStatesRef.current.set(resolvedSessionKey, states);
       if (appMountedRef.current) {
         setCancelledRetryRevision((current) => current + 1);
@@ -5518,6 +5634,7 @@ export function App({
         retryableTurnErrorIdRef.current = null;
         retryableTurnErrorIdentityRef.current = undefined;
         retriedTurnErrorIdRef.current = null;
+        failedTurnErrorRetryRef.current = null;
         retryOwnerRef.current = {
           sessionId: sessionIdAfterEnsure,
           workspaceCwd: promptWorkspaceCwd,
@@ -5825,7 +5942,11 @@ export function App({
     const currentFailedBlock = getLatestUserBlock(store.getSnapshot().blocks);
     if (
       !currentFailedBlock ||
-      !matchesUserMessageIdentity(currentFailedBlock, failed.identity)
+      !matchesUserMessageIdentity(
+        currentFailedBlock,
+        failed.identity,
+        retryOwner.snapshot.isCurrent(),
+      )
     ) {
       updateFailedPrompt(null);
       return;
@@ -5842,6 +5963,7 @@ export function App({
     }
     updateFailedPrompt(null);
     const retryStartedAt = Date.now();
+    const retryAttemptId = ++cancelledRetryAttemptRef.current;
     const retryTranscriptIdentity: FailedPromptRetry['transcriptIdentity'] = {
       kind: 'failed-prompt',
       identity: failed.identity,
@@ -5850,6 +5972,7 @@ export function App({
       retryTranscriptIdentityMatches(
         store.getSnapshot().blocks,
         retryTranscriptIdentity,
+        retryOwner.snapshot.isCurrent(),
       );
     setFailedPromptRetry({
       sessionId: failed.sessionId,
@@ -5882,6 +6005,7 @@ export function App({
       onCancelledBeforeAdmission: () => {
         restoreOrDeferCancelledRetry(retryOwner, {
           kind: 'failed-prompt',
+          attemptId: retryAttemptId,
           failed,
         });
       },
@@ -5909,6 +6033,7 @@ export function App({
         if (!admitted) {
           restoreOrDeferCancelledRetry(retryOwner, {
             kind: 'failed-prompt',
+            attemptId: retryAttemptId,
             failed,
           });
         }
@@ -6949,6 +7074,9 @@ export function App({
 
   useEffect(() => {
     const retryableTurnError = getRetryableTurnError(blocks);
+    if (retryableTurnError) {
+      rearmFailedTurnErrorRetry(retryableTurnError, blocks);
+    }
     const previousIdentity = retryableTurnErrorIdentityRef.current;
     const identityMatches =
       previousIdentity === undefined ||
@@ -6979,12 +7107,13 @@ export function App({
       lastSubmittedSourceVersionRef.current = -1;
       retryableTurnErrorIdentityRef.current = undefined;
       retriedTurnErrorIdRef.current = null;
+      failedTurnErrorRetryRef.current = null;
     } else if (canRetry) {
       retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
     }
     retryableTurnErrorIdRef.current = canRetry ? retryableTurnError.id : null;
     setShowRetryHint(canRetry);
-  }, [blocks, connected, failedPromptRetry]);
+  }, [blocks, connected, failedPromptRetry, rearmFailedTurnErrorRetry]);
 
   useEffect(() => {
     onStreamingStateChange?.(streamingState);
@@ -8471,6 +8600,7 @@ export function App({
                     block.id === failedMessage.messageId,
                 ),
               failedMessage.identity,
+              failedMessage.owner.snapshot.isCurrent(),
             )
           ) {
             updateFailedPrompt({
@@ -9647,6 +9777,7 @@ export function App({
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
+      const retryAttemptId = ++cancelledRetryAttemptRef.current;
       const retryOwner = retryOwnerRef.current;
       if (!retryOwnerIsCurrent(retryOwner)) {
         setShowRetryHint(false);
@@ -9695,6 +9826,7 @@ export function App({
         onCancelledBeforeAdmission: () => {
           restoreOrDeferCancelledRetry(retryOwner, {
             kind: 'turn-error',
+            attemptId: retryAttemptId,
             errorId: retryErrorId,
             identity: retryErrorIdentity,
             text: retryText,
@@ -9725,6 +9857,37 @@ export function App({
             );
             return;
           }
+          if (!admitted) {
+            restoreOrDeferCancelledRetry(retryOwner, {
+              kind: 'turn-error',
+              attemptId: retryAttemptId,
+              errorId: retryErrorId,
+              identity: retryErrorIdentity,
+              text: retryText,
+              images: retryImages,
+              inputAnnotations: retryInputAnnotations,
+              previousRetriedTurnErrorId,
+              previousShowRetryHint,
+            });
+          }
+          if (isDaemonTurnError(error)) {
+            failedTurnErrorRetryRef.current = {
+              errorId: retryErrorId,
+              text: retryText,
+              images: retryImages,
+              inputAnnotations: retryInputAnnotations,
+              owner: retryOwner,
+            };
+            const nextTurnError = getRetryableTurnError(
+              store.getSnapshot().blocks,
+            );
+            if (nextTurnError) {
+              rearmFailedTurnErrorRetry(
+                nextTurnError,
+                store.getSnapshot().blocks,
+              );
+            }
+          }
           if (retryTranscriptIsCurrent()) {
             reportError(error, 'Failed to retry prompt');
           }
@@ -9746,6 +9909,7 @@ export function App({
     connected,
     pushToast,
     reportError,
+    rearmFailedTurnErrorRetry,
     restoreOrDeferCancelledRetry,
     retryOwnerIsCurrent,
     sendPrompt,
@@ -9952,7 +10116,11 @@ export function App({
   const visibleFailedPromptBlock =
     failedPrompt &&
     latestUserBlock &&
-    matchesUserMessageIdentity(latestUserBlock, failedPrompt.identity) &&
+    matchesUserMessageIdentity(
+      latestUserBlock,
+      failedPrompt.identity,
+      failedPrompt.owner.snapshot.isCurrent(),
+    ) &&
     retryOwnerIsCurrent(failedPrompt.owner)
       ? latestUserBlock
       : undefined;

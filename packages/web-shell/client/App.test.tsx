@@ -489,7 +489,10 @@ vi.mock('@qwen-code/sdk/daemon', () => ({
     }
   },
   DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
-  isDaemonTurnError: () => false,
+  isDaemonTurnError: (error: unknown) =>
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { _daemonTurnError?: unknown })._daemonTurnError === true,
 }));
 
 vi.mock('./hooks/useMessages', () => ({
@@ -11242,8 +11245,6 @@ describe('App session callbacks', () => {
     const callbackStarted = deferred<void>();
     const callbackFinished = deferred<void>();
     mockSessionActions.createSession.mockImplementation(async () => {
-      mockConnection.sessionId = 'session-created';
-      mockConnection.workspaceCwd = '/workspace';
       testState.ownerVersion += 1;
       return { sessionId: 'session-created' };
     });
@@ -11270,6 +11271,12 @@ describe('App session callbacks', () => {
     await vi.waitFor(() => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalledOnce();
     });
+    act(() => {
+      mockConnection.sessionId = 'session-created';
+      mockConnection.workspaceCwd = '/workspace';
+      rerender({ onSessionCreated, onSubmitBefore });
+    });
+    await flush();
 
     act(() => {
       testState.blocks = [
@@ -11962,6 +11969,117 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('preserves the newer cancelled retry when admissions settle out of order', async () => {
+    const oldRetryApproval = deferred<void>();
+    const newerRetryApproval = deferred<void>();
+    let admissionCount = 0;
+    const onSubmitBefore = vi.fn(() => {
+      admissionCount += 1;
+      if (admissionCount === 2) return oldRetryApproval.promise;
+      if (admissionCount === 4) return newerRetryApproval.promise;
+      return Promise.resolve();
+    });
+    const oldError = {
+      kind: 'error',
+      source: 'turn_error',
+      id: 'turn-error-old',
+      promptId: 'prompt-old',
+    } as const;
+    const newerError = {
+      kind: 'error',
+      source: 'turn_error',
+      id: 'turn-error-newer',
+      promptId: 'prompt-newer',
+    } as const;
+    const { container, rerender } = renderApp({ onSubmitBefore });
+    await flush();
+
+    testState.prompt = 'first';
+    await clickSubmit(container);
+    act(() => {
+      testState.blocks = [oldError];
+      rerender({ onSubmitBefore });
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    expect(onSubmitBefore).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.blocks = [];
+      testState.ownerVersion += 1;
+      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.blocks = [];
+      testState.ownerVersion += 1;
+      rerender({ onSubmitBefore });
+    });
+
+    testState.prompt = 'newer';
+    await clickSubmit(container);
+    act(() => {
+      testState.blocks = [newerError];
+      rerender({ onSubmitBefore });
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    expect(onSubmitBefore).toHaveBeenCalledTimes(4);
+
+    act(() => {
+      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.blocks = [];
+      testState.ownerVersion += 1;
+      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+    });
+    await act(async () => {
+      newerRetryApproval.resolve();
+      await newerRetryApproval.promise;
+    });
+    await act(async () => {
+      oldRetryApproval.resolve();
+      await oldRetryApproval.promise;
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.blocks = [newerError];
+      testState.ownerVersion += 1;
+      rerender({ onSubmitBefore });
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'newer',
+      expect.objectContaining({ retry: true }),
+    );
+  });
+
   it('allows manual retry after a model stream interrupted turn error', async () => {
     const retrySend = deferred<void>();
     const { container, rerender } = renderApp();
@@ -12032,6 +12150,139 @@ describe('App session callbacks', () => {
       rerender();
       await Promise.resolve();
     });
+  });
+
+  it.each([
+    ['a fresh prompt id', 'prompt-2'],
+    ['a reused prompt id', 'prompt-1'],
+  ])(
+    'reoffers a turn-error retry when the retried turn fails with %s',
+    async (_label, nextPromptId) => {
+      const retrySend = deferred<void>();
+      mockSessionActions.sendPrompt
+        .mockResolvedValueOnce(undefined)
+        .mockReturnValueOnce(retrySend.promise)
+        .mockResolvedValueOnce(undefined);
+      const { container, rerender } = renderApp();
+      await flush();
+
+      testState.prompt = 'recover this stream';
+      await clickSubmit(container);
+      act(() => {
+        testState.blocks = [
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'turn-error-1',
+            promptId: 'prompt-1',
+          },
+        ];
+        rerender();
+      });
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+          ?.click();
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+      });
+      const retryOptions = mockSessionActions.sendPrompt.mock.calls[1]?.[1];
+
+      act(() => {
+        retryOptions?.onAdmissionStarted?.();
+        retryOptions?.onAdmitted?.();
+      });
+      await act(async () => {
+        retrySend.reject(
+          Object.assign(new Error('retried turn failed'), {
+            _daemonTurnError: true,
+          }),
+        );
+        await Promise.resolve();
+      });
+      expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+      act(() => {
+        testState.blocks = [
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'turn-error-1',
+            promptId: 'prompt-1',
+          },
+          {
+            kind: 'error',
+            source: 'turn_error',
+            id: 'turn-error-2',
+            promptId: nextPromptId,
+          },
+        ];
+        rerender();
+      });
+      await flush();
+
+      expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+      act(() => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+          ?.click();
+      });
+      await flush();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(3);
+      expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+        'recover this stream',
+        expect.objectContaining({ retry: true }),
+      );
+    },
+  );
+
+  it('restores a turn-error retry when resend fails before admission starts', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    act(() => {
+      testState.blocks = [
+        { kind: 'error', source: 'turn_error', id: 'turn-error-network' },
+      ];
+      rerender();
+    });
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new TypeError('network unavailable'),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+  });
+
+  it('keeps a turn-error retry visible through background notifications', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    act(() => {
+      testState.blocks = [
+        { kind: 'error', source: 'turn_error', id: 'turn-error-background' },
+        {
+          id: 'background-1',
+          kind: 'user',
+          text: 'Background task completed',
+          meta: { source: 'background_notification' },
+        },
+      ];
+      rerender();
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
   });
 
   it('preserves the turn-error retry while session writes are blocked', async () => {
@@ -16900,6 +17151,90 @@ describe('App prompt send failure retry', () => {
     );
   });
 
+  it('keeps a failed-prompt retry visible through background notifications', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user', text: 'hello' }];
+      return firstSend.promise;
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      testState.blocks = [
+        { id: 'u1', kind: 'user', text: 'hello' },
+        {
+          id: 'background-1',
+          kind: 'user',
+          text: 'Background task completed',
+          meta: { source: 'background_notification' },
+        },
+      ];
+      testState.messages = [
+        { id: 'u1', role: 'user', content: 'hello' },
+        {
+          id: 'background-1',
+          role: 'system',
+          content: 'Background task completed',
+          source: 'background_notification',
+        },
+      ];
+      rerender();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('u1');
+  });
+
+  it('keeps a failed-prompt retry when its optimistic block is cloned', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const optimisticUser = { id: 'u1', kind: 'user', text: 'hello' } as const;
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [optimisticUser];
+      return firstSend.promise;
+    });
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    act(() => {
+      testState.blocks = [{ ...optimisticUser, text: 'hello echoed' }];
+      testState.messages = [
+        { id: 'u1', role: 'user', content: 'hello echoed' },
+      ];
+      rerender();
+    });
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('u1');
+  });
+
   it('keeps a failed-prompt retry when its workspace becomes available', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     mockConnection.sessionId = 'session-late';
@@ -17686,6 +18021,80 @@ describe('App prompt send failure retry', () => {
       'hello',
       expect.objectContaining({ optimisticUserMessage: false }),
     );
+  });
+
+  it('restores a failed-prompt retry onto the replayed stable user record', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let approveRetry: (() => void) | undefined;
+    let admissionCount = 0;
+    const onSubmitBefore = vi.fn(() => {
+      admissionCount += 1;
+      if (admissionCount === 1) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        approveRetry = resolve;
+      });
+    });
+    const firstSend = deferred<void>();
+    const failedUser = {
+      id: 'user-2',
+      kind: 'user',
+      text: 'hello',
+      sourceRecordIds: ['record-failed'],
+    } as const;
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [failedUser];
+      return firstSend.promise;
+    });
+    const { container, rerender } = renderApp({ onSubmitBefore });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [{ id: 'user-2', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+    });
+    act(() => {
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.blocks = [];
+      testState.messages = [];
+      testState.ownerVersion += 1;
+      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+    });
+    await act(async () => {
+      approveRetry?.();
+      await Promise.resolve();
+    });
+    act(() => {
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.blocks = [
+        {
+          id: 'user-9',
+          kind: 'user',
+          text: 'rewritten display text',
+          sourceRecordIds: ['record-failed'],
+        },
+      ];
+      testState.messages = [
+        { id: 'user-9', role: 'user', content: 'rewritten display text' },
+      ];
+      testState.ownerVersion += 1;
+      rerender({ onSubmitBefore });
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('user-9');
   });
 
   it('drops a cancelled failed-prompt retry when its transcript anchor changes', async () => {

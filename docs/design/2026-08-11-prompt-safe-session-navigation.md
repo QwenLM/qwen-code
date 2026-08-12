@@ -21,6 +21,8 @@ closes at any point while admission or preparation is pending, the draft and
 retry state remain owned by the source composer even if navigation completes
 or fails before the continuation returns. A cancelled retry is consumed only
 after navigation settles and its source session becomes current again. A retry
+started later supersedes an older retry of the same kind even when their
+asynchronous admission callbacks settle out of order. A retry
 whose workspace is known may settle across an attachment replacement of the
 same logical session. A retry captured before its workspace is known may be
 restored only while the captured live owner remains current, or after that same
