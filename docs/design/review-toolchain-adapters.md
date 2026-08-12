@@ -215,8 +215,8 @@ Focused tests must prove:
 6. The serialized report shape remains unchanged.
 
 P1 adds the Maven oracle set, pinned by `lib/maven-toolchain.test.ts` plus
-the Maven branches of the `test-plan`, `base-tree`, `build-test`, and
-`agent-prompt` suites:
+the Maven branches of the `test-plan`, `base-tree`, `build-test`,
+`agent-prompt`, and `test-delta` suites:
 
 1. Selector safety: a directory name carrying `,`, `:`, `%`, or a leading
    `-`/`!` cannot reach a `-pl` selector and widens the run to the full
@@ -240,8 +240,9 @@ the Maven branches of the `test-plan`, `base-tree`, `build-test`, and
    input exception exists for them. Acquisition failures are infrastructure
    with the diff-inputs exceptions, never a finding.
 6. Downstream consumers: `base-tree` skips Maven bases before checkout,
-   `test-plan` settles Maven claims against recorded runs, and Agent 7's
-   brief carries the Maven branch.
+   `test-plan` settles Maven claims against recorded runs, Agent 7's
+   brief carries the Maven branch, and `test-delta` refuses Maven lifecycle
+   commands in the npm-only rerun grammar.
 
 Verification commands:
 
@@ -268,10 +269,13 @@ Fastjson2 and Druid establish these requirements:
   `./mvnw` without the executable bit (a `core.fileMode=false` checkout) also
   falls back to the system `mvn`, because running it would die with exit 126
   and turn the whole run into an infrastructure handoff that verifies
-  nothing. A checked-in wrapper that is empty (0 bytes) — or a directory
-  carrying the wrapper name — also falls back to the system `mvn` on both
-  platforms: it passes the existence and exec-bit gates, exits 0, and would
-  otherwise certify a build that never started. Druid's older wrapper depends
+  nothing. A checked-in wrapper that is empty (0 bytes) also falls back to
+  the system `mvn` on both platforms: it passes the existence and exec-bit
+  gates, exits 0, and would otherwise certify a build that never started. A
+  DIRECTORY carrying the wrapper name falls back for a different reason: it
+  passes the same gates but dies exit 126 on execution on POSIX, and cannot
+  execute at all on win32 (where the gate is a regular file with non-zero
+  size, not an exec bit). Druid's older wrapper depends
   on the process cwd and fails when invoked by absolute path from another
   repository. When no wrapper exists,
   use the system `mvn`.
@@ -413,9 +417,13 @@ Command results carry five optional classification flags consumed by
   records failures Maven did not fail on (a fail-never setting, or a
   skip-tests setting that suppressed the whole test phase), so a Test Plan
   claim must not be ruled reproduced against it.
-- `CommandResult.evidenceCapped`: part of the command's fresh report
-  evidence was never read (past the parse cap, rejected by the parser, or
-  unseen past a truncated sweep), so the adapter refused to certify the run
+- `CommandResult.evidenceCapped`: the adapter refused to certify the run
+  because part of its evidence was never read or cannot corroborate a pass
+  (fresh reports past the parse cap, reports rejected by the parser, reports
+  unseen past a truncated sweep, failure-evidence lines dropped by the
+  output trim's rescue cap, or a `-l`/`--log-file` setting in
+  `.mvn/maven.config` that redirects the whole build output away from the
+  stdout the failure scans read)
   and a Test Plan claim must not be settled against it. The flag is
   exit-code independent: on an exit-0 run it withholds a pass; on a
   non-zero exit the exit remains definitive.
@@ -423,10 +431,14 @@ Command results carry five optional classification flags consumed by
   phase (`Tests are skipped.`) — zero tests ran, so count claims must not
   adjudicate against the run and a contradiction is worded as suppression,
   not recorded failures.
-- `CommandResult.neverRan`: the command exited 0 but never started the
-  toolchain (no fresh reports and no toolchain output — a stub wrapper), so
-  the run verified nothing and a Test Plan claim must not be ruled
-  reproduced against it.
+- `CommandResult.neverRan`: the command exited 0 but cannot prove the
+  toolchain started. With an unmodified launcher that means no fresh reports
+  and no Maven-framed output (a stub wrapper); a wrapper the diff itself
+  modified always lands here, because it can print `[INFO]` lines and write
+  fresh reports itself — nothing about such a run's evidence proves a build
+  started. A `-q`/`--quiet` setting in `.mvn/maven.config` can also land a
+  real run here (it strips every framed line). Either way the run verified
+  nothing, and a Test Plan claim must not be ruled reproduced against it.
 
 Command results additionally carry `maven` — the lifecycle phase, `-pl`
 module set, and `-am` flag the adapter rendered the command from — so
@@ -434,7 +446,10 @@ module set, and `-am` flag the adapter rendered the command from — so
 parsing the command line back.
 
 Dependency/plugin resolution failures and unavailable wrapper/runtime are
-infrastructure outcomes, except when the diff changed the inputs that could
+infrastructure outcomes (the unlaunchable-wrapper guarantee on POSIX only —
+win32 wrapper-launch deaths remain attributed to the diff until the
+predicate gap noted in Risks is closed), except when the diff changed the
+inputs that could
 have caused them: dependency-input changes (POMs, `.mvn/**`, the settings or
 repository locations `.mvn/maven.config` references, and the wrapper file
 this platform executes) suppress the resolution carve-out, and a change to
@@ -448,8 +463,9 @@ launder a source failure into infrastructure. Timeout and spawn
 death are always infrastructure — no input exception exists for them — but
 when the interrupted run still produced fresh failing reports, those failures
 stay visible as test evidence, and when its captured output ALSO records
-source or goal failures a fail-never setting never exited on, the note
-discloses them — neither is framed as purely environmental. Compiler and
+Surefire `Tests run:` summaries with non-zero failures, or source or goal
+failures a fail-never/fail-at-end setting never exited on, the note
+discloses them — none is framed as purely environmental. Compiler and
 test failures remain deterministic build/test evidence, and a zero exit that
 Maven's own `[ERROR]`/`[FATAL]` framing contradicts (a fail-never setting)
 counts as a failure, not a pass.
@@ -565,6 +581,6 @@ None. P1 settled the report-schema widening it introduced (`toolchain`
 discriminant, `CommandResult.infrastructure`,
 `CommandResult.swallowedFailure`, `CommandResult.evidenceCapped`,
 `CommandResult.testsSuppressed`, `CommandResult.neverRan`,
-`CommandResult.maven`);
+`CommandResult.rescueOverflow`, `CommandResult.maven`);
 multi-toolchain aggregation remains a decision for the phase that introduces
 that behavior.

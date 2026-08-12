@@ -414,20 +414,22 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
   // modules, no root aggregator), settled by a depth-1 listing when the base
   // has no npm-applicable root package.json either. A husky-only manifest
   // leaves no consumable npm half, so it must not suppress the probe.
+  const mavenBaseNote =
+    `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
+    'commands — a base-side Maven build could not be consumed, so it was not run ' +
+    '(never a finding against the PR)';
+  // The root pom decides the gate alone; probing it FIRST spares every
+  // root-pom Maven base the npm workspace scan the second check pays.
+  if (gitHasPath(worktree, baseSha, 'pom.xml')) {
+    return unavailable(mavenBaseNote);
+  }
   const npmAtBase = (() => {
     if (!gitHasPath(worktree, baseSha, 'package.json')) return false;
     const blob = gitBlob(worktree, baseSha, 'package.json');
     return blob !== null && blobIsNpmProject(blob, worktree, baseSha);
   })();
-  if (
-    gitHasPath(worktree, baseSha, 'pom.xml') ||
-    (!npmAtBase && gitTreeHasNestedPom(worktree, baseSha))
-  ) {
-    return unavailable(
-      `the merge base is a Maven project, and this release's A/B attribution only reruns npm test ` +
-        'commands — a base-side Maven build could not be consumed, so it was not run ' +
-        '(never a finding against the PR)',
-    );
+  if (!npmAtBase && gitTreeHasNestedPom(worktree, baseSha)) {
+    return unavailable(mavenBaseNote);
   }
   // A real mutual-exclusion lock around sweep+add+build, not just the marker.
   // The reuse fast path covers the AFTER-build window; this covers the build

@@ -788,9 +788,30 @@ function stripOpaqueSections(xml: string): string | null {
           const interior = xml.slice(i + (comment ? 4 : 9), end);
           const interiorClose = /<\/\s*([A-Za-z0-9:_.-]+)/gi;
           let match: RegExpExecArray | null;
+          const interiorCloses = new Map<string, number>();
           while ((match = interiorClose.exec(interior)) !== null) {
             const name = match[1].toLowerCase();
             if ((openCounts.get(name) ?? 0) > 0) {
+              return null;
+            }
+            interiorCloses.set(name, (interiorCloses.get(name) ?? 0) + 1);
+          }
+          // The mirror probe: an interior OPEN of a verdict-bearing element
+          // whose close sits after the section straddles the boundary the
+          // other way — the section deletes the element's header and its
+          // failure body. Restricted to the names the parse reads: stray
+          // unclosed fragments of test output (a printed generic type, an
+          // HTML log) must not reject the report.
+          const interiorOpen =
+            /<(testsuite|testcase|failure|error)\b[^<>]*?(\/?)\s*>/gi;
+          const interiorOpens = new Map<string, number>();
+          while ((match = interiorOpen.exec(interior)) !== null) {
+            if (match[2] === '/') continue;
+            const name = match[1].toLowerCase();
+            interiorOpens.set(name, (interiorOpens.get(name) ?? 0) + 1);
+          }
+          for (const [name, opens] of interiorOpens) {
+            if (opens > (interiorCloses.get(name) ?? 0)) {
               return null;
             }
           }
@@ -998,6 +1019,17 @@ function projectDirOf(report: string): string {
   return dirname(dirname(dirname(report)));
 }
 
+/**
+ * Marker lines are mined line-by-line from `output` by the classifiers and
+ * by test-plan: a newline or control character in a PR-controlled report
+ * path or case name would split the marker and forge a second line inside
+ * the scanned output.
+ */
+function markerSafe(text: string): string {
+  // eslint-disable-next-line no-control-regex -- control chars are what gets stripped
+  return text.replace(/[\u0000-\u001f\u007f]/g, '_');
+}
+
 /** Evidence the run could not read: unparsed past the count cap, rejected by the parser, or unseen past a truncated sweep. */
 interface FreshEvidenceGaps {
   unparsed: number;
@@ -1054,7 +1086,7 @@ function appendTestSummaries(
     );
     return {
       line:
-        `[maven-test-report] ${project} (${group.length} report(s)): ` +
+        `[maven-test-report] ${markerSafe(project)} (${group.length} report(s)): ` +
         `tests=${clampedPassed}, failures=0, errors=0, skipped=0`,
       clampedPassed,
     };
@@ -1120,7 +1152,7 @@ function appendTestSummaries(
         0,
       );
       return (
-        `[maven-test-report] ${project} (${group.length} failing report(s)): ` +
+        `[maven-test-report] ${markerSafe(project)} (${group.length} failing report(s)): ` +
         `tests=${passed + failures}, failures=${failures}, errors=0, skipped=0`
       );
     },
@@ -1151,7 +1183,7 @@ function appendTestSummaries(
     for (const [project, group] of omittedProjects) {
       const failures = group.reduce((sum, item) => sum + failedCount(item), 0);
       reportLines.push(
-        `[maven-test-failure] ${project === '.' ? '' : `${project}/`}target/: ` +
+        `[maven-test-failure] ${project === '.' ? '' : `${markerSafe(project)}/`}target/: ` +
           `${failures} failure(s) past the ${MAX_FAILING_REPORT_LINES}-project rollup cap`,
       );
     }
@@ -1160,7 +1192,8 @@ function appendTestSummaries(
 
   const caseLines = failing.flatMap((summary) => {
     const cases = summary.failedCases.map(
-      (testcase) => `[maven-test-failure] ${summary.report}: ${testcase}`,
+      (testcase) =>
+        `[maven-test-failure] ${markerSafe(summary.report)}: ${markerSafe(testcase)}`,
     );
     // The invariant test-plan's guards key on: failures>0 ⇒ at least one
     // [maven-test-failure] line. A report whose <testsuite> header records
@@ -1169,7 +1202,7 @@ function appendTestSummaries(
     // vanish from the mined text.
     if (cases.length === 0 && summary.droppedCases === 0) {
       cases.push(
-        `[maven-test-failure] ${summary.report}: ${summary.failures} ` +
+        `[maven-test-failure] ${markerSafe(summary.report)}: ${summary.failures} ` +
           `failure(s), ${summary.errors} error(s) recorded without case detail`,
       );
     }
@@ -1624,7 +1657,18 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
     '-global-settings',
   ]);
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
+    let token = tokens[i];
+    // The config reader hands Maven one argument per line, and commons-cli
+    // pairs a value-less `-D` with the NEXT line exactly like the attached
+    // `-Dmaven.repo.local=…` spelling — join the pair so the property
+    // prefixes below see the same shape.
+    if (
+      (token === '-D' || token === '--define' || token === '-define') &&
+      tokens[i + 1] !== undefined
+    ) {
+      token = `-D${tokens[i + 1]}`;
+      i += 1;
+    }
     // Maven 3.9's chained local repositories: EVERY entry is a local-
     // repository location. The two prefixes are disjoint —
     // `-Dmaven.repo.local.tail=` diverges from `-Dmaven.repo.local=` at
@@ -1669,6 +1713,28 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
     if (path !== null) inputs.push(path);
   }
   return inputs;
+}
+
+/**
+ * The output before any executed test phase. Surefire marks test execution's
+ * start — the `T E S T S` banner and the per-class `[INFO] Running` lines —
+ * and a test's own stdout reaches the captured output only at or after them:
+ * wording the acquisition carve-out accepts as Maven's own (launch,
+ * dependency, disk) precedes them on every run where Maven itself printed it
+ * before the tests started.
+ */
+function preTestPhaseOutput(output: string): string {
+  const kept: string[] = [];
+  for (const line of output.split('\n')) {
+    if (
+      /^\[INFO\] Running /.test(line) ||
+      /^\[INFO\]\s+T E S T S\s*$/.test(line)
+    ) {
+      break;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
 }
 
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
@@ -1777,20 +1843,40 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // resolution failure may be the diff's own doing.
   const configTokens = mavenConfigTokens(args.root);
   const settingsInputs = mavenConfigDependencyInputs(args.root, configTokens);
-  // A repo-shipped, PR-writable `.mvn/maven.config` can carry `-q`/`--quiet`,
-  // which strips EVERY `[INFO]`/framed line the neverRan check below keys on:
-  // a quiet run that skipped its tests (or a module with none) exits 0 with
-  // zero bytes of output, indistinguishable there from a wrapper that never
-  // started. Detect it so the note names the real cause.
+  // A repo-shipped, PR-writable `.mvn/maven.config` can carry `-q`/`--quiet`
+  // (commons-cli accepts the single-dash long `-quiet` too), which strips
+  // EVERY `[INFO]`/framed line the neverRan check below keys on: a quiet run
+  // that skipped its tests (or a module with none) exits 0 with zero bytes of
+  // output, indistinguishable there from a wrapper that never started. Detect
+  // it so the note names the real cause.
   const quietConfig = configTokens.some(
-    (token) => token === '-q' || token === '--quiet',
+    (token) => token === '-q' || token === '--quiet' || token === '-quiet',
   );
   // fail-never is the ONE setting that lets framed `[ERROR]` failures
   // coexist with an exit-0 run, and `.mvn/maven.config` is the only place
   // this run inherits it (the adapter never adds it to the command line).
   // The swallowed-failure check below keys on this.
   const failNeverConfig = configTokens.some(
-    (token) => token === '-fn' || token === '--fail-never',
+    (token) =>
+      token === '-fn' || token === '--fail-never' || token === '-fail-never',
+  );
+  // `-l`/`--log-file` (the single-dash long `-log-file` included) redirects
+  // the ENTIRE build output into the named file: every stdout scan this
+  // verdict keys on reads an empty stream, while a green sibling report still
+  // blocks neverRan — the certified green-wash quietConfig and failNeverConfig
+  // exist to prevent. Refuse certification like capped evidence.
+  const logFileConfig = configTokens.some(
+    (token) =>
+      token === '-l' ||
+      token === '--log-file' ||
+      token === '-log-file' ||
+      token.startsWith('--log-file=') ||
+      token.startsWith('-log-file=') ||
+      (/^-l.+/.test(token) &&
+        !token.startsWith('-log-file') &&
+        // commons-cli matches the single-dash long spelling of
+        // `--legacy-local-repository` before the `-l` short option.
+        token !== '-legacy-local-repository'),
   );
   const dependencyInputsChanged = args.changedFiles.some((file) => {
     const path = normalizedChangedPath(args.root, file);
@@ -1981,13 +2067,6 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // compiling anything — so a standalone or profile-inactive project costs one
   // fast failure here instead of a second reactor model in this file.
   const rejected = SELECTOR_REJECTED_RE.exec(executed.output);
-  if (rejected) {
-    return unsupportedReport(
-      `Maven rejected the selected project(s) — ${rejected[1].trim()} — as not part of the active reactor. ` +
-        'They are standalone or profile-inactive under the current profiles and JDK, so this run verified ' +
-        'nothing and no other scope was guessed.',
-    );
-  }
   const fresh = before
     ? freshTestSummaries(args.root, before)
     : { summaries: [], unparsed: 0, rejected: 0, truncated: false };
@@ -2012,6 +2091,25 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`
   // exit 0 over failing tests, and the verdict must read the evidence.
   const freshFailures = hasFreshTestFailure(summaries);
+  // A selector rejection on an exit-0 run with green fresh reports is the
+  // forged-framing class: absent fail-never, Maven prints no `[ERROR]` over a
+  // successful run, so the match is test stdout and the passing run must not
+  // be discarded — the same gate every other exit-0 framing scan honors.
+  if (
+    rejected &&
+    !(
+      result.exitCode === 0 &&
+      summaries.length > 0 &&
+      !freshFailures &&
+      !failNeverConfig
+    )
+  ) {
+    return unsupportedReport(
+      `Maven rejected the selected project(s) — ${rejected[1].trim()} — as not part of the active reactor. ` +
+        'They are standalone or profile-inactive under the current profiles and JDK, so this run verified ' +
+        'nothing and no other scope was guessed.',
+    );
+  }
   // Reports past the evidence cap were never parsed, reports the parser
   // rejected were never read, and a truncated sweep never saw some reports
   // at all: the failure status of all three is UNKNOWN, and certifying a
@@ -2020,12 +2118,15 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // The trim's rescue cap dropping failure-evidence lines is the same
   // epistemic state as the fresh-report gaps: classification read an output
   // whose verdict-relevant lines may be gone — refuse to certify exactly
-  // like them.
+  // like them. A `-l`/`--log-file` setting in `.mvn/maven.config` is the
+  // same state from the other side: the scans read an output the setting
+  // redirected away.
   const evidenceCapped =
     fresh.unparsed > 0 ||
     fresh.rejected > 0 ||
     fresh.truncated ||
-    result.rescueOverflow === true;
+    result.rescueOverflow === true ||
+    logFileConfig;
   // A skip setting (`-DskipTests`/`-Dmaven.test.skip=true` in
   // `.mvn/maven.config`, or a POM `<skipTests>`) lets `mvn test` exit 0
   // having executed ZERO tests, and Surefire's skip path emits none of the
@@ -2053,14 +2154,17 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const neverRan =
     result.exitCode === 0 &&
     !result.timedOut &&
-    summaries.length === 0 &&
     !testsSuppressed &&
-    // Framed output proves Maven ran ONLY when the launcher is not the
-    // diff's own: a PR-modified wrapper is executed deliberately and can
-    // print `[INFO]` lines itself, so there it takes fresh reports — the
-    // one evidence a stub cannot fake into this result — to prove the
-    // build started.
-    (executedWrapperChanged || !hasMavenFramedLine(result.output));
+    // A PR-modified wrapper is a PR-controlled script executed with write
+    // access to the worktree: it can print `[INFO]` lines AND write fresh
+    // Surefire XML between the snapshot and the sweep, and the freshness
+    // filter accepts any writer during the run — nothing about the run's
+    // evidence can prove a build started, so refuse certification outright.
+    // With an unmodified launcher, zero fresh reports AND zero Maven-framed
+    // output still mean the build never started — "never ran", not
+    // "tested nothing".
+    (executedWrapperChanged ||
+      (summaries.length === 0 && !hasMavenFramedLine(result.output)));
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -2075,11 +2179,22 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // success otherwise), so absent that setting the whole-output framing
   // matches are test output, not Maven's own verdict — the same prelude
   // defense isLaunchFailure applies, extended to the remaining scans.
+  // The Surefire stdout summary scan is the deliberate exception: the
+  // relocated-failing-report shape it exists to catch carries no other
+  // signal, so it stays ungated (the exit-0 note arm words the cause
+  // accordingly).
   const framingUntrusted =
     result.exitCode === 0 &&
     summaries.length > 0 &&
     !freshFailures &&
     !failNeverConfig;
+  // A failing exit carries no exit-0 forgery premise — Maven DOES frame its
+  // own failures there — but test stdout echoes the same framing: the wording
+  // arms therefore read only the output before any test phase started, where
+  // Maven's own launch, dependency, and disk failures precede every test
+  // echo. Exit-0 scans keep the whole output.
+  const wordingOutput =
+    result.exitCode === 0 ? result.output : preTestPhaseOutput(result.output);
   const swallowedFailure =
     result.exitCode === 0 &&
     !result.timedOut &&
@@ -2087,10 +2202,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     (testsSuppressed ||
       stdoutTestFailures ||
       (!framingUntrusted &&
-        (isSourceFailure(result.output) ||
-          isDependencyFailure(result.output) ||
-          isLaunchFailure(result.output) ||
-          isGoalFailure(result.output))));
+        (isSourceFailure(wordingOutput) ||
+          isDependencyFailure(wordingOutput) ||
+          isLaunchFailure(wordingOutput) ||
+          isGoalFailure(wordingOutput))));
   const ok =
     result.exitCode === 0 &&
     !result.timedOut &&
@@ -2104,7 +2219,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const acquisitionFailure =
     !ok &&
     !freshFailures &&
-    !isSourceFailure(result.output) &&
+    !isSourceFailure(wordingOutput) &&
     // Executed failing tests record themselves in the stdout summaries even
     // when the sweep misses their XML: dependency-flavored assertion text
     // (`Connection refused`, `Unknown host`) otherwise matches the
@@ -2116,10 +2231,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // defense: with green fresh reports and no fail-never, framed wording is
     // forged test stdout, and an exit-0 acquisition finding off it would
     // launder the run.
-    ((((isLaunchFailure(result.output) &&
+    ((((isLaunchFailure(wordingOutput) &&
       !executedWrapperChanged &&
       !(executable === 'mvn' && platformWrapperChanged)) ||
-      (isDependencyFailure(result.output) && !dependencyInputsChanged)) &&
+      (isDependencyFailure(wordingOutput) && !dependencyInputsChanged)) &&
       !framingUntrusted) ||
       // Shape-classified, not wording-classified: bash/dash localize
       // these diagnostics under a non-English LANG, so the match keys on
@@ -2282,6 +2397,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         'the output trim dropped failure-evidence lines past its rescue cap',
       );
     }
+    if (logFileConfig) {
+      gapReasons.push(
+        '`.mvn/maven.config` redirects the build output to a log file (`-l`/`--log-file`), ' +
+          'so the stdout failure scans read nothing',
+      );
+    }
     report.note =
       `\`${result.command}\` exited 0, but ${gapReasons.join('; ')} — their ` +
       'failure status is unknown, so the run is not certified as a pass.' +
@@ -2295,25 +2416,32 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       '`<skipTests>`) suppressed the entire test phase, so nothing was tested. ' +
       'Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0 && neverRan) {
-    report.note =
-      `\`${result.command}\` exited 0 without starting Maven — no fresh reports` +
-      (executedWrapperChanged
-        ? ', and the wrapper this run executed is changed by the diff, so its own ' +
-          'output cannot prove a build ran'
-        : ' and no Maven output at all') +
-      ', so the build never ran and nothing was verified (an empty or ' +
-      'stub wrapper passes the launch gates and exits 0' +
-      (quietConfig
-        ? ', or a `-q`/`--quiet` setting in `.mvn/maven.config` suppressed every line ' +
-          'Maven prints, which also silences a run that skipped its tests'
-        : '') +
-      '). Treat this as an unverified run, not a pass.';
+    report.note = executedWrapperChanged
+      ? `\`${result.command}\` exited 0, but the wrapper it executed is changed ` +
+        'by the diff — a PR-modified wrapper can print Maven output and write fresh ' +
+        'Surefire/Failsafe reports itself, so ' +
+        (summaries.length > 0
+          ? 'neither its output nor its fresh reports prove a build ran'
+          : 'with no fresh reports, nothing proves a build ran') +
+        '. Treat this as an unverified run, not a pass.'
+      : `\`${result.command}\` exited 0 without starting Maven — no fresh reports` +
+        ' and no Maven output at all, so the build never ran and nothing was verified (an empty or ' +
+        'stub wrapper passes the launch gates and exits 0' +
+        (quietConfig
+          ? ', or a `-q`/`--quiet` (or single-dash `-quiet`) setting in `.mvn/maven.config` ' +
+            'suppressed every line Maven prints, which also silences a run that skipped its tests'
+          : '') +
+        '). Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0) {
-    report.note =
-      `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
-      'a fail-never or testFailureIgnore-style setting (e.g. `-fn`/`--fail-never` in ' +
-      '`.mvn/maven.config`, or surefire `testFailureIgnore`) is swallowing them. ' +
-      'Treat this as a failed run, not a pass.';
+    report.note = failNeverConfig
+      ? `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
+        'a fail-never setting (e.g. `-fn`/`--fail-never` in `.mvn/maven.config`) or a ' +
+        'testFailureIgnore-style surefire setting is swallowing them. ' +
+        'Treat this as a failed run, not a pass.'
+      : `\`${result.command}\` exited 0 but its output records test failures the exit code ` +
+        'did not fail on — a testFailureIgnore-style surefire setting is the usual cause, ' +
+        'though echoed test output prints the same lines. ' +
+        'Treat this as a failed run, not a pass.';
   } else if (!ok) {
     report.note =
       `\`${result.command}\` failed. Correlate compiler or test errors with the changed files; ` +

@@ -216,13 +216,15 @@ const MAVEN_RUNNER_SOURCE =
   '|(?:\\.{1,2}[/\\\\])+(?:mvn(?:\\.(?:cmd|exe))?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?|mvnw(?:\\.cmd)?)';
 
 /** Runners whose presence makes a backticked span a command, not prose.
- *  Case-insensitive: Windows authors type `MVNW test` and `mvnw.CMD test`
- *  (the filesystem is case-insensitive there), and a span the runner check
- *  rejects is a claim silently never extracted and never ruled. */
+ *  The legacy runners stay case-sensitive: the script adjudicators are, so
+ *  extracting capitalized prose spans (`Node 22`, `NPM RUN test:unit`) only
+ *  added claims that can never settle. The Maven alternation is matched
+ *  case-insensitively through MAVEN_RUNNER_RE: Windows authors type
+ *  `MVNW test` and `mvnw.CMD test` (the filesystem is case-insensitive
+ *  there), and a span the runner check rejects is a claim silently never
+ *  extracted and never ruled. */
 const RUNNER_RE = new RegExp(
-  '^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\\b' +
-    `|^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`,
-  'i',
+  '^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\\b',
 );
 
 const MAVEN_RUNNER_RE = new RegExp(`^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`, 'i');
@@ -373,7 +375,9 @@ export function extractClaims(section: string): Array<{
     // A unified diff pasted into the Test Plan (the template's Evidence
     // section invites it) is not a set of path claims about the tree.
     if (/^(?:diff --git|---|\+\+\+|@@)\s/.test(span)) continue;
-    if (RUNNER_RE.test(span)) push('command', span);
+    if (RUNNER_RE.test(span) || MAVEN_RUNNER_RE.test(span)) {
+      push('command', span);
+    }
     if (PATH_RE.test(span)) {
       // A bare Maven runner token (`./mvnw`) is a command, not a claim
       // about the tree, even though its spelling happens to match PATH_RE.
@@ -667,7 +671,29 @@ const MAVEN_PHASE_RE =
  * out-of-vocabulary work is refused separately by claimFinalWork.
  */
 const MAVEN_UNRUN_WORK_RE =
-  /^(?:deploy|site|pre-site|post-site|pre-clean|post-clean|prepare-package|pre-integration-test|integration-test|post-integration-test)$/;
+  /^(?:deploy|site|pre-site|post-site|pre-clean|post-clean|prepare-package|pre-integration-test|integration-test|post-integration-test|initialize|process-resources|process-classes|process-test-classes|generate-sources|process-sources|generate-resources|generate-test-sources|process-test-sources|generate-test-resources|process-test-resources)$/;
+
+/**
+ * Boolean flags that change no outcome the review measures — batch mode and
+ * transfer-progress suppression (the review's own command carries them),
+ * verbosity and error stack traces, and the version banner that does not
+ * stop the build (`-v`/`--version` DOES stop it and joins the zero-work
+ * guards). A claim carrying one settles exactly like the claim without it.
+ */
+const NEUTRAL_MAVEN_FLAGS = new Set([
+  '-B',
+  '--batch-mode',
+  '-ntp',
+  '--no-transfer-progress',
+  '-q',
+  '--quiet',
+  '-e',
+  '--errors',
+  '-X',
+  '--debug',
+  '-V',
+  '--show-version',
+]);
 
 /**
  * Flags whose space-separated form consumes the NEXT token as their value
@@ -739,6 +765,10 @@ const MAVEN_SINGLE_DASH_LONGS = new Set([
   'fail-at-end',
   'encrypt-master-password',
   'encrypt-password',
+  'batch-mode',
+  'help',
+  'version',
+  'show-version',
 ]);
 
 function normalizeMavenSingleDashLongTokens(tokens: string[]): string[] {
@@ -796,6 +826,34 @@ function mavenPositionalTokens(tokens: string[]): string[] {
     positional.push(token);
   }
   return positional;
+}
+
+/**
+ * True when a value flag's value is missing — the command ends on the flag
+ * itself (`mvn test -l`). Real Maven dies in argument parsing there
+ * (`MissingArgumentException`), zero lifecycle work runs, and the claim
+ * names a command that cannot execute.
+ */
+function mavenDanglingValueFlag(tokens: string[]): boolean {
+  for (let i = 0; i < tokens.length; i++) {
+    const token = unquoteToken(tokens[i]);
+    if (MAVEN_VALUE_FLAGS.has(token)) {
+      const next = tokens[i + 1];
+      if (next === undefined) return true;
+      i += 1;
+      i = skipQuotedTail(tokens, i, next);
+      continue;
+    }
+    const eq = token.indexOf('=');
+    if (
+      eq > 0 &&
+      token.startsWith('-') &&
+      MAVEN_VALUE_FLAGS.has(token.slice(0, eq))
+    ) {
+      i = skipQuotedTail(tokens, i, token.slice(eq + 1));
+    }
+  }
+  return false;
 }
 
 function mavenLifecycle(tokens: string[]): string | null {
@@ -924,11 +982,14 @@ function mavenPlModules(tokens: string[]): string[] | null {
     let value: string;
     if (quote !== null && raw.length > 1 && raw.endsWith(quote)) {
       value = raw.slice(1, -1);
-      // Undo shellQuotePath's `'\''` dance for dirs with an apostrophe.
-      if (quote === "'") value = value.replace(/'\\''/g, "'");
     } else {
       value = raw;
     }
+    // Undo shellQuotePath's `'\''` dance for dirs with an apostrophe. The
+    // claim pipeline strips one quote layer from every token before this
+    // walker runs, so the space-separated spelling arrives with the dance
+    // exposed and no surrounding quote left to detect — apply it regardless.
+    value = value.replace(/'\\''/g, "'");
     values.push(value);
   }
   if (values.length === 0) return null;
@@ -1005,7 +1066,7 @@ function rejoinQuotedTokens(tokens: string[]): string[] {
  * recognizes carries a JVM source path followed by a line/column.
  */
 const SOURCE_FAILURE_PATH_RE =
-  /(?:^|\s)((?:[A-Za-z]:)?\/[^\s:]+\.(?:java|kts?|scala|groovy))(?=:(?:\[|\s?\(|\s?\d))/;
+  /^\[(?:ERROR|FATAL)\] .*?((?:[A-Za-z]:)?\/.*?\.(?:java|kts?|scala|groovy))(?=:(?:\[|\s?\(|\s?\d))/;
 
 function sourceFailurePath(line: string): string | null {
   return SOURCE_FAILURE_PATH_RE.exec(line.replace(/\\/g, '/'))?.[1] ?? null;
@@ -1129,11 +1190,17 @@ function ruleCommand(
     // produce. The single-dash long spelling is normalized above.
     token === '-fn' ||
     token === '--fail-never' ||
-    // The password-encryption options perform zero lifecycle work: a claim
-    // carrying one cannot settle on a run that executed phases, and the
-    // attached/commons-cli separator-less spellings carry the same scope.
+    // The password-encryption options and the usage/version printers
+    // perform zero lifecycle work: a claim carrying one cannot settle on a
+    // run that executed phases, and the attached/commons-cli separator-less
+    // spellings carry the same scope. `-V`/`--show-version` deliberately
+    // stays neutral — it prints the version WITHOUT stopping the build.
     token.startsWith('-emp') ||
     token.startsWith('-ep') ||
+    token === '-h' ||
+    token === '--help' ||
+    token === '-v' ||
+    token === '--version' ||
     token === '--encrypt-master-password' ||
     token.startsWith('--encrypt-master-password=') ||
     token === '--encrypt-password' ||
@@ -1172,19 +1239,37 @@ function ruleCommand(
       MAVEN_UNRUN_WORK_RE.test(token) ||
       (!token.startsWith('-') && token.includes(':')),
   );
-  // Maven dies on 'Unknown lifecycle phase' for any OTHER bare positional
-  // (`mvn foo test` runs no work): the settlement invariant the comment
-  // above states for trailing and unrun work applies to mid-position junk
-  // too, or the claim settles `reproduces` over a command that errored out.
-  // Position 0 is the runner itself, which names no lifecycle work.
+  // Maven dies on 'Unknown lifecycle phase' for any bare positional outside
+  // its lifecycle vocabulary (the settlement phases plus the default-
+  // lifecycle phases MAVEN_UNRUN_WORK_RE models), and on 'Unable to parse
+  // command line options' for any option it does not have (`mvn foo test`
+  // and `mvn test --verbose` run no work): the settlement invariant the
+  // comment above states for trailing and unrun work applies to mid-position
+  // junk of BOTH kinds, or the claim settles `reproduces` over a command
+  // that errored out. Position 0 is the runner itself, which names no
+  // lifecycle work.
+  // A dash token real Maven accepts: a value flag (the space-separated form
+  // is consumed before the positionals; the attached spellings carry their
+  // value in-token), a boolean flag scopesNonPl or mavenHasAlsoMake models,
+  // or a neutral flag that changes no outcome the review measures.
+  const modeledMavenOption = (token: string): boolean =>
+    MAVEN_VALUE_FLAGS.has(token) ||
+    scopesNonPl(token) ||
+    token === '-am' ||
+    token === '--also-make' ||
+    NEUTRAL_MAVEN_FLAGS.has(token) ||
+    // The `-l` family's attached spelling (`-lbuild.log`): `-l` is the one
+    // value flag scopesNonPl leaves out on purpose, so its attached form
+    // would otherwise read as an unknown option.
+    (token.startsWith('-l') && token !== '-l');
   const unknownWork = positionalTokens
     .slice(1)
-    .some(
-      (token) =>
-        !token.startsWith('-') &&
-        !MAVEN_PHASE_RE.test(token) &&
-        !MAVEN_UNRUN_WORK_RE.test(token) &&
-        !token.includes(':'),
+    .some((token) =>
+      token.startsWith('-')
+        ? !modeledMavenOption(token)
+        : !MAVEN_PHASE_RE.test(token) &&
+          !MAVEN_UNRUN_WORK_RE.test(token) &&
+          !token.includes(':'),
     );
   const claimScopesItself = claimTokens.some(
     (token) =>
@@ -1203,6 +1288,11 @@ function ruleCommand(
   const claimFinalWork = positionalTokens
     .filter((token) => !token.startsWith('-'))
     .at(-1);
+  // A value flag missing its value (`mvn test -l`) dies in Maven's argument
+  // parsing before any lifecycle work — the claim settles nothing, exactly
+  // like unknown work.
+  const danglingValueFlag =
+    mavenClaim && mavenDanglingValueFlag(claimTokenList);
   const claimPlModules = mavenPlModules(claimTokenList);
   // A claim scoped by `-pl` ALONE can settle on a recorded run with the same
   // module set and final lifecycle — that is the SAME scope, and discarding
@@ -1226,12 +1316,14 @@ function ruleCommand(
     claimFinalWork === claimedLifecycle &&
     !claimScopesItself &&
     !unknownWork &&
+    !danglingValueFlag &&
     c.maven?.lifecycle === claimedLifecycle;
   const settledBySameScope = (c: CommandResult): boolean =>
     claimOnlyPlScoped &&
     claimedLifecycle !== null &&
     claimFinalWork === claimedLifecycle &&
     !unknownWork &&
+    !danglingValueFlag &&
     c.maven?.lifecycle === claimedLifecycle &&
     sameModuleSet(c.maven?.modules ?? null, claimPlModules);
   // A run this review itself classified as infrastructure (a timeout, a
@@ -1354,6 +1446,15 @@ function ruleCommand(
     const settledReduced = settledByLifecycle(c);
     const scoped =
       (settledReduced || settledBySameScope(c)) && c.maven?.modules != null;
+    // A claim without `-am` settling on an `-am` run: the recorded run
+    // resolved inter-module dependencies from the reactor while the claim's
+    // bare command resolves them from the local repository — the note must
+    // not read as if the exact command ran.
+    const alsoMakeAsymmetry =
+      scoped && c.maven?.alsoMake === true && !mavenHasAlsoMake(claimTokenList);
+    const asymmetry = alsoMakeAsymmetry
+      ? ', with the upstream closure (`-am`) the claim does not name'
+      : '';
     // A multi-phase claim (`clean test`) settles on its FINAL phase when
     // it carries no scoping of its own — the adapter only ever runs
     // `test` or `test-compile`, so the note must not read as if the
@@ -1363,9 +1464,9 @@ function ruleCommand(
     const howItRan =
       scoped && phaseReduced
         ? `this review ran a module-scoped form of its final phase (\`${claimedLifecycle}\`), ` +
-          `not the full \`${claimPhases.join(' ')}\` it claims`
+          `not the full \`${claimPhases.join(' ')}\` it claims${asymmetry}`
         : scoped
-          ? 'this review ran a module-scoped form of it'
+          ? `this review ran a module-scoped form of it${asymmetry}`
           : phaseReduced
             ? `this review ran its final phase (\`${claimedLifecycle}\`), ` +
               `not the full \`${claimPhases.join(' ')}\` it claims`
@@ -1409,6 +1510,10 @@ function ruleCommand(
       settledBySameScope(c) &&
       c.maven?.alsoMake === true &&
       !mavenHasAlsoMake(claimTokenList) &&
+      // An infrastructure run cannot contradict — the cascade's
+      // environmental arm is its only consumer — so the carve-out must not
+      // hide a capped one from that arm.
+      !c.infrastructure &&
       (finished(c) || c.evidenceCapped === true) &&
       ranFailed(c) &&
       // A wrapper that never started Maven and a global skip setting

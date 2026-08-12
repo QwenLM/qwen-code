@@ -121,9 +121,11 @@ export interface CommandResult {
    */
   testsSuppressed?: boolean;
   /**
-   * The command exited 0 but never started the toolchain at all — no fresh
-   * reports and no toolchain output (a stub wrapper): the run verified
-   * nothing, and `test-plan` must not rule a claim reproduced against it.
+   * The command exited 0 but cannot prove the toolchain started: with an
+   * unmodified launcher, no fresh reports and no toolchain output (a stub
+   * wrapper); a diff-modified launcher always lands here, because it can
+   * forge both. The run verified nothing, and `test-plan` must not rule a
+   * claim reproduced against it.
    */
   neverRan?: boolean;
   /**
@@ -332,7 +334,7 @@ export function trimOutput(s: string): {
   const omitted = middle.length;
   const dropped = matched.length - kept.length;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept${dropped > 0 ? ` — first ${RESCUE_MAX} matching lines only, ${dropped} more omitted` : ''}] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept${dropped > 0 ? ` — first ${RESCUE_MAX} matches kept, failure evidence before benign lines, ${dropped} more omitted` : ''}] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return {
     text: s.slice(0, headEnd) + marker + s.slice(tailStart),

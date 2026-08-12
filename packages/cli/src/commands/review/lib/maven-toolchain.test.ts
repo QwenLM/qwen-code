@@ -1329,6 +1329,11 @@ describe('maven toolchain adapter', () => {
 
       expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
       expect(report.note).toContain('wrapper change itself was not exercised');
+      // The fallback is a green run: keying neverRan's wrapper disjunct on
+      // ANY changed wrapper (instead of the executed one) would read it as
+      // never run and fail it.
+      expect(report.ok).toBe(true);
+      expect(report.test[0]?.neverRan).toBeUndefined();
     },
   );
 
@@ -1513,6 +1518,8 @@ describe('maven toolchain adapter', () => {
     // A fail-never setting (-fn/--fail-never) makes Maven exit 0 over a
     // compilation failure; no Surefire XML exists for freshFailures to see.
     writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-fn\n');
 
     const report = runAdapter(['core/src/Main.java'], {
       exec: (command) =>
@@ -1557,6 +1564,8 @@ describe('maven toolchain adapter', () => {
     // inputs changed, the swallowed failure stays a failed run — not green,
     // and not laundered into an environmental result.
     writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-fn\n');
 
     const report = runAdapter(['core/pom.xml'], {
       exec: (command) =>
@@ -2435,6 +2444,8 @@ describe('maven toolchain adapter', () => {
     // compile/dependency/launch classes were recognized before: a
     // checkstyle goal failure read green.
     writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-fn\n');
     const report = runAdapter(['core/src/Main.java'], {
       exec: (command) =>
         result(command, {
@@ -2659,6 +2670,8 @@ describe('maven toolchain adapter', () => {
     // must happen before classification — colored bytes once laundered a
     // failed compile under fail-never into a green verdict.
     writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-fn\n');
     const report = runAdapter(['core/src/Main.java'], {
       exec: (command) =>
         result(command, {
@@ -2920,7 +2933,7 @@ describe('maven toolchain adapter', () => {
       expect(report.ok).toBe(false);
       expect(report.test[0]?.swallowedFailure).toBe(true);
       expect(report.test[0]?.infrastructure).toBeUndefined();
-      expect(report.note).toContain('fail-never or testFailureIgnore');
+      expect(report.note).toContain('testFailureIgnore');
     }
   });
 
@@ -3292,6 +3305,263 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.neverRan).toBe(true);
     expect(report.note).toContain('changed by the diff');
   });
+
+  it('reads a PR-modified wrapper writing fresh reports as never run', () => {
+    // Fresh reports are the evidence the stub twin demands — but a
+    // PR-modified wrapper runs with write access to the worktree and can
+    // write them itself between the snapshot and the sweep, and the
+    // freshness filter accepts any writer during the run. Nothing about
+    // the run's evidence can prove a build started there.
+    writeReactor();
+    writeExecutedWrapper();
+
+    const report = runAdapter([executedWrapperName, 'core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output: '[INFO] BUILD SUCCESS',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.neverRan).toBe(true);
+    expect(report.note).toContain('changed by the diff');
+    expect(report.note).toContain('fresh reports');
+    expect(report.note).not.toContain('Maven test passed');
+  });
+
+  it('detects single-dash long fail-never and quiet spellings in maven.config', () => {
+    // commons-cli accepts `-fail-never`/`-quiet` exactly like the `--`
+    // twins; missing them silently disarmed the exit-0 green-wash defense
+    // for a spelling the PR-writable config can carry.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-fail-never\n');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check on project core: boom',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+    expect(report.note).toContain('fail-never');
+  });
+
+  it('refuses certification when maven.config redirects output to a log file', () => {
+    // `-l`/`--log-file` sends the ENTIRE build output to the named file:
+    // every stdout failure scan reads nothing while a green sibling report
+    // still blocks neverRan — the certified green-wash the quiet and
+    // fail-never detectors exist to prevent.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-l\nbuild.log\n');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output: '[INFO] BUILD SUCCESS',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
+    expect(report.note).toContain('log file');
+    expect(report.note).not.toContain('Maven test passed');
+  });
+
+  it('does not read test-stdout infrastructure wording at a failing exit as environmental', () => {
+    // On a failing exit Maven frames its own errors, so the exit-0
+    // forgery premise cannot apply — but test stdout echoes the same
+    // framing once tests run. Wording after the first test-phase marker is
+    // an echo: the carve-out reads only the output before the tests
+    // started.
+    writeReactor();
+
+    const forged = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[INFO] Running com.example.EchoTest\n' +
+            '[ERROR] simulated ENOSPC: No space left on device',
+        }),
+    });
+    expect(forged.test[0]?.infrastructure).toBeUndefined();
+    expect(forged.note).toContain('Correlate compiler or test errors');
+
+    // The same wording BEFORE any test phase is Maven's own.
+    const genuine = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output: '[ERROR] simulated ENOSPC: No space left on device',
+        }),
+    });
+    expect(genuine.test[0]?.infrastructure).toBe(true);
+    expect(genuine.note).toContain('infrastructure evidence');
+  });
+
+  it('does not discard a green run on a forged selector rejection', () => {
+    // Exit-0 + green fresh reports + no fail-never: Maven prints no
+    // `[ERROR]`, so a framed selector-rejection line is test stdout — the
+    // passing run must survive exactly like every other exit-0 framing
+    // scan.
+    writeProject('.', ['core']);
+    writeProject('core');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Could not find the selected project in the reactor: core',
+        });
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(true);
+    expect(report.note).toContain('Maven test passed');
+  });
+
+  it('rejects a section that opens a verdict element it does not close', () => {
+    // The mirror of the swallowing shape: an interior OPEN whose close
+    // sits after the section erases the element's header and failure body
+    // without rejection.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="T" name="fails"><!-- <failure> --></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 1, output: '[INFO] BUILD FAILURE' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
+  });
+
+  it('keeps stray unclosed fragments of other names out of the mirror probe', () => {
+    // Test output wrapped in CDATA routinely carries unclosed markup
+    // fragments (a printed generic type, an HTML log); only the names the
+    // parse reads may reject the report.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="T" name="fails"><failure>boom <![CDATA[ <div> ]]></failure></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 1, output: '[INFO] BUILD FAILURE' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+  });
+
+  it('treats detached -D maven.repo.local spellings in maven.config as dependency inputs', () => {
+    // The config reader hands Maven one argument per line; commons-cli
+    // pairs a value-less `-D` with the next line exactly like the attached
+    // `-Dmaven.repo.local=…` spelling.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    mkdirSync(join(root, 'custom-repo'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-D\nmaven.repo.local=custom-repo\n',
+    );
+
+    const report = runAdapter(['custom-repo/org/example/lib.jar'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'sanitizes control characters out of marker line names',
+    () => {
+      // A report path is PR-controlled text: a newline in a directory name
+      // split the appended marker and forged a second line inside the
+      // classified output (win32 forbids control chars in names, so the
+      // vector is POSIX-only).
+      writeReactor();
+      const forgedName =
+        'evil\n[ERROR] Could not resolve dependencies for project example:core:jar:1';
+
+      const report = runAdapter(['core/src/Main.java'], {
+        exec: (command) => {
+          const dir = join(root, forgedName, 'target', 'surefire-reports');
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(
+            join(dir, 'TEST-Evil.xml'),
+            '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+          );
+          return result(command, {
+            exitCode: 1,
+            output:
+              '[ERROR] Failed to execute goal org.example:plugin:1:check on project core: boom',
+          });
+        },
+      });
+
+      // The forged `[ERROR]` line never lands in the classified output: no
+      // infrastructure classification off it, and the marker carries the
+      // sanitized single-line name.
+      expect(report.test[0]?.infrastructure).toBeUndefined();
+      const output = report.test[0]?.output ?? '';
+      expect(output).not.toContain('\n[ERROR] Could not resolve dependencies');
+      expect(output).toContain('evil_[ERROR] Could not resolve dependencies');
+    },
+  );
 
   it('treats single-dash long settings spellings in maven.config as dependency inputs', () => {
     // commons-cli accepts `-settings <path>` exactly like `--settings`;

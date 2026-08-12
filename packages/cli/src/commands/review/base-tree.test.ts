@@ -407,14 +407,24 @@ describe('runBaseTree', () => {
     // `packages/**` scopes nothing the npm adapter can model (applies()
     // declines it); suppressing the nested-pom probe for the blob would make
     // a standalone-module Maven base pay the cold checkout this gate exists
-    // to prevent.
+    // to prevent. The fixture pairs the unmodeled glob with a modeled one
+    // resolving a real package: dropping the conjunct then makes the blob
+    // npm-applicable and this test red.
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
     mkdirSync(join(repo, 'app'), { recursive: true });
-    writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'app', 'package.json'),
+      JSON.stringify({
+        name: 'app',
+        scripts: { build: 'tsc', test: 'vitest' },
+      }),
+    );
     writeFileSync(
       join(repo, 'package.json'),
-      JSON.stringify({ workspaces: ['packages/**'] }),
+      JSON.stringify({ workspaces: ['packages/**', 'app'] }),
     );
-    git(repo, 'add', 'app', 'package.json');
+    git(repo, 'add', 'java', 'app', 'package.json');
     git(repo, 'commit', '-qam', 'unmodeled glob + nested maven');
     const sha = git(repo, 'rev-parse', 'HEAD');
 

@@ -513,6 +513,10 @@ describe('runTestDelta', () => {
     // of throwing out of the whole call.
     expect(r.entries).toHaveLength(1);
     expect(r.entries[0].base.timedOut).toBe(false);
+    // The base output is the trim's TEXT — a plain string, never the
+    // `{text, evidenceDropped}` shape trimOutput returns. Losing the
+    // `.text` adaptation would serialize a nested object into the report.
+    expect(typeof r.entries[0].base.output).toBe('string');
   });
 
   it('hands spawnSync an integral, positive timeout for a fractional budget', () => {

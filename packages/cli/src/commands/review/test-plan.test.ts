@@ -124,6 +124,16 @@ describe('extractTestPlanSection', () => {
 });
 
 describe('extractClaims', () => {
+  it('keeps capitalized legacy-runner prose out of the command claims', () => {
+    // Case-insensitivity is granted to the Maven alternation alone
+    // (`MVNW test`): the script adjudicators stay case-sensitive, so
+    // capitalized legacy-runner spans would only add claims that can never
+    // settle.
+    expect(extractClaims('Needs `Node.js`; run `NPM RUN test:unit`')).toEqual(
+      [],
+    );
+  });
+
   it('picks commands and paths out of code spans', () => {
     const claims = extractClaims(
       'Ran `npm run build` and `npm test --workspace=packages/cli`.\nAdded `packages/cli/src/a.test.ts`.',
@@ -2954,6 +2964,160 @@ describe('runTestPlan', () => {
       const consumed = run('## Test Plan\n\nRan `mvn verify -l test`', [], bt);
       expect(verdictOf(consumed.claims, 'mvn verify -l test')).toBe(
         'unchecked',
+      );
+    });
+
+    it('does not settle a claim ending on a value flag missing its value', () => {
+      // Real Maven dies in argument parsing on the dangling form
+      // (`MissingArgumentException`) and runs zero lifecycle work — the
+      // claim names a command that cannot execute. `-l` is the one value
+      // flag whose presence does not scope, so its dangling spelling
+      // slipped through every settlement gate.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      for (const claim of [
+        'mvn test -l',
+        'mvn test --log-file',
+        'mvn test -log-file',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${claim}\``, [], bt);
+        expect(verdictOf(r.claims, claim)).toBe('unchecked');
+      }
+      // The valued form still settles — only the missing value blocks.
+      const valued = run('## Test Plan\n\nRan `mvn test -l build.log`', [], bt);
+      expect(verdictOf(valued.claims, 'mvn test -l build.log')).toBe(
+        'reproduces',
+      );
+    });
+
+    it('does not settle a claim carrying an option Maven rejects', () => {
+      // Maven dies on 'Unable to parse command line options' for an option
+      // it does not have — zero lifecycle work runs, exactly like an
+      // unknown bare positional — so the claim must not settle.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test --verbose`', [], bt);
+      expect(verdictOf(r.claims, './mvnw test --verbose')).toBe('unchecked');
+      // A modeled neutral flag still settles.
+      const modeled = run('## Test Plan\n\nRan `./mvnw -B test`', [], bt);
+      expect(verdictOf(modeled.claims, './mvnw -B test')).toBe('reproduces');
+    });
+
+    it('does not settle claims carrying the zero-work usage or version options', () => {
+      // Real Maven prints usage/version and exits 0 with zero lifecycle
+      // work for them — certifying one would read a command that built and
+      // tested nothing as run-and-passed. `-V` deliberately stays neutral:
+      // it prints the version WITHOUT stopping the build.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      for (const flag of ['-h', '--help', '-v', '--version', '-help']) {
+        const r = run(`## Test Plan\n\nRan \`mvn ${flag} test\``, [], bt);
+        expect(verdictOf(r.claims, `mvn ${flag} test`)).toBe('unchecked');
+      }
+      const show = run('## Test Plan\n\nRan `mvn -V test`', [], bt);
+      expect(verdictOf(show.claims, 'mvn -V test')).toBe('reproduces');
+    });
+
+    it('settles default-lifecycle phase claims with the reduction disclosed', () => {
+      // Maven accepts every default-lifecycle phase as a bare positional;
+      // the review never runs them explicitly, so the claim settles on its
+      // final phase with the reduction disclosed instead of reading
+      // unchecked over work the recorded run DID execute.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `mvn generate-sources test`', [], bt);
+      const claim = r.claims.find(
+        (c) => c.text === 'mvn generate-sources test',
+      );
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain('final phase (`test`)');
+    });
+
+    it('discloses the -am asymmetry when a -pl claim settles on an -am run', () => {
+      // The recorded run resolved inter-module dependencies from the
+      // reactor; the claim's bare command resolves them from the local
+      // repository — the note must not read as if the exact command ran.
+      const bt = {
+        build: [],
+        test: [mavenCmd()],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw -pl core test');
+      expect(claim?.verdict).toBe('reproduces');
+      expect(claim?.note).toContain(
+        'with the upstream closure (`-am`) the claim does not name',
+      );
+    });
+
+    it('words a capped infrastructure -am run as environmental', () => {
+      // An infrastructure run cannot contradict — the cascade's
+      // environmental arm is its only consumer — so the `-am` carve-out
+      // must not hide a capped one from that arm and force the false
+      // "different scope or phase" note.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ infrastructure: true, evidenceCapped: true })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw -pl core test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('environmental reasons');
+    });
+
+    it('settles an apostrophe module dir spelled with the quoting dance', () => {
+      // shellSelector wraps `it's dir` as `'it'\''s dir'`; the claim
+      // pipeline strips one quote layer before mavenPlModules runs, so the
+      // space-separated spelling arrives with the dance exposed and no
+      // outer quote left to detect — the undo must apply regardless, or
+      // the claim can never settle or be contradicted.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: ["it's dir"], alsoMake: false })],
+      } as unknown as BuildTestReport;
+      const r = run(
+        "## Test Plan\n\nRan `./mvnw -pl 'it'\\''s dir' test`",
+        [],
+        bt,
+      );
+      expect(verdictOf(r.claims, "./mvnw -pl 'it'\\''s dir' test")).toBe(
+        'reproduces',
+      );
+    });
+
+    it('attributes a compiler failure through a source path with a space', () => {
+      // A module dir can carry a space, and the compiler-error path it
+      // emits does too: the path capture must not stop at the space, or
+      // the `-am` carve-out keeps discarding a run that failed inside the
+      // claim and reads it unchecked.
+      mkdirSync(join(dir, 'my module'), { recursive: true });
+      writeFileSync(join(dir, 'my module', 'pom.xml'), '<project/>');
+      const wt = dir.replace(/\\/g, '/');
+
+      const bt = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['my module'],
+            exitCode: 1,
+            output: `[ERROR] ${wt}/my module/src/Foo.java:[10,5] cannot find symbol`,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run(
+        "## Test Plan\n\nRan `./mvnw -pl 'my module' test`",
+        [],
+        bt,
+      );
+      expect(verdictOf(r.claims, "./mvnw -pl 'my module' test")).toBe(
+        'contradicted',
       );
     });
 

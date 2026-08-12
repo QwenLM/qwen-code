@@ -5,7 +5,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  chmodSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -419,10 +425,21 @@ describe('runBuildTest', () => {
   it('selects Maven when the npm half uses unmodeled workspace globs', () => {
     // The guard exists for exactly this root: npm cannot scope `packages/**`,
     // and applying anyway would block Maven selection into the same
-    // unsupported handoff this test's sibling pins.
+    // unsupported handoff this test's sibling pins. The fixture pairs the
+    // unmodeled glob with a modeled one resolving a real package: dropping
+    // the guard's conjunct then makes npm applicable and flips selection
+    // to the ambiguous handoff, turning this test red.
     writeFileSync(
       join(root, 'package.json'),
-      JSON.stringify({ name: 'frontend', workspaces: ['packages/**'] }),
+      JSON.stringify({
+        name: 'frontend',
+        workspaces: ['packages/**', 'apps/*'],
+      }),
+    );
+    mkdirSync(join(root, 'apps/a'), { recursive: true });
+    writeFileSync(
+      join(root, 'apps/a/package.json'),
+      JSON.stringify({ name: 'a', scripts: { build: 'tsc', test: 'vitest' } }),
     );
     writeFileSync(join(root, 'pom.xml'), '<project/>');
     writePlan(['src/Main.java']);
@@ -444,6 +461,56 @@ describe('runBuildTest', () => {
     expect(runSpy).toHaveBeenCalledOnce();
     runSpy.mockRestore();
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'records rescueOverflow from the real executor end to end',
+    () => {
+      // Both halves of the rescue-overflow contract are otherwise pinned
+      // through seams that bypass the real-executor wiring: direct
+      // trimOutput tests and fixture execs injecting rescueOverflow. This
+      // drives runBuildTest's OWN run executor (no injected exec) with
+      // output carrying >40 evidence lines in the omitted middle, so
+      // deleting the wiring ships red.
+      writeFileSync(join(root, 'pom.xml'), '<project/>');
+      writeFileSync(
+        join(root, 'mvnw'),
+        [
+          '#!/bin/sh',
+          'i=0',
+          'while [ $i -lt 40 ]; do',
+          '  echo "[INFO] padding line $i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"',
+          '  i=$((i+1))',
+          'done',
+          'i=0',
+          'while [ $i -lt 60 ]; do',
+          '  echo "[ERROR] Failed to execute goal org.example:plugin:1:check (check) on project m$i: boom"',
+          '  i=$((i+1))',
+          'done',
+          'i=0',
+          'while [ $i -lt 120 ]; do',
+          '  echo "[INFO] tail padding line $i yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"',
+          '  i=$((i+1))',
+          'done',
+          'exit 1',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(root, 'mvnw'), 0o755);
+      writePlan(['src/Main.java']);
+
+      const report = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 30,
+        install: false,
+      });
+
+      expect(report.toolchain).toBe('maven');
+      expect(report.ok).toBe(false);
+      expect(report.test[0]?.rescueOverflow).toBe(true);
+      expect(report.test[0]?.evidenceCapped).toBe(true);
+    },
+  );
 
   it('selects Maven when the npm glob matches zero packages', () => {
     writeFileSync(
@@ -1115,7 +1182,7 @@ describe('runBuildTest', () => {
       't'.repeat(6500);
     const trimmed = trimOutput(input).text;
     expect(trimmed).toContain(
-      'runner summaries kept — first 40 matching lines only, 10 more omitted',
+      'runner summaries kept — first 40 matches kept, failure evidence before benign lines, 10 more omitted',
     );
   });
 
@@ -1174,7 +1241,7 @@ describe('runBuildTest', () => {
     const trimmed = trimOutput(input);
     expect(trimmed.evidenceDropped).toBe(true);
     expect(trimmed.text).toContain(
-      'first 40 matching lines only, 5 more omitted',
+      'first 40 matches kept, failure evidence before benign lines, 5 more omitted',
     );
   });
 
