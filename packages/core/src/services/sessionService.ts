@@ -21,6 +21,7 @@ import type {
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import {
@@ -863,8 +864,7 @@ export class SessionService {
       if ('text' in part) {
         const textPart = part as { text: string };
         const text = textPart.text;
-        // Truncate long prompts for display
-        return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+        return this.truncatePromptForDisplay(text);
       }
     }
     return '';
@@ -876,11 +876,34 @@ export class SessionService {
    */
   private extractFirstPromptFromRecords(records: ChatRecord[]): string {
     for (const record of records) {
-      if (record.type !== 'user') continue;
+      if (record.type !== 'user' || record.subtype !== undefined) continue;
+      const payload = record.systemPayload as
+        | UserPromptRecordPayload
+        | undefined;
+      if (payload?.displayText !== undefined) {
+        const displayText = payload.displayText;
+        if (displayText) {
+          return this.truncatePromptForDisplay(displayText);
+        }
+        continue;
+      }
       const prompt = this.extractPromptText(record.message);
-      if (prompt) return prompt;
+      if (prompt) {
+        return prompt;
+      }
     }
     return '';
+  }
+
+  private truncatePromptForDisplay(text: string): string {
+    const codePoints: string[] = [];
+    for (const codePoint of text) {
+      if (codePoints.length === 200) {
+        return `${codePoints.join('')}...`;
+      }
+      codePoints.push(codePoint);
+    }
+    return text;
   }
 
   /**

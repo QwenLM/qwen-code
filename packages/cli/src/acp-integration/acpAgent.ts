@@ -334,6 +334,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   DAEMON_MODEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
@@ -4676,9 +4677,20 @@ class QwenAgent implements Agent {
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
+    const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    // The user-facing display projection is caller-controlled metadata; honor
+    // it only for trusted parents (the daemon bridge re-injects the trusted
+    // channel-worker value here). A plain delete would drop that re-injection.
+    if (
+      this.privateParentState === 'trusted' &&
+      typeof suppliedPromptDisplayText === 'string'
+    ) {
+      meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
     } else {
