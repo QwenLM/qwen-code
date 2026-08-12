@@ -192,6 +192,7 @@ interface ServeArgs {
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
   'initialize-timeout-ms'?: number;
+  'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
@@ -271,7 +272,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: MEMORY_PROJECT_SCOPES,
         description:
           'Choose how project memory is partitioned. ' +
-          '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +
+          'Defaults to "workspace" so each daemon workspace stays isolated; "git-root" preserves the legacy shared scope. ' +
           'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
       })
       .option('max-connections', {
@@ -398,17 +399,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         default: DEFAULT_MAX_JOURNAL_EVENTS,
         description:
-          'Per-session cap on raw events retained in the in-flight live ' +
-          'journal (current unfinished turn). When exceeded, the oldest ' +
-          'entries are dropped. Must be a positive safe integer.',
+          'Per-session cap on replay entries retained in the in-flight live ' +
+          'journal (current unfinished turn). Compatible text/thought chunks ' +
+          'share bounded entries. When exceeded, the oldest entries are ' +
+          'dropped. Must be a positive safe integer.',
       })
       .option('max-journal-bytes', {
         type: 'number',
         default: DEFAULT_MAX_JOURNAL_BYTES,
         description:
-          'Per-session byte cap on the in-flight live journal. When ' +
-          'exceeded, the oldest entries are dropped (at least one is ' +
-          'always kept). Must be a positive safe integer.',
+          'Per-session source-event byte cap on the in-flight live journal. ' +
+          'When exceeded, the oldest entries are dropped whole (at least ' +
+          'one is always kept), so the retained tail can be much smaller ' +
+          'than the cap. Must be a positive safe integer.',
       })
       .option('http-bridge', {
         type: 'boolean',
@@ -513,6 +516,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'ACP child request timeout, including the initialize handshake (ms). ' +
           'Default: 10000 (10 s).',
+      })
+      .option('session-restore-timeout-ms', {
+        type: 'number',
+        description:
+          'ACP session load/resume timeout (ms). Default: 60000. An explicit ' +
+          '--initialize-timeout-ms can raise (but never lower) this default.',
       })
       .option('session-reap-interval-ms', {
         type: 'number',
@@ -830,6 +839,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['initialize-timeout-ms'] !== undefined
           ? { initializeTimeoutMs: argv['initialize-timeout-ms'] }
+          : {}),
+        ...(argv['session-restore-timeout-ms'] !== undefined
+          ? {
+              sessionRestoreTimeoutMs: argv['session-restore-timeout-ms'],
+            }
           : {}),
         ...(argv['session-reap-interval-ms'] !== undefined
           ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }

@@ -234,6 +234,31 @@ describe('parseInstallSource', () => {
       expect(result.type).toBe('git');
       expect(result.pluginName).toBe('my-plugin');
     });
+
+    it('parses a digit-leading direct-root alias without mistaking it for a port', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'git@github.com:owner/repo.git:2048-game',
+        { pluginSourceKind: 'extension-root' },
+      );
+
+      expect(result.source).toBe('git@github.com:owner/repo.git');
+      expect(result.pluginName).toBe('2048-game');
+      expect(result.pluginSourceKind).toBe('extension-root');
+    });
+
+    it('parses a digit-leading sso direct-root alias', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('sso://team/repo:2048-game', {
+        pluginSourceKind: 'extension-root',
+      });
+
+      expect(result.source).toBe('sso://team/repo');
+      expect(result.pluginName).toBe('2048-game');
+      expect(result.pluginSourceKind).toBe('extension-root');
+    });
   });
 
   describe('local path parsing', () => {

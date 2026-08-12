@@ -59,6 +59,8 @@ import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
+  MAX_SESSION_RESTORE_TIMEOUT_MS,
+  resolveSessionRestoreTimeoutMs,
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import {
@@ -87,7 +89,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
-import { createHealthDemoRoutes } from './routes/health-demo.js';
+import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
@@ -291,6 +293,7 @@ export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
   listWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 export type {
@@ -617,6 +620,7 @@ export interface ServeAppDeps {
 // Mirrors the bridge's session-idle reaper default (30 min). Used only to
 // size the scheduled-task keepalive interval when no explicit timeout is set.
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
+const SCHEDULED_TASK_RESTORE_HEADROOM_MS = 10_000;
 // Bounds for the keepalive interval: ≥30s (avoid busy-looping on a tiny custom
 // timeout) and ≤10min (stay well inside the 30-min default reaper window).
 const KEEPALIVE_MIN_INTERVAL_MS = 30_000;
@@ -675,6 +679,14 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  // The scheduled-task helpers retain an outer watchdog for injected bridges.
+  // A value above the timer ceiling is their explicit no-watchdog sentinel.
+  const scheduledTaskRestoreTimeoutMs =
+    sessionRestoreTimeoutMs + SCHEDULED_TASK_RESTORE_HEADROOM_MS >
+    MAX_SESSION_RESTORE_TIMEOUT_MS
+      ? MAX_SESSION_RESTORE_TIMEOUT_MS + 1
+      : sessionRestoreTimeoutMs + SCHEDULED_TASK_RESTORE_HEADROOM_MS;
   if (deps.workspaceRuntimeRemoval && !deps.voiceCoordinator) {
     throw new Error(
       'createServeApp: deps.workspaceRuntimeRemoval requires the matching deps.voiceCoordinator.',
@@ -987,6 +999,7 @@ export function createServeApp(
       maxJournalEvents: opts.maxJournalEvents,
       maxJournalBytes: opts.maxJournalBytes,
       initializeTimeoutMs: opts.initializeTimeoutMs,
+      sessionRestoreTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -994,9 +1007,12 @@ export function createServeApp(
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
       delegateReadTextFileToClient: false,
-      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Final ACP text writes remain delegated. Workspace writes use WFS;
+      // marked same-host tool writes may use the factory's host writer.
       // Unexpected delegated reads still fail closed at the WFS boundary.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+        allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+      }),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -1589,15 +1605,14 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
-  const healthDemoRoutes = createHealthDemoRoutes({
+  const healthRoutes = createHealthRoutes({
     opts,
-    getPort,
     workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
-  if (healthDemoRoutes.exposeHealthPreAuth) {
-    healthDemoRoutes.register(app);
+  if (healthRoutes.exposeHealthPreAuth) {
+    healthRoutes.register(app);
   }
 
   installAccessLogMiddleware(app, daemonLog);
@@ -1686,13 +1701,12 @@ export function createServeApp(
     app.use(rateLimiter.middleware);
   }
 
-  if (!healthDemoRoutes.exposeHealthPreAuth) {
+  if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
-    // the token. Otherwise unauthenticated callers can ping any
-    // reachable address:port to confirm a daemon exists (and `/demo`
-    // leaks the full API surface).
-    healthDemoRoutes.register(app);
+    // `/health` AFTER `bearerAuth` so probes must carry the token.
+    // Otherwise unauthenticated callers can ping any reachable
+    // address:port to confirm a daemon exists.
+    healthRoutes.register(app);
   }
 
   installJsonBodyParser(app);
@@ -1782,6 +1796,7 @@ export function createServeApp(
     maxSessionsPerWorkspace: opts.maxSessions,
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
+    sessionRestoreTimeoutMs,
     languageCodes,
   });
 
@@ -2524,6 +2539,7 @@ export function createServeApp(
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
           boundWorkspace: runtime.workspaceCwd,
+          loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
             registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
           onError: (sessionId, err) => {
@@ -2562,6 +2578,7 @@ export function createServeApp(
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
         runtimeBaseDir: runtime.sessionRuntimeBaseDir,
         cleanupSession: (sessionId) => cleanupSession(runtime, sessionId),
         onTasksRead: (tasks) =>

@@ -27,6 +27,11 @@ import type {
   ExtensionPluginSourceKind,
 } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  AGENT_PLUGIN_SCHEMA,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
 
 const debugLogger = createDebugLogger('EXTENSION_CONVERTER');
 
@@ -38,20 +43,22 @@ export const SUPPORTED_EXTENSION_MANIFESTS = [
   QODER_PLUGIN_MANIFEST,
 ] as const;
 
-function removeConvertedDirectory(directory: string): void {
+async function removeConvertedDirectory(directory: string): Promise<void> {
   try {
-    fs.rmSync(directory, { recursive: true, force: true });
+    await fs.promises.rm(directory, { recursive: true, force: true });
   } catch {
     // Ignore cleanup errors so they do not mask the conversion result.
   }
 }
 
-type MarketplacePluginLocation = 'root' | 'other' | 'missing-marketplace';
+type MarketplacePluginSelection =
+  | { location: 'root'; version?: string }
+  | { location: 'other' | 'missing-marketplace' };
 
-function selectedMarketplacePluginLocation(
+function selectedMarketplacePlugin(
   extensionDir: string,
   pluginName: string,
-): MarketplacePluginLocation {
+): MarketplacePluginSelection {
   const marketplacePath = path.join(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[2],
@@ -59,13 +66,13 @@ function selectedMarketplacePluginLocation(
   try {
     fs.lstatSync(marketplacePath);
   } catch {
-    return 'missing-marketplace';
+    return { location: 'missing-marketplace' };
   }
   if (
     !fs.existsSync(marketplacePath) ||
     !realPathWithin(marketplacePath, extensionDir)
   ) {
-    return 'other';
+    return { location: 'other' };
   }
 
   try {
@@ -77,28 +84,34 @@ function selectedMarketplacePluginLocation(
       marketplace === null ||
       !Array.isArray((marketplace as { plugins?: unknown }).plugins)
     ) {
-      return 'other';
+      return { location: 'other' };
     }
 
     const selectedPlugin = (
       marketplace as { plugins: Array<Record<string, unknown>> }
     ).plugins.find((plugin) => plugin['name'] === pluginName);
     if (!selectedPlugin) {
-      return 'other';
+      return { location: 'other' };
     }
 
     const source = selectedPlugin['source'];
+    const version =
+      typeof selectedPlugin['version'] === 'string'
+        ? selectedPlugin['version']
+        : undefined;
     // Claude marketplaces allow an entry without `source`; that entry refers
     // to the marketplace root itself.
-    if (source === undefined || source === null) return 'root';
-    if (typeof source !== 'string') return 'other';
+    if (source === undefined || source === null) {
+      return { location: 'root', version };
+    }
+    if (typeof source !== 'string') return { location: 'other' };
 
     return path.resolve(path.join(extensionDir, source)) ===
       path.resolve(extensionDir)
-      ? 'root'
-      : 'other';
+      ? { location: 'root', version }
+      : { location: 'other' };
   } catch {
-    return 'other';
+    return { location: 'other' };
   }
 }
 
@@ -132,7 +145,7 @@ function loadConventionalHooks(
 function mergeHooks(
   ...sources: Array<ExtensionHooks | undefined>
 ): ExtensionHooks | undefined {
-  const merged: ExtensionHooks = {};
+  const merged = Object.create(null) as ExtensionHooks;
   for (const source of sources) {
     if (!source) continue;
     for (const [event, definitions] of Object.entries(source)) {
@@ -173,6 +186,15 @@ export async function convertCompatibleExtension(
   let originSource: ExtensionOriginSource = 'QwenCode';
   let externalContent = false;
   let requiresClaudeFileAdaptation = false;
+  const isExplicitMarketplaceEntry = pluginSourceKind === 'marketplace-entry';
+  const isExplicitExtensionRoot = pluginSourceKind === 'extension-root';
+  // A direct-root alias must not suppress Agent Plugins detection. Legacy
+  // named installs and explicit marketplace selectors retain selector-first
+  // behavior.
+  const agentPluginStatus =
+    pluginName && !isExplicitExtensionRoot
+      ? 'unrelated'
+      : getAgentPluginSchemaStatus(extensionDir);
   const configFilePath = path.join(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],
@@ -189,24 +211,29 @@ export async function convertCompatibleExtension(
   // them. Legacy metadata keeps the old manifest-first behavior so an update
   // cannot suddenly replace a previously installed root Gemini/Qwen extension
   // with a marketplace subplugin.
-  const marketplaceLocation = pluginName
-    ? selectedMarketplacePluginLocation(extensionDir, pluginName)
-    : 'missing-marketplace';
-  const isExplicitMarketplaceEntry = pluginSourceKind === 'marketplace-entry';
-  const isExplicitExtensionRoot = pluginSourceKind === 'extension-root';
-  const selectedMarketplaceEntryUsesRoot = marketplaceLocation === 'root';
+  const marketplaceSelection = pluginName
+    ? selectedMarketplacePlugin(extensionDir, pluginName)
+    : { location: 'missing-marketplace' as const };
+  const selectedMarketplaceEntryUsesRoot =
+    marketplaceSelection.location === 'root';
   const rootMarketplacePluginName =
     pluginName && !isExplicitExtensionRoot && selectedMarketplaceEntryUsesRoot
       ? pluginName
       : undefined;
 
-  // A selected subdirectory/remote marketplace plugin must win over manifests
-  // at the marketplace repository root. Only explicit new metadata opts into
-  // this precedence; legacy installs retain their previous root selection.
-  if (
+  if (agentPluginStatus === 'unsupported') {
+    throw new Error(
+      `Unsupported Agent Plugins schema. Supported schema: "${AGENT_PLUGIN_SCHEMA}".`,
+    );
+  } else if (agentPluginStatus === 'supported') {
+    originSource = 'AgentPlugins';
+    // A selected subdirectory/remote marketplace plugin must win over manifests
+    // at the marketplace repository root. Only explicit new metadata opts into
+    // this precedence; legacy installs retain their previous root selection.
+  } else if (
     isExplicitMarketplaceEntry &&
     pluginName &&
-    marketplaceLocation !== 'missing-marketplace' &&
+    marketplaceSelection.location !== 'missing-marketplace' &&
     !selectedMarketplaceEntryUsesRoot
   ) {
     const converted = await convertClaudePluginPackage(
@@ -217,6 +244,11 @@ export async function convertCompatibleExtension(
       true,
     );
     newExtensionDir = converted.convertedDir;
+    if (getAgentPluginSchemaStatus(newExtensionDir) !== 'unrelated') {
+      fs.rmSync(path.join(newExtensionDir, AGENT_PLUGIN_MANIFEST), {
+        force: true,
+      });
+    }
     originSource = 'Claude';
     externalContent = converted.externalContent;
   } else if (hasQwenConfig) {
@@ -259,12 +291,18 @@ export async function convertCompatibleExtension(
         };
       }
 
-      const geminiHooks =
-        geminiConversion.config.hooks ??
-        loadConventionalHooks(geminiConversion.convertedDir);
+      const conventionalHooks = loadConventionalHooks(
+        geminiConversion.convertedDir,
+      );
+      const geminiHooks = geminiConversion.config.hooks ?? conventionalHooks;
       const claudeHooks = claudeConversion.config.hooks;
       const mergedConfig = {
         ...geminiConversion.config,
+        ...(rootMarketplacePluginName &&
+        marketplaceSelection.location === 'root' &&
+        marketplaceSelection.version
+          ? { version: marketplaceSelection.version }
+          : {}),
         hooks: mergeHooks(geminiHooks, claudeHooks),
       };
       signal?.throwIfAborted();
@@ -279,13 +317,13 @@ export async function convertCompatibleExtension(
         'externalContent' in claudeConversion
           ? claudeConversion.externalContent
           : false;
-      requiresClaudeFileAdaptation = Boolean(claudeHooks);
+      requiresClaudeFileAdaptation = Boolean(conventionalHooks || claudeHooks);
     } catch (error) {
-      removeConvertedDirectory(geminiConversion.convertedDir);
+      await removeConvertedDirectory(geminiConversion.convertedDir);
       throw error;
     } finally {
       if (claudeConversion) {
-        removeConvertedDirectory(claudeConversion.convertedDir);
+        await removeConvertedDirectory(claudeConversion.convertedDir);
       }
     }
   } else if (isGeminiExtension) {
@@ -301,6 +339,11 @@ export async function convertCompatibleExtension(
       true,
     );
     newExtensionDir = converted.convertedDir;
+    if (getAgentPluginSchemaStatus(newExtensionDir) !== 'unrelated') {
+      fs.rmSync(path.join(newExtensionDir, AGENT_PLUGIN_MANIFEST), {
+        force: true,
+      });
+    }
     originSource = 'Claude';
     externalContent = converted.externalContent;
   } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {

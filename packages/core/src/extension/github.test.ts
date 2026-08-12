@@ -39,6 +39,7 @@ import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { AGENT_PLUGIN_SCHEMA } from './agent-plugins-v1/index.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -1393,6 +1394,71 @@ describe('git extension helpers', () => {
       }
     });
 
+    it('forwards marketplace-entry kind when checking an archive URL update', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'archive-url-marketplace-update-test-'),
+      );
+      try {
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: EXTENSIONS_CONFIG_FILENAME,
+            content: JSON.stringify({
+              name: 'marketplace-root',
+              version: '2.0.0',
+            }),
+          },
+          {
+            name: '.claude-plugin/marketplace.json',
+            content: JSON.stringify({
+              name: 'catalog',
+              owner: { name: 'Owner' },
+              plugins: [
+                {
+                  name: 'selected',
+                  source: './plugins/selected',
+                },
+              ],
+            }),
+          },
+          {
+            name: 'plugins/selected/.claude-plugin/plugin.json',
+            content: JSON.stringify({
+              name: 'selected',
+              version: '1.0.0',
+            }),
+          },
+        ]);
+        mockHttpsResponses(archive);
+        const extension = createExtension({
+          name: 'selected',
+          version: '1.0.0',
+          installMetadata: {
+            type: 'archive-url',
+            source: 'https://example.com/catalog.zip',
+            pluginName: 'selected',
+            pluginSourceKind: 'marketplace-entry',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('should return UP_TO_DATE for archive URL extension with same version', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'archive-url-update-test-'),
@@ -2177,6 +2243,30 @@ describe('git extension helpers', () => {
       await expect(
         fs.readFile(path.join(tempDir, 'system-prompt.md'), 'utf-8'),
       ).resolves.toBe('# System context');
+    });
+
+    it('should extract and flatten a wrapped Agent Plugin archive', async () => {
+      const archivePath = path.join(tempDir, 'wrapped-agent-plugin.zip');
+      const manifest = JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable-plugin',
+      });
+      const skill =
+        '---\nname: direct\ndescription: Direct skill\n---\nPortable instructions.';
+      const archive = await createZipBuffer(tempDir, [
+        { name: 'wrapped/plugin.json', content: manifest },
+        { name: 'wrapped/skills/direct/SKILL.md', content: skill },
+      ]);
+      await fs.writeFile(archivePath, archive);
+
+      await extractArchiveFile(archivePath, tempDir);
+
+      await expect(
+        fs.readFile(path.join(tempDir, 'plugin.json'), 'utf8'),
+      ).resolves.toBe(manifest);
+      await expect(
+        fs.readFile(path.join(tempDir, 'skills', 'direct', 'SKILL.md'), 'utf8'),
+      ).resolves.toBe(skill);
     });
 
     it('should flatten wrapped archives when the archive file is in the destination', async () => {

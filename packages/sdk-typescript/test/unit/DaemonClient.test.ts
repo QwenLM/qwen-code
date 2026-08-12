@@ -2751,12 +2751,14 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const session = await client.loadSession('s-1', {
         workspaceCwd: '/work/a',
+        timeoutMs: 0,
       });
 
       expect(session.state).toEqual({ configOptions: [] });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+      expect(calls[0]?.signal).toBeNull();
     });
 
     it('sends client identity headers on restore requests', async () => {
@@ -2801,6 +2803,296 @@ describe('DaemonClient', () => {
       await expect(client.loadSession('missing')).rejects.toMatchObject({
         status: 404,
       });
+    });
+
+    it('uses a 70s restore timeout instead of the generic 30s default', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const restore = client.loadSession('slow-session');
+        const outcome = restore.catch((error: unknown) => error);
+        // Pin the exact boundary, not a range. The default is the 60s daemon
+        // budget plus 10s of headroom; collapsing it onto the server budget
+        // would make the client abort race the daemon's own deadline and cost
+        // the caller the structured retryable 504 this exists to deliver.
+        await vi.advanceTimersByTimeAsync(69_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([-1, 1.5, Number.NaN])(
+      'rejects a per-request restore timeout of %s',
+      async (timeoutMs) => {
+        const fetch = vi.fn() as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.loadSession('slow-session', { timeoutMs }),
+        ).rejects.toThrow(TypeError);
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('disables the client timer for a per-request timeout past the ceiling', async () => {
+      // Not a rejection: an over-ceiling delay is treated as "no client timer",
+      // matching the derived-capability path. The hazard being defended is
+      // `setTimeout` compressing such a delay to about a millisecond, which
+      // would abort the restore immediately with a spurious TimeoutError.
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const outcome = client
+          .loadSession('slow-session', { timeoutMs: 2_147_483_648 })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fetch).toHaveBeenCalledOnce();
+        // No abort signal is attached at all — the request is left to the
+        // daemon's own deadline rather than a client timer that would fire in
+        // about a millisecond.
+        expect(signal).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(300_000);
+        void outcome;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('honors per-request timeout before an explicit global timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 20_000,
+        });
+        const restore = client.resumeSession('slow-session', {
+          timeoutMs: 25_000,
+        });
+        const outcome = restore.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('uses an explicit global timeout when the request has no override', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 20_000,
+        });
+        const restore = client.loadSession('slow-session');
+        const outcome = restore.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        expect(signal?.aborted).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(['rest', 'acp-http', 'acp-ws'] as const)(
+      'aborts a timed-out restore over %s transport',
+      async (transportType) => {
+        vi.useFakeTimers();
+        try {
+          let observedSignal: AbortSignal | undefined;
+          const transport: DaemonTransport = {
+            type: transportType,
+            supportsReplay: transportType !== 'acp-ws',
+            connected: true,
+            fetch: vi.fn(
+              (_url: string, init: RequestInit) =>
+                new Promise<Response>((_resolve, reject) => {
+                  observedSignal = init.signal ?? undefined;
+                  observedSignal?.addEventListener(
+                    'abort',
+                    () => reject(observedSignal?.reason),
+                    { once: true },
+                  );
+                }),
+            ),
+            async *subscribeEvents() {},
+            dispose() {},
+          };
+          const client = new DaemonClient({
+            baseUrl: 'http://daemon',
+            transport,
+          });
+          const restore = client.loadSession('slow-session', {
+            timeoutMs: 5_000,
+          });
+          const outcome = restore.catch((error: unknown) => error);
+
+          await vi.advanceTimersByTimeAsync(5_000);
+
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+          expect(observedSignal?.aborted).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('caches the advertised restore budget without implicit capability fetches', async () => {
+      vi.useFakeTimers();
+      try {
+        let restoreSignal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 80_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            restoreSignal = init?.signal ?? undefined;
+            restoreSignal?.addEventListener(
+              'abort',
+              () => reject(restoreSignal?.reason),
+              { once: true },
+            );
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+        const restore = client.loadSession('slow-session');
+        const outcome = restore.catch((error: unknown) => error);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(89_999);
+        expect(restoreSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('lets an explicit global timeout win over the advertised budget', async () => {
+      // Precedence, not just each branch in isolation: reordering the last two
+      // branches to prefer the advertised budget would silently stretch a
+      // caller's configured 20s SLA to 90s with every other test still green.
+      vi.useFakeTimers();
+      try {
+        let restoreSignal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 80_000 },
+              }),
+            );
+          }
+          return new Promise<Response>((_resolve, reject) => {
+            restoreSignal = init?.signal ?? undefined;
+            restoreSignal?.addEventListener(
+              'abort',
+              () => reject(restoreSignal?.reason),
+              { once: true },
+            );
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 20_000,
+        });
+        await client.capabilities();
+
+        const outcome = client
+          .loadSession('slow-session')
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(19_999);
+        expect(restoreSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('disables a derived restore timer beyond the JavaScript ceiling', async () => {
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: [],
+              modelServices: [],
+              limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+            })
+          : jsonResponse(200, {
+              sessionId: 's-1',
+              workspaceCwd: '/work/a',
+              attached: false,
+              state: {},
+            }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.capabilities();
+      await client.loadSession('s-1');
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.signal).toBeNull();
     });
   });
 
@@ -3925,16 +4217,18 @@ describe('DaemonClient', () => {
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
+        { messageId: 'client-mid-1' },
       );
       expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
         message: 'also check tests',
+        messageId: 'client-mid-1',
       });
     });
 
-    it('returns accepted:false verbatim when the session is idle', async () => {
+    it('returns accepted:false verbatim when the daemon rejects admission', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(200, { accepted: false }),
       );
@@ -4000,6 +4294,37 @@ describe('DaemonClient', () => {
       await expect(
         client.enqueueMidTurnMessage('s-1', 'hi'),
       ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe('getMidTurnMessages', () => {
+    it('GETs the encoded session snapshot with client identity and signal', async () => {
+      const snapshot = {
+        messages: [{ messageId: 'mid-1', text: 'shared message' }],
+        settledMessageIds: ['mid-2'],
+        promotedMessageIds: ['mid-3'],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+
+      await expect(
+        client.getMidTurnMessages('s/1', {
+          clientId: 'client-1',
+          signal: ctrl.signal,
+        }),
+      ).resolves.toEqual(snapshot);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-messages',
+      );
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      const forwarded = calls[0]?.signal;
+      expect(forwarded?.aborted).toBe(false);
+      ctrl.abort();
+      expect(forwarded?.aborted).toBe(true);
     });
   });
 

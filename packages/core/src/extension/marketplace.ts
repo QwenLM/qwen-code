@@ -63,11 +63,12 @@ export function parseSourceAndPluginName(source: string): {
       if (lastColonIndex !== -1) {
         // Check if what follows the colon looks like a pluginName (not a port number or path)
         const potentialPluginName = afterScheme.substring(lastColonIndex + 1);
-        // Plugin name should not contain '/' and should not be a number (port)
+        // Plugin names may begin with digits (for example, "2048-game"). Only
+        // a fully numeric suffix is a port rather than an appended alias.
         if (
           potentialPluginName &&
           !potentialPluginName.includes('/') &&
-          !/^\d+/.test(potentialPluginName)
+          !/^\d+$/.test(potentialPluginName)
         ) {
           repoEndIndex = scheme.length + lastColonIndex;
           hasPluginName = true;

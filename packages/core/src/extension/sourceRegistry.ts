@@ -73,6 +73,8 @@ export interface DiscoveredPlugin {
   installSource: string;
   /** Whether `pluginName` selects a marketplace entry or names a root plugin. */
   pluginSourceKind?: ExtensionPluginSourceKind;
+  /** Stable install-source identity used to match direct-root aliases. */
+  installIdentity?: string;
   /** Whether an extension with this name is already installed. */
   installed: boolean;
 }
@@ -216,10 +218,7 @@ function resolveInstallSource(
       debugLogger.warn(
         `Ignoring local path source "${src}" from remote marketplace "${marketplace.source}".`,
       );
-      return {
-        installSource: plugin.name,
-        pluginSourceKind: 'extension-root',
-      };
+      return { installSource: '', pluginSourceKind: 'extension-root' };
     }
     const isDirectUrl = /^https?:\/\//i.test(src);
     return classifyRemotePluginSource(
@@ -243,17 +242,14 @@ function resolveInstallSource(
       debugLogger.warn(
         `Ignoring local path source "${src.url}" from remote marketplace "${marketplace.source}".`,
       );
-      return {
-        installSource: plugin.name,
-        pluginSourceKind: 'extension-root',
-      };
+      return { installSource: '', pluginSourceKind: 'extension-root' };
     }
     return classifyRemotePluginSource(src.url);
   }
-  return {
-    installSource: plugin.name,
-    pluginSourceKind: 'extension-root',
-  };
+  // A direct JSON document has no cloneable root for a missing/relative source.
+  // Keep the entry visible for provenance, but mark it non-installable instead
+  // of manufacturing a target that parseInstallSource cannot actually fetch.
+  return { installSource: '', pluginSourceKind: 'extension-root' };
 }
 
 /**
@@ -275,7 +271,7 @@ function sanitizeDisplay(text: string | undefined): string | undefined {
 function pluginsFromConfig(
   marketplace: ExtensionSource,
   config: ClaudeMarketplaceConfig,
-  installedNames: ReadonlySet<string>,
+  installedKeys: ReadonlySet<string>,
 ): DiscoveredPlugin[] {
   return (config.plugins ?? []).map((plugin) => {
     const installTarget = resolveInstallSource(marketplace, plugin);
@@ -295,8 +291,39 @@ function pluginsFromConfig(
       installs: pluginInstalls(plugin),
       components: pluginComponents(plugin),
       ...installTarget,
-      installed: installedNames.has(plugin.name),
+      installIdentity: installTarget.installSource
+        ? discoveredPluginInstallIdentity(
+            installTarget.installSource,
+            installTarget.pluginSourceKind,
+          )
+        : undefined,
+      installed:
+        installedKeys.has(plugin.name) ||
+        (installTarget.installSource !== '' &&
+          installedKeys.has(
+            discoveredPluginInstallIdentity(
+              installTarget.installSource,
+              installTarget.pluginSourceKind,
+            ),
+          )),
     };
+  });
+}
+
+export function discoveredPluginInstallIdentity(
+  installSource: string,
+  pluginSourceKind?: ExtensionPluginSourceKind,
+): string {
+  const { repo, pluginName } = parseSourceAndPluginName(installSource);
+  const normalizedSource = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)
+    ? `https://github.com/${repo}`
+    : repo;
+  return JSON.stringify({
+    source: normalizedSource,
+    ...(pluginSourceKind === 'marketplace-entry' && pluginName
+      ? { pluginName }
+      : {}),
+    pluginSourceKind,
   });
 }
 
@@ -383,7 +410,7 @@ export class SourceRegistryStore {
  */
 export async function discoverPlugins(
   sources: readonly ExtensionSource[],
-  installedNames: ReadonlySet<string>,
+  installedKeys: ReadonlySet<string>,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<DiscoveredPlugin[]> {
   const results = await Promise.all(
@@ -401,7 +428,7 @@ export async function discoverPlugins(
           );
           return [];
         }
-        return pluginsFromConfig(marketplace, config, installedNames);
+        return pluginsFromConfig(marketplace, config, installedKeys);
       } catch (error) {
         debugLogger.error(
           `Failed to discover plugins from ${redactUrlCredentials(

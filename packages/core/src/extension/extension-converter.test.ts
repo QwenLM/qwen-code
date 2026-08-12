@@ -12,6 +12,36 @@ import { convertCompatibleExtension as convertGeminiOrClaudeExtension } from './
 import { ExtensionManager, type ExtensionConfig } from './extensionManager.js';
 import { ExtensionStore } from './extension-store.js';
 import { ExtensionStorage } from './storage.js';
+import {
+  AGENT_PLUGIN_SCHEMA,
+  AGENT_PLUGIN_SCHEMA_PREFIX,
+} from './agent-plugins-v1/index.js';
+
+function snapshotDirectory(root: string): Array<[string, string]> {
+  const snapshot: Array<[string, string]> = [];
+  const visit = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = path.relative(root, absolutePath);
+      if (entry.isDirectory()) {
+        snapshot.push([`${relativePath}/`, 'directory']);
+        visit(absolutePath);
+      } else if (entry.isSymbolicLink()) {
+        snapshot.push([
+          relativePath,
+          `symlink:${fs.readlinkSync(absolutePath)}`,
+        ]);
+      } else {
+        snapshot.push([
+          relativePath,
+          fs.readFileSync(absolutePath).toString('base64'),
+        ]);
+      }
+    }
+  };
+  visit(root);
+  return snapshot.sort(([left], [right]) => left.localeCompare(right));
+}
 
 describe('convertGeminiOrClaudeExtension', () => {
   let extensionDir: string;
@@ -108,6 +138,16 @@ describe('convertGeminiOrClaudeExtension', () => {
       pluginName: 'ponytail',
       marketplacePluginName: 'ponytail',
       marketplaceSource: undefined,
+      marketplaceHooks: undefined,
+      expectedHookPath: 'scripts/session-start.sh',
+      pluginSourceKind: 'marketplace-entry' as const,
+      includeMarketplace: true,
+    },
+    {
+      installKind: 'null-source marketplace root',
+      pluginName: 'ponytail',
+      marketplacePluginName: 'ponytail',
+      marketplaceSource: null,
       marketplaceHooks: undefined,
       expectedHookPath: 'scripts/session-start.sh',
       pluginSourceKind: 'marketplace-entry' as const,
@@ -240,7 +280,7 @@ describe('convertGeminiOrClaudeExtension', () => {
         'utf-8',
       );
 
-      const sourceEntriesBefore = fs.readdirSync(extensionDir).sort();
+      const sourceSnapshotBefore = snapshotDirectory(extensionDir);
       const converted = await convertGeminiOrClaudeExtension(
         extensionDir,
         pluginName,
@@ -248,7 +288,7 @@ describe('convertGeminiOrClaudeExtension', () => {
         undefined,
         pluginSourceKind,
       );
-      expect(fs.readdirSync(extensionDir).sort()).toEqual(sourceEntriesBefore);
+      expect(snapshotDirectory(extensionDir)).toEqual(sourceSnapshotBefore);
       convertedDir = converted.extensionDir;
       const config = JSON.parse(
         fs.readFileSync(
@@ -307,7 +347,6 @@ describe('convertGeminiOrClaudeExtension', () => {
         extensionDir: installedDir,
       });
 
-      expect(fs.existsSync(extensionDir)).toBe(false);
       const installedCommand = (
         installedConfig.hooks?.['SessionStart']?.[0].hooks?.[0] as {
           command?: string;
@@ -571,7 +610,7 @@ describe('convertGeminiOrClaudeExtension', () => {
     );
     fs.writeFileSync(path.join(scriptsDir, 'start.sh'), '#!/bin/sh\n');
 
-    const sourceEntriesBefore = fs.readdirSync(extensionDir).sort();
+    const sourceSnapshotBefore = snapshotDirectory(extensionDir);
     const converted = await convertGeminiOrClaudeExtension(
       extensionDir,
       'ponytail',
@@ -580,7 +619,7 @@ describe('convertGeminiOrClaudeExtension', () => {
       'marketplace-entry',
     );
     convertedDir = converted.extensionDir;
-    expect(fs.readdirSync(extensionDir).sort()).toEqual(sourceEntriesBefore);
+    expect(snapshotDirectory(extensionDir)).toEqual(sourceSnapshotBefore);
 
     const config = JSON.parse(
       fs.readFileSync(
@@ -680,12 +719,109 @@ describe('convertGeminiOrClaudeExtension', () => {
     ) as ExtensionConfig;
 
     expect(config.hooks?.['PreToolUse']).toHaveLength(1);
+    expect(converted.requiresClaudeFileAdaptation).toBe(true);
     expect(
       config.hooks?.['SessionStart']?.map(
         (definition) =>
           (definition.hooks?.[0] as { command?: string })?.command,
       ),
     ).toEqual(['gemini-start.sh', 'claude-start.sh']);
+  });
+
+  it.each(['constructor', '__proto__'])(
+    'merges prototype-named %s hooks from conventional and Claude sources',
+    async (eventName) => {
+      fs.writeFileSync(
+        path.join(extensionDir, 'gemini-extension.json'),
+        JSON.stringify({ name: 'prototype-hooks', version: '1.0.0' }),
+      );
+      const manifestDir = path.join(extensionDir, '.claude-plugin');
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(manifestDir, { recursive: true });
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(manifestDir, 'plugin.json'),
+        JSON.stringify({
+          name: 'prototype-hooks',
+          version: '1.0.0',
+          hooks: './hooks/claude-hooks.json',
+        }),
+      );
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          hooks: {
+            [eventName]: [
+              { hooks: [{ type: 'command', command: 'conventional.sh' }] },
+            ],
+          },
+        }),
+      );
+      fs.writeFileSync(
+        path.join(hooksDir, 'claude-hooks.json'),
+        JSON.stringify({
+          hooks: {
+            [eventName]: [
+              { hooks: [{ type: 'command', command: 'claude.sh' }] },
+            ],
+          },
+        }),
+      );
+
+      const converted = await convertGeminiOrClaudeExtension(extensionDir);
+      convertedDir = converted.extensionDir;
+      const config = JSON.parse(
+        fs.readFileSync(
+          path.join(converted.extensionDir, 'qwen-extension.json'),
+          'utf-8',
+        ),
+      ) as ExtensionConfig;
+
+      expect(
+        Object.prototype.hasOwnProperty.call(config.hooks, eventName),
+      ).toBe(true);
+      expect(
+        (config.hooks as Record<string, unknown[]> | undefined)?.[eventName],
+      ).toHaveLength(2);
+    },
+  );
+
+  it('uses the selected root marketplace entry version in a dual manifest', async () => {
+    fs.writeFileSync(
+      path.join(extensionDir, 'gemini-extension.json'),
+      JSON.stringify({ name: 'versioned-root', version: '1.0.0' }),
+    );
+    const manifestDir = path.join(extensionDir, '.claude-plugin');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'plugin.json'),
+      JSON.stringify({ name: 'versioned-root', version: '1.0.0' }),
+    );
+    fs.writeFileSync(
+      path.join(manifestDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'catalog',
+        owner: { name: 'Owner' },
+        plugins: [{ name: 'versioned-root', version: '2.1.0', source: './' }],
+      }),
+    );
+
+    const converted = await convertGeminiOrClaudeExtension(
+      extensionDir,
+      'versioned-root',
+      undefined,
+      undefined,
+      'marketplace-entry',
+    );
+    convertedDir = converted.extensionDir;
+    const config = JSON.parse(
+      fs.readFileSync(
+        path.join(converted.extensionDir, 'qwen-extension.json'),
+        'utf-8',
+      ),
+    ) as ExtensionConfig;
+
+    expect(config.version).toBe('2.1.0');
   });
 
   it('keeps a valid Gemini conversion when Claude metadata is malformed', async () => {
@@ -798,5 +934,190 @@ describe('convertGeminiOrClaudeExtension', () => {
     } finally {
       createTmpDirSpy.mockRestore();
     }
+  });
+});
+describe('Agent Plugins extension conversion', () => {
+  let pluginRoot: string;
+
+  beforeEach(() => {
+    pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-plugin-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pluginRoot, { recursive: true, force: true });
+  });
+
+  it('selects a supported Agent Plugin without converting it', async () => {
+    const manifest = JSON.stringify({
+      $schema: AGENT_PLUGIN_SCHEMA,
+      name: 'portable-plugin',
+    });
+    fs.writeFileSync(path.join(pluginRoot, 'plugin.json'), manifest);
+
+    await expect(
+      convertGeminiOrClaudeExtension(pluginRoot),
+    ).resolves.toMatchObject({
+      extensionDir: pluginRoot,
+      originSource: 'AgentPlugins',
+      externalContent: false,
+    });
+    expect(fs.readFileSync(path.join(pluginRoot, 'plugin.json'), 'utf8')).toBe(
+      manifest,
+    );
+    expect(fs.existsSync(path.join(pluginRoot, 'qwen-extension.json'))).toBe(
+      false,
+    );
+  });
+
+  it('detects a direct-root Agent Plugin even when it has an install alias', async () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable-plugin',
+      }),
+    );
+
+    await expect(
+      convertGeminiOrClaudeExtension(
+        pluginRoot,
+        'catalog-alias',
+        undefined,
+        undefined,
+        'extension-root',
+      ),
+    ).resolves.toMatchObject({
+      extensionDir: pluginRoot,
+      originSource: 'AgentPlugins',
+    });
+  });
+
+  it('gives an unsupported Agent Plugins schema priority over Qwen format', async () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: `${AGENT_PLUGIN_SCHEMA_PREFIX}2.0.0/plugin.schema.json`,
+        name: 'future-plugin',
+      }),
+    );
+    fs.writeFileSync(
+      path.join(pluginRoot, 'qwen-extension.json'),
+      JSON.stringify({ name: 'qwen-fallback', version: '1.0.0' }),
+    );
+
+    await expect(convertGeminiOrClaudeExtension(pluginRoot)).rejects.toThrow(
+      'Unsupported Agent Plugins schema',
+    );
+  });
+
+  it('leaves an unrelated plugin.json out of format detection', async () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({ $schema: 'https://example.com/plugin.schema.json' }),
+    );
+    fs.writeFileSync(
+      path.join(pluginRoot, 'qwen-extension.json'),
+      JSON.stringify({ name: 'qwen-extension', version: '1.0.0' }),
+    );
+
+    await expect(
+      convertGeminiOrClaudeExtension(pluginRoot),
+    ).resolves.toMatchObject({
+      extensionDir: pluginRoot,
+      originSource: 'QwenCode',
+      externalContent: false,
+    });
+  });
+
+  it('honors an explicit marketplace selection over a root Agent Plugin manifest', async () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'root-agent-plugin',
+      }),
+    );
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'sample-marketplace',
+        owner: { name: 'Test Owner', email: 'owner@example.com' },
+        plugins: [
+          {
+            name: 'requested-plugin',
+            version: '2.0.0',
+            source: './plugin-src',
+          },
+        ],
+      }),
+    );
+    const selectedRoot = path.join(pluginRoot, 'plugin-src');
+    fs.mkdirSync(path.join(selectedRoot, '.claude-plugin'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(selectedRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'requested-plugin', version: '2.0.0' }),
+    );
+    fs.writeFileSync(
+      path.join(selectedRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'carried-agent-plugin',
+      }),
+    );
+
+    const selected = await convertGeminiOrClaudeExtension(
+      pluginRoot,
+      'requested-plugin',
+      undefined,
+      undefined,
+      'marketplace-entry',
+    );
+    expect(selected.originSource).toBe('Claude');
+    const selectedConfig = JSON.parse(
+      fs.readFileSync(
+        path.join(selected.extensionDir, 'qwen-extension.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(selectedConfig['name']).toBe('requested-plugin');
+    expect(fs.existsSync(path.join(selected.extensionDir, 'plugin.json'))).toBe(
+      false,
+    );
+    fs.rmSync(selected.extensionDir, { recursive: true, force: true });
+
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: `${AGENT_PLUGIN_SCHEMA_PREFIX}2.0.0/plugin.schema.json`,
+        name: 'future-root-agent-plugin',
+      }),
+    );
+    fs.writeFileSync(
+      path.join(selectedRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: `${AGENT_PLUGIN_SCHEMA_PREFIX}2.0.0/plugin.schema.json`,
+        name: 'future-carried-agent-plugin',
+      }),
+    );
+    const selectedWithFutureRoot = await convertGeminiOrClaudeExtension(
+      pluginRoot,
+      'requested-plugin',
+      undefined,
+      undefined,
+      'marketplace-entry',
+    );
+    expect(selectedWithFutureRoot.originSource).toBe('Claude');
+    expect(
+      fs.existsSync(
+        path.join(selectedWithFutureRoot.extensionDir, 'plugin.json'),
+      ),
+    ).toBe(false);
+    fs.rmSync(selectedWithFutureRoot.extensionDir, {
+      recursive: true,
+      force: true,
+    });
   });
 });

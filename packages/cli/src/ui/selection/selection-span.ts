@@ -5,7 +5,11 @@
  */
 
 import type { ReadonlyFrame } from 'ink';
-import type { NormalizedSelection } from './selection-state.js';
+import type {
+  NormalizedSelection,
+  Point,
+  SelectionMode,
+} from './selection-state.js';
 
 /** A cell counts as part of a word when it is non-empty and not whitespace. */
 function isWordCell(value: string): boolean {
@@ -71,4 +75,15 @@ export function lineSpanAt(
     return null;
   }
   return { sx: 0, sy: y, ex: end, ey: y };
+}
+
+/** Resolve the span at a point for a word/line selection mode. */
+export function spanAtForMode(
+  frame: ReadonlyFrame | null,
+  mode: Exclude<SelectionMode, 'char'>,
+  point: Point,
+): NormalizedSelection | null {
+  return mode === 'word'
+    ? wordSpanAt(frame, point.x, point.y)
+    : lineSpanAt(frame, point.y);
 }

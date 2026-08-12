@@ -21,11 +21,45 @@ From this directory:
 ```bash
 npm install --workspaces=false
 npm run build:runtime --workspaces=false
-npm test --workspaces=false
 npm run dev --workspaces=false
 ```
 
-Use `QWEN_DESKTOP_WORKSPACE=/absolute/path` to choose the initial workspace. Without it, the app shows a workspace picker on first launch.
+The first two steps are one-time setup. After that, `npm run dev` is all you need.
+
+`build:runtime` bundles the current platform's Node.js, the `qwen` CLI, and the built Web Shell into `runtime/qwen-code/`. Re-run it only when you change the CLI or Web Shell source.
+
+Use `QWEN_DESKTOP_WORKSPACE=/absolute/path` to override the initial workspace. The app otherwise restores its saved primary workspace or creates `~/Documents/Qwen` on first launch. `QWEN_DEFAULT_WORKSPACE_DIR=/absolute/path` relocates that first-launch default, matching the Electron shell. Add and switch project workspaces from the Web Shell after startup.
+
+## Debugging
+
+### Runtime log
+
+The daemon log is written to `~/Library/Logs/com.alibaba.qwen-code/desktop-runtime.log` on macOS. Tail it to see `qwen serve` output:
+
+```bash
+tail -f ~/Library/Logs/com.alibaba.qwen-code/desktop-runtime.log
+```
+
+The desktop state (saved workspace, window position) is stored in `~/Library/Application Support/com.alibaba.qwen-code/desktop-state.json`.
+
+### WebView DevTools
+
+Open the Web Shell's DevTools from the running window with `Cmd+Option+I` (macOS) or `Ctrl+Shift+I` (Windows/Linux). This lets you inspect network requests, console output, and the React component tree.
+
+### Environment variables
+
+| Variable                     | Purpose                                                             |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `QWEN_DESKTOP_WORKSPACE`     | Override the initial workspace path                                 |
+| `QWEN_DEFAULT_WORKSPACE_DIR` | Relocate the first-launch default workspace directory               |
+| `QWEN_DESKTOP_SKIP_BUILD`    | Set to `1` to skip the CLI/Web Shell rebuild during `build:runtime` |
+| `QWEN_CODE_ROOT`             | Point to a local qwen-code checkout for the runtime bundle          |
+
+### Rust tests
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
 ## Releases
 
