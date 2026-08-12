@@ -1517,7 +1517,7 @@ export const ToolLine = memo(function ToolLine({
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
-      {!isTodo && expanded && detailView && detailsVisible && (
+      {!isTodo && expanded && detailView && (!isWorkflow || detailsVisible) && (
         <div
           className={
             isWorkflow

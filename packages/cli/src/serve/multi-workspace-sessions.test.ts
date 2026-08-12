@@ -1070,13 +1070,20 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('workspace_archived_session_export');
     expect(res.body.features).toContain('workspace_display_name');
     expect(res.body.workspaces).toEqual([
-      { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
+      {
+        id: 'primary-id',
+        cwd: PRIMARY_CWD,
+        primary: true,
+        trusted: true,
+        workflowsEnabled: false,
+      },
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
         displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
+        workflowsEnabled: false,
       },
     ]);
     expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);
