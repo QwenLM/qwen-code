@@ -21,6 +21,8 @@ model_name="${OPENAI_MODEL:-qwen3.7-max}"
 dataset_revision="2"
 max_attempts="${BENCHMARK_MAX_ATTEMPTS:-4}"
 retry_backoff_seconds="${BENCHMARK_RETRY_BACKOFF_SECONDS:-60}"
+execution_backend="${BENCHMARK_EXECUTION_BACKEND:-harbor}"
+eas_template_manifest="${EAS_TEMPLATE_MANIFEST:-${pool_root}/deploy/eas/templates.json}"
 output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
 
 if [[ ! "${INSTANCE_LIMIT}" =~ ^[0-9]+$ ]] || (( INSTANCE_LIMIT < 1 || INSTANCE_LIMIT > 500 )); then
@@ -35,29 +37,41 @@ if [[ ! "${retry_backoff_seconds}" =~ ^[0-9]+$ ]]; then
   echo "BENCHMARK_RETRY_BACKOFF_SECONDS must be a non-negative integer" >&2
   exit 2
 fi
-for required_path in "${pool_bin}" "${python_bin}" "${dataset_root}" "${agent_cache_prepare}"; do
+if [[ "${execution_backend}" != "harbor" && "${execution_backend}" != "eas" && "${execution_backend}" != "eas-smoke" ]]; then
+  echo "BENCHMARK_EXECUTION_BACKEND must be harbor, eas, or eas-smoke" >&2
+  exit 2
+fi
+required_paths=("${pool_bin}" "${python_bin}" "${dataset_root}")
+if [[ "${execution_backend}" == "harbor" ]]; then
+  required_paths+=("${agent_cache_prepare}")
+elif [[ "${execution_backend}" == "eas" || "${execution_backend}" == "eas-smoke" ]]; then
+  required_paths+=("${eas_template_manifest}")
+fi
+for required_path in "${required_paths[@]}"; do
   if [[ ! -e "${required_path}" ]]; then
     echo "Required DSW resource is missing: ${required_path}" >&2
     exit 2
   fi
 done
-agent_cache_dirs=(
-  "${agent_cache_root}"
-  "${agent_cache_root}/node"
-  "${agent_cache_root}/nvm"
-  "${agent_cache_root}/npm"
-  "${agent_cache_root}/qwen-code"
-)
-for cache_dir in "${agent_cache_dirs[@]}"; do
-  if [[ ! -d "${cache_dir}" ]]; then
-    echo "::error::Benchmark cache directory is missing: ${cache_dir}" >&2
-    exit 2
-  fi
-  if [[ ! -w "${cache_dir}" ]]; then
-    echo "::error::Benchmark cache directory is not writable by $(id -un): ${cache_dir}" >&2
-    exit 2
-  fi
-done
+if [[ "${execution_backend}" == "harbor" ]]; then
+  agent_cache_dirs=(
+    "${agent_cache_root}"
+    "${agent_cache_root}/node"
+    "${agent_cache_root}/nvm"
+    "${agent_cache_root}/npm"
+    "${agent_cache_root}/qwen-code"
+  )
+  for cache_dir in "${agent_cache_dirs[@]}"; do
+    if [[ ! -d "${cache_dir}" ]]; then
+      echo "::error::Benchmark cache directory is missing: ${cache_dir}" >&2
+      exit 2
+    fi
+    if [[ ! -w "${cache_dir}" ]]; then
+      echo "::error::Benchmark cache directory is not writable by $(id -un): ${cache_dir}" >&2
+      exit 2
+    fi
+  done
+fi
 
 mkdir -p "${output_root}"
 manifest_path="${output_root}/manifest.json"
@@ -75,14 +89,20 @@ fi
 # Cache the exact published Qwen Code version and its Node/npm runtime before
 # tasks become claimable. This normally takes seconds on a warm DSW cache and
 # does not wait for the benchmark itself.
-qwen_version="${QWEN_REF#v}"
-"${python_bin}" "${agent_cache_prepare}" \
-  --cache-root "${agent_cache_root}" \
-  --node-version "${QWEN_BENCHMARK_NODE_VERSION:-v22.23.1}" \
-  --nvm-version "${QWEN_BENCHMARK_NVM_VERSION:-v0.40.2}" \
-  --qwen-version "${qwen_version}" \
-  --npm-registry "${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}" \
-  > "${output_root}/agent-cache-manifest-path.txt"
+if [[ "${execution_backend}" == "harbor" ]]; then
+  qwen_version="${QWEN_REF#v}"
+  "${python_bin}" "${agent_cache_prepare}" \
+    --cache-root "${agent_cache_root}" \
+    --node-version "${QWEN_BENCHMARK_NODE_VERSION:-v22.23.1}" \
+    --nvm-version "${QWEN_BENCHMARK_NVM_VERSION:-v0.40.2}" \
+    --qwen-version "${qwen_version}" \
+    --npm-registry "${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}" \
+    > "${output_root}/agent-cache-manifest-path.txt"
+elif [[ "${execution_backend}" == "eas" || "${execution_backend}" == "eas-smoke" ]]; then
+  "${pool_bin}" validate-eas-templates \
+    --task-manifest "${manifest_path}" \
+    --template-manifest "${eas_template_manifest}" >/dev/null
+fi
 
 export BENCHMARK_POOL_DATABASE_URL="${database_url}"
 "${pool_bin}" init-db >/dev/null
@@ -130,6 +150,7 @@ jq -n \
   --arg release_tag "${RELEASE_TAG}" \
   --arg qwen_ref "${QWEN_REF}" \
   --arg qwen_commit "${QWEN_COMMIT}" \
+  --arg execution_backend "${execution_backend}" \
   --argjson expected_instances "${INSTANCE_LIMIT}" \
   '{
     status: $status,
@@ -137,6 +158,7 @@ jq -n \
     release_tag: $release_tag,
     qwen_ref: $qwen_ref,
     qwen_commit: $qwen_commit,
+    execution_backend: $execution_backend,
     expected_instances: $expected_instances
   }' > "${output_root}/dispatch-receipt.json"
 
