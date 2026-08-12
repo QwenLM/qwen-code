@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -194,13 +194,27 @@ describe('linter directories', () => {
         writeFileSync(fixture, 'official archive');
         rmSync(localArchive);
         rmSync(executable);
+        rmSync(path.dirname(cacheArchive), { recursive: true });
+        execSync(installer, { env });
+        expect(readFileSync(cacheArchive, 'utf8')).toBe('official archive');
+        expect(readFileSync(curlLog, 'utf8')).toBe(
+          'download\ndownload\ndownload\n',
+        );
+
+        rmSync(localArchive);
+        rmSync(executable);
         rmSync(cacheArchive);
         mkdirSync(cacheArchive);
-        execSync(installer, { env });
+        const result = spawnSync(installer, { env, shell: true });
+        expect(result.status).toBe(0);
+        expect(result.stderr.toString()).toContain('EISDIR');
+        expect(result.stderr.toString()).toContain(
+          'Warning: could not persist linter archive',
+        );
         expect(readFileSync(executable, 'utf8')).toBe('official archive');
         expect(statSync(cacheArchive).isDirectory()).toBe(true);
         expect(readFileSync(curlLog, 'utf8')).toBe(
-          'download\ndownload\ndownload\n',
+          'download\ndownload\ndownload\ndownload\n',
         );
       } finally {
         rmSync(root, { recursive: true, force: true });
