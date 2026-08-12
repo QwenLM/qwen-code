@@ -155,11 +155,13 @@ flowchart TD
 ### One Conversations runtime
 
 Introduce one one-flight `ConversationRuntimeManager` per daemon. It lazily
-ensures the Conversations root, runtime, ACP bridge, and child even when Live
-Voice is disabled. Live enablement only binds and advertises Live-specific Host,
-Appshot, Realtime, speech, and task channels; it does not own the manager or the
-underlying runtime lifetime. Concurrent ensure failures reset the one-flight so
-a later request can retry initialization.
+validates the Conversations root and ensures the registered runtime and ACP
+bridge even when Live Voice is disabled. `ensure()` does not preheat the bridge
+or start the Qwen ACP child; the first operation that actually needs an ACP
+session starts the one shared child. Live enablement only binds and advertises
+Live-specific Host, Appshot, Realtime, speech, and task channels; it does not own
+the manager or the underlying runtime lifetime. Concurrent ensure failures reset
+the one-flight so a later request can retry initialization.
 
 The existing internal runtime provenance value `live-conversation` is retained
 for compatibility in the first implementation. Within daemon routing it means
@@ -168,11 +170,12 @@ as Live. Persisted session source performs that classification. Renaming the
 runtime provenance is unnecessary for this feature and would expand the change
 without changing behavior.
 
-Each workspace runtime owns one ACP bridge and child process. Standalone and
-Live sessions therefore share the Conversations runtime's existing ACP child.
-Session admission remains subject to the daemon's total and per-runtime limits.
-One healthy ACP child is a steady-state ownership invariant; a bounded overlap
-during crash replacement or teardown is not treated as a second runtime.
+Each workspace runtime owns one ACP bridge and a lazily started child process.
+Standalone and Live sessions therefore share the Conversations runtime's ACP
+child after first use. Session admission remains subject to the daemon's total
+and per-runtime limits. One healthy ACP child is a steady-state ownership
+invariant; a bounded overlap during crash replacement or teardown is not treated
+as a second runtime.
 
 ### Cross-daemon ownership
 
@@ -365,10 +368,12 @@ interface DaemonStandaloneFields {
 }
 
 interface DaemonStandaloneSession
-  extends DaemonSession, DaemonStandaloneFields {}
+  extends DaemonSession,
+    DaemonStandaloneFields {}
 
 interface DaemonRestoredStandaloneSession
-  extends DaemonRestoredSession, DaemonStandaloneFields {}
+  extends DaemonRestoredSession,
+    DaemonStandaloneFields {}
 
 interface DaemonStandaloneSessionSummary extends DaemonSessionSummary {
   sourceType: 'standalone';
@@ -603,14 +608,15 @@ Suggested title: `refactor(cli): Generalize the Conversations runtime foundation
   UI behavior.
 
 Verification covers manager concurrency and failure reset, secure root/child
-validation, Live enabled/disabled lifecycle, concurrent Live work sharing the
-runtime, and complete Live regression behavior.
+validation, absence of ACP/Host/provider preheat, Live enabled/disabled
+lifecycle, concurrent Live work sharing the runtime, and complete Live regression
+behavior.
 
 Estimated size: 180-320 production lines and 300-550 test lines. Keep the
 production refactor below the repository's 500-line core-refactor gate.
 
-Exit criterion: Live uses the generalized manager, and the runtime can be lazily
-ensured without enabling Live.
+Exit criterion: Live uses the generalized manager, and the runtime/bridge can be
+lazily ensured without enabling Live or starting the ACP child.
 
 ### PR1: Runtime ownership and isolation
 
@@ -806,8 +812,8 @@ the daemon contract.
 
 ### Runtime and source
 
-- Concurrent ensure calls produce one runtime/bridge and one healthy ACP child
-  in steady state.
+- Concurrent ensure calls produce one runtime/bridge without starting ACP; after
+  first ACP use, the runtime owns one healthy child in steady state.
 - Multiple standalone and Live sessions share the child without cwd, event,
   permission, transcript, source, or model-state leakage.
 - Two supporting daemons contend safely; dead-owner reclaim, PID reuse, corrupt
