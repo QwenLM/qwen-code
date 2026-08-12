@@ -162,6 +162,48 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('keeps session frames buffered when only the connection SSE stream is live', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const connectionStream = new FakeStream('sse');
+      conn.attachConnStream(connectionStream);
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const eventDelivery = conn.sendSession('sess-1', { event: true }, 7);
+      const replyDelivery = conn.sendSessionReply('sess-1', { reply: true });
+
+      expect(connectionStream.sent).toEqual([]);
+      expect(registry.getSnapshot()).toMatchObject({
+        bufferedSessionFrames: 2,
+        preAttachOwnedFrames: 2,
+      });
+      expect(budget.snapshot().usedFrames).toBe(2);
+
+      const sessionStream = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', sessionStream, new AbortController());
+
+      await expect(eventDelivery).resolves.toBe('delivered');
+      await expect(replyDelivery).resolves.toBe('delivered');
+      expect(sessionStream.sent).toEqual([
+        { message: { event: true }, id: 7 },
+        { message: { reply: true }, id: undefined },
+      ]);
+      expect(budget.snapshot().usedFrames).toBe(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('on resume, skips id-bearing buffered frames (ring owns them) AND defers id-less replies until flushBufferedSessionFrames (post-replay order)', () => {
     // Two regressions in one path:
     //  (1) silent-frame-loss: a frame sent to the dead socket (id below the

@@ -327,23 +327,46 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonLogMode>().not.toBeNever();
     expectTypeOf<DaemonLogHealth>().not.toBeNever();
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
-    expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
-      compactedReplayMaxBytes: number;
-      acpPreAttachMaxPayloadBytesGlobal: number | null;
-    }>();
     expectTypeOf<
+      Pick<DaemonStatusReport['limits'], 'compactedReplayMaxBytes'>
+    >().toMatchTypeOf<
+      Pick<
+        DaemonStatusReport['limits'],
+        | 'acpPreAttachMaxFramesPerStream'
+        | 'acpPreAttachMaxFramesPerConnection'
+        | 'acpPreAttachMaxFramesGlobal'
+        | 'acpPreAttachMaxPayloadBytesPerConnection'
+        | 'acpPreAttachMaxPayloadBytesGlobal'
+      >
+    >();
+    expectTypeOf<
+      DaemonStatusReport['limits']['acpPreAttachMaxPayloadBytesGlobal']
+    >().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<
+      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'enabled'>
+    >().toMatchTypeOf<
+      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'preAttach'>
+    >();
+    expectTypeOf<undefined>().toMatchTypeOf<
       DaemonStatusReport['runtime']['transport']['acp']['preAttach']
-    >().toMatchTypeOf<{
-      usedFrames: number;
-      usedBytes: number;
-      guardFailures: number;
-    }>();
+    >();
+    expectTypeOf<{
+      connectionIdPrefix: string;
+    }>().toMatchTypeOf<
+      Pick<
+        NonNullable<DaemonStatusReport['full']>['acpConnections'][number],
+        | 'bufferedConnectionFrames'
+        | 'bufferedSessionFrames'
+        | 'pendingDeliveryFrames'
+        | 'preAttachOwnedFrames'
+        | 'preAttachOwnedBytes'
+      >
+    >();
     expectTypeOf<
-      NonNullable<DaemonStatusReport['full']>['acpConnections'][number]
-    >().toMatchTypeOf<{
-      preAttachOwnedFrames: number;
-      preAttachOwnedBytes: number;
-    }>();
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['preAttachOwnedFrames']
+    >().toEqualTypeOf<number | undefined>();
     expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
       runId?: string;
       logMode?: DaemonLogMode;

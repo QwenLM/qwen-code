@@ -953,7 +953,7 @@ export class AcpConnection {
       receipt?.discarded();
       return Promise.resolve('closed');
     }
-    const expectedStream = binding?.stream ?? this.connStream;
+    const expectedStream = binding ? binding.stream : this.connStream;
     if (
       (binding ? binding.ownedFrames : this.connOwnedFrames) >=
       ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
@@ -971,7 +971,7 @@ export class AcpConnection {
       receipt?.discarded();
       if (
         this.destroyed ||
-        (binding?.stream ?? this.connStream) !== expectedStream ||
+        (binding ? binding.stream : this.connStream) !== expectedStream ||
         (binding !== undefined &&
           this.sessions.get(binding.sessionId) !== binding)
       ) {
@@ -982,7 +982,7 @@ export class AcpConnection {
     }
     if (
       this.destroyed ||
-      (binding?.stream ?? this.connStream) !== expectedStream ||
+      (binding ? binding.stream : this.connStream) !== expectedStream ||
       (binding !== undefined &&
         this.sessions.get(binding.sessionId) !== binding)
     ) {
