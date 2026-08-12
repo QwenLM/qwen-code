@@ -44,7 +44,7 @@ permissions:
   contents: 'read'
 
 concurrency:
-  group: 'desktop-release-${{ inputs.version }}'
+  group: "desktop-release-${{ inputs.dry_run && inputs.version || 'publish' }}"
   cancel-in-progress: false
 
 env:
@@ -179,14 +179,19 @@ jobs:
             package-lock.json
             packages/desktop-shell/package-lock.json
 
-      - uses: 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
-        with:
-          path: '${{ runner.temp }}/qwen-desktop-node-cache'
-          key: 'desktop-node-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}'
-
       - name: 'Configure bundled Node.js cache'
+        id: 'node-cache-path'
         shell: 'bash'
-        run: 'echo "QWEN_DESKTOP_NODE_CACHE_DIR=$RUNNER_TEMP/qwen-desktop-node-cache" >> "$GITHUB_ENV"'
+        run: |
+          cache_path="$RUNNER_TEMP/qwen-desktop-node-cache"
+          echo "QWEN_DESKTOP_NODE_CACHE_DIR=$cache_path" >> "$GITHUB_ENV"
+          echo "path=$cache_path" >> "$GITHUB_OUTPUT"
+
+      - uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
+        id: 'node-cache'
+        with:
+          path: '${{ steps.node-cache-path.outputs.path }}'
+          key: 'desktop-node-v2-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}-${{ inputs.dry_run }}'
 
       - uses: 'dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4' # stable
         with:
@@ -335,6 +340,12 @@ jobs:
       - name: 'Prepare bundled runtime'
         working-directory: 'packages/desktop-shell'
         run: 'npm run build:runtime'
+
+      - uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4
+        if: "${{ steps.node-cache.outputs.cache-hit != 'true' }}"
+        with:
+          path: '${{ steps.node-cache-path.outputs.path }}'
+          key: 'desktop-node-v2-${{ matrix.rust_target }}-${{ env.NODE_VERSION }}-${{ inputs.dry_run }}'
 
       - name: 'Run desktop tests'
         working-directory: 'packages/desktop-shell'
@@ -613,6 +624,7 @@ jobs:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           GH_TOKEN: '${{ github.token }}'
           FEED_TAG: '${{ env.DESKTOP_FEED_TAG }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
         run: |
           set -euo pipefail
           feed_assets=(release-assets/desktop-latest.json)
@@ -626,6 +638,19 @@ jobs:
             )
           fi
           if gh release view "$FEED_TAG" >/dev/null 2>&1; then
+            directory="$(mktemp -d)"
+            trap 'rm -rf "$directory"' EXIT
+            gh release download "$FEED_TAG" --dir "$directory" --pattern 'desktop-latest.json'
+            current="$(jq -r '.version' "$directory/desktop-latest.json")"
+            if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Current Desktop stable feed has an invalid version: $current"
+              exit 1
+            fi
+            newest="$(printf '%s\n%s\n' "$RELEASE_VERSION" "$current" | sort -V | tail -n 1)"
+            if [ "$current" != "$RELEASE_VERSION" ] && [ "$newest" = "$current" ]; then
+              echo "::notice::Desktop $RELEASE_VERSION will not replace newer stable feed $current."
+              exit 0
+            fi
             gh release upload "$FEED_TAG" "${feed_assets[@]}" --clobber
           else
             gh release create "$FEED_TAG" "${feed_assets[@]}" --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false

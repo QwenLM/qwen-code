@@ -28,6 +28,7 @@ if (refreshChecksums !== -1) {
   process.exit(0);
 }
 fs.mkdirSync(runtimeDir, { recursive: true });
+recoverInterruptedRuntime();
 const stagingRoot = fs.mkdtempSync(path.join(runtimeDir, '.prepare-'));
 const packageRoot = path.join(stagingRoot, 'qwen-code');
 const libDir = path.join(packageRoot, 'lib');
@@ -149,37 +150,37 @@ async function installNodeRuntime(destination, desktopTarget) {
     ? path.resolve(process.env.QWEN_DESKTOP_NODE_CACHE_DIR)
     : path.join(os.tmpdir(), 'qwen-desktop-node-cache');
   const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
-  const cachedChecksumsPath = path.join(cacheDir, 'SHASUMS256.txt');
   const cachedArchivePath = path.join(cacheDir, archiveName);
+  fs.rmSync(path.join(cacheDir, 'SHASUMS256.txt'), { force: true });
   const temporaryRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'qwen-desktop-node-'),
   );
   try {
     const checksumsPath = path.join(temporaryRoot, 'SHASUMS256.txt');
     const archivePath = path.join(temporaryRoot, archiveName);
+    await download(`${downloadRoot}/SHASUMS256.txt`, checksumsPath);
+    const checksums = fs.readFileSync(checksumsPath, 'utf8');
     if (
-      validCachedArchive(cachedArchivePath, cachedChecksumsPath, archiveName)
-    ) {
-      console.log(`Using cached Node.js runtime ${archiveName}`);
-      fs.copyFileSync(cachedChecksumsPath, checksumsPath);
-      fs.copyFileSync(cachedArchivePath, archivePath);
-    } else {
-      await download(`${downloadRoot}/SHASUMS256.txt`, checksumsPath);
-      await download(`${downloadRoot}/${archiveName}`, archivePath);
-      verifyChecksum(
+      copyValidCachedArchive(
+        cachedArchivePath,
         archivePath,
         archiveName,
-        fs.readFileSync(checksumsPath, 'utf8'),
-      );
+        checksums,
+      )
+    ) {
+      console.log(`Using cached Node.js runtime ${archiveName}`);
+    } else {
+      await download(`${downloadRoot}/${archiveName}`, archivePath);
+      verifyChecksum(archivePath, archiveName, checksums);
       fs.mkdirSync(cacheDir, { recursive: true });
-      fs.copyFileSync(checksumsPath, cachedChecksumsPath);
-      fs.copyFileSync(archivePath, cachedArchivePath);
+      const temporaryCachePath = `${cachedArchivePath}.${process.pid}.tmp`;
+      try {
+        fs.copyFileSync(archivePath, temporaryCachePath);
+        fs.renameSync(temporaryCachePath, cachedArchivePath);
+      } finally {
+        fs.rmSync(temporaryCachePath, { force: true });
+      }
     }
-    verifyChecksum(
-      archivePath,
-      archiveName,
-      fs.readFileSync(checksumsPath, 'utf8'),
-    );
     extractNodeArchive(archivePath, temporaryRoot);
     const extractedRoot = path.join(
       temporaryRoot,
@@ -194,20 +195,20 @@ async function installNodeRuntime(destination, desktopTarget) {
   }
 }
 
-function validCachedArchive(archivePath, checksumsPath, archiveName) {
-  if (!fs.existsSync(archivePath) || !fs.existsSync(checksumsPath)) {
-    return false;
-  }
+function copyValidCachedArchive(
+  cachedArchivePath,
+  archivePath,
+  archiveName,
+  checksums,
+) {
+  if (!fs.existsSync(cachedArchivePath)) return false;
   try {
-    verifyChecksum(
-      archivePath,
-      archiveName,
-      fs.readFileSync(checksumsPath, 'utf8'),
-    );
+    fs.copyFileSync(cachedArchivePath, archivePath);
+    verifyChecksum(archivePath, archiveName, checksums);
     return true;
   } catch {
+    fs.rmSync(cachedArchivePath, { force: true });
     fs.rmSync(archivePath, { force: true });
-    fs.rmSync(checksumsPath, { force: true });
     return false;
   }
 }
@@ -337,6 +338,18 @@ function copyDirectory(source, destination) {
     dereference: true,
     filter: (entry) => path.basename(entry) !== '.DS_Store',
   });
+}
+
+function recoverInterruptedRuntime() {
+  for (const entry of fs.readdirSync(runtimeDir)) {
+    if (!entry.startsWith('.prepare-')) continue;
+    const staleRoot = path.join(runtimeDir, entry);
+    const previousRoot = path.join(staleRoot, 'previous');
+    if (!fs.existsSync(finalPackageRoot) && fs.existsSync(previousRoot)) {
+      fs.renameSync(previousRoot, finalPackageRoot);
+    }
+    fs.rmSync(staleRoot, { recursive: true, force: true });
+  }
 }
 
 function replaceRuntime() {

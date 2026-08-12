@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
@@ -208,7 +208,7 @@ function testDesktopReleaseHardening() {
   );
   assert.match(
     workflow,
-    /Desktop prereleases must use a SemVer prerelease suffix/,
+    /IS_PRERELEASE" = 'true' \] && \[\[ ! "\$version" =~ \^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+-/,
     'prerelease builds must not reuse a stable Desktop version',
   );
   assert.match(
@@ -224,6 +224,11 @@ function testDesktopReleaseHardening() {
     /\*\.exe\)/,
     'Windows release collection must not include embedded executables',
   );
+  assert.match(
+    workflow,
+    /\*\.AppImage\|\*\.AppImage\.sig\|\*\.deb\|\*\.deb\.sig/,
+    'Linux release collection must allow only installers and updater signatures',
+  );
 
   const prepareRuntime = fs.readFileSync(
     path.join(packageDir, 'scripts', 'prepare-runtime.js'),
@@ -236,8 +241,19 @@ function testDesktopReleaseHardening() {
   );
   assert.match(
     workflow,
-    /desktop-node-\$\{\{ matrix\.rust_target \}\}-\$\{\{ env\.NODE_VERSION \}\}/,
+    /desktop-node-v2-\$\{\{ matrix\.rust_target \}\}-\$\{\{ env\.NODE_VERSION \}\}-\$\{\{ inputs\.dry_run \}\}/,
     'release builds must persist the bundled Node.js archive cache',
+  );
+  assert.match(workflow, /actions\/cache\/restore@/);
+  assert.match(workflow, /actions\/cache\/save@/);
+  assert.equal(
+    (
+      workflow.match(
+        /path: '\$\{\{ steps\.node-cache-path\.outputs\.path \}\}'/g,
+      ) ?? []
+    ).length,
+    2,
+    'cache restore and save must share the configured cache path',
   );
   assert.ok(
     prepareRuntime.indexOf('replaceRuntime();') >
@@ -255,7 +271,11 @@ function testRuntimePreparation(directory) {
   const nodeVersion = process.versions.node;
   const archiveName = `node-v${nodeVersion}-darwin-arm64.tar.gz`;
   const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
-  const archivePath = path.join(cacheDir, archiveName);
+  const cachedArchivePath = path.join(cacheDir, archiveName);
+  const archivePath = path.join(directory, archiveName);
+  const checksumsPath = path.join(directory, 'SHASUMS256.txt');
+  const fetchLog = path.join(directory, 'fetch.log');
+  const fetchMock = path.join(directory, 'mock-fetch.mjs');
   const extractedRoot = path.join(
     directory,
     `node-v${nodeVersion}-darwin-arm64`,
@@ -273,7 +293,10 @@ function testRuntimePreparation(directory) {
     path.join(packageDir, 'scripts', 'prepare-runtime.js'),
     testScript,
   );
-  fs.writeFileSync(path.join(directory, '.nvmrc'), '22\n');
+  fs.writeFileSync(
+    path.join(directory, '.nvmrc'),
+    `${process.versions.node.split('.')[0]}\n`,
+  );
   fs.writeFileSync(
     path.join(testPackageDir, 'package.json'),
     JSON.stringify({ version: '0.0.0-test' }),
@@ -291,7 +314,6 @@ function testRuntimePreparation(directory) {
   fs.mkdirSync(path.join(extractedRoot, 'bin'), { recursive: true });
   fs.writeFileSync(path.join(extractedRoot, 'bin', 'node'), 'node');
   fs.writeFileSync(path.join(extractedRoot, 'LICENSE'), 'node license');
-  fs.mkdirSync(cacheDir, { recursive: true });
   execFileSync('tar', [
     '-czf',
     archivePath,
@@ -303,9 +325,19 @@ function testRuntimePreparation(directory) {
     .createHash('sha256')
     .update(fs.readFileSync(archivePath))
     .digest('hex');
+  fs.writeFileSync(checksumsPath, `${archiveHash}  ${archiveName}\n`);
   fs.writeFileSync(
-    path.join(cacheDir, 'SHASUMS256.txt'),
-    `${archiveHash}  ${archiveName}\n`,
+    fetchMock,
+    `import fs from 'node:fs';
+globalThis.fetch = async (url) => {
+  const value = String(url);
+  const source = value.endsWith('/SHASUMS256.txt')
+    ? process.env.QWEN_TEST_NODE_CHECKSUMS
+    : process.env.QWEN_TEST_NODE_ARCHIVE;
+  fs.appendFileSync(process.env.QWEN_TEST_FETCH_LOG, value + '\\n');
+  return new Response(fs.readFileSync(source), { status: 200 });
+};
+`,
   );
 
   const env = {
@@ -315,6 +347,15 @@ function testRuntimePreparation(directory) {
     QWEN_DESKTOP_NODE_CACHE_DIR: cacheRoot,
     QWEN_DESKTOP_SKIP_BUILD: '1',
     QWEN_DESKTOP_TARGET: 'darwin-arm64',
+    QWEN_TEST_FETCH_LOG: fetchLog,
+    QWEN_TEST_NODE_ARCHIVE: archivePath,
+    QWEN_TEST_NODE_CHECKSUMS: checksumsPath,
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${pathToFileURL(fetchMock).href}`,
+    ]
+      .filter(Boolean)
+      .join(' '),
     npm_execpath: process.env.npm_execpath || process.argv[1],
   };
   const first = spawnSync(process.execPath, [testScript], {
@@ -322,13 +363,50 @@ function testRuntimePreparation(directory) {
     env,
   });
   assert.equal(first.status, 0, first.stderr);
-  assert.match(first.stdout, /Using cached Node\.js runtime/);
+  assert.doesNotMatch(first.stdout, /Using cached Node\.js runtime/);
+  assert.ok(fs.existsSync(cachedArchivePath));
   assert.ok(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
   );
 
+  const second = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /Using cached Node\.js runtime/);
+
+  fs.appendFileSync(cachedArchivePath, 'tampered');
+  const poisonedHash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(cachedArchivePath))
+    .digest('hex');
+  fs.writeFileSync(
+    path.join(cacheDir, 'SHASUMS256.txt'),
+    `${poisonedHash}  ${archiveName}\n`,
+  );
+  const recoveredCache = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(recoveredCache.status, 0, recoveredCache.stderr);
+  assert.doesNotMatch(recoveredCache.stdout, /Using cached Node\.js runtime/);
+  const fetches = fs.readFileSync(fetchLog, 'utf8').trim().split('\n');
+  assert.equal(fetches.filter((url) => url.endsWith(archiveName)).length, 2);
+  assert.equal(
+    fetches.filter((url) => url.endsWith('SHASUMS256.txt')).length,
+    3,
+  );
+  assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
+
   const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
   fs.writeFileSync(marker, 'preserve me');
+  const strandedRoot = path.join(runtimeDir, '.prepare-stranded');
+  fs.mkdirSync(strandedRoot);
+  fs.renameSync(
+    path.join(runtimeDir, 'qwen-code'),
+    path.join(strandedRoot, 'previous'),
+  );
   fs.rmSync(path.join(sourceRoot, 'LICENSE'));
   const failed = spawnSync(process.execPath, [testScript], {
     encoding: 'utf8',
@@ -336,6 +414,10 @@ function testRuntimePreparation(directory) {
   });
   assert.notEqual(failed.status, 0);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'preserve me');
+  assert.deepEqual(
+    fs.readdirSync(runtimeDir).filter((entry) => entry.startsWith('.prepare-')),
+    [],
+  );
 }
 
 function testUpdaterMirrorConfiguration() {
