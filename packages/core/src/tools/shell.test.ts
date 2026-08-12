@@ -135,6 +135,7 @@ describe('ShellTool', () => {
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
+      isTruncateToolOutputThresholdExplicit: vi.fn().mockReturnValue(false),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
       getFileSystemService: vi.fn().mockReturnValue(mockFileSystemService),
@@ -3064,6 +3065,50 @@ describe('ShellTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
     });
 
+    describe('output truncation threshold', () => {
+      it('keeps the 30k Shell default when no threshold is configured', () => {
+        expect(shellTool.maxOutputChars).toBe(30_000);
+      });
+
+      it.each([25_000, 10_000, 100_000, Number.POSITIVE_INFINITY])(
+        'exposes the explicit threshold %s to the scheduler',
+        (threshold) => {
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            threshold,
+          );
+
+          expect(shellTool.maxOutputChars).toBe(threshold);
+        },
+      );
+
+      it('keeps 40k model-facing output when the explicit threshold is 100k', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          100_000,
+        );
+        const output = 'x'.repeat(40_000);
+        const invocation = shellTool.build({
+          command: 'large-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({ output, exitCode: 0 });
+
+        const result = await promise;
+
+        expect(result.llmContent).toContain(output);
+        expect(result.llmContent).not.toContain(
+          'Tool output was too large and has been truncated',
+        );
+        expect(result.persistedOutputFiles).toBeUndefined();
+      });
+    });
+
     it('retains shell truncation without an artifact and records the persistence decision', async () => {
       const originalOutput = 'A'.repeat(30_001);
       const shortenedContent =
@@ -3422,7 +3467,7 @@ describe('ShellTool', () => {
           const result = await promise;
 
           // Shell must pass lines: Infinity so the global line cap can't
-          // undercut its declared 30k char budget.
+          // undercut its effective Shell char budget.
           expect(spy).toHaveBeenCalledWith(
             expect.anything(),
             ShellTool.Name,

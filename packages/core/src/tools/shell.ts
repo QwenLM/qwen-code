@@ -88,6 +88,13 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
+
+function getShellOutputThreshold(config: Config): number {
+  return config.isTruncateToolOutputThresholdExplicit()
+    ? config.getTruncateToolOutputThreshold()
+    : DEFAULT_SHELL_OUTPUT_THRESHOLD;
+}
 
 /**
  * Model-facing liveness guidance shared verbatim by both background
@@ -2913,10 +2920,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // scheduler) so the long-run hint below is appended OUTSIDE the
         // truncation envelope; the scheduler's sentinel makes its later pass a
         // no-op here. lines: Infinity keeps this char-only so the global line
-        // cap can't undercut the declared 30k char budget — many short lines
+        // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: 30_000,
+          threshold: getShellOutputThreshold(this.config),
           previewChars: 4000,
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
@@ -5032,7 +5039,7 @@ export class ShellTool extends BaseDeclarativeTool<
   static Name: string = ToolNames.SHELL;
 
   override get maxOutputChars(): number {
-    return 30_000;
+    return getShellOutputThreshold(this.config);
   }
 
   constructor(private readonly config: Config) {

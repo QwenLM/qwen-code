@@ -2055,6 +2055,7 @@ export class Config {
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
+  private readonly truncateToolOutputThresholdExplicit: boolean;
   private readonly truncateToolOutputLines: number;
   private readonly toolOutputBatchBudget: number;
   private readonly shellDefaultTimeoutMs: number | undefined;
@@ -2343,6 +2344,8 @@ export class Config {
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    this.truncateToolOutputThresholdExplicit =
+      params.truncateToolOutputThreshold !== undefined;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.toolOutputBatchBudget =
@@ -7371,6 +7374,10 @@ export class Config {
     }
 
     return this.truncateToolOutputThreshold;
+  }
+
+  isTruncateToolOutputThresholdExplicit(): boolean {
+    return this.truncateToolOutputThresholdExplicit;
   }
 
   getTruncateToolOutputLines(): number {
