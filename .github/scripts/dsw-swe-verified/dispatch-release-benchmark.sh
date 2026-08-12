@@ -17,11 +17,19 @@ dataset_root="${SWE_VERIFIED_DATASET_ROOT:-${pool_root}/datasets/swe-bench-verif
 agent_cache_root="${QWEN_BENCHMARK_CACHE_ROOT:-/mnt/workspace/qwen-benchmark-cache}"
 agent_cache_prepare="${pool_root}/service/deploy/prepare-agent-cache.py"
 database_url="${BENCHMARK_POOL_DATABASE_URL:-postgresql://qwen_benchmark@127.0.0.1:55432/qwen_benchmark_dsw_release_v1}"
+execution_backend="${BENCHMARK_EXECUTION_BACKEND:-harbor}"
+model_env_file="${MODEL_ENV_FILE:-/mnt/workspace/qwen-benchmark-eas-poc/config/model.env}"
+if [[ "${execution_backend}" == "eas" && -s "${model_env_file}" ]]; then
+  set -a
+  # This file contains only OPENAI_BASE_URL and OPENAI_MODEL; the API key is
+  # deliberately stored in a separate 0600 file consumed by the Executor.
+  source "${model_env_file}"
+  set +a
+fi
 model_name="${OPENAI_MODEL:-qwen3.7-max}"
 dataset_revision="2"
 max_attempts="${BENCHMARK_MAX_ATTEMPTS:-4}"
 retry_backoff_seconds="${BENCHMARK_RETRY_BACKOFF_SECONDS:-60}"
-execution_backend="${BENCHMARK_EXECUTION_BACKEND:-harbor}"
 eas_template_manifest="${EAS_TEMPLATE_MANIFEST:-${pool_root}/deploy/eas/templates.json}"
 output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
 

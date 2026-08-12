@@ -76,6 +76,11 @@ jobs:
             execution_backend='eas-smoke'
             instance_limit='1'
             instance_id='astropy__astropy-12907'
+          elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-full-[0-9A-Za-z._-]+$ ]]; then
+            should_run='true'
+            execution_backend='eas'
+            instance_limit='500'
+            instance_id=''
           elif [[ "${RELEASE_PRERELEASE}" == 'false' && "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.0$ ]]; then
             should_run='true'
           fi
