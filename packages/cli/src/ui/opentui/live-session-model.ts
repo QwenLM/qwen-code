@@ -22,8 +22,14 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
   confirm?: ToolConfirmState;
 };
 
+export type LiveThinkingItem = Extract<HistoryItem, { kind: 'thinking' }> & {
+  startedAt?: number;
+  durationMs?: number;
+};
+
 export type LiveHistoryItem =
-  | Exclude<HistoryItem, { kind: 'tool' }>
+  | Exclude<HistoryItem, { kind: 'tool' } | { kind: 'thinking' }>
+  | LiveThinkingItem
   | LiveToolItem;
 
 let uid = 0;
@@ -60,13 +66,18 @@ export function foldLiveEvent(
           id: nid('th'),
           text: ev.delta,
           done: false,
+          startedAt: Date.now(),
         });
       }
       return items;
     }
     case 'thinking-end': {
       if (last?.kind === 'thinking')
-        items[items.length - 1] = { ...last, done: true };
+        items[items.length - 1] = {
+          ...last,
+          done: true,
+          durationMs: Date.now() - (last.startedAt ?? Date.now()),
+        };
       return items;
     }
     case 'text': {

@@ -25,8 +25,10 @@ import {
   foldLiveEvent,
   settleOpenTools,
   type LiveHistoryItem,
+  type LiveThinkingItem,
   type LiveToolItem,
 } from './live-session-model.js';
+import { formatDuration } from '../utils/displayUtils.js';
 import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
 import {
   findProviderByCredentials,
@@ -229,6 +231,47 @@ function AssistantMessage(props: {
 /** Original-style header banner. Stable: depends only on config/width, so it
  *  does not re-render on streaming; resize re-renders without flicker via the
  *  erase-free painter. */
+const LOGO_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
+function lerpHex(a: string, b: string, t: number): string {
+  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
+  const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+  return (
+    '#' +
+    pa
+      .map((v, i) =>
+        Math.round(v + (pb[i] - v) * t)
+          .toString(16)
+          .padStart(2, '0'),
+      )
+      .join('')
+  );
+}
+function gradientAt(stops: string[], t: number): string {
+  if (stops.length === 0) return C.accent;
+  if (stops.length === 1) return stops[0];
+  const seg = Math.min(stops.length - 1, Math.floor(t * (stops.length - 1)));
+  const lt = t * (stops.length - 1) - seg;
+  return lerpHex(stops[seg], stops[seg + 1], lt);
+}
+/** ASCII logo with the original horizontal gradient (themes GradientColors). */
+function GradientLogo() {
+  const lines = shortAsciiLogo.replace(/^\n/, '').split('\n');
+  const w = Math.max(...lines.map((l) => [...l].length), 1);
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      {lines.map((line, li) => (
+        <box key={li} flexDirection="row">
+          {[...line].map((ch, ci) => (
+            <text key={ci} fg={gradientAt(LOGO_GRADIENT, ci / w)}>
+              {ch}
+            </text>
+          ))}
+        </box>
+      ))}
+    </box>
+  );
+}
+
 function approvalModeLabel(mode: string): string {
   switch (mode) {
     case 'yolo':
@@ -337,7 +380,7 @@ function buildBanner(config: Config | undefined, width: number) {
       marginRight={1}
       flexShrink={0}
     >
-      <text fg={C.accent}>{shortAsciiLogo}</text>
+      <GradientLogo />
       <box width={logoGap} />
       {infoPanel}
     </box>
@@ -738,10 +781,13 @@ function App({
   } catch {
     footerBranch = '';
   }
+  const fm = (
+    config as unknown as { getModel?: () => unknown } | undefined
+  )?.getModel?.();
   const footerModel =
-    (
-      config as unknown as { getModelDisplayName?: () => string } | undefined
-    )?.getModelDisplayName?.() ?? '';
+    typeof fm === 'string'
+      ? fm
+      : ((fm as { id?: string } | undefined)?.id ?? '');
   const footerLine1 =
     `→ ${footerProject}` +
     (footerBranch ? ` · git:(${footerBranch})` : '') +
@@ -750,24 +796,23 @@ function App({
 
   return (
     <box flexDirection="column" width={width} height="100%">
-      {banner}
-      {/* Tips line (mirrors original Tips component) */}
-      <box paddingLeft={1} paddingRight={1} flexShrink={0}>
-        <text fg={C.dim}>
-          {
-            'Tips: Try /insight to generate personalized insights from your chat history.'
-          }
-        </text>
-      </box>
-      {/* chat viewport — replaces qwen-code VP mode */}
+      {/* flow layout: banner/Tips/messages/input/footer scroll together,
+          top-aligned when empty (banner scrolls away on long sessions) */}
       <scrollbox
         flexGrow={1}
         minHeight={0}
         stickyScroll={true}
         stickyStart="bottom"
         verticalScrollbarOptions={{ visible: false }}
-        marginTop={0}
       >
+        {banner}
+        <box paddingLeft={1} paddingRight={1}>
+          <text fg={C.dim}>
+            {
+              'Tips: Try /insight to generate personalized insights from your chat history.'
+            }
+          </text>
+        </box>
         <box height={1} />
         {items.map((item) => {
           switch (item.kind) {
@@ -787,9 +832,23 @@ function App({
                   </text>
                 </box>
               );
-            case 'thinking':
-              // original: lone dim ∴ marker; click expands the thought with
-              // proper wrapping + right padding
+            case 'thinking': {
+              // mirror original ThinkingMessage: icon + label(+duration) + hint
+              const th = item as LiveThinkingItem;
+              const completedLabel =
+                th.durationMs == null
+                  ? null
+                  : th.durationMs < 1000
+                    ? 'Thought briefly'
+                    : `Thought for ${formatDuration(th.durationMs)}`;
+              const label = !th.done
+                ? 'Thinking…'
+                : (completedLabel ?? 'Thought');
+              const hint = !th.done
+                ? ''
+                : expanded.has(item.id)
+                  ? ' (ctrl+o to collapse)'
+                  : ' (click or ctrl+o to expand)';
               return (
                 <box
                   key={item.id}
@@ -806,7 +865,9 @@ function App({
                       }
                     }}
                   >
-                    <text fg={C.dim}>∴</text>
+                    <text fg={C.dim}>
+                      {`${th.done ? '∴' : '∵'} ${label}${hint}`}
+                    </text>
                   </box>
                   {expanded.has(item.id) && item.text.length > 0 && (
                     <box paddingLeft={2} paddingRight={2} marginTop={1}>
@@ -815,6 +876,7 @@ function App({
                   )}
                 </box>
               );
+            }
             case 'assistant':
               return <AssistantMessage key={item.id} item={item} />;
             case 'tool':
@@ -838,6 +900,32 @@ function App({
           }
         })}
         <box height={1} />
+        {/* prompt (flows after messages; top-aligned when empty) */}
+        <box flexDirection="column">
+          <OpenTuiInputPrompt
+            onSubmit={submitText}
+            userMessages={userPrompts}
+            config={config}
+            approvalMode={approvalMode}
+            streaming={streaming || commandProcessing}
+            onInterrupt={() => {
+              if (commandProcessingRef.current) {
+                gateway.cancel();
+                return;
+              }
+              liveAbortRef.current?.abort();
+              liveAbortRef.current = null;
+              setStreaming(false);
+            }}
+            placeholder="Type your message or @path/to/file"
+            focus={!dialog}
+          />
+        </box>
+        {/* footer */}
+        <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+          <text fg={C.dim}>{footerLine1}</text>
+          <text fg={C.dim}>{footerLine2}</text>
+        </box>
       </scrollbox>
 
       {/* active dialog (help/theme/settings/model/permissions/…) */}
@@ -856,41 +944,6 @@ function App({
           onApprovalModeChanged={setApprovalMode}
         />
       )}
-
-      {/* prompt (original: top line + > prefix, no outer box) */}
-      <box flexDirection="column" flexShrink={0}>
-        <OpenTuiInputPrompt
-          onSubmit={submitText}
-          userMessages={userPrompts}
-          config={config}
-          approvalMode={approvalMode}
-          streaming={streaming || commandProcessing}
-          onInterrupt={() => {
-            // Esc while a slash command runs cancels it (dispatcher.cancel);
-            // otherwise it interrupts the live model turn.
-            if (commandProcessingRef.current) {
-              gateway.cancel();
-              return;
-            }
-            liveAbortRef.current?.abort();
-            liveAbortRef.current = null;
-            setStreaming(false);
-          }}
-          placeholder="Type your message or @path/to/file"
-          focus={!dialog}
-        />
-      </box>
-
-      {/* footer (mirrors original Footer) */}
-      <box
-        flexDirection="column"
-        paddingLeft={1}
-        paddingRight={1}
-        flexShrink={0}
-      >
-        <text fg={C.dim}>{footerLine1}</text>
-        <text fg={C.dim}>{footerLine2}</text>
-      </box>
     </box>
   );
 }
