@@ -3653,7 +3653,7 @@ export const AppContainer = (props: AppContainerProps) => {
           // filters the INFO out while the files stay in the system prompt,
           // so the next prompt must re-announce; rewinding to a turn at/after
           // the announcement keeps the INFO and must not duplicate it.
-          contextFilesAnnouncedRef.current = !truncatedUi.some(
+          contextFilesAnnouncedRef.current = truncatedUi.some(
             (item) =>
               item.type === MessageType.INFO &&
               typeof item.text === 'string' &&

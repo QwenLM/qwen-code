@@ -6270,6 +6270,25 @@ describe('AppContainer State Management', () => {
       expect(announcementCalls(addItem)).toHaveLength(1);
     });
 
+    it('re-arms the latch after Ctrl-L (handleClearScreen) wipes the INFO', () => {
+      const { addItem } = renderAnnouncementHarness(['QWEN.md']);
+
+      capturedUIActions.handleFinalSubmit('hello', {
+        submittedPrompt: 'hello',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(1);
+
+      // Ctrl-L wipes the emitted INFO without a session switch; the latch
+      // must re-arm so the still-attached files re-announce on the next
+      // prompt.
+      capturedUIActions.handleClearScreen();
+
+      capturedUIActions.handleFinalSubmit('again', {
+        submittedPrompt: 'again',
+      });
+      expect(announcementCalls(addItem)).toHaveLength(2);
+    });
+
     it('does not consume the latch on a whitespace-only prompt', () => {
       const { addItem } = renderAnnouncementHarness(['QWEN.md']);
 
