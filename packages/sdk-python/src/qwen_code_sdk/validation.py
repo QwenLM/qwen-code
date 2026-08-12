@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import get_args
 from uuid import RFC_4122, UUID
 
 from .errors import ValidationError
 from .types import (
+    PermissionMode,
     QueryOptions,
     _validate_can_use_tool_callable,
     _validate_stderr_callable,
 )
 
-_VALID_PERMISSION_MODES = {"default", "plan", "auto-edit", "auto", "yolo"}
+_VALID_PERMISSION_MODES = set(get_args(PermissionMode))
 _VALID_AUTH_TYPES = {"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"}
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
@@ -87,7 +89,7 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError(
             f"Invalid permission_mode: {options.permission_mode!r}. "
-            "Expected one of: default, plan, auto-edit, auto, yolo."
+            f"Expected one of: {', '.join(get_args(PermissionMode))}."
         )
 
     if options.auth_type and options.auth_type not in _VALID_AUTH_TYPES:
