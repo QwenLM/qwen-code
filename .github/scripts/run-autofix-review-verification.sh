@@ -349,12 +349,25 @@ fi
 # fixture manifests deeper in a src tree are ordinary test data.
 sensitive_class_of() {
   # Prints the class name for a path, or nothing. Kept as one function so
-  # the round scan and the PR-footprint scan cannot drift.
+  # the round scan and the PR-footprint scan cannot drift. Classes are
+  # NARROW on purpose: a PR that only edits issue templates must not
+  # thereby license rounds to rewrite workflows, so executable CI surface,
+  # repo scripts, and passive .github metadata are separate capabilities.
+  # scripts/tests/** is ordinary test code, not gate machinery — the gate
+  # never executes it, and tooling PRs routinely grow tests there.
   local f="${1}"
   case "${f}" in
-    .github/*) echo 'ci-workflows' ;;
+    .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
+    .github/scripts/*) echo 'ci-scripts' ;;
+    .github/*) echo 'gh-metadata' ;;
     .husky/*) echo 'git-hooks' ;;
-    *) case "$(basename "${f}")" in
+    scripts/tests/*) ;;
+    # The transitive executable surface of the gate's own commands:
+    # `npm run build/lint/…` resolve through manifests INTO these files,
+    # and .npmrc steers what npm itself executes.
+    scripts/*) echo 'repo-scripts' ;;
+    .npmrc | .nvmrc) echo 'toolchain-config' ;;
+    *) case "${f##*/}" in
       eslint.config.*) echo 'lint-config' ;;
       vitest.config.*) echo 'test-config' ;;
       tsconfig.json | tsconfig.*.json) echo 'ts-config' ;;
@@ -388,7 +401,11 @@ while IFS= read -r f; do
     esac
   fi
   [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
-done < <(git diff --name-only "${ROUND_RANGE}")
+# -z --no-renames: NUL-delimited raw paths (a specially named file is not
+# core.quotePath-mangled past the case patterns), and a rename decomposes
+# into A+D so the VACATED sensitive path is classified too — moving a
+# workflow out of .github/ is a removal of verification machinery.
+done < <(git diff --name-only -z --no-renames "${ROUND_RANGE}" | tr '\0' '\n')
 if [[ -n "${ROUND_CLASSES}" ]]; then
   PR_CLASSES=''
   while IFS= read -r f; do
@@ -403,7 +420,7 @@ if [[ -n "${ROUND_CLASSES}" ]]; then
       esac
     fi
     [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
-  done < <(git diff --name-only "${PR_RANGE}")
+  done < <(git diff --name-only -z --no-renames "${PR_RANGE}" | tr '\0' '\n')
   VIOLATIONS="$(while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     cls="${line%% *}"
@@ -436,7 +453,14 @@ if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
     if [[ -n "${DELETED_TESTS}" ]]; then
       echo
       echo 'Deleted test files:'
-      while IFS= read -r f; do [[ -n "${f}" ]] && echo "- \`${f}\`"; done <<< "${DELETED_TESTS}"
+      # Filenames are branch-controlled bytes rendered inside a gate-authored
+      # (trusted-voice) document: a backtick in a legal git filename would
+      # close the code span and let the name forge "machine-measured" text.
+      # Render through a conservative safe-character set; anything else
+      # (backticks, newlines, control bytes) becomes '?'.
+      while IFS= read -r f; do
+        [[ -n "${f}" ]] && echo "- \`${f//[^A-Za-z0-9._\/ -]/?}\`"
+      done <<< "${DELETED_TESTS}"
     fi
     echo
     echo 'The justification must be in the round summary above; a deletion is only sound when the pinned behavior itself was wrong (evidence shown) or the coverage demonstrably survives elsewhere. · 本轮测试覆盖净减少（门自动测量，非 agent 文本）；删除是否成立请对照上方轮次摘要中的理由——仅当被钉住的行为本身有误（需给出证据）或覆盖确有替代时才合理。'
@@ -496,19 +520,26 @@ else
   done
 fi
 
-# Bite check: a round that changes source AND tests claims (implicitly or
-# explicitly) that behavior needed changing — most often "I fixed the defect
-# a finding described, and this test pins the fix". The claim is checkable
-# without trusting anyone's prose: run this round's changed tests against
-# the PRE-ROUND tree (origin/<branch> sources + the round's test files).
-# If EVERY changed test also passes there, the tests demonstrate nothing —
-# the classic shape of a plausible-but-false finding implemented as a "fix"
-# whose regression test was green all along. Reject, not retryable: the
-# 18-minute repair pass cannot make a nonexistent defect reproduce; the next
-# full round re-reads the feedback with this evidence in LAST_REJECTION and
-# can decline or escalate the finding instead.
+# Bite check: run this round's changed tests against the PRE-ROUND tree
+# (origin/<branch> sources + the round's test files). If EVERY changed test
+# also passes there, the tests demonstrate nothing — the classic shape of a
+# plausible-but-false finding implemented as a "fix" whose regression test
+# was green all along.
+#
+# INTENT decides the consequence, and intent is read from the round's own
+# machine-readable artifacts, not inferred from the diff shape: a round is
+# a DEFECT-CLAIM round only when resolved-comments.txt marks a finding
+# resolved-in-code whose thread is Critical-tagged or belongs to a
+# CHANGES_REQUESTED review (matched in rc.json/rv.json). Those rounds get a
+# non-retryable rejection on all-green — the 18-minute repair pass cannot
+# make a nonexistent defect reproduce; the next full round re-reads the
+# feedback with the evidence in LAST_REJECTION and can decline or escalate
+# instead. Every OTHER src+test round (a refactor pinning existing
+# behavior, an optional cleanup adding coverage) legitimately produces
+# all-green pre-round tests, so all-green there is a gate-authored ADVISORY
+# in the report, never a rejection.
 # Scope guards (all fail OPEN — only the clean "ran and all passed" verdict
-# rejects):
+# has consequences):
 #   - Runnable unit tests only: *.test.* / *.spec.* files. Snapshots and
 #     integration-tests/ are not directly runnable here.
 #   - Single-package rounds only: on the detached pre-round tree, gitignored
@@ -520,7 +551,10 @@ fi
 #   - A test that fails on the pre-round tree for ANY reason (assertion,
 #     collection, import of a round-added symbol) counts as biting; the
 #     check's power is the all-green case, which no honest defect fix
-#     produces.
+#     produces. KNOWN LIMIT, deliberate: the verdict is existential over
+#     the batch, so in a mixed Critical round one genuinely biting test
+#     vouches for the batch — binding each behavior to its own probe needs
+#     per-test result parsing and is out of scope here.
 BITE_RUNNER="${BITE_RUNNER:-bite_runner_default}"
 bite_runner_default() {
   # $1 = workspace dir, rest = test paths relative to the workspace.
@@ -530,10 +564,34 @@ bite_runner_default() {
 }
 mapfile -t BITE_FILES < <(git diff --name-only --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' | grep -v '__snapshots__' || true)
+# No blanket *.md exclusion: .qwen/skills/**/*.md is EXECUTABLE agent
+# behavior (and scripts/tests pins it), so markdown counts as source; the
+# consequence gating above keeps doc-only rounds from ever being rejected.
 BITE_SRC="$(git diff --name-only "${ROUND_RANGE}" \
   -- ':(exclude,glob)**/*.test.*' ':(exclude,glob)**/*.spec.*' \
   ':(exclude,glob)**/__snapshots__/**' ':(exclude,glob)**/test-utils/**' \
-  ':(exclude,glob)integration-tests/**' ':(exclude,glob)**/*.md')"
+  ':(exclude,glob)integration-tests/**')"
+# Does this round RESOLVE a Critical-tagged or CHANGES_REQUESTED finding in
+# code? resolved-comments.txt is the agent's own machine-readable claim of
+# what it fixed; rc.json/rv.json carry the thread bodies and review states
+# the scan already fetched. Absent/empty inputs read as "no defect claim".
+BITE_ENFORCE='false'
+if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
+  BITE_ENFORCE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
+    --slurpfile reviews "${WORKDIR}/rv.json" '
+    (add // []) as $comments
+    | ($reviews | add // []) as $reviews
+    | ($ids | split("\n") | map(select(test("^[0-9]+$")) | tonumber)) as $resolved
+    | any($comments[];
+        (.id as $id | $resolved | index($id) != null)
+        and (
+          ((.body // "") | contains("**[Critical]**"))
+          or ((.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")))
+        ))' "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
+  [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
+fi
 if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
   BITE_PKGS="$(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}" |
     bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
@@ -577,9 +635,9 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
         exit 1
       }
       git reset --quiet 2>> "${GATE_LOG}" || true
-      if [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then
+      if [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' && "${BITE_ENFORCE}" == 'true' ]]; then
         {
-          echo 'Every test this round added or changed ALSO PASSES on the pre-round tree (the branch as pushed, with only your test files overlaid). A defect fix must come with a test that fails before the fix and passes after it — an all-green result here means the claimed defect does not reproduce, no matter who reported it.'
+          echo 'Every test this round added or changed ALSO PASSES on the pre-round tree (the branch as pushed, with only your test files overlaid). This round resolves a Critical / Request-changes finding in code, and a defect fix must come with a test that fails before the fix and passes after it — an all-green result here means the claimed defect does not reproduce, no matter who reported it.'
           echo
           echo 'If the finding does not reproduce, do not implement it: decline it (for a disproved finding) or escalate it as an open question, attaching this measurement as the evidence.'
           echo
@@ -590,6 +648,14 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
           echo '````'
         } >> "${GATE_LOG}"
         reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'
+      elif [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then
+        # Not a defect-claim round: all-green pre-round tests are legitimate
+        # for a refactor or coverage addition — surface, never reject.
+        {
+          echo '🦷 **Gate advisory — this round'"'"'s changed tests all pass on the pre-round tree** (machine-measured, not agent-authored). Expected for a refactor or coverage addition; if this round was meant to FIX a defect, that defect did not reproduce. · 本轮改动的测试在轮前树上全部通过（门自动测量，非 agent 文本）。对重构或补充覆盖属正常；若本轮意在修复缺陷，则该缺陷未能复现。'
+        } >> "${WORKDIR}/gate-advisories.md"
+        echo "🦷 changed tests all pass on the pre-round tree — advisory written (no defect claim in this round)" \
+          | tee -a "${GATE_LOG}"
       elif [[ "${BITE_BIT}" == 'true' ]]; then
         echo "🦷 bite confirmed: at least one changed test fails on the pre-round tree" \
           | tee -a "${GATE_LOG}"

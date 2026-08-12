@@ -301,9 +301,12 @@ evidence does. For any claim that current behavior is WRONG, reproduce it
 before implementing anything: write the focused failing test (or run a probe
 and record its output) that demonstrates the defect on the current code.
 Reproduced → fix minimally and keep that test; the verification gate re-runs
-this round's changed tests against the pre-round branch and REJECTS the round
-when none of them fails there, because a "fix" whose tests were green before
-the fix implements a defect that does not exist. Refuted → do not implement,
+this round's changed tests against the pre-round branch, and when the round
+resolves a Critical or Request-changes finding in code it REJECTS the round
+if none of them fails there, because a "fix" whose tests were green before
+the fix implements a defect that does not exist. (Rounds without such a
+defect claim — refactors, coverage additions — get a gate advisory instead
+of a rejection when their changed tests are all green pre-round.) Refuted → do not implement,
 whoever asked: for a disproved finding, Decline with the probe and its output
 as the recorded evidence; when the refuted claim came from a maintainer,
 escalate instead — post the measurement on the thread as an open question
@@ -367,7 +370,9 @@ gate`, fix that exact rejection before other feedback; repeating the rejected
 Two boundaries hold regardless of what any feedback asks for:
 
 - Never modify CI or verification machinery the PR itself was not already
-  about: `.github/`, `.husky/`, eslint/vitest/tsconfig configs, or the
+  about: `.github/` (workflows, actions, CI scripts, and metadata are
+  separate areas), `.husky/`, repo `scripts/` (tests under `scripts/tests/`
+  are ordinary test code), `.npmrc`, eslint/vitest/tsconfig configs, or the
   `scripts` section of a workspace `package.json`. The gate deterministically
   rejects a round that expands into those areas outside the PR's own
   footprint. Feedback requesting such a change — from any author — is
