@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
@@ -39,6 +40,7 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
@@ -50,6 +52,73 @@ try {
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+async function testBootstrapWorkspaceVisibility() {
+  const elements = {};
+  const element = (selector) => {
+    elements[selector] ??= {
+      addEventListener(event, listener) {
+        this.listeners ??= {};
+        this.listeners[event] = listener;
+      },
+      style: {},
+    };
+    return elements[selector];
+  };
+  const listeners = {};
+  let resolveBootstrapState;
+  const tauri = {
+    core: {
+      invoke: async (command) => {
+        if (command === 'bootstrap_state') {
+          return new Promise((resolve) => {
+            resolveBootstrapState = resolve;
+          });
+        }
+        assert.equal(command, 'restart_runtime');
+        return new Promise(() => {});
+      },
+    },
+    event: {
+      listen: async (event, listener) => {
+        listeners[event] = listener;
+      },
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(packageDir, 'bootstrap', 'bootstrap.js'), 'utf8'),
+    { document: { querySelector: element }, window: { __TAURI__: tauri } },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  listeners['runtime-starting']({
+    payload: '/Users/example/Projects/qwen-code',
+  });
+  assert.equal(element('#workspace').hidden, true);
+
+  listeners['runtime-failed']({ payload: 'runtime failed' });
+  assert.equal(element('#workspace').hidden, false);
+  assert.equal(
+    element('#workspace').textContent,
+    '/Users/example/Projects/qwen-code',
+  );
+
+  element('#retry').listeners.click();
+  assert.equal(element('#workspace').hidden, true);
+
+  resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'starting',
+    workspace: '/Users/example/Documents',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('#title').textContent, 'Restarting Qwen Code');
+  assert.equal(
+    element('#workspace').hidden,
+    true,
+    'A stale bootstrap snapshot must not overwrite a newer recovery action.',
+  );
 }
 
 function testLegacyApplicationIdentity() {
