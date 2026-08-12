@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
@@ -283,6 +284,41 @@ describe('tryGenerateSessionTitle', () => {
 
     expect(captured).not.toContain('MID_SESSION_TOOL_METADATA');
     expect(captured).toContain('please add a regression test');
+  });
+
+  it('excludes UserPromptSubmit hook context from the title prompt', async () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'Diagnose the parser CI failure.' },
+          {
+            text: wrapUserPromptSubmitContext(
+              'UNRELATED_MEMORY_TOPIC '.repeat(80),
+            ),
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'I will inspect the parser workflow.' }],
+      },
+    ];
+
+    let captured = '';
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history,
+      generateJsonResult: async (opts: unknown) => {
+        captured = JSON.stringify((opts as { contents: Content[] }).contents);
+        return { title: 'Diagnose parser CI failure' };
+      },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal);
+
+    expect(captured).toContain('Diagnose the parser CI failure.');
+    expect(captured).not.toContain('UNRELATED_MEMORY_TOPIC');
   });
 
   it('drops pure system-reminder messages from the title prompt', async () => {
