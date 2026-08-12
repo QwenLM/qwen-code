@@ -38,6 +38,10 @@ describe('audit-layers taxonomy', () => {
     expect(
       parseLayerReceipts(`Layer walked: ${SHELL_MODEL_LAYERS[0].id}`).size,
     ).toBe(1);
+    // The state layers name the REMOVAL side, not only the add side — an
+    // add-only model that never handles `unset -f`/`set +a` is the divergence.
+    expect(rendered).toContain('unset -f');
+    expect(rendered).toContain('set +a');
   });
 
   it('names the state layer PR #8687 exposed', () => {

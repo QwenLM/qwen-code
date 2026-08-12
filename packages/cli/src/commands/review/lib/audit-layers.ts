@@ -127,7 +127,7 @@ export const SHELL_MODEL_LAYERS: readonly DefectLayer[] = [
   {
     id: 'resolution-order',
     briefHint:
-      'a function shadowing `git`/`cd`, `command`/`builtin` bypass, `export -f`',
+      'a function shadowing `git`/`cd`, `command`/`builtin` bypass, `export -f` — and the removals `unset -f`/`unalias`/`export -n -f`',
     label:
       'name resolution order (function vs builtin vs external, command/builtin, export -f)',
     signals: [
@@ -143,7 +143,8 @@ export const SHELL_MODEL_LAYERS: readonly DefectLayer[] = [
   },
   {
     id: 'inheritance',
-    briefHint: '`set -a`/allexport into a child or `$(…)`',
+    briefHint:
+      '`set -a`/allexport into a child or `$(…)`, and its reset `set +a`/`+o`',
     label:
       'option inheritance (set -a / allexport into a child or substitution)',
     signals: [

@@ -57,8 +57,11 @@ import {
   findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { BRIEFS } from './lib/agent-briefs.js';
-import { SHELL_MODEL_LAYERS } from './lib/audit-layers.js';
+import { BRIEFS, MODELED_SYSTEM_EXECUTION_LENS } from './lib/agent-briefs.js';
+import {
+  MODELED_SYSTEM_DOMAIN,
+  SHELL_MODEL_LAYERS,
+} from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
 import {
   readRecordedPrompts,
@@ -233,6 +236,48 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(p).toContain('Project rules');
     expect(p).toContain('No `any` in new code.');
     expect(buildChunkAgentPrompt(PLAN, 13)).not.toContain('Project rules');
+  });
+
+  it('attaches the execution-model lens to a chunk agent on a modeled-system diff, and not otherwise', () => {
+    // On 3B the dimension agents are replaced by these per-territory ones, so
+    // Agent 2's brief never reaches a chunk agent. A manifest-declared modeled
+    // system arms the lens here, scoped to the chunk; an ordinary domain does not.
+    const chunkPlan = (domains: string[]) =>
+      ({
+        diffPathAbsolute: '/d.txt',
+        chunks: [
+          {
+            id: 1,
+            startLine: 1,
+            endLine: 10,
+            lines: 10,
+            chars: 100,
+            maxLineChars: 50,
+            oversized: false,
+            files: [{ path: 'guard.ts', newStart: 1, newEnd: 9 }],
+          },
+        ],
+        repositoryContext: {
+          version: 1,
+          provider: 'test',
+          label: 'guard',
+          domains,
+          relatedPaths: [],
+          recommendedTests: [],
+          requiredConfigurations: [],
+          requiredAgents: [],
+          unverifiedDimensions: [],
+          verificationNotes: [],
+        },
+      }) as never;
+    const armed = buildChunkAgentPrompt(chunkPlan([MODELED_SYSTEM_DOMAIN]), 1);
+    expect(armed).toContain('Modeled-executable-system lens — your territory');
+    expect(armed).toContain("A model of another system's EXECUTION");
+    // The same lens text Agent 2 carries — one source, both topologies.
+    expect(armed).toContain(MODELED_SYSTEM_EXECUTION_LENS);
+    expect(buildChunkAgentPrompt(chunkPlan(['compiler']), 1)).not.toContain(
+      'Modeled-executable-system lens — your territory',
+    );
   });
 });
 
