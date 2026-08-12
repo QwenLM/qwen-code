@@ -835,6 +835,9 @@ export class ExtensionStore {
     update: (policy: ExtensionPolicy) => void,
   ): Promise<ExtensionStoreSnapshot> {
     identities.forEach(assertIdentity);
+    if (identities.length === 0) {
+      throw new Error('At least one extension identity is required.');
+    }
     return await this.withLock(async () => {
       const snapshot =
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();

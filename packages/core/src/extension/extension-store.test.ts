@@ -247,6 +247,23 @@ describe('ExtensionStore', () => {
     ).rejects.toBeInstanceOf(ExtensionConflictError);
   });
 
+  it('rejects an empty batch without materializing store state', async () => {
+    const legacy = {
+      demo: { overrides: ['!/work/*', '/work/enabled/*'] },
+    };
+    await fsp.writeFile(enablementPath, JSON.stringify(legacy));
+    const store = makeStore();
+
+    await expect(store.setDefaultActivations([], 'disabled')).rejects.toThrow(
+      'At least one extension identity is required.',
+    );
+
+    expect(fs.existsSync(path.join(storeDir, 'state.json'))).toBe(false);
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual(
+      legacy,
+    );
+  });
+
   it('re-keys a policy to a new id for the same name after an id-formula change', async () => {
     const store = makeStore();
     const oldId = 'a'.repeat(64);

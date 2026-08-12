@@ -488,6 +488,7 @@ describe('extension management v2 REST', () => {
   it('rejects malformed v2 batches before queueing an operation', async () => {
     const h = await makeHarness();
     mockExtensionManager();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
       const nonArrayGlobal = await auth(
         request(h.app)
@@ -502,6 +503,11 @@ describe('extension management v2 REST', () => {
           .put('/extensions/activation')
           .send({ extensionIds: [], state: 'enabled' }),
       );
+      const nonStringGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({ extensionIds: [extensionId, 42], state: 'enabled' }),
+      );
       const invalidGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
@@ -514,6 +520,20 @@ describe('extension management v2 REST', () => {
             extensionIds: Array.from({ length: 101 }, () => extensionId),
             state: 'enabled',
           }),
+      );
+      const nonArrayWorkspace = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({ extensionIds: extensionId }),
+      );
+      const emptyWorkspace = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({ extensionIds: [] }),
       );
       const invalidWorkspace = await auth(
         request(h.app)
@@ -531,8 +551,11 @@ describe('extension management v2 REST', () => {
       expect(nonArrayGlobal.status).toBe(400);
       expect(missingGlobal.status).toBe(400);
       expect(emptyGlobal.status).toBe(400);
+      expect(nonStringGlobal.status).toBe(400);
       expect(invalidGlobal.status).toBe(400);
       expect(oversizedGlobal.status).toBe(400);
+      expect(nonArrayWorkspace.status).toBe(400);
+      expect(emptyWorkspace.status).toBe(400);
       expect(invalidWorkspace.status).toBe(400);
       expect(inheritedGlobal.status).toBe(400);
       expect(invalidGlobal.body).toMatchObject({
@@ -547,7 +570,14 @@ describe('extension management v2 REST', () => {
       expect(inheritedGlobal.body).toMatchObject({
         code: 'invalid_extension_activation',
       });
-      for (const response of [nonArrayGlobal, missingGlobal, emptyGlobal]) {
+      for (const response of [
+        nonArrayGlobal,
+        missingGlobal,
+        emptyGlobal,
+        nonStringGlobal,
+        nonArrayWorkspace,
+        emptyWorkspace,
+      ]) {
         expect(response.body).toMatchObject({ code: 'invalid_extension_ids' });
       }
       expect(
@@ -556,7 +586,11 @@ describe('extension management v2 REST', () => {
       expect(
         ExtensionManager.prototype.setExtensionWorkspaceActivations,
       ).not.toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('Cannot set headers after they are sent'),
+      );
     } finally {
+      stderr.mockRestore();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
