@@ -25,7 +25,7 @@ export interface FileUploadClient {
 export type FileUploadStatus = 'pending' | 'uploading' | 'done' | 'error';
 
 /** Machine-readable failure codes; the render site localizes them. */
-export type FileUploadErrorCode = 'tooLarge' | 'noDaemon';
+export type FileUploadErrorCode = 'tooLarge' | 'noDaemon' | 'tooManyFiles';
 
 export interface FileUploadItem {
   id: string;
@@ -41,21 +41,27 @@ export interface FileUploadItem {
   error?: string;
   /** Server-confirmed final path (may be auto-numbered). */
   resultPath?: string;
+  /** Set on a `tooManyFiles` notice row: how many files were not queued. */
+  skippedCount?: number;
 }
 
 export interface UseFileUploadOptions {
   client: FileUploadClient | undefined;
   maxBytes: number;
   /**
-   * Identity of the target workspace. When it changes (or the hook
-   * unmounts), in-flight uploads are aborted and the queue is cleared, so an
-   * upload started for workspace A cannot insert a path into workspace B.
+   * Identity of the target workspace AND the session composing into it.
+   * When it changes (or the hook unmounts), in-flight uploads are aborted
+   * and the queue is cleared, so an upload started for workspace A cannot
+   * insert a path into workspace B, and an upload started in one session
+   * cannot append its reference to another session's draft after a switch.
    */
   targetKey: string;
 }
 
 export interface UseFileUploadReturn {
   uploads: FileUploadItem[];
+  /** True while any item is pending or in flight; gates composer submit. */
+  isBusy: boolean;
   /**
    * Queue `files` for sequential upload into `targetDir` (relative to the
    * target workspace root; `'.'` for the root). `onUploaded` fires exactly
@@ -80,6 +86,12 @@ interface QueuedUpload {
 
 let uploadIdCounter = 0;
 const SUCCESS_DISMISS_MS = 3000;
+/**
+ * Cap on files accepted per drop/picker batch. Unbounded batches render one
+ * strip row per file and keep the strictly-sequential queue busy for hours;
+ * overflow is surfaced as a single notice row instead.
+ */
+const MAX_FILES_PER_BATCH = 100;
 
 function joinTargetPath(targetDir: string, filename: string): string {
   const dir = targetDir.replace(/\/+$/, '');
@@ -209,7 +221,9 @@ export function useFileUpload(
     (files: File[], targetDir: string, onUploaded?: (path: string) => void) => {
       if (files.length === 0) return;
       const limit = maxBytesRef.current;
-      for (const file of files) {
+      const accepted = files.slice(0, MAX_FILES_PER_BATCH);
+      const skipped = files.length - accepted.length;
+      for (const file of accepted) {
         uploadIdCounter += 1;
         const id = `upload-${uploadIdCounter}`;
         const targetPath = joinTargetPath(targetDir, file.name);
@@ -238,6 +252,21 @@ export function useFileUpload(
           controller: new AbortController(),
           onUploaded,
         });
+      }
+      if (skipped > 0) {
+        uploadIdCounter += 1;
+        uploadsRef.current = [
+          ...uploadsRef.current,
+          {
+            id: `upload-${uploadIdCounter}`,
+            file: files[accepted.length] as File,
+            targetPath: '',
+            status: 'error',
+            progress: 0,
+            errorCode: 'tooManyFiles',
+            skippedCount: skipped,
+          },
+        ];
       }
       commit();
       void processQueue();
@@ -277,5 +306,9 @@ export function useFileUpload(
     };
   }, [targetKey, commit]);
 
-  return { uploads, uploadFiles, removeUpload };
+  const isBusy = uploads.some(
+    (item) => item.status === 'pending' || item.status === 'uploading',
+  );
+
+  return { uploads, isBusy, uploadFiles, removeUpload };
 }

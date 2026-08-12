@@ -176,7 +176,8 @@ export function AtMentionPanel({
           labelTitle: item.label,
           subtitle: item.subtitle,
           description:
-            menu.selectedProviderId === FILE_PROVIDER_ID
+            menu.selectedProviderId === FILE_PROVIDER_ID &&
+            item.kind !== 'upload'
               ? undefined
               : (item.description ?? item.detail),
           icon: item.icon,

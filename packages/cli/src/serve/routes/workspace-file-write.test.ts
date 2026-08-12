@@ -38,6 +38,7 @@ async function makeHarness(opts?: {
   trusted?: boolean;
   token?: string;
   generationGuard?: { assertOpen(): void };
+  workspaceName?: string;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -45,7 +46,7 @@ async function makeHarness(opts?: {
       `qwen-write-routes-${randomBytes(4).toString('hex')}-`,
     ),
   );
-  const wsDir = path.join(scratch, 'ws');
+  const wsDir = path.join(scratch, opts?.workspaceName ?? 'ws');
   await fsp.mkdir(wsDir);
   const workspace = canonicalizeWorkspace(wsDir);
   const events: BridgeEvent[] = [];
@@ -122,7 +123,10 @@ async function sendChunkedUpload(
           },
         );
         // The server may destroy the connection mid-body once it rejects.
-        req.on('error', () => {});
+        // Settle even when the socket dies before any response: otherwise
+        // the promise never resolves and the test hangs into the suite
+        // timeout instead of failing fast on the status assertion.
+        req.on('error', () => settle(0, ''));
         const chunk = Buffer.alloc(4 * 1024 * 1024, 1);
         let remaining = totalBytes;
         const writeNext = (): void => {
@@ -688,14 +692,34 @@ describe('POST /file/upload', () => {
 
   it('uploads into an existing subdirectory', async () => {
     await fsp.mkdir(path.join(h.workspace, 'sub'));
-    const res = await upload(path.join('sub', 'file.txt')).send(
-      Buffer.from('hi'),
-    );
+    // A literal forward-slash path: browsers always send POSIX separators;
+    // path.join would emit a backslash on the Windows gate.
+    const res = await upload('sub/file.txt').send(Buffer.from('hi'));
     expect(res.status).toBe(201);
     expect(res.body.path).toBe('sub/file.txt');
     expect(
       await fsp.readFile(path.join(h.workspace, 'sub', 'file.txt'), 'utf-8'),
     ).toBe('hi');
+  });
+
+  it('uploads into a workspace whose root path trips the suspicious-pattern check', async () => {
+    // A canonical workspace root containing a trailing-dot segment is legal
+    // on POSIX but matches hasSuspiciousPathPattern. Candidates must be
+    // re-resolved from the workspace-relative admission dir, not from the
+    // absolute root, or every upload fails with 'suspicious pattern' while
+    // /file/write on the same workspace works normally.
+    await teardown(h);
+    h = await makeHarness({ token: 'secret', workspaceName: 'my proj.' });
+    const first = await upload('report.txt').send(Buffer.from('hi'));
+    expect(first.status).toBe(201);
+    expect(first.body.path).toBe('report.txt');
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'report.txt'), 'utf-8'),
+    ).toBe('hi');
+    // Numbered candidates take the same re-resolution path.
+    const second = await upload('report.txt').send(Buffer.from('v2'));
+    expect(second.status).toBe(201);
+    expect(second.body.path).toBe('report (1).txt');
   });
 
   it('handles filenames with spaces, non-ASCII, and literal % and #', async () => {

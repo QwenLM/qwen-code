@@ -878,6 +878,32 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('uploads into a workspace whose root path trips the suspicious-pattern check', async () => {
+    // A canonical root with a trailing-dot segment matches
+    // hasSuspiciousPathPattern; candidates must re-resolve from the
+    // workspace-relative admission dir rather than the absolute root.
+    const h = await makeHarness({
+      token: 'secret',
+      secondaryDirName: 'my proj.',
+    });
+    try {
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/file/upload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('Content-Type', 'application/octet-stream')
+        .query({ path: 'report.txt' })
+        .send(Buffer.from('hi'));
+      expect(res.status).toBe(201);
+      expect(res.body.path).toBe('report.txt');
+      await expect(
+        fsp.readFile(path.join(h.secondaryCwd, 'report.txt'), 'utf-8'),
+      ).resolves.toBe('hi');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('shares one upload gate between legacy and qualified routes', async () => {
     let started = 0;
     let releaseWrites: () => void = () => {};

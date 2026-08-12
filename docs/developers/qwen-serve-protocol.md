@@ -191,6 +191,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
+ 'workspace_file_upload',
  'session_approval_mode_control', 'workspace_tool_toggle', 'workspace_skill_toggle',
  'workspace_skill_batch_toggle',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
@@ -273,8 +274,13 @@ the hash-aware text mutation routes (`POST /file/write`, `POST /file/edit`).
 The write tag means the route contract exists; it does not mean the current
 deployment is open for anonymous mutation. Write/edit are strict mutation
 routes and require a configured bearer token even on loopback.
+`workspace_file_upload` covers `POST /file/upload`, the binary ingress route:
+an `application/octet-stream` body capped at `MAX_UPLOAD_BYTES` (50 MiB) is
+written into the workspace without ever overwriting — an occupied name is
+auto-numbered (`name (1).ext`, `name (2).ext`, ...). It is also a strict
+mutation route.
 
-When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, and `/workspaces/:workspace/file/edit`.
+When `workspace_qualified_rest_core` is advertised, the same file surface is also available at `/workspaces/:workspace/file`, `/workspaces/:workspace/file/bytes`, `/workspaces/:workspace/stat`, `/workspaces/:workspace/list`, `/workspaces/:workspace/glob`, `/workspaces/:workspace/file/write`, `/workspaces/:workspace/file/edit`, and `/workspaces/:workspace/file/upload`.
 
 The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces/:workspace/agents` and `/workspaces/:workspace/agents/:agentType`. These plural routes only read or mutate project-level agents for the selected workspace; `global` and `user` scope requests return `400 { code: "global_scope_not_supported_for_workspace_route" }`. Workspace-less `/workspace/agents` routes retain their existing primary-workspace behavior and remain the only REST surface for user-level agent scope.
 

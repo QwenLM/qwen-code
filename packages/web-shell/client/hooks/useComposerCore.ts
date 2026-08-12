@@ -1122,6 +1122,12 @@ export interface UseComposerCoreOptions {
    * absent, the upload item is hidden.
    */
   onFileUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
+  /**
+   * True while a workspace file upload is pending or in flight. Gates
+   * submit exactly like the image lane's pending batches, so a prompt cannot
+   * go out before the upload's `@file` reference has been inserted.
+   */
+  workspaceUploadBusy?: boolean;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -1400,6 +1406,7 @@ export function useComposerCore(
     onComposerTagClick,
     onImageIngestionNotice,
     onFileUploadRequest,
+    workspaceUploadBusy = false,
     editorTheme,
   } = options;
 
@@ -1490,6 +1497,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
+  workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
@@ -2403,7 +2412,8 @@ export function useComposerCore(
   ) => {
     if (
       disabledRef.current ||
-      imageIngestionLaneRef.current.pendingBatches > 0
+      imageIngestionLaneRef.current.pendingBatches > 0 ||
+      workspaceUploadBusyRef.current
     ) {
       return true;
     }
@@ -3883,7 +3893,8 @@ export function useComposerCore(
   const retryLast = useCallback(() => {
     if (
       disabledRef.current ||
-      imageIngestionLaneRef.current.pendingBatches > 0
+      imageIngestionLaneRef.current.pendingBatches > 0 ||
+      workspaceUploadBusyRef.current
     ) {
       return;
     }
@@ -4056,7 +4067,8 @@ export function useComposerCore(
     (match: string) => {
       if (
         disabledRef.current ||
-        imageIngestionLaneRef.current.pendingBatches > 0
+        imageIngestionLaneRef.current.pendingBatches > 0 ||
+        workspaceUploadBusyRef.current
       ) {
         return;
       }
@@ -4157,7 +4169,11 @@ export function useComposerCore(
 
   // ---- Computed ----
 
-  const canSubmit = !disabled && pendingImageBatchCount === 0 && hasContent;
+  const canSubmit =
+    !disabled &&
+    pendingImageBatchCount === 0 &&
+    !workspaceUploadBusy &&
+    hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&

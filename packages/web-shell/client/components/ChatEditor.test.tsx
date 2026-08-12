@@ -110,6 +110,7 @@ const composerCoreState = vi.hoisted(() => ({
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
+  workspaceUploadBusy: false,
 }));
 
 // Controllable `useOptionalWorkspace()` value for file-upload gating tests.
@@ -160,8 +161,11 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         targetDir: string,
         restoreQuery?: () => void,
       ) => void;
+      workspaceUploadBusy?: boolean;
     }) => {
       composerCoreState.onFileUploadRequest = options?.onFileUploadRequest;
+      composerCoreState.workspaceUploadBusy =
+        options?.workspaceUploadBusy ?? false;
       return {
         containerRef: React.createRef<HTMLDivElement>(),
         viewRef: { current: null },
@@ -324,6 +328,7 @@ interface ChatEditorRenderProps {
   animatePlaceholder?: boolean;
   disabled?: boolean;
   atWorkspaceCwd?: string;
+  sessionId?: string;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
 }
@@ -1827,7 +1832,7 @@ describe('ChatEditor file upload gating', () => {
     expect(restore).toHaveBeenCalledTimes(1);
   });
 
-  it('does not restore the mention once the picker produced a change', () => {
+  it('does not restore the mention once the picker produced a change', async () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     workspace.client.uploadWorkspaceFile.mockResolvedValue({
       kind: 'file_upload',
@@ -1852,6 +1857,10 @@ describe('ChatEditor file upload gating', () => {
     act(() => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    // Flush the upload this change started: without it the pending promise
+    // resolves after the test body (state updates outside act, a dismiss
+    // timer firing into a later test), and every sibling test flushes too.
+    await act(async () => {});
     act(() => {
       input.dispatchEvent(new Event('cancel'));
     });
@@ -2055,6 +2064,68 @@ describe('ChatEditor file upload gating', () => {
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
+  it('gates the composer submit while an upload is in flight', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    let resolveUpload!: (
+      value: Awaited<ReturnType<typeof workspace.client.uploadWorkspaceFile>>,
+    ) => void;
+    workspace.client.uploadWorkspaceFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    expect(composerCoreState.workspaceUploadBusy).toBe(false);
+
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    await act(async () => {});
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(composerCoreState.workspaceUploadBusy).toBe(true);
+
+    await act(async () => {
+      resolveUpload({
+        kind: 'file_upload',
+        path: 'notes.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+    });
+    expect(composerCoreState.workspaceUploadBusy).toBe(false);
+  });
+
+  it('cancels an in-flight upload when the session switches', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    let signal: AbortSignal | undefined;
+    workspace.client.uploadWorkspaceFile.mockImplementation((req) => {
+      signal = req.signal;
+      return new Promise(() => {});
+    });
+    uploadWorkspaceState.current = workspace;
+    composerCoreState.addTags.mockClear();
+    const container = renderChatEditor({ sessionId: 'session-a' });
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'notes.txt')]);
+    await act(async () => {});
+    expect(workspace.client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(
+      container.querySelector('[data-web-shell-upload-strip]'),
+    ).not.toBeNull();
+
+    // Same workspace, different session: the shared ChatEditor now shows
+    // session B's draft, so session A's upload must be canceled instead of
+    // appending its @file reference to session B's draft on completion.
+    rerenderChatEditor(container, { sessionId: 'session-b' });
+    await act(async () => {});
+    expect(signal?.aborted).toBe(true);
+    expect(container.querySelector('[data-web-shell-upload-strip]')).toBeNull();
+
+    await act(async () => {});
+    expect(composerCoreState.addTags).not.toHaveBeenCalled();
+  });
+
   describe('qualified upload targeting', () => {
     const makeQualifiedWorkspace = (
       features: string[],
@@ -2194,6 +2265,46 @@ describe('ChatEditor file upload gating', () => {
       expect(input.value).toBe('');
       expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
       expect(qualifiedClient.uploadWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it('restores the mention query when the stale-target guard blocks the picker', async () => {
+      const { workspace, qualifiedClient } = makeQualifiedWorkspace(
+        qualifiedFeatures,
+        primaryAndSecondary,
+      );
+      uploadWorkspaceState.current = workspace;
+      const container = renderChatEditor({});
+      const input = container.querySelector<HTMLInputElement>(
+        '[data-web-shell-upload-input]',
+      )!;
+
+      const restore = vi.fn();
+      act(() => {
+        composerCoreState.onFileUploadRequest?.('docs', restore);
+      });
+      rerenderChatEditor(container, { atWorkspaceCwd: '/secondary' });
+
+      Object.defineProperty(input, 'files', {
+        value: [new File(['abc'], 'notes.txt')],
+        configurable: true,
+      });
+      let inputValue = 'C:\\fakepath\\notes.txt';
+      Object.defineProperty(input, 'value', {
+        configurable: true,
+        get: () => inputValue,
+        set: (next: string) => {
+          inputValue = next;
+        },
+      });
+      act(() => {
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await act(async () => {});
+
+      expect(qualifiedClient.uploadWorkspaceFile).not.toHaveBeenCalled();
+      // The guard blocked the upload, but the deleted mention query must
+      // come back instead of vanishing silently.
+      expect(restore).toHaveBeenCalledTimes(1);
     });
   });
 });

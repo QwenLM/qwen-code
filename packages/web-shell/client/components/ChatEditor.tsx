@@ -1350,6 +1350,19 @@ export const ChatEditor = memo(
       uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
       50 * 1024 * 1024;
 
+    // -- File upload ----------------------------------------------------------
+    // The hook's cancel/reset granularity includes the session: ChatEditor is
+    // shared across sessions (a switch swaps the doc in the same EditorView),
+    // so an upload that survives a same-workspace session switch would append
+    // its @file reference to the other session's draft.
+    const fileUpload = useFileUpload({
+      client: uploadTarget?.client,
+      maxBytes: maxUploadBytes,
+      targetKey: `${sessionId ?? '<no-session>'}:${
+        uploadTarget?.targetKey ?? '<none>'
+      }`,
+    });
+
     const triggerFilePicker = useCallback(
       (targetDir: string, restoreQuery?: () => void) => {
         uploadPickerTargetRef.current = targetDir;
@@ -1392,6 +1405,7 @@ export const ChatEditor = memo(
       onComposerTagClick,
       onImageIngestionNotice,
       onFileUploadRequest: uploadEnabled ? triggerFilePicker : undefined,
+      workspaceUploadBusy: fileUpload.isBusy,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -1399,12 +1413,6 @@ export const ChatEditor = memo(
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
-    // -- File upload ----------------------------------------------------------
-    const fileUpload = useFileUpload({
-      client: uploadTarget?.client,
-      maxBytes: maxUploadBytes,
-      targetKey: uploadTarget?.targetKey ?? '<none>',
-    });
     const addComposerTags = core.addTags;
     const clearImageDragState = core.clearImageDragState;
     const insertUploadReference = useCallback(
@@ -1516,6 +1524,7 @@ export const ChatEditor = memo(
         const files = Array.from(event.target.files ?? []);
         const targetDir = uploadPickerTargetRef.current;
         const capturedKey = uploadPickerTargetKeyRef.current;
+        const restore = uploadPickerRestoreRef.current;
         uploadPickerRestoreRef.current = undefined;
         event.target.value = '';
         // Only upload if the target workspace is unchanged since the picker
@@ -1528,6 +1537,11 @@ export const ChatEditor = memo(
           capturedKey === (uploadTarget?.targetKey ?? '')
         ) {
           uploadFiles(files, targetDir, insertUploadReference);
+        } else {
+          // The @ panel deleted the mention query before opening the picker.
+          // A blocked or empty selection must give it back, like the native
+          // cancel path does, instead of silently eating the typed text.
+          restore?.();
         }
       },
       [uploadFiles, insertUploadReference, uploadTarget?.targetKey],
@@ -2237,7 +2251,11 @@ export const ChatEditor = memo(
                             })
                           : upload.errorCode === 'noDaemon'
                             ? t('composer.upload.error.noDaemon')
-                            : t('composer.upload.error')))}
+                            : upload.errorCode === 'tooManyFiles'
+                              ? t('composer.upload.error.tooManyFiles', {
+                                  count: upload.skippedCount ?? 0,
+                                })
+                              : t('composer.upload.error')))}
                   </span>
                   <button
                     type="button"

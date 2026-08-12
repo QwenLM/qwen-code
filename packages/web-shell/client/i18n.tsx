@@ -531,6 +531,8 @@ const EN: Messages = {
   'composer.upload.error.noDaemon': 'No daemon connection',
   'composer.upload.error.tooLarge': (v) =>
     `File exceeds the ${v?.limit ?? ''} upload limit`,
+  'composer.upload.error.tooManyFiles': (v) =>
+    `${v?.count ?? 0} more files were not added (limit per batch)`,
   'composer.upload.cancel': 'Cancel upload',
   'composer.upload.dismiss': 'Dismiss',
   'composer.upload.renamed': 'Saved as',
@@ -3363,6 +3365,8 @@ const ZH: Messages = {
   'composer.upload.error.noDaemon': '未连接 Daemon',
   'composer.upload.error.tooLarge': (v) =>
     `文件超过 ${v?.limit ?? ''} 上传上限`,
+  'composer.upload.error.tooManyFiles': (v) =>
+    `另有 ${v?.count ?? 0} 个文件未添加（单批数量上限）`,
   'composer.upload.cancel': '取消上传',
   'composer.upload.dismiss': '关闭',
   'composer.upload.renamed': '已保存为',

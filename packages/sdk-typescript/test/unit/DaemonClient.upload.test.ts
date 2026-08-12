@@ -236,37 +236,45 @@ describe('uploadWorkspaceFile', () => {
     expect(calls[0]?.signal).toBe(ctrl.signal);
   });
 
-  it('inherits the client timeout when timeoutMs is omitted', async () => {
-    vi.useFakeTimers();
-    try {
-      const fetch = vi.fn(
-        async (_input: RequestInfo | URL, init?: RequestInit) =>
-          await new Promise<Response>((_resolve, reject) => {
-            init?.signal?.addEventListener(
-              'abort',
-              () => reject(init.signal?.reason),
-              { once: true },
-            );
-          }),
-      ) as unknown as typeof globalThis.fetch;
-      const client = new DaemonClient({
-        baseUrl: 'http://daemon',
-        fetch,
-        fetchTimeoutMs: 25,
-      });
-      const result = client
-        .uploadWorkspaceFile({
-          path: 'a.bin',
-          data: new Uint8Array([1]),
-        })
-        .catch((error: unknown) => error);
+  it(
+    'inherits the client timeout when timeoutMs is omitted',
+    // The mock fetch settles only via the abort signal; under the exact
+    // regression this test guards (no timeout armed, no signal composed)
+    // nothing would abort and the promise would hang into the package
+    // testTimeout. A per-test budget fails that shape fast.
+    { timeout: 5_000 },
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const fetch = vi.fn(
+          async (_input: RequestInfo | URL, init?: RequestInit) =>
+            await new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => reject(init.signal?.reason),
+                { once: true },
+              );
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 25,
+        });
+        const result = client
+          .uploadWorkspaceFile({
+            path: 'a.bin',
+            data: new Uint8Array([1]),
+          })
+          .catch((error: unknown) => error);
 
-      await vi.advanceTimersByTimeAsync(25);
-      await expect(result).resolves.toMatchObject({ name: 'TimeoutError' });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        await vi.advanceTimersByTimeAsync(25);
+        await expect(result).resolves.toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('allows timeoutMs 0 to disable the client timeout', async () => {
     const { fetch, calls } = recordingFetch(() =>

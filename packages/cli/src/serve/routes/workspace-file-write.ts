@@ -411,6 +411,15 @@ interface UploadAdmission {
   fs: WorkspaceFileSystem;
   basename: string;
   resolvedDir: ResolvedPath;
+  /**
+   * Workspace-relative form of `resolvedDir` (POSIX separators). Candidates
+   * are re-resolved from THIS string, not from the absolute `resolvedDir`:
+   * `resolveWithinWorkspace` runs `hasSuspiciousPathPattern` on the whole
+   * input, and a workspace root whose own path trips the pattern check
+   * (trailing-dot/space segment, DOS device name) would otherwise fail every
+   * upload even though admission resolved the same root successfully.
+   */
+  admissionDir: string;
 }
 
 const uploadAdmissions = new WeakMap<Request, UploadAdmission>();
@@ -633,6 +642,7 @@ function fileUploadAdmission(
           fs,
           basename,
           resolvedDir,
+          admissionDir: workspaceRelative(req, resolvedDir),
         });
         next();
       } catch (err) {
@@ -662,7 +672,7 @@ async function handlePostFileUpload(
     });
     return;
   }
-  const { route, fs, basename, resolvedDir } = admission;
+  const { route, fs, basename, resolvedDir, admissionDir } = admission;
   const { stem, ext } = splitStemExtension(basename);
   const lease = uploadGateLeases.get(req);
   if (lease) lease.handlerStarted = true;
@@ -695,7 +705,10 @@ async function handlePostFileUpload(
       const candidateAbs = path.join(resolvedDir as string, candidateBasename);
       let resolved: ResolvedPath;
       try {
-        resolved = await fs.resolve(candidateAbs, 'write');
+        resolved = await fs.resolve(
+          path.join(admissionDir, candidateBasename),
+          'write',
+        );
       } catch (err) {
         // Boundary escapes and other resolution failures stop the loop.
         sendFsError(res, err, route);

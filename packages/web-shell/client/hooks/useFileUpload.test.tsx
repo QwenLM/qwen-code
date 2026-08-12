@@ -816,6 +816,68 @@ describe('useFileUpload', () => {
     });
   });
 
+  it('reports isBusy while an item is pending or in flight', async () => {
+    const gate =
+      deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>();
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn(() => gate.promise),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    expect(latest!.isBusy).toBe(false);
+
+    act(() => {
+      latest!.uploadFiles([makeFile('a.txt')], '.');
+    });
+    expect(latest!.isBusy).toBe(true);
+
+    await act(async () => {
+      gate.resolve({
+        kind: 'file_upload',
+        path: 'a.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+    });
+    expect(latest!.uploads[0]).toMatchObject({ status: 'done' });
+    expect(latest!.isBusy).toBe(false);
+  });
+
+  it('is not busy when every item failed locally', () => {
+    const client: FileUploadClient = { uploadWorkspaceFile: vi.fn() };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    act(() => {
+      latest!.uploadFiles([makeFile('big.bin', MAX + 1)], '.');
+    });
+    expect(latest!.uploads[0]).toMatchObject({
+      status: 'error',
+      errorCode: 'tooLarge',
+    });
+    expect(latest!.isBusy).toBe(false);
+  });
+
+  it('caps a drop/picker batch and surfaces overflow as one notice row', () => {
+    const client: FileUploadClient = {
+      // Never settles so no completion mutates state outside act.
+      uploadWorkspaceFile: vi.fn(() => new Promise(() => {})),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+    const files = Array.from({ length: 103 }, (_, i) => makeFile(`f${i}.txt`));
+
+    act(() => {
+      latest!.uploadFiles(files, '.');
+    });
+
+    // 100 accepted rows plus exactly one overflow notice, not 103 rows.
+    expect(latest!.uploads).toHaveLength(101);
+    expect(latest!.uploads[100]).toMatchObject({
+      status: 'error',
+      errorCode: 'tooManyFiles',
+      skippedCount: 3,
+    });
+    expect(latest!.uploads[100]!.file.name).toBe('f100.txt');
+    expect(latest!.uploads[99]!.file.name).toBe('f99.txt');
+  });
+
   it('never uploads a queued item after the target workspace switches', async () => {
     const gates: Array<
       Deferred<{
