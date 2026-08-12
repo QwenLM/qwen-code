@@ -1558,6 +1558,106 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[2]?.text).toBe('text A');
     });
 
+    it('ensureLeadingAssistantThinking leaves a tool_use turn with no thinking block untouched', () => {
+      // Every other case here feeds a message that contains at least one
+      // thinking block, so the `runStart === -1` guard (nothing is
+      // fabricated when the message has no thinking block at all) is pinned
+      // by nothing. This shape is reachable in production:
+      // dropUnsignedThinkingFromAssistantMessages strips every unsigned
+      // thinking block from a completed mid-history tool_use turn, and a
+      // model may simply return a tool round with no thinking. A mutation
+      // deleting the guard runs the run-extension loop from runStart === -1
+      // and reads blocks[-1].type -> TypeError.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'no thinking here' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const assistant = messages[1];
+      const blocks = assistant?.content as Array<{ type: string }>;
+      // Nothing fabricated, nothing reordered: chronological order stands.
+      expect(blocks.map((b) => b.type)).toEqual(['text', 'tool_use']);
+    });
+
+    it('ensureLeadingAssistantThinking relocates a first thinking run that ends at the final block', () => {
+      // Every other case here places the first thinking run strictly before
+      // the end of the content array, so the run-extension loop's
+      // `runEnd < blocks.length` bound is pinned by nothing. This trailing-
+      // run shape is one this PR manufactures: a single STOP stream
+      // [text, functionCall, signed episode] now persists in stream order,
+      // and the recovery-coalescing keep path merges into
+      // [text..., functionCall, signed episode]. A mutation deleting the
+      // bound extends runEnd past the array and reads blocks[blocks.length]
+      // .type -> TypeError.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'text A' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                { text: 'episode', thought: true, thoughtSignature: 'sE' },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const blocks = messages.filter((m) => m.role === 'assistant')[0]
+        ?.content as Array<{ type: string }>;
+      // The trailing thinking run is relocated to the front as a unit.
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+      ]);
+    });
+
     it('cleans orphaned tool_use blocks without matching tool_result', () => {
       // A genuine orphan requires a subsequent message that was actually
       // scanned and found lacking a matching tool_result -- not merely the

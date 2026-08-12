@@ -14904,6 +14904,66 @@ describe('GeminiChat', async () => {
       expect(signed?.thoughtSignature).toBe('sig-kept');
       expect(signed?.text).toBe('complete episode');
       expect(parts.some((p) => p.functionCall)).toBe(true);
+      // Order is the replay-load-bearing half, same as the XML-recovery keep
+      // test: a signature-validating provider rejects a turn whose reasoning
+      // episode trails the tool call it preceded. Presence assertions alone
+      // survive a mutation that swaps appendRecoveryContinuationParts's final
+      // concat to `[...nextParts, ...mergedParts]`, splicing the continuation
+      // (with its functionCall) ahead of the merged episode.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
+    });
+
+    it('keeps a dangling unsigned trailing episode when coalescing recovery pairs and the continuation calls NO tool', async () => {
+      // Negative control for the coalescing-site drop gate. The drop is
+      // gated on "the recovery continuation introduces a functionCall"
+      // ((modelContinuation.parts ?? []).some((p) => p.functionCall)). When
+      // that continuation is plain text with NO tool call, the unsigned
+      // trailing episode is a legitimate reasoning fragment with nothing to
+      // wedge -- no tool_use will ever pair with it -- so it must be KEPT.
+      // Hardcoding that gate argument to `true` pops the episode here while
+      // every functionCall path (the drop test above, the whole describe)
+      // stays green, so without this complement the gate's FALSE branch is
+      // completely unpinned.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [{ text: 'thinking about it', thought: true }],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([makeChunk([{ text: 'continuing' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'do a task' },
+        'prompt-recovery-kept-unsigned-episode',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+      // The unsigned trailing episode survives because the continuation
+      // never introduced a functionCall.
+      expect(
+        parts.some(
+          (part) => part.thought && part.text && !part.thoughtSignature,
+        ),
+      ).toBe(true);
+      expect(parts.some((part) => part.text === 'thinking about it')).toBe(
+        true,
+      );
+      expect(parts.some((part) => part.functionCall)).toBe(false);
     });
 
     it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
