@@ -328,6 +328,18 @@ describe('journalGrowthPoolMb', () => {
     },
   );
 
+  it('derives the pool from the capped effective budget, not the flag', () => {
+    // The flag may exceed host memory; the pool must divide the capped
+    // effective budget, not the uncapped flag, or growth is funded from
+    // capacity the host cannot back.
+    const budget = resolveDaemonMemoryBudget({
+      budgetMb: 8_192,
+      availableMemoryMb: 4_096,
+    });
+    expect(budget.effectiveBudgetMb).toBe(4_096);
+    expect(journalGrowthPoolMb(budget)).toBe(204);
+  });
+
   it('disables the pool on a below-minimum host instead of flooring', () => {
     // Any positive pool would carve growth capacity out of a budget the
     // host cannot back; insufficient memory must disable growth outright.

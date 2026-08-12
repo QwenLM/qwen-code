@@ -21,12 +21,16 @@ import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from '@qwen-code/acp-bridge/externalToolGuard';
 import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   isValidMemoryBudgetMb,
+  JOURNAL_GROWTH_POOL_FRACTION,
+  MAX_JOURNAL_GROWTH_POOL_MB,
   memoryBudgetRangeError,
+  MIN_MEMORY_BUDGET_MB,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   ApprovalMode,
@@ -413,7 +417,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Per-session baseline source-event byte cap on the in-flight live ' +
           'journal. When a turn outgrows it, adaptive growth raises the ' +
-          "session's caps (per-session hard cap 256 MiB) within a growth " +
+          "session's caps (per-session hard cap " +
+          JOURNAL_GROWTH_HARD_CAP_BYTES / (1024 * 1024) +
+          ' MiB) within a growth ' +
           'pool derived from the daemon memory budget (see ' +
           '--memory-budget-mb); without granted headroom the oldest entries ' +
           'are dropped whole (at least one is always kept), so the retained ' +
@@ -438,9 +444,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'or host memory, and capped at the resolved available memory either ' +
           'way. It does not change how any `qwen --acp` child is sized; the ' +
           'one consumer today is adaptive live-journal growth: one ' +
-          'daemon-wide pool of 5% of the effective budget (capped at 1024 ' +
-          'MB; 0, growth disabled, when the effective budget falls below ' +
-          'the 1024 MB minimum; see --max-journal-bytes). Reported under ' +
+          'daemon-wide pool of ' +
+          JOURNAL_GROWTH_POOL_FRACTION * 100 +
+          '% of the effective budget (capped at ' +
+          MAX_JOURNAL_GROWTH_POOL_MB +
+          ' MB; 0, growth disabled, when the effective budget falls below ' +
+          'the ' +
+          MIN_MEMORY_BUDGET_MB +
+          ' MB minimum; see --max-journal-bytes). Reported under ' +
           '`limits.memory` in daemon status, alongside a modeled per-child ' +
           'partition under `limits.memory.childHeap`. Must be an integer in ' +
           '[1024, 1048576].',

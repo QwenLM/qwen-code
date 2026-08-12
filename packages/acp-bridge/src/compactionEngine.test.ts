@@ -1324,10 +1324,15 @@ describe('TurnBoundaryCompactionEngine', () => {
   describe('adaptive live-journal growth', () => {
     const markerOf = (snap: { liveJournal: BridgeEvent[] }) =>
       snap.liveJournal.find((e) => e.type === 'history_truncated');
+    // Pinned entry baseline: advisor fixtures and grown-cap assertions in
+    // this block encode it, so constructors pin it instead of mirroring
+    // the unpinned DEFAULT_MAX_JOURNAL_EVENTS.
+    const ENTRY_BASELINE = 10_000;
 
     it('grows the caps instead of evicting when the advisor grants headroom', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         onJournalGrowth: (current) => ({
           maxEvents: current.maxEvents * 2,
           maxBytes: current.maxBytes * 2,
@@ -1351,6 +1356,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       const seen: Array<{ maxEvents: number; maxBytes: number }> = [];
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 1,
+        maxJournalBytes: 8 * 1024 * 1024,
         onJournalGrowth: (current) => {
           seen.push({ ...current });
           return seen.length < 3
@@ -1434,6 +1440,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         ];
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         now: () => clockMs,
         onJournalGrowth: () => grants.shift(),
       });
@@ -1463,6 +1470,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       }));
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         onJournalGrowth: advisor,
       });
       for (let i = 1; i <= 3; i++) {
@@ -1486,6 +1494,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       // while the entry count stays low. Explicit byte lengths keep the
       // breach independent of envelope serialization size.
       const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: ENTRY_BASELINE,
         maxJournalBytes: 300,
         onJournalGrowth: (current) => ({
           maxEvents: current.maxEvents * 2,
@@ -1501,7 +1510,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         2,
       );
       expect(engine.journalLimits()).toEqual({
-        maxEvents: 20_000,
+        maxEvents: ENTRY_BASELINE * 2,
         maxBytes: 600,
       });
     });
@@ -1510,15 +1519,16 @@ describe('TurnBoundaryCompactionEngine', () => {
       // A partial grant leaves the journal over the raised cap; the
       // eviction loop must still trim the excess and stamp the marker.
       const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: ENTRY_BASELINE,
         maxJournalBytes: 300,
-        onJournalGrowth: () => ({ maxEvents: 10_000, maxBytes: 450 }),
+        onJournalGrowth: () => ({ maxEvents: ENTRY_BASELINE, maxBytes: 450 }),
       });
       engine.ingest(makeUserMessage(1, 'first large event'), 150);
       engine.ingest(makeUserMessage(2, 'second large event'), 150);
       engine.ingest(makeUserMessage(3, 'third large event'), 300);
 
       expect(engine.journalLimits()).toEqual({
-        maxEvents: 10_000,
+        maxEvents: ENTRY_BASELINE,
         maxBytes: 450,
       });
       const snap = engine.snapshot();
@@ -1539,8 +1549,12 @@ describe('TurnBoundaryCompactionEngine', () => {
       // from 400, receives no further growth, and rolls back — the caps
       // must stay at the baseline and eviction still keeps the oversized
       // survivor, with the pool never charged.
-      const advisor = vi.fn(() => ({ maxEvents: 10_000, maxBytes: 400 }));
+      const advisor = vi.fn(() => ({
+        maxEvents: ENTRY_BASELINE,
+        maxBytes: 400,
+      }));
       const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: ENTRY_BASELINE,
         maxJournalBytes: 300,
         onJournalGrowth: advisor,
       });
@@ -1550,7 +1564,7 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       expect(advisor).toHaveBeenCalledTimes(2);
       expect(engine.journalLimits()).toEqual({
-        maxEvents: 10_000,
+        maxEvents: ENTRY_BASELINE,
         maxBytes: 300,
       });
       const snap = engine.snapshot();
@@ -1582,6 +1596,7 @@ describe('TurnBoundaryCompactionEngine', () => {
               },
       );
       const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: ENTRY_BASELINE,
         maxJournalBytes: 8 * MiB,
         onJournalGrowth: advisor,
       });
@@ -1590,7 +1605,7 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       expect(advisor).toHaveBeenCalledTimes(2);
       expect(engine.journalLimits()).toEqual({
-        maxEvents: 40_000,
+        maxEvents: ENTRY_BASELINE * 4,
         maxBytes: 32 * MiB,
       });
       const snap = engine.snapshot();
@@ -1610,9 +1625,10 @@ describe('TurnBoundaryCompactionEngine', () => {
       const advisor = vi.fn((current: { maxBytes: number }) =>
         current.maxBytes >= 1200
           ? undefined
-          : { maxEvents: 10_000, maxBytes: current.maxBytes * 2 },
+          : { maxEvents: ENTRY_BASELINE, maxBytes: current.maxBytes * 2 },
       );
       const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: ENTRY_BASELINE,
         maxJournalBytes: 300,
         now: () => clockMs,
         onJournalGrowth: advisor,
@@ -1627,10 +1643,49 @@ describe('TurnBoundaryCompactionEngine', () => {
       // intermediate grants and then hits the refusal.
       expect(advisor).toHaveBeenCalledTimes(6);
       expect(engine.journalLimits()).toEqual({
-        maxEvents: 10_000,
+        maxEvents: ENTRY_BASELINE,
         maxBytes: 300,
       });
       const snap = engine.snapshot();
+      expect(
+        snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
+      ).toEqual([3]);
+    });
+
+    it('rolls back and records a refusal when the walk exhausts its step budget', () => {
+      // A misbehaving advisor granting strictly-growing-but-non-retaining
+      // caps drives the walk to its step budget; the engine must roll the
+      // caps back, charge nothing, and throttle re-asks like any other
+      // refusal.
+      const advisor = vi.fn(
+        (current: { maxEvents: number; maxBytes: number }) => ({
+          maxEvents: current.maxEvents + 100,
+          maxBytes: current.maxBytes + 1,
+        }),
+      );
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        maxJournalBytes: 300,
+        now: () => 0,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'first large event'), 250);
+      engine.ingest(makeUserMessage(2, 'second large event'), 250);
+
+      // 64 non-improving grants exhaust the per-breach walk budget; the
+      // caps roll back to the baseline.
+      expect(advisor).toHaveBeenCalledTimes(64);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 2,
+        maxBytes: 300,
+      });
+
+      // Exhaustion counts as a refusal: a breach inside the throttle
+      // window must not re-ask on the hot ingest path.
+      engine.ingest(makeUserMessage(3, 'third large event'), 250);
+      expect(advisor).toHaveBeenCalledTimes(64);
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeDefined();
       expect(
         snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
       ).toEqual([3]);
@@ -1646,6 +1701,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       }));
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         onJournalGrowth: advisor,
       });
       engine.ingest(makeUserMessage(1, 'message-1'));
@@ -1665,6 +1721,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       let granted = false;
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         onJournalGrowth: (current) => {
           if (granted) return undefined;
           granted = true;
@@ -1765,6 +1822,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 1,
+        maxJournalBytes: 8 * 1024 * 1024,
         now: () => clockMs,
         onJournalGrowth: advisor,
       });
@@ -1785,6 +1843,7 @@ describe('TurnBoundaryCompactionEngine', () => {
     it('keeps grown caps across turn boundaries', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         onJournalGrowth: (current) => ({
           maxEvents: current.maxEvents * 4,
           maxBytes: current.maxBytes * 4,

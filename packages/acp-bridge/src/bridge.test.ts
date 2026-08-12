@@ -132,6 +132,41 @@ function deferred<T>(): {
 }
 
 /**
+ * Test-local fake of the daemon-wide growth aggregator `runQwenServe` wires
+ * every bridge to: one shared provider set plus the register/read pair.
+ * Both multi-bridge growth tests share it so they cannot drift into
+ * modeling different daemon contracts.
+ */
+function makeGrowthAggregator(): {
+  providers: Set<() => readonly JournalGrowthSessionLimit[]>;
+  journalGrowthSessionLimits: () => readonly JournalGrowthSessionLimit[];
+  registerJournalGrowthSessionLimits: (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ) => () => void;
+} {
+  const providers = new Set<() => readonly JournalGrowthSessionLimit[]>();
+  const journalGrowthSessionLimits =
+    (): readonly JournalGrowthSessionLimit[] => {
+      const limits: JournalGrowthSessionLimit[] = [];
+      for (const provider of providers) limits.push(...provider());
+      return limits;
+    };
+  const registerJournalGrowthSessionLimits = (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ): (() => void) => {
+    providers.add(provider);
+    return () => {
+      providers.delete(provider);
+    };
+  };
+  return {
+    providers,
+    journalGrowthSessionLimits,
+    registerJournalGrowthSessionLimits,
+  };
+}
+
+/**
  * Captures `session.restore.*` events so the timeout path's observability
  * contract is asserted rather than assumed. These events are the operator's
  * only view of a kill_empty-vs-fence_shared decision and of how a late,
@@ -5108,6 +5143,7 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         journalGrowthPoolBytes: 256 * 1024 * 1024,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -5178,6 +5214,7 @@ describe('createAcpSessionBridge', () => {
         // 'single' scope would attach the second spawn to the first).
         sessionScope: 'thread',
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         journalGrowthPoolBytes: 8 * 1024 * 1024,
       });
 
@@ -5235,6 +5272,11 @@ describe('createAcpSessionBridge', () => {
           (event) => event.type === 'history_truncated',
         ),
       ).toBeUndefined();
+      // Positive content pin: the marker-absence check also passes on an
+      // empty journal, which would skip the grown session entirely.
+      for (const text of ['a-1', 'a-2', 'a-3']) {
+        expect(JSON.stringify(firstSnap.liveJournal)).toContain(text);
+      }
 
       const secondSnap = await bridge.loadSession({
         sessionId: second.sessionId,
@@ -5246,6 +5288,10 @@ describe('createAcpSessionBridge', () => {
           (event) => event.type === 'history_truncated',
         ),
       ).toMatchObject({ data: { scope: 'live_journal' } });
+      // Pin the retained window too: marker presence alone also passes on
+      // an over-eviction that drops one extra entry.
+      expect(JSON.stringify(secondSnap.liveJournal)).toContain('b-2');
+      expect(JSON.stringify(secondSnap.liveJournal)).toContain('b-3');
 
       gates.get(first.sessionId)?.resolve();
       gates.get(second.sessionId)?.resolve();
@@ -5264,6 +5310,7 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         journalGrowthPoolBytes: 8 * 1024 * 1024,
       });
 
@@ -5298,7 +5345,108 @@ describe('createAcpSessionBridge', () => {
       expect(
         snap.liveJournal?.find((event) => event.type === 'history_truncated'),
       ).toMatchObject({ data: { scope: 'live_journal' } });
+      // Pin the retained window too: marker presence alone also passes on
+      // an over-eviction that drops one extra entry.
+      expect(JSON.stringify(snap.liveJournal)).toContain('r-4');
+      expect(JSON.stringify(snap.liveJournal)).toContain('r-5');
 
+      await bridge.shutdown();
+    });
+
+    it('releases granted growth when the mid-restore session fails', async () => {
+      // Mid-restore growth accounting is covered elsewhere only on the
+      // restore-success exit. A restore that FAILs after its pending bus
+      // grew must leave the pool accounting with its dead cap: the
+      // failure-path cleanup deletes the pending bus, so a sibling session
+      // breaching afterwards grows from the returned headroom instead of
+      // truncating against a phantom grant.
+      const handles: ChannelHandle[] = [];
+      const load = deferred<LoadSessionResponse>();
+      const gate = deferred<void>();
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          // Route by id: the failing restore holds its deferred promise;
+          // the later snapshot load for the sibling session resolves.
+          loadSessionImpl: (p) =>
+            p.sessionId === 'restore-fails' ? load.promise : {},
+          promptImpl: async () => {
+            await gate.promise;
+            return { stopReason: 'end_turn' };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowthPoolBytes: 8 * 1024 * 1024,
+      });
+
+      const restore = bridge.loadSession({
+        sessionId: 'restore-fails',
+        workspaceCwd: WS_A,
+      });
+      await vi.waitFor(() => {
+        expect(handles).toHaveLength(1);
+        expect(handles[0]!.agent.loadSessionCalls).toHaveLength(1);
+      });
+
+      // Breach the pending bus so it grows (consuming the whole pool).
+      for (const text of ['f-1', 'f-2', 'f-3']) {
+        await handles[0]!.agentConnection.sessionUpdate({
+          sessionId: 'restore-fails',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      // Fail the restore; its grown cap must leave the pool accounting.
+      load.reject(new Error('restore failed'));
+      await expect(restore).rejects.toThrow();
+
+      // A sibling session breaching now receives the returned headroom.
+      const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const secondPrompt = bridge.sendPrompt(
+        second.sessionId,
+        {
+          sessionId: second.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { clientId: second.clientId, promptId: 'prompt-second' },
+      );
+      await vi.waitFor(() => {
+        expect(handles).toHaveLength(2);
+        expect(handles[1]!.agent.promptCalls).toHaveLength(1);
+      });
+      for (const text of ['s-1', 's-2', 's-3']) {
+        await handles[1]!.agentConnection.sessionUpdate({
+          sessionId: second.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      const snap = await bridge.loadSession({
+        sessionId: second.sessionId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snap.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toBeUndefined();
+      for (const text of ['s-1', 's-2', 's-3']) {
+        expect(JSON.stringify(snap.liveJournal)).toContain(text);
+      }
+
+      gate.resolve();
+      await secondPrompt;
       await bridge.shutdown();
     });
 
@@ -5316,6 +5464,7 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         journalGrowthPoolBytes: 8 * 1024 * 1024,
       });
 
@@ -5366,6 +5515,11 @@ describe('createAcpSessionBridge', () => {
       expect(
         snapA.liveJournal?.find((event) => event.type === 'history_truncated'),
       ).toBeUndefined();
+      // Positive content pin: the marker-absence check also passes on an
+      // empty journal, which would skip the grown session entirely.
+      for (const text of ['a-1', 'a-2', 'a-3']) {
+        expect(JSON.stringify(snapA.liveJournal)).toContain(text);
+      }
 
       const snapB = await bridge.loadSession({
         sessionId: 'restore-b',
@@ -5375,6 +5529,10 @@ describe('createAcpSessionBridge', () => {
       expect(
         snapB.liveJournal?.find((event) => event.type === 'history_truncated'),
       ).toMatchObject({ data: { scope: 'live_journal' } });
+      // Pin the retained window too: marker presence alone also passes on
+      // an over-eviction that drops one extra entry.
+      expect(JSON.stringify(snapB.liveJournal)).toContain('b-2');
+      expect(JSON.stringify(snapB.liveJournal)).toContain('b-3');
 
       await bridge.shutdown();
     });
@@ -5399,6 +5557,7 @@ describe('createAcpSessionBridge', () => {
         sessionScope: 'thread',
         channelIdleTimeoutMs: 60_000,
         maxJournalEvents: 2,
+        maxJournalBytes: 8 * 1024 * 1024,
         journalGrowthPoolBytes: 8 * 1024 * 1024,
       });
 
@@ -5538,23 +5697,14 @@ describe('createAcpSessionBridge', () => {
     // sibling workspaces breaching concurrently must therefore share a
     // single pool — the first growth exhausts it and the second bridge
     // truncates, where per-bridge pools would have funded both.
-    const providers = new Set<() => readonly JournalGrowthSessionLimit[]>();
-    const journalGrowthSessionLimits =
-      (): readonly JournalGrowthSessionLimit[] => {
-        const limits: JournalGrowthSessionLimit[] = [];
-        for (const provider of providers) limits.push(...provider());
-        return limits;
-      };
-    const registerJournalGrowthSessionLimits = (
-      provider: () => readonly JournalGrowthSessionLimit[],
-    ): (() => void) => {
-      providers.add(provider);
-      return () => {
-        providers.delete(provider);
-      };
-    };
+    const {
+      providers,
+      journalGrowthSessionLimits,
+      registerJournalGrowthSessionLimits,
+    } = makeGrowthAggregator();
     const sharedGrowthOpts = {
       maxJournalEvents: 2,
+      maxJournalBytes: 8 * 1024 * 1024,
       journalGrowthPoolBytes: 8 * 1024 * 1024,
       journalGrowthSessionLimits,
       registerJournalGrowthSessionLimits,
@@ -5639,6 +5789,11 @@ describe('createAcpSessionBridge', () => {
     expect(
       snapA.liveJournal?.find((event) => event.type === 'history_truncated'),
     ).toBeUndefined();
+    // Positive content pin: the marker-absence check also passes on an
+    // empty journal, which would skip the grown session entirely.
+    for (const text of ['a-1', 'a-2', 'a-3']) {
+      expect(JSON.stringify(snapA.liveJournal)).toContain(text);
+    }
 
     const snapB = await bridgeB.loadSession({
       sessionId: sessionB.sessionId,
@@ -5648,6 +5803,10 @@ describe('createAcpSessionBridge', () => {
     expect(
       snapB.liveJournal?.find((event) => event.type === 'history_truncated'),
     ).toMatchObject({ data: { scope: 'live_journal' } });
+    // Pin the retained window too: marker presence alone also passes on an
+    // over-eviction that drops one extra entry.
+    expect(JSON.stringify(snapB.liveJournal)).toContain('b-2');
+    expect(JSON.stringify(snapB.liveJournal)).toContain('b-3');
 
     gates.get(sessionA.sessionId)?.resolve();
     gates.get(sessionB.sessionId)?.resolve();
@@ -5677,21 +5836,8 @@ describe('createAcpSessionBridge', () => {
     // the 8 MiB-baseline bridge's policy must not read it as 8 MiB of
     // granted growth — that would exhaust the pool while it is unused
     // and refuse every grant.
-    const providers = new Set<() => readonly JournalGrowthSessionLimit[]>();
-    const journalGrowthSessionLimits =
-      (): readonly JournalGrowthSessionLimit[] => {
-        const limits: JournalGrowthSessionLimit[] = [];
-        for (const provider of providers) limits.push(...provider());
-        return limits;
-      };
-    const registerJournalGrowthSessionLimits = (
-      provider: () => readonly JournalGrowthSessionLimit[],
-    ): (() => void) => {
-      providers.add(provider);
-      return () => {
-        providers.delete(provider);
-      };
-    };
+    const { journalGrowthSessionLimits, registerJournalGrowthSessionLimits } =
+      makeGrowthAggregator();
     const sharedGrowthOpts = {
       journalGrowthPoolBytes: 8 * 1024 * 1024,
       journalGrowthSessionLimits,
@@ -5720,6 +5866,7 @@ describe('createAcpSessionBridge', () => {
     const bridgeA = makeBridge({
       channelFactory: async () => handleA.channel,
       maxJournalEvents: 2,
+      maxJournalBytes: 8 * 1024 * 1024,
       ...sharedGrowthOpts,
     });
     const bridgeB = makeBridge({

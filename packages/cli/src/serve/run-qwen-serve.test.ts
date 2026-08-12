@@ -38,7 +38,11 @@ import {
   resolveDaemonMemoryBudget,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { JOURNAL_GROWTH_HARD_CAP_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import {
+  DEFAULT_MAX_JOURNAL_BYTES,
+  DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
+} from '@qwen-code/acp-bridge/replayWindowLimits';
 import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
@@ -1701,6 +1705,12 @@ describe('runQwenServe telemetry validation', () => {
     };
 
     try {
+      // Shift the host-memory pin between the two derivation points: the
+      // boot bridge derived its pool from the 8 GiB pin above. A dynamic
+      // attach that RE-DERIVED the budget would now see 16 GiB and build a
+      // different pool, failing the parity assertion below; the correct
+      // boot-closure implementation never re-reads host memory.
+      mockTotalMemBytes.value = 16 * 1024 * 1024 * 1024;
       const added = await fetch(`${handle.url}/workspaces`, {
         method: 'POST',
         headers,
@@ -2702,7 +2712,10 @@ describe('runQwenServe memory budget', () => {
   });
 
   it('derives an adaptive journal growth pool into every bridge', async () => {
-    mockTotalMemBytes.value = 8 * 1024 * 1024 * 1024;
+    // 16 GiB host: the derived budget (8192 MB) differs from the flag
+    // budget (4096 MB), so the parity assertion below can tell whether the
+    // daemon actually consumed --memory-budget-mb when deriving the pool.
+    mockTotalMemBytes.value = 16 * 1024 * 1024 * 1024;
     const constrainedSpy = vi
       .spyOn(
         process as { constrainedMemory: () => number },
@@ -2852,7 +2865,9 @@ describe('runQwenServe memory budget', () => {
   });
 
   it('derives the adaptive journal growth pool into secondary-workspace bridges too', async () => {
-    mockTotalMemBytes.value = 8 * 1024 * 1024 * 1024;
+    // 16 GiB host: derived budget (8192 MB) != flag budget (4096 MB), as
+    // in the single-workspace sibling, so flag consumption is pinned.
+    mockTotalMemBytes.value = 16 * 1024 * 1024 * 1024;
     const constrainedSpy = vi
       .spyOn(
         process as { constrainedMemory: () => number },
@@ -3011,9 +3026,16 @@ describe('runQwenServe memory budget', () => {
           { limitBytes: 1001, baselineBytes: 8 * 1024 * 1024 },
         ]);
       }
-      for (const unregister of unregisters) {
-        unregister?.();
+      // Unregister one provider at a time with a view assertion between:
+      // a hook that wiped the entire shared set on ANY unregister would
+      // still pass a bulk end-state check.
+      unregisters[0]?.();
+      for (const view of views) {
+        expect(view?.()).toEqual([
+          { limitBytes: 1001, baselineBytes: 8 * 1024 * 1024 },
+        ]);
       }
+      unregisters[1]?.();
       for (const view of views) {
         expect(view?.()).toEqual([]);
       }
@@ -7765,8 +7787,8 @@ describe('runQwenServe runtime startup failures', () => {
             1024 *
             1024,
           hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
-          baselineMaxEvents: 10_000,
-          baselineMaxBytes: 8 * 1024 * 1024,
+          baselineMaxEvents: DEFAULT_MAX_JOURNAL_EVENTS,
+          baselineMaxBytes: DEFAULT_MAX_JOURNAL_BYTES,
         });
       } finally {
         await handle.close();

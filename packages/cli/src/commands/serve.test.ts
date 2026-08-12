@@ -472,6 +472,40 @@ describe('serve rate limit env parsing', () => {
     );
   });
 
+  it('forwards a single pinned entry cap without the byte cap', async () => {
+    // The two conditional spreads are independent; pinning ONE flag must
+    // forward it alone. Coupling them would silently drop the pinned cap.
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-events 5000');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalEvents: 5000 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalBytes',
+    );
+  });
+
+  it('forwards a single pinned byte cap without the entry cap', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs('--no-web --max-journal-bytes 1048576');
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ maxJournalBytes: 1048576 }),
+    );
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
+      'maxJournalEvents',
+    );
+  });
+
   it('starts Local Control with a fresh token, QR pairing, and sleep inhibition', async () => {
     const stdoutWrites: string[] = [];
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
