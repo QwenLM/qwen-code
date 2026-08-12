@@ -119,6 +119,23 @@ describe('built-in channel registry', () => {
           kind: 'object',
           properties: [{ key: 'type', label: 'Type', kind: 'string' }],
         },
+        // supportedChannelCatalog() injects the session-scope descriptor into
+        // every manageable entry that does not declare its own.
+        {
+          key: 'sessionScope',
+          label: 'Session scope',
+          kind: 'enum',
+          required: true,
+          default: 'user',
+          description:
+            'Controls which incoming conversations share one agent session.',
+          options: [
+            { value: 'user', label: 'Per user and chat' },
+            { value: 'thread', label: 'Per thread' },
+            { value: 'chat_thread', label: 'Per chat and thread' },
+            { value: 'single', label: 'One shared session' },
+          ],
+        },
       ],
     });
   });
