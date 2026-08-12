@@ -123,6 +123,7 @@ class FakeDwsClient implements DwsClientLike {
   wikiDocuments = new Map<string, string[]>([['wiki-1', ['doc-1']]]);
   streams: FakeStream[] = [];
   assertAuthenticated = vi.fn(async () => Promise.resolve(this.identity));
+  isUserImMessage = vi.fn(async () => Promise.resolve(true));
   sendImMessage = vi
     .fn<(target: DwsImTarget, content: string, key: string) => Promise<void>>()
     .mockResolvedValue(undefined);
@@ -275,7 +276,7 @@ async function readyPolicyChannel(
 }
 
 describe('DwsChannel', () => {
-  it('always starts @ messages and ignores removed source switches', async () => {
+  it('starts @ and all direct messages while ignoring legacy source settings', async () => {
     const client = new FakeDwsClient();
 
     await readyChannel(
@@ -290,7 +291,7 @@ describe('DwsChannel', () => {
     expect(client.assertAuthenticated).toHaveBeenCalledOnce();
     expect(client.streams.map((item) => item.source)).toEqual([
       { kind: 'at' },
-      { kind: 'direct', userId: 'user-2' },
+      { kind: 'direct' },
     ]);
   });
 
@@ -311,6 +312,7 @@ describe('DwsChannel', () => {
     expect(client.streams.map((item) => item.source)).toEqual([
       { kind: 'at' },
       { kind: 'group', conversationId: 'cid-ambient' },
+      { kind: 'direct' },
     ]);
   });
 
@@ -402,8 +404,8 @@ describe('DwsChannel', () => {
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(2_000);
 
-      expect(client.streams).toHaveLength(2);
-      expect(client.streams[1]?.source).toEqual({ kind: 'at' });
+      expect(client.streams).toHaveLength(3);
+      expect(client.streams[2]?.source).toEqual({ kind: 'at' });
     } finally {
       vi.useRealTimers();
     }
@@ -436,16 +438,13 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('accepts direct messages from configured users and replies to that user', async () => {
+  it('accepts ordinary direct messages and replies to that user', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ imUserIds: ['user-2'] }),
-    );
+    const channel = await readyChannel(client);
 
     await client.emit(
       1,
-      message('user_im_message_receive_o2o', 'message-1', 'check my todo'),
+      message('user_im_message_receive_o2o_all', 'message-1', 'check my todo'),
     );
     await channel.sendMessage('cid-1', 'done');
 
@@ -459,6 +458,89 @@ describe('DwsChannel', () => {
       'done',
       expect.any(String),
     );
+  });
+
+  it('applies sender pairing to ordinary direct messages', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'pair-dm', 'please help'),
+    );
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
+  });
+
+  it('silently drops application messages before sender pairing', async () => {
+    const client = new FakeDwsClient();
+    client.isUserImMessage.mockResolvedValue(false);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'app-message', 'automated', {
+        senderId: 'open-application',
+        senderName: 'Application',
+      }),
+    );
+
+    expect(client.isUserImMessage).toHaveBeenCalledWith(
+      'app-message',
+      'open-application',
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).not.toHaveBeenCalled();
+    await expect(channel.sendMessage('cid-1', 'reply')).rejects.toThrow(
+      'no DWS message target',
+    );
+  });
+
+  it('coalesces sender verification during an application message burst', async () => {
+    const client = new FakeDwsClient();
+    let resolveCheck!: (isUser: boolean) => void;
+    client.isUserImMessage.mockImplementation(
+      async () =>
+        new Promise<boolean>((resolve) => {
+          resolveCheck = resolve;
+        }),
+    );
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+
+    const messages = Array.from({ length: 20 }, (_, index) =>
+      client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `app-message-${index}`,
+          'automated',
+          { senderId: 'open-application', senderName: 'Application' },
+        ),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(client.isUserImMessage).toHaveBeenCalledOnce(),
+    );
+    resolveCheck(false);
+    await Promise.all(messages);
+
+    expect(client.isUserImMessage).toHaveBeenCalledOnce();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
   it('dispatches ambient messages from an explicit non-mention group', async () => {
@@ -596,16 +678,13 @@ describe('DwsChannel', () => {
     const { bridge } = await readyPolicyChannel(
       client,
       makeConfig({
-        imUserIds: ['user-2'],
         dmPolicy: 'disabled',
       }),
     );
 
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o', 'disabled-dm', 'please help'),
-    );
-
+    expect(client.streams.map((stream) => stream.source)).toEqual([
+      { kind: 'at' },
+    ]);
     expect(bridge.prompt).not.toHaveBeenCalled();
   });
 

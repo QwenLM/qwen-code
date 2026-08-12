@@ -40,7 +40,6 @@ const NO_REPLY_SENTINEL_PATTERN = /^\[NO_REPLY\][.!]?$/i;
 interface DwsConfig extends ChannelConfig {
   dwsPath?: unknown;
   profile?: unknown;
-  imUserIds?: unknown;
   documentIds?: unknown;
   wikiSpaceIds?: unknown;
   wikiDiscoveryInterval?: unknown;
@@ -280,6 +279,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly imStates: ImSubscriptionState[];
   private readonly ownUserIds = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
+  private readonly verifiedUserSenders = new Map<string, Promise<boolean>>();
   private readonly initializedDocumentSet: Set<string>;
   private readonly documentStateById: Map<string, PersistedDocumentState>;
   private pollAbortController = new AbortController();
@@ -302,7 +302,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       'wikiDiscoveryInterval',
       DEFAULT_WIKI_DISCOVERY_INTERVAL_MS,
     );
-    const imUserIds = configuredList(config.imUserIds, 'imUserIds');
     const configuredTrigger = configuredString(config.trigger, 'trigger');
     if (config.trigger !== undefined && configuredTrigger === undefined) {
       throw new Error('DWS channel field trigger must be a non-empty string.');
@@ -314,7 +313,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     ].join(' ');
     const imSources: DwsImSource[] = [
       { kind: 'at' },
-      ...imUserIds.map((userId): DwsImSource => ({ kind: 'direct', userId })),
       ...Object.entries(config.groups)
         .filter(
           ([conversationId, group]) =>
@@ -329,6 +327,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           }),
         ),
     ];
+    if (config.dmPolicy !== 'disabled') imSources.push({ kind: 'direct' });
 
     const hasDocumentSources =
       documentIds.length > 0 || wikiSpaceIds.length > 0;
@@ -784,17 +783,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
     key: string,
   ): Promise<void> {
-    const target: DwsImTarget =
-      source.kind === 'direct'
-        ? { kind: 'direct', openDingTalkId: message.senderId }
-        : { kind: 'group', conversationId: message.conversationId };
-    this.rememberImTarget(message.conversationId, target);
-
     if (this.ownUserIds.has(message.senderId)) {
       this.markProcessedMessage(key);
       this.saveCursor();
       return;
     }
+    if (!(await this.isUserImSender(message))) {
+      this.markProcessedMessage(key);
+      this.saveCursor();
+      return;
+    }
+
+    const target: DwsImTarget =
+      source.kind === 'direct'
+        ? { kind: 'direct', openDingTalkId: message.senderId }
+        : { kind: 'group', conversationId: message.conversationId };
+    this.rememberImTarget(message.conversationId, target);
 
     const text = message.content.trim();
     if (!text) {
@@ -824,6 +828,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     await this.handleInbound(envelope);
     this.markProcessedMessage(key);
     this.saveCursor();
+  }
+
+  private async isUserImSender(message: DwsImMessage): Promise<boolean> {
+    let check = this.verifiedUserSenders.get(message.senderId);
+    if (!check) {
+      check = this.client.isUserImMessage(message.messageId, message.senderId);
+      this.verifiedUserSenders.set(message.senderId, check);
+    }
+    try {
+      return await check;
+    } catch (error) {
+      if (this.verifiedUserSenders.get(message.senderId) === check) {
+        this.verifiedUserSenders.delete(message.senderId);
+      }
+      throw error;
+    }
   }
 
   private async pollDocument(

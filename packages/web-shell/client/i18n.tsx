@@ -2614,10 +2614,6 @@ const EN: Messages = {
   'channels.editor.field.dws.profile': 'DWS profile',
   'channels.editor.field.dws.profile.description':
     'Optional profile name or corpId. Leave empty to use the active profile',
-  'channels.editor.field.dws.imUserIds':
-    'Direct-message users (comma-separated)',
-  'channels.editor.field.dws.imUserIds.description':
-    'DingTalk user IDs whose direct messages should start tasks',
   'channels.editor.field.dws.documentIds': 'Documents (comma-separated)',
   'channels.editor.field.dws.documentIds.description':
     'DingTalk document IDs or URLs to watch',
@@ -5340,9 +5336,6 @@ const ZH: Messages = {
   'channels.editor.field.dws.profile': 'DWS 身份',
   'channels.editor.field.dws.profile.description':
     '可选的 profile 名称或 corpId；留空时使用当前身份',
-  'channels.editor.field.dws.imUserIds': '单聊用户（逗号分隔）',
-  'channels.editor.field.dws.imUserIds.description':
-    '这些钉钉用户 ID 发来的单聊消息会启动任务',
   'channels.editor.field.dws.documentIds': '文档（逗号分隔）',
   'channels.editor.field.dws.documentIds.description':
     '需要监听的钉钉文档 ID 或 URL',

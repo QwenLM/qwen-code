@@ -130,6 +130,116 @@ describe('DwsClient', () => {
     });
   });
 
+  it('subscribes to all ordinary direct messages without a user filter', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    const onMessage = vi.fn();
+
+    await client.subscribeToIm({ kind: 'direct' }, onMessage, vi.fn());
+    await onLine(
+      json({
+        type: 'user_im_message_receive_o2o_all',
+        event_id: 'event-1',
+        message_id: 'message-1',
+        conversation_id: 'cid-1',
+        content: '{"content":"check this"}',
+        sender_open_dingtalk_id: 'open-alice',
+        sender: 'Alice',
+      }),
+    );
+
+    expect(eventStarter).toHaveBeenCalledWith(
+      '/opt/dws',
+      [
+        'event',
+        'consume',
+        'user_im_message_receive_o2o_all',
+        '--format',
+        'compact',
+      ],
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'user_im_message_receive_o2o_all',
+      eventId: 'event-1',
+      messageId: 'message-1',
+      conversationId: 'cid-1',
+      content: 'check this',
+      senderId: 'open-alice',
+      senderName: 'Alice',
+    });
+  });
+
+  it('verifies a human IM sender from the canonical message record', async () => {
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        complete: true,
+        messages: [
+          {
+            messageId: 'message-1',
+            senderId: 'open-alice',
+            senderType: 'user',
+          },
+        ],
+        notFoundMessageIds: [],
+      }),
+      stderr: '',
+    });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:user' },
+      runner,
+    );
+
+    await expect(
+      client.isUserImMessage('message-1', 'open-alice'),
+    ).resolves.toBe(true);
+    expect(runner).toHaveBeenCalledWith('/opt/dws', [
+      '--profile',
+      'corp:user',
+      'chat',
+      '+messages-mget',
+      '--msg-ids',
+      'message-1',
+      '--no-reactions',
+      '--format',
+      'json',
+    ]);
+  });
+
+  it('rejects an application IM sender whose message is not a user message', async () => {
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        complete: false,
+        messages: [],
+        notFoundMessageIds: ['message-1'],
+        failures: [
+          {
+            messageId: 'message-1',
+            stage: 'mget',
+            error: 'message unavailable',
+          },
+        ],
+      }),
+      stderr: '',
+    });
+    const client = new DwsClient({ executable: '/opt/dws' }, runner);
+
+    await expect(client.isUserImMessage('message-1', 'open-app')).resolves.toBe(
+      false,
+    );
+  });
+
   it('parses the NDJSON envelope emitted by the default event format', () => {
     expect(
       parseDwsImEvent(

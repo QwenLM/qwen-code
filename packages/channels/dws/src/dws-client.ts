@@ -36,7 +36,7 @@ export interface DwsDocumentComment {
 
 export type DwsImSource =
   | { kind: 'at' }
-  | { kind: 'direct'; userId: string }
+  | { kind: 'direct' }
   | { kind: 'group'; conversationId: string };
 
 export type DwsImTarget =
@@ -47,6 +47,7 @@ export interface DwsImMessage {
   type:
     | 'user_im_message_receive_at'
     | 'user_im_message_receive_o2o'
+    | 'user_im_message_receive_o2o_all'
     | 'user_im_message_receive_group';
   eventId: string;
   messageId: string;
@@ -58,6 +59,7 @@ export interface DwsImMessage {
 
 export interface DwsClientLike {
   assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity>;
+  isUserImMessage(messageId: string, senderId: string): Promise<boolean>;
   subscribeToIm(
     source: DwsImSource,
     onMessage: (message: DwsImMessage) => void | Promise<void>,
@@ -376,6 +378,7 @@ export function parseDwsImEvent(line: string): DwsImMessage {
   if (
     type !== 'user_im_message_receive_at' &&
     type !== 'user_im_message_receive_o2o' &&
+    type !== 'user_im_message_receive_o2o_all' &&
     type !== 'user_im_message_receive_group'
   ) {
     throw new Error(`Unsupported DWS event type: ${type ?? 'unknown'}.`);
@@ -426,7 +429,7 @@ function eventKey(source: DwsImSource): string {
     case 'at':
       return 'user_im_message_receive_at';
     case 'direct':
-      return 'user_im_message_receive_o2o';
+      return 'user_im_message_receive_o2o_all';
     case 'group':
       return 'user_im_message_receive_group';
     default:
@@ -492,7 +495,6 @@ export class DwsClient implements DwsClientLike {
       '--format',
       'compact',
     ];
-    if (source.kind === 'direct') args.push('--user', source.userId);
     if (source.kind === 'group') {
       args.push('--group', source.conversationId);
     }
@@ -502,6 +504,47 @@ export class DwsClient implements DwsClientLike {
       async (line) => onMessage(parseDwsImEvent(line)),
       onError,
     );
+  }
+
+  async isUserImMessage(messageId: string, senderId: string): Promise<boolean> {
+    const response = await this.run([
+      'chat',
+      '+messages-mget',
+      '--msg-ids',
+      messageId,
+      '--no-reactions',
+    ]);
+    if (!isRecord(response) || !Array.isArray(response['messages'])) {
+      throw new Error('DWS message verification returned an invalid response.');
+    }
+    const message = response['messages'].find(
+      (item) =>
+        isRecord(item) &&
+        firstString(item, ['messageId', 'message_id', 'openMessageId']) ===
+          messageId,
+    );
+    if (isRecord(message)) {
+      const actualSender = firstString(message, [
+        'senderId',
+        'sender_id',
+        'senderOpenDingTalkId',
+        'sender_open_dingtalk_id',
+      ]);
+      const senderType = firstString(message, [
+        'senderType',
+        'sender_type',
+      ])?.toLowerCase();
+      return (
+        actualSender === senderId &&
+        !['app', 'application', 'bot', 'robot', 'system'].includes(
+          senderType ?? '',
+        )
+      );
+    }
+    if (stringList(response['notFoundMessageIds']).includes(messageId)) {
+      return false;
+    }
+    throw new Error('DWS could not verify the incoming message sender.');
   }
 
   async sendImMessage(

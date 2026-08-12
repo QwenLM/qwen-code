@@ -56,12 +56,6 @@ export const plugin: ChannelPlugin = {
           'Optional DWS profile. Leave empty to use the active profile',
       },
       {
-        key: 'imUserIds',
-        label: 'Direct-message users',
-        kind: 'string-list',
-        description: 'DingTalk user IDs whose direct messages start tasks',
-      },
-      {
         key: 'documentIds',
         label: 'Documents',
         kind: 'string-list',
@@ -130,7 +124,7 @@ export const plugin: ChannelPlugin = {
       },
     ],
     validateConfig: (config) => {
-      for (const field of ['imUserIds', 'documentIds', 'wikiSpaceIds']) {
+      for (const field of ['documentIds', 'wikiSpaceIds']) {
         if (!validStringList(config[field])) {
           return `DWS ${field} must contain non-empty strings.`;
         }

@@ -16,7 +16,6 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'dwsPath',
       'profile',
-      'imUserIds',
       'documentIds',
       'wikiSpaceIds',
       'wikiDiscoveryInterval',
@@ -51,6 +50,9 @@ describe('DWS channel plugin', () => {
 
   it('ignores removed source settings', () => {
     expect(
+      plugin.management?.validateConfig?.({ imUserIds: 'legacy-user' }),
+    ).toBeUndefined();
+    expect(
       plugin.management?.validateConfig?.({ imGroupIds: 'legacy-group' }),
     ).toBeUndefined();
     expect(
@@ -59,9 +61,6 @@ describe('DWS channel plugin', () => {
   });
 
   it('rejects malformed source lists and triggers', () => {
-    expect(plugin.management?.validateConfig?.({ imUserIds: [''] })).toContain(
-      'non-empty strings',
-    );
     expect(plugin.management?.validateConfig?.({ trigger: ' ' })).toContain(
       'non-empty string',
     );
