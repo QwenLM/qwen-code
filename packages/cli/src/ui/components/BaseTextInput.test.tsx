@@ -186,11 +186,13 @@ describe('BaseTextInput', () => {
   });
 
   it.each([
-    { columns: 11, label: 'session' },
-    { columns: 12, label: '会话标题' },
+    { columns: 11, label: 'session', expectedLabel: 'sessi…' },
+    { columns: 12, label: '会话标题', expectedLabel: '会话标…' },
+    { columns: 20, label: 'session', expectedLabel: 'session' },
+    { columns: 4, label: 'session', expectedLabel: '' },
   ])(
     'keeps the top border within $columns columns for "$label"',
-    ({ columns, label }) => {
+    ({ columns, label, expectedLabel }) => {
       const originalDescriptor = Object.getOwnPropertyDescriptor(
         process.stdout,
         'columns',
@@ -211,6 +213,11 @@ describe('BaseTextInput', () => {
         const topBorderLine = lastFrame()?.split('\n')[0] ?? '';
 
         expect(stringWidth(topBorderLine)).toBe(columns);
+        if (expectedLabel) {
+          expect(topBorderLine).toContain(` ${expectedLabel} `);
+        } else {
+          expect(topBorderLine).toBe('─'.repeat(columns));
+        }
       } finally {
         if (originalDescriptor) {
           Object.defineProperty(process.stdout, 'columns', originalDescriptor);
