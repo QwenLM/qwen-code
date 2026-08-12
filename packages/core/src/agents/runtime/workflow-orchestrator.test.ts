@@ -2508,6 +2508,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   };
 
   function fakeConfigWithMgr(opts: {
+    transcriptDir?: string;
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -2558,6 +2559,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // drive GitWorktreeService stubs without re-deriving cwd.
       getTargetDir: () => '/fake/repo',
       getSessionId: () => 'sess_fake_test_id',
+      getProjectRoot: () => opts.transcriptDir ?? '/fake/repo',
+      getCliVersion: () => '9.9.9',
+      storage: opts.transcriptDir
+        ? { getProjectDir: () => opts.transcriptDir }
+        : undefined,
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
@@ -2683,6 +2689,55 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         'agent',
       ]),
     );
+  });
+
+  it('records override-path events in the workflow transcript', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        onCreate: async () => ({
+          finalText: 'override-output',
+          terminateMode: 'GOAL',
+          runWithEmitter: (emitter) => {
+            emitter.emit(AgentEventType.ROUND_TEXT, {
+              subagentId: 'sub',
+              round: 1,
+              text: 'override transcript output',
+              thoughtText: '',
+              timestamp: 1,
+            });
+          },
+        }),
+      });
+
+      await createProductionDispatch(config)('override prompt', {
+        model: 'override-model',
+      });
+
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const records = fs
+        .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(2);
+      expect(records[1]!['parentUuid']).toBe(records[0]!['uuid']);
+      expect(records[1]!['agentId']).toBe(records[0]!['agentId']);
+      expect(calls[0]!.executeAgentId).toBe(records[0]!['agentId']);
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
   });
 
   it('strips internal tags from override-path final text', async () => {
@@ -3948,6 +4003,13 @@ describe('createProductionDispatch — subagent transcripts', () => {
       attempt += 1;
       if (attempt > 1) {
         nextTerminateMode.value = 'GOAL';
+        emitter.emit(AgentEventType.ROUND_TEXT, {
+          subagentId: 'workflow-agent',
+          round: 2,
+          text: 'retry completed',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
         return;
       }
       nextTerminateMode.value = 'CANCELLED';
@@ -3972,8 +4034,18 @@ describe('createProductionDispatch — subagent transcripts', () => {
     const names = transcriptNames();
     expect(names).toHaveLength(1);
     // One launch record, not one per attempt.
-    const users = recordsIn(names[0]!).filter((r) => r['type'] === 'user');
+    const records = recordsIn(names[0]!);
+    const users = records.filter((r) => r['type'] === 'user');
     expect(users).toHaveLength(1);
+    for (let i = 1; i < records.length; i++) {
+      expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
+      expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
+    }
+    expect(created).toHaveLength(2);
+    expect(created.map((call) => call.agentId)).toEqual([
+      records[0]!['agentId'],
+      records[0]!['agentId'],
+    ]);
   });
 
   // The journal writes no `result` line for a dispatch that throws, so a
