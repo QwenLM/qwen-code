@@ -44,6 +44,18 @@ describe('canonicalizeAgentOpts', () => {
       JSON.stringify({ workingDir: 'wt' }),
     );
     expect(a).not.toBe(b);
+    // Symmetric HIT direction: the same workingDir must derive the SAME key,
+    // or resumeFromRunId silently misses the journal and re-spends every
+    // dispatch of a workingDir-using workflow.
+    expect(
+      deriveAgentKey('', 'review it', {
+        workingDir: '.qwen/tmp/review-pr-1',
+      }),
+    ).toBe(
+      deriveAgentKey('', 'review it', {
+        workingDir: '.qwen/tmp/review-pr-1',
+      }),
+    );
   });
 
   it('sorts object keys deeply so reordered schemas hash the same', () => {

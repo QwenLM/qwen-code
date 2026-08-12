@@ -158,6 +158,24 @@ export function generateAgentWorktreeSlug(): string {
   return `${AGENT_WORKTREE_PREFIX}-${hex}`;
 }
 
+/**
+ * Attribute lines a `git worktree list --porcelain` record can carry after
+ * its `worktree <path>` line. Anything else on those lines means the path
+ * above contained a newline and the entry was truncated.
+ */
+function isWorktreeListPorcelainAttribute(line: string): boolean {
+  return (
+    line === 'bare' ||
+    line === 'detached' ||
+    line === 'locked' ||
+    line === 'prunable' ||
+    line.startsWith('HEAD ') ||
+    line.startsWith('branch ') ||
+    line.startsWith('locked ') ||
+    line.startsWith('prunable ')
+  );
+}
+
 export interface WorktreeInfo {
   /** Unique identifier for this worktree */
   id: string;
@@ -323,17 +341,30 @@ export class GitWorktreeService {
    * `git worktree list --porcelain` lists the primary working tree first
    * regardless of where in the repository it runs. Callers anchoring a
    * check at the repository itself (not the current worktree) use this.
-   * A main-tree path containing a newline truncates to the first line;
-   * consumers fail closed on the bad anchor and the authoritative
-   * registration checks never consult this value.
+   *
+   * The porcelain format is newline-delimited, so a main-tree path that
+   * itself contains a newline splits across lines and the first entry
+   * truncates. The remainder then appears where a record attribute belongs;
+   * it is not one, which is how the truncation is detected — this method
+   * returns `null` and callers fall back to `getRepoTopLevel()`, whose
+   * single-value `--show-toplevel` answer keeps interior newlines intact.
+   * (`--porcelain -z` would be immune but needs Git >= 2.36.) A truncated
+   * anchor is not merely wrong: it can resolve inside a DIFFERENT repository
+   * whose worktree registry the gate below would then consult.
    */
   async getMainWorktreePath(): Promise<string | null> {
     try {
       const out = await (
         await this.getGit()
       ).raw(['worktree', 'list', '--porcelain']);
-      const firstLine = out.split('\n', 1)[0]?.trim() ?? '';
+      const lines = out.split('\n');
+      const firstLine = lines[0]?.trim() ?? '';
       if (!firstLine.startsWith('worktree ')) return null;
+      for (const line of lines.slice(1)) {
+        const attr = line.trim();
+        if (attr === '') break; // blank line ends the first record
+        if (!isWorktreeListPorcelainAttribute(attr)) return null;
+      }
       const mainPath = firstLine.slice('worktree '.length).trim();
       return mainPath.length > 0 ? mainPath : null;
     } catch (error) {

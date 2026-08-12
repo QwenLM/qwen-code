@@ -607,4 +607,74 @@ describe('GitWorktreeService', () => {
       ).toBeNull();
     });
   });
+
+  describe('getMainWorktreePath', () => {
+    it('parses the first porcelain entry as the main worktree path', async () => {
+      hoistedMockRaw.mockResolvedValueOnce(
+        'worktree /repo\n' +
+          'HEAD abc123\n' +
+          'branch refs/heads/main\n' +
+          '\n' +
+          'worktree /repo/.qwen/worktrees/wt\n' +
+          'HEAD abc123\n' +
+          'branch refs/heads/wt\n',
+      );
+      const service = new GitWorktreeService('/repo/.qwen/worktrees/wt');
+
+      await expect(service.getMainWorktreePath()).resolves.toBe('/repo');
+      expect(hoistedMockRaw).toHaveBeenCalledWith([
+        'worktree',
+        'list',
+        '--porcelain',
+      ]);
+    });
+
+    it('accepts a bare-repository first entry', async () => {
+      hoistedMockRaw.mockResolvedValueOnce('worktree /srv/repo.git\nbare\n');
+      const service = new GitWorktreeService('/srv/repo.git');
+
+      await expect(service.getMainWorktreePath()).resolves.toBe(
+        '/srv/repo.git',
+      );
+    });
+
+    it('returns null when the first line is not a worktree entry', async () => {
+      hoistedMockRaw.mockResolvedValueOnce('HEAD abc123\n');
+      const service = new GitWorktreeService('/repo');
+
+      await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+
+    it('returns null when the porcelain output is empty', async () => {
+      hoistedMockRaw.mockResolvedValueOnce('');
+      const service = new GitWorktreeService('/repo');
+
+      await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+
+    it('returns null when git fails', async () => {
+      hoistedMockRaw.mockRejectedValueOnce(new Error('git unavailable'));
+      const service = new GitWorktreeService('/repo');
+
+      await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+
+    // A main-tree path containing a newline splits the first porcelain entry
+    // across lines; the truncated prefix can resolve inside a DIFFERENT
+    // repository and aim the containment gate at that repo's worktree
+    // registry. The path remainder lands where a record attribute belongs —
+    // it is not one, so the anchor is refused and callers fall back to
+    // `--show-toplevel`, which keeps interior newlines intact.
+    it('returns null when the main-tree path contains a newline', async () => {
+      hoistedMockRaw.mockResolvedValueOnce(
+        'worktree /outer/sub/\n' +
+          'R1\n' +
+          'HEAD abc123\n' +
+          'branch refs/heads/main\n',
+      );
+      const service = new GitWorktreeService('/outer/sub/\nR1');
+
+      await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+  });
 });

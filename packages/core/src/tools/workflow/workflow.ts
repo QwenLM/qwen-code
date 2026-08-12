@@ -112,7 +112,8 @@ const WORKFLOW_PARAM_SCHEMA = {
         'exists and its uncommitted state is the point (a review worktree, a ' +
         'checkout a previous step provisioned) — exactly the case isolation ' +
         'cannot serve. Mutually exclusive with `isolation`. The path must live ' +
-        'inside the repository and appear in `git worktree list`. ' +
+        'inside the repository and be a linked worktree registered via ' +
+        '`git worktree add` — the main checkout is not eligible. ' +
         'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
         'in their disallowed-tool floor regardless of agentType. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
