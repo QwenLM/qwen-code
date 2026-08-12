@@ -201,5 +201,20 @@ API by any reviewer — flagged explicitly rather than asserted.
 This is the concrete instance the companion inventory document's Site 3
 refers to, and it is presented here as its own document because it is an
 actionable, scoped bug — not a philosophical question — with a clear next
-step: reasoning-episode consolidation must happen at a layer every transcript→`Content[]` reader passes through (e.g. background-agent/fork transcript recovery, ACP replay/restore, see Site 11 of the inventory), or the persistence producer must be made to write the coalesced shape. Simply fixing resume-time rehydration is insufficient, as it leaves other consumers exposed to the identical hazard. No fix is proposed in detail here, consistent with this being a
+step. Two changes are needed, and they are complementary rather than
+alternatives:
+
+1. **Consumer side** — reasoning-episode consolidation must happen at a layer
+   every transcript→`Content[]` reader passes through (background-agent/fork
+   transcript recovery, ACP replay/restore; see Site 11 of the inventory).
+   Fixing resume-time rehydration alone is insufficient, since it leaves the
+   other consumers exposed to the identical hazard.
+2. **Producer side** — the persistence layer should write the coalesced
+   shape, so newly written transcripts are correct at rest.
+
+Neither substitutes for the other. A producer-only fix is inert for every
+transcript already on disk, and those are precisely the sessions a user
+resumes; a consumer-only fix leaves the on-disk record permanently divergent
+from live history, so any future reader inherits the same hazard. No fix is
+proposed in detail here, consistent with this being a
 documentation-and-verdict deliverable, not an implementation PR.
