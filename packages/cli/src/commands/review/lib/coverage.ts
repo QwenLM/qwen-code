@@ -368,7 +368,7 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
   const first = rec.launchPrompt.split('\n')[0]?.trim() ?? '';
-  if (first) return first.length > 60 ? `${first.slice(0, 57)}...` : first;
+  if (first) return first.replace(/\s+/g, ' ');
   return rec.agentName || rec.agentId;
 }
 

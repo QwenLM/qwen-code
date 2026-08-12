@@ -30,6 +30,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { compressSummary } from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
   ROUND_CAP_PHRASE,
@@ -796,6 +797,10 @@ function composeReviewBody(
       for (const label of cov.idleAgents) {
         const entry = {
           subject: label,
+          publicSubject:
+            publicLabelsZh[label] === undefined
+              ? publicAgentSubject(label)
+              : undefined,
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
           subjectZh: publicLabelsZh[label],
@@ -824,6 +829,10 @@ function composeReviewBody(
       for (const label of cov.blindAgents) {
         const entry = {
           subject: label,
+          publicSubject:
+            publicLabelsZh[label] === undefined
+              ? publicAgentSubject(label)
+              : undefined,
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
@@ -853,11 +862,16 @@ function composeReviewBody(
       for (const label of cov.unopenedAgents) {
         const entry = {
           subject: label,
+          publicSubject:
+            publicLabelsZh[label] === undefined
+              ? publicAgentSubject(label)
+              : undefined,
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
           reasonZh:
-            '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
+            '启动 prompt 为它指定了 diff 中的行，但它从未打开：有工具调用，' +
+            '却没有一次读取 diff',
           subjectZh: publicLabelsZh[label],
         };
         coverageEntries.push(entry);
@@ -1382,11 +1396,22 @@ function composeReviewBody(
     const shown = keptBudgetGaps.slice(0, MAX_BUDGET_GAP_LINES);
     const more = keptBudgetGaps.length - shown.length;
     const enList =
-      shown.map((it) => `${it.agent}: ${mdField(it.gap)}`).join('; ') +
-      (more > 0 ? `, and ${more} more` : '');
+      shown
+        .map(
+          (it) =>
+            `${
+              it.agentZh !== undefined
+                ? it.agent
+                : (publicAgentSubject(it.agent) ?? it.agent)
+            }: ${mdField(it.gap)}`,
+        )
+        .join('; ') + (more > 0 ? `, and ${more} more` : '');
     const zhList =
       shown
-        .map((it) => `${it.agentZh ?? it.agent}：${mdField(it.gap)}`)
+        .map(
+          (it) =>
+            `${it.agentZh ?? publicAgentSubject(it.agent) ?? it.agent}：${mdField(it.gap)}`,
+        )
         .join('；') + (more > 0 ? `，另有 ${more} 条` : '');
     notReviewedParts.push({
       en: `Not explored to full depth (tool budget reached): ${enList}.`,
@@ -1452,20 +1477,35 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
-    const named: string[] = [];
-    const namedZh: string[] = [];
+    const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = CHUNK_SUBJECT_RE.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
       else {
-        named.push(e.publicSubject ?? e.subject);
-        namedZh.push(e.subjectZh ?? e.publicSubject ?? e.subject);
+        const subject = e.publicSubject ?? e.subject;
+        const existing = named.get(subject);
+        if (existing) existing.count++;
+        else
+          named.set(subject, {
+            zh: e.subjectZh ?? subject,
+            count: 1,
+          });
       }
     }
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
-    const shown = [...(gap ? [gap.phrase] : []), ...named];
-    const shownZh = [...(gap ? [gap.phraseZh] : []), ...namedZh];
+    const shown = [
+      ...(gap ? [gap.phrase] : []),
+      ...[...named].map(([subject, { count }]) =>
+        count > 1 ? `${subject} (×${count})` : subject,
+      ),
+    ];
+    const shownZh = [
+      ...(gap ? [gap.phraseZh] : []),
+      ...[...named.values()].map(({ zh, count }) =>
+        count > 1 ? `${zh}（×${count}）` : zh,
+      ),
+    ];
     const reasonZh = reasonZhOf.get(reason) ?? reason;
     notReviewedParts.push({
       en: reason
@@ -1494,6 +1534,31 @@ function composeReviewBody(
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
+
+  const disclosedChunkIds = new Set<number>();
+  for (const e of coverageEntries) {
+    const m = CHUNK_SUBJECT_RE.exec(e.subject);
+    if (m) disclosedChunkIds.add(Number(m[1]));
+  }
+  const nothingCertified =
+    coverageEntries.some((e) => e.subject === 'coverage') ||
+    (plannedChunks.length > 0 &&
+      coveredChunks.every((id) => disclosedChunkIds.has(id)));
+  const hasCoverageGaps =
+    unreviewed.length + coverageEntries.length > 0 ||
+    missingReceipts.length > 0 ||
+    uncoverable.length > 0;
+  const coverageOpener: Bi | undefined = nothingCertified
+    ? {
+        en: '⚠️ This run could not certify that any of this diff was reviewed.',
+        zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+      }
+    : hasCoverageGaps
+      ? {
+          en: 'Partially reviewed — gaps disclosed.',
+          zh: '仅完成部分审查，审查缺口已披露。',
+        }
+      : undefined;
 
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
@@ -1555,6 +1620,7 @@ function composeReviewBody(
     // trust warning (clause 2), an undecided existing Critical (clause 5),
     // or the unread-scope disclosure (clause 6).
     const parts = [
+      ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
@@ -1623,9 +1689,9 @@ function composeReviewBody(
     });
   }
 
-  // 2. Context-unavailable clause — when present, it opens the body and no
-  //    clause may certify "no blockers".
+  // 2. Context-unavailable clause — no later clause may certify "no blockers".
   if (contextUnavailable) {
+    if (coverageOpener) clauses.push(coverageOpener);
     clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
@@ -1640,13 +1706,11 @@ function composeReviewBody(
       !downgradeRequestChanges &&
       c === 0 &&
       cannotTell.length === 0 &&
-      uncoverable.length === 0 &&
-      unreviewed.length + coverageEntries.length === 0 &&
+      !hasCoverageGaps &&
       // A missing receipt caps the event but was left out of certification, so a
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free — and neither
       // can a loop that ended with findings no verifier ever ruled on.
-      missingReceipts.length === 0 &&
       // A disclosed budget gap is not a blocker, but "Reviewed — no
       // blockers." two lines above "Not explored to full depth" is the
       // opener certifying what the disclosure takes back — the exact
@@ -1664,24 +1728,27 @@ function composeReviewBody(
     // `coverage` subject is the no-plan/unreadable-transcripts family — there
     // is no chunk universe to count, and what cannot be counted cannot be
     // certified.
-    const disclosedChunkIds = new Set<number>();
-    for (const e of coverageEntries) {
-      const m = CHUNK_SUBJECT_RE.exec(e.subject);
-      if (m) disclosedChunkIds.add(Number(m[1]));
-    }
-    const nothingCertified =
-      coverageEntries.some((e) => e.subject === 'coverage') ||
-      (plannedChunks.length > 0 &&
-        coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    // Any opener starting with "Reviewed" reads as contradicting the
+    // "Not reviewed:" clauses below it — announcing the gaps does not fix
+    // it, as the first cut of this wording showed (#8811). When disclosures
+    // follow, the opener says the review is PARTIAL instead, so the pair
+    // reads in one direction; the certifying and the zero-certified openers
+    // above keep their exact wording.
     clauses.push(
-      nothingCertified
-        ? {
-            en: '⚠️ This run could not certify that any of this diff was reviewed.',
-            zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
-          }
-        : canCertify
+      coverageOpener ??
+        (canCertify
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
-          : { en: 'Reviewed.', zh: '已审查。' },
+          : findingsFileUnreadable
+            ? {
+                en: 'Review incomplete — findings unavailable.',
+                zh: '审查未完成——发现不可用。',
+              }
+            : findingsUnverifiedAtCompose
+              ? {
+                  en: 'Review incomplete — unverified findings disclosed.',
+                  zh: '审查未完成——未验证的发现已披露。',
+                }
+              : { en: 'Reviewed.', zh: '已审查。' }),
     );
   }
 
@@ -1768,6 +1835,24 @@ function composeReviewBody(
     remediation,
     lowSignal,
   };
+}
+
+/**
+ * The public subject for an agent-derived disclosure label. A `chunk N`
+ * label stays bare — the chunk collapse translates it into the author's
+ * units. Any other label is the truncated first line of a launch prompt:
+ * prose. Rendered bare it reads as a claim about the PR itself —
+ * #8811's posted body carried "Not reviewed: This PR narrows the
+ * daemon-marker check from a truthy tes..." — not as the name of the agent
+ * that failed. Quoted, it reads as a name. The INTERNAL subject stays the
+ * unquoted label: the dedup and certification checks key on it. Rostered
+ * role labels never reach it — every call site keeps them bare: a
+ * publicLabel is a name the plan chose, not a prompt fragment.
+ */
+function publicAgentSubject(label: string): string | undefined {
+  return CHUNK_SUBJECT_RE.test(label)
+    ? undefined
+    : mdField(JSON.stringify(compressSummary(label.replace(/[`\r\n]+/g, ' '))));
 }
 
 /**

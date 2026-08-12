@@ -898,10 +898,10 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
   it('keeps the launch first line for a discloser no built prompt matches', () => {
     // The boundary of the rename above: only a record matching a BUILT
     // role prompt escapes the fallback, and the fallback is the launch
-    // prompt's first line, truncated — the exact register the production
-    // spill wore. A discloser whose prompt the run wrote itself keeps
-    // that name; a regression to a worse default fails right here, in
-    // the channel where the spill landed.
+    // prompt's first line — the exact register the production spill
+    // wore. A discloser whose prompt the run wrote itself keeps that
+    // name; a regression to a worse default fails right here, in the
+    // channel where the spill landed.
     transcript('a1', good(1), { calls: 3, range: [0, 100] });
     transcript('a2', good(2), { calls: 2, range: [100, 100] });
     const p = plan();
@@ -917,7 +917,7 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     const gaps = coverageFromTranscripts(p, ENV).budgetGaps;
     const entry = gaps.find((g) => g.gaps.includes('the stray pass'));
     expect(entry?.agent).toBe(
-      'You are review agent `free-lance`, an extra pass this run...',
+      'You are review agent `free-lance`, an extra pass this run wrote for itself.',
     );
   });
 
