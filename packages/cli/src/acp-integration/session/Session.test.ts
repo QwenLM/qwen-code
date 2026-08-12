@@ -4710,6 +4710,110 @@ describe('Session', () => {
       });
     });
 
+    it('sanitizes and truncates the shell commandLabel branch', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // The shell branch reads the raw registry entry description (the
+      // registry only sanitizes its own displayText), so it must pin the
+      // same bidi/control stripping and 80-code-point cap independently.
+      mockBackgroundShellRegistry.getAll.mockReturnValue([
+        {
+          id: 'shell-1',
+          description: `a\u202eb\tc\n${'x'.repeat(90)}`,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      callback(
+        'Background shell "a..." completed.',
+        '<task-notification><kind>shell</kind></task-notification>',
+        { shellId: 'shell-1', status: 'completed' },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'shell-1',
+                kind: 'shell',
+                commandLabel: 'ab c' + 'x'.repeat(73) + '...',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('sanitizes the agent description branch built from the entry label', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // buildBackgroundEntryLabel pre-truncates the description at 40
+      // chars; bidi controls inside that window must still be stripped by
+      // the Session-side sanitization of the composed agent label.
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([
+        {
+          id: 'agent-1',
+          description: `a\u202eb\tc\n${'x'.repeat(90)}`,
+          subagentType: 'Explore',
+          isBackgrounded: true,
+          status: 'completed',
+          notified: false,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Background agent "a..." completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                kind: 'agent',
+                description: 'Explore: ab c' + 'x'.repeat(33) + '\u2026',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
     it('truncates astral (emoji) labels on a code-point boundary', async () => {
       mockChat.sendMessageStream = vi
         .fn()

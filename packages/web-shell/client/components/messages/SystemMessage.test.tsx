@@ -216,6 +216,28 @@ describe('SystemMessage — background notification i18n body', () => {
     );
   });
 
+  it('renders the dropped-lines clause in zh-CN when throttling dropped output', () => {
+    const container = render(
+      <SystemMessage
+        content="raw daemon text"
+        variant="info"
+        source="background_notification"
+        data={{
+          status: 'completed',
+          kind: 'monitor',
+          description: 'logs',
+          eventCount: 5,
+          droppedLines: 2,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '监控器已完成（5 个事件，因限流丢弃 2 行）：logs',
+    );
+  });
+
   it('renders failed monitor notifications with the event count in zh-CN', () => {
     const container = render(
       <SystemMessage
