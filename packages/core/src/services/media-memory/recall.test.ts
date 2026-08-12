@@ -498,6 +498,42 @@ describe('MediaMemoryRecallService — gaps and availability', () => {
     expect(result.entries.length).toBeGreaterThan(0);
   });
 
+  it('never emits sibling gaps or advice for a deleted source (C7)', async () => {
+    // Only the audio track was ever extracted, so `visual` has no
+    // evidence: the pre-fix code emitted `artifact_unavailable` AND a
+    // `not_processed` sibling, and the advisor — which only filters
+    // `artifact_unavailable` — then suggested keyframe extraction on a
+    // handle whose file is gone (a guaranteed-to-fail turn).
+    const source = await recognizeMovie();
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    await fs.rm(moviePath);
+
+    const result = await recallService(recallConfig(), {
+      advise: ({ resourceId: rid, gap }) =>
+        gap.reason === 'artifact_unavailable'
+          ? []
+          : [
+              {
+                toolName: 'omni_extract_keyframes',
+                resourceId: rid,
+                arguments: {},
+                reason: 'no visual evidence',
+              },
+            ],
+    }).recall({ resourceIds: [resourceId], query: 'q' });
+
+    expect(result.gaps).toEqual([
+      {
+        scope: {},
+        channels: ['visual', 'acoustic', 'speech_text'],
+        reason: 'artifact_unavailable',
+      },
+    ]);
+    // Nothing can be gathered from a deleted file — no advice at all.
+    expect(result.nextPolicyActions).toBeUndefined();
+  });
+
   it('withholds the handle of a deleted derived artifact', async () => {
     const source = await recognizeMovie();
     const { degradedPath } = await commitDegrade(source);

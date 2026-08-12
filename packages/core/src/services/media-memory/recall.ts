@@ -900,13 +900,22 @@ export class MediaMemoryRecallService {
       MediaMemoryRecallGap & { forResourceId: string; mediaType: OmniModality }
     > = [];
     if (!(await pathExists(fileRef))) {
-      gaps.push({
-        scope: {},
-        channels: expectedChannels(version.mediaType),
-        reason: 'artifact_unavailable',
-        forResourceId,
-        mediaType: version.mediaType,
-      });
+      // The source bytes are gone (D5): report the loss and STOP. Continuing
+      // the channel scan would emit sibling `not_processed` gaps, and the
+      // advisor — which only filters `artifact_unavailable` — would then
+      // suggest evidence-gathering calls carrying a handle whose file no
+      // longer exists: the gate resolves it and `assertMediaPolicyIo` fails,
+      // a guaranteed-to-fail turn. Nothing can be gathered from a deleted
+      // file, so "unavailable" is the complete and only honest gap.
+      return [
+        {
+          scope: {},
+          channels: expectedChannels(version.mediaType),
+          reason: 'artifact_unavailable',
+          forResourceId,
+          mediaType: version.mediaType,
+        },
+      ];
     }
 
     const complete = new Set<MediaChannel>();

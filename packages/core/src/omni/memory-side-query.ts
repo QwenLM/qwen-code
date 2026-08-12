@@ -98,8 +98,17 @@ export function extractRequestResourceIds(
   return found;
 }
 
-/** Plain request text (non-annotation text parts, bounded) — the
- * selector's only view of what the user is asking. */
+/** Strip every `<system-reminder>…</system-reminder>` block from a text
+ * part. Harness reminders are not the user's question, but they can be
+ * PREPENDED INTO the user's own text part (IDE context does exactly that,
+ * before the passive-recall pass runs) — dropping the whole part on a
+ * leading tag would hide the question from the selector entirely. */
+function stripSystemReminders(text: string): string {
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
+}
+
+/** Plain request text (system reminders removed, bounded) — the selector's
+ * only view of what the user is asking. */
 function selectorRequestText(parts: readonly PartUnion[]): string {
   const texts: string[] = [];
   for (const part of parts) {
@@ -109,8 +118,9 @@ function selectorRequestText(parts: readonly PartUnion[]): string {
         : typeof part === 'object' && part !== null && 'text' in part
           ? (part as { text?: string }).text
           : undefined;
-    if (!text || text.startsWith('<system-reminder>')) continue;
-    texts.push(text);
+    if (!text) continue;
+    const stripped = stripSystemReminders(text).trim();
+    if (stripped) texts.push(stripped);
   }
   let joined = texts.join('\n');
   if (joined.length > MAX_SELECTOR_REQUEST_CHARS) {

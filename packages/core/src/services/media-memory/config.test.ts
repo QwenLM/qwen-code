@@ -63,6 +63,11 @@ describe('normalizeOmniMemoryConfig', () => {
 
   it('rejects unknown keys at every level', () => {
     for (const raw of [
+      // Root level too: a typo'd section would otherwise silently discard
+      // the WHOLE configuration and run defaults (active mode) while the
+      // operator believes sideQuery is configured.
+      { recalll: { mode: 'sideQuery' } },
+      { collection: {}, memory: {} },
       { collection: { maxInlineBytes: 1 } },
       { recall: { maxEntry: 1 } },
       { recall: { active: { maxFiles: 1 } } },
@@ -72,6 +77,12 @@ describe('normalizeOmniMemoryConfig', () => {
         OmniMemoryConfigError,
       );
     }
+  });
+
+  it('rejects a non-object root', () => {
+    expect(() => normalizeOmniMemoryConfig(5 as never)).toThrow(
+      OmniMemoryConfigError,
+    );
   });
 
   it('rejects non-object sections', () => {

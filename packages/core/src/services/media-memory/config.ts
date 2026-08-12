@@ -98,6 +98,7 @@ export const DEFAULT_OMNI_MEMORY_CONFIG: NormalizedOmniMemoryConfig = {
   },
 };
 
+const ROOT_KEYS = new Set(['collection', 'recall']);
 const COLLECTION_KEYS = new Set(['maxInlineTextBytes']);
 const RECALL_KEYS = new Set([
   'mode',
@@ -183,6 +184,15 @@ export function normalizeOmniMemoryConfig(
   raw: RawOmniMemorySettings | undefined,
 ): NormalizedOmniMemoryConfig {
   const defaults = DEFAULT_OMNI_MEMORY_CONFIG;
+
+  // Reject unknown ROOT keys too (same stance as every nested level, and as
+  // the sibling `omni.processing` normalizer): a typo'd or renamed section
+  // would otherwise silently discard the whole configuration — the session
+  // would run default `active` mode while the user believes sideQuery is
+  // configured, which is exactly the silent fallback this module forbids.
+  if (raw !== undefined) {
+    requireRecord(raw, 'omni.memory', ROOT_KEYS);
+  }
 
   let maxInlineTextBytes = defaults.collection.maxInlineTextBytes;
   if (raw?.collection !== undefined) {

@@ -163,6 +163,43 @@ describe('omni memory sideQuery selector', () => {
       expect(reminder).not.toContain(tmpDir);
     });
 
+    it('shows the selector the question even when IDE context is merged in', async () => {
+      const resourceId = await recordAndBind();
+      let seenRequest = '';
+      runSideQueryMock.mockImplementation((async (
+        _config: unknown,
+        options: { contents: Content[] },
+      ) => {
+        const payload = JSON.parse(
+          (options.contents[0]!.parts![0] as { text: string }).text,
+        );
+        seenRequest = payload.request;
+        return { entryIds: [] };
+      }) as never);
+
+      // Exactly how client.ts builds the parts in IDE mode: wrapIdeContext
+      // output is PREPENDED INTO the user's own text part, before the
+      // passive-recall pass runs — so the question lives in a part that
+      // STARTS with <system-reminder>. Dropping such parts wholesale would
+      // make the selector pick relevance-blind.
+      await runOmniMemorySideQuery({
+        config: sideQueryConfig(),
+        requestParts: [
+          {
+            text:
+              '<system-reminder>\nActive file: /x/y.ts\n</system-reminder>' +
+              'what size is this image?',
+          },
+          { text: formatResourceHandleText('pic.png', resourceId) },
+        ],
+      });
+
+      expect(seenRequest).toContain('what size is this image?');
+      // The reminder itself is stripped, not forwarded.
+      expect(seenRequest).not.toContain('system-reminder');
+      expect(seenRequest).not.toContain('/x/y.ts');
+    });
+
     it('degrades to an empty recall with a reason when the selector fails', async () => {
       const resourceId = await recordAndBind();
       runSideQueryMock.mockRejectedValue(new Error('boom'));
