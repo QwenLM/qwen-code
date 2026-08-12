@@ -533,6 +533,20 @@ describe('composeReview — modeled-system defect-layer cap', () => {
     expect(compose(p).event).toBe('COMMENT');
   });
 
+  it('does not count an auditor whose diff read misses its baked territory', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    // A reverse auditor whose launch baked territory 3301-4000 but whose only diff
+    // read was lines 1-50: retirement's territory bar drops it, so its six parroted
+    // receipts do not count and the layers stay owed. `diffToolCalls > 0` alone
+    // would (wrongly) credit them and release Approve.
+    transcript(
+      'ra-off',
+      `${IDENTITY}\nread_file(file_path="${DIFF}", offset=3300, limit=700)`,
+      { toolCalls: 1, range: [0, 50], text: walked(...ALL) },
+    );
+    expect(compose(p).event).toBe('COMMENT');
+  });
+
   it('is inert without the sentinel domain — an ordinary review is unaffected', () => {
     const p = markedPlan(['some-other-domain']);
     auditor('ra-1', ''); // zero receipts, but the domain is not armed

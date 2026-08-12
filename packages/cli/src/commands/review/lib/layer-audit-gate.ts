@@ -23,12 +23,13 @@
 // Counting those would release Approve on a diff whose layers went unwalked, the
 // exact incident this feature exists to catch. So a transcript's receipts count
 // only when it is (a) genuinely a reverse-audit auditor — matched on its launch
-// IDENTITY line, not a free-text mention of the role a verifier or nested
-// subagent can carry — and (b) shown by the harness's tool-call record to have
-// actually read the diff (`diffToolCalls > 0`, the bar retirement.ts applies
-// before a dry receipt retires a chunk). A brief-only parrot has `diffToolCalls
-// === 0` and is dropped; note that `successfulToolCalls > 0` alone would NOT drop
-// it, since reading the brief is a successful call.
+// IDENTITY line, not a free-text mention of the role — and (b) shown by the
+// harness's tool-call record to have READ ITS TERRITORY: it made a diff read
+// (`diffToolCalls > 0`) AND, when its launch prompt baked specific diff ranges,
+// one of those reads overlapped them (`openedTheTerritory`, retirement's full
+// bar — `diffToolCalls > 0` alone is range-blind, and an auditor that read a far
+// chunk then parroted its receipts would otherwise pass). A whole-diff auditor
+// bakes no ranges, so the overlap check passes and the diff-read floor stands.
 //
 // Two properties make it safe to land:
 //
@@ -38,20 +39,24 @@
 //    review is untouched.
 //  - **Only ever WITHHOLDS an Approve.** It appends to `unreviewedDimensions`,
 //    which caps — it never ends the reverse-audit loop, never blocks a Request
-//    changes, never touches the convergence rule. This is the safe half of the
-//    layer-aware-convergence work, staged ahead of any change to the stop rule
-//    itself. The corroboration errs the same way: an auditor that walked a layer
-//    but whose diff read we cannot see is dropped, which can only OVER-owe a
-//    layer (withhold), never release one.
+//    changes, never touches the convergence rule. The corroboration errs the
+//    same way: an auditor that walked a layer but whose territory read we cannot
+//    see is dropped, which can only OVER-owe a layer (withhold), never release
+//    one.
 //
-// Fail-open throughout, matching every other transcript reader here: an
-// unreadable plan, an invalid context, a missing transcript dir, or zero counted
-// auditor returns each yields no cap. A gate that cannot read must not cap a
-// verdict on a coverage it could not measure — the reverse-audit-ran floor
-// (compose-review) already owns "the auditor never ran".
+// Fail-open only where it cannot MEASURE: an unreadable plan, an invalid context,
+// or a transcript read that throws yields no cap (a gate that cannot read must
+// not cap a verdict on a coverage it could not measure). But a read that
+// SUCCEEDS and finds reverse auditors that ran yet none corroborated is a
+// measurement, not a blind spot — and the reverse-audit-ran floor does not cover
+// it (compose-review's `deliveryOf` requires a verbatim launch, an opened brief
+// and a read findings file, with no diff-read requirement), so this owes every
+// layer rather than deferring. Only "no reverse auditor ran at all" defers to the
+// floor.
 
 import { statSync, readFileSync } from 'node:fs';
 import { readTranscripts } from './transcripts.js';
+import { bakedRanges, openedTheTerritory } from './retirement.js';
 import { repositoryContextOf } from './repository-context.js';
 import { MODELED_SYSTEM_DOMAIN, owedLayerDimensions } from './audit-layers.js';
 
@@ -59,46 +64,56 @@ import { MODELED_SYSTEM_DOMAIN, owedLayerDimensions } from './audit-layers.js';
  * The launch-prompt IDENTITY line of a reverse-audit auditor. `agent-prompt`
  * builds every role's header as `` You are review agent `<role>` — <label> ``,
  * so this anchors on the reverse auditor's own identity rather than a bare
- * `includes('reverse-audit')` substring. That substring counted any transcript
- * whose prompt merely MENTIONED the role — a verifier inlining reverse-audit
- * findings and quoting their receipt lines, a nested subagent writing the same
- * session dir — and pulled its finalText into the receipt pool. retirement.ts
- * uses the bare substring too, but only as a pre-filter before pairing each
- * transcript to a recorded prompt; this gate has no such second stage, so the
- * selector itself must be the identity line.
+ * `includes('reverse-audit')` substring, which counted any transcript whose
+ * prompt merely MENTIONED the role — a verifier inlining reverse-audit findings,
+ * a nested subagent writing the same session dir.
  */
 export const REVERSE_AUDIT_IDENTITY = 'You are review agent `reverse-audit`';
 
+/** What the reader found: the corroborated auditors' final returns, and how many
+ *  identity-matched reverse auditors ran at all (corroborated or not). */
+interface AuditorReturns {
+  corroborated: string[];
+  identityMatched: number;
+}
+
 /**
- * The reverse-audit auditors' final returns for this run — identity-anchored and
- * corroborated by a real diff read. `diffPath` is the plan's `diffPathAbsolute`:
- * `readTranscripts` populates `diffToolCalls` only when it is given the diff
- * path, so without it the corroboration filter would drop every transcript. The
- * run-epoch fence (records older than the plan belong to a previous review of
- * the same PR in the same session) is `readTranscripts`'s own, via `since`.
+ * The reverse-audit auditors' returns for this run — identity-anchored and
+ * corroborated by a territory-overlapping diff read. `diffPath` is the plan's
+ * `diffPathAbsolute`: `readTranscripts` populates `diffToolCalls`/`diffReads`
+ * only when given it, and `bakedRanges` reads the launch prompt's baked
+ * `read_file` ranges against it. The run-epoch fence (records older than the plan
+ * belong to a previous review of the same PR) is `readTranscripts`'s own.
  */
 function readReverseAuditReturns(
   planPath: string,
   env: NodeJS.ProcessEnv,
   diffPath: string | undefined,
-): string[] {
+): AuditorReturns {
   try {
     const since = statSync(planPath).mtimeMs;
-    return readTranscripts(since, env, diffPath)
-      .filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY))
-      .filter((t) => t.diffToolCalls > 0)
+    const auditors = readTranscripts(since, env, diffPath).filter((t) =>
+      t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY),
+    );
+    const corroborated = auditors
+      .filter(
+        (t) =>
+          t.diffToolCalls > 0 &&
+          openedTheTerritory(
+            t.diffReads,
+            bakedRanges(t.launchPrompt, diffPath),
+          ),
+      )
       .map((t) => t.finalText ?? '');
+    return { corroborated, identityMatched: auditors.length };
   } catch {
-    // Fail-open, as this module's header promises — and as every sibling
-    // transcript reader in composeReviewBody already does. A missing transcript
-    // dir makes readTranscripts throw TranscriptsUnavailableError, an unstat-able
-    // plan makes statSync throw, and any other read failure lands here too: each
-    // yields no returns, hence no cap. Without this catch the throw propagated out
-    // of the gate and took compose down with it on a manifest-marked diff in a
-    // transcript-less environment (a sandbox, a read-only HOME, a re-compose on a
-    // clean machine) — posting nothing on exactly the security diffs this feature
-    // exists for. The reverse-audit-ran floor owns "the auditor never ran".
-    return [];
+    // Could not MEASURE — a missing transcript dir (readTranscripts throws
+    // TranscriptsUnavailableError), an unstat-able plan, any read failure. Yield
+    // nothing and no cap: without this the throw took compose down on a
+    // manifest-marked diff in a transcript-less environment (a sandbox, a
+    // read-only HOME, a re-compose on a clean machine). The reverse-audit-ran
+    // floor owns "the auditor never ran".
+    return { corroborated: [], identityMatched: 0 };
   }
 }
 
@@ -115,7 +130,7 @@ export function layerAuditGate(
     planPath: string,
     env: NodeJS.ProcessEnv,
     diffPath: string | undefined,
-  ) => string[] = readReverseAuditReturns,
+  ) => AuditorReturns = readReverseAuditReturns,
 ): { unreviewed: string[] } {
   if (!planPath) return { unreviewed: [] };
 
@@ -145,12 +160,20 @@ export function layerAuditGate(
       ? diffPathValue
       : undefined;
 
-  const returns = readReturns(planPath, env, diffPath);
-  // No counted auditor return is not "every layer owed" — it is "no corroborated
-  // reverse auditor ran here", which the reverse-audit-ran floor already caps.
-  // Capping every layer on top would double-cap and invent a coverage
-  // measurement from an empty transcript set.
-  if (returns.length === 0) return { unreviewed: [] };
-
-  return { unreviewed: owedLayerDimensions(returns) };
+  const { corroborated, identityMatched } = readReturns(
+    planPath,
+    env,
+    diffPath,
+  );
+  if (corroborated.length > 0) {
+    return { unreviewed: owedLayerDimensions(corroborated) };
+  }
+  // No corroborated auditor. If identity-matched auditors ran but none read their
+  // territory, the reverse-audit-ran floor does NOT cap it (no diff-read
+  // requirement), so owe every layer — `owedLayerDimensions([])` is all of them.
+  // If no reverse auditor ran at all (or the read threw), the floor owns it.
+  if (identityMatched > 0) {
+    return { unreviewed: owedLayerDimensions([]) };
+  }
+  return { unreviewed: [] };
 }

@@ -145,6 +145,29 @@ describe('parseLayerReceipts', () => {
     ]).toEqual(['scope-propagation']);
   });
 
+  it('keeps a list-item fence open until a closer at its content column', () => {
+    // Round-4 probe: a fence opened after `- ` closes only at the list content
+    // column; a shallower closer is fence content, so the markers after it stay
+    // quoted. A too-shallow closer must not release them.
+    const listFence = [
+      '- ```',
+      'example text',
+      ' ```', // one space — shallower than the opener's content column → not a closer
+      'Layer walked: toctou — quoted',
+      'Layer walked: inheritance — quoted',
+      '```', // column 0 — still shallower than the opener → not a closer
+    ].join('\n');
+    expect(parseLayerReceipts(listFence).size).toBe(0);
+    // The content-column closer does close it, and a real receipt after counts.
+    const closed = [
+      '- ```',
+      'example text',
+      '  ```', // two spaces — reaches the list content column → closes
+      'Layer walked: scope-propagation — real',
+    ].join('\n');
+    expect([...parseLayerReceipts(closed)]).toEqual(['scope-propagation']);
+  });
+
   it('requires the colon — a colon-less shape is not a receipt', () => {
     // Relaxing the mandatory colon would let colon-less parrot prose parse as a
     // receipt, and that is the credit/release direction.
@@ -180,8 +203,6 @@ describe('layerCoverage', () => {
     const cov = layerCoverage(returns);
     expect(cov.covered['lexing']).toBe(true);
     expect(cov.covered['scope-propagation']).toBe(true);
-    expect(cov.coveredBy['lexing']).toEqual([0]);
-    expect(cov.coveredBy['scope-propagation']).toEqual([1]);
     // The layers nobody walked are exactly what a "two dry rounds" stop would hide.
     expect(cov.uncovered).toEqual([
       'expansion',

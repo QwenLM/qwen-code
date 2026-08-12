@@ -197,35 +197,46 @@ const LAYER_RECEIPT_LINE_RE =
 const LAYER_HINT_RE = /layer\s+walked/i;
 
 /**
- * The layer ids an auditor return RECEIPTS via the structured marker, validated
- * against the taxonomy (an unknown id is ignored, never coined). Fenced code and
- * blockquotes are skipped exactly as `budgetGapDisclosures` skips them — this
- * skill reviews its own PRs, and a return that QUOTES the marker is not USING it.
+ * CommonMark fenced-code tracking, biased toward SKIPPING so a QUOTED
+ * `Layer walked:` marker never reads as a live receipt (the credit/release
+ * direction). Openers are recognised GENEROUSLY — 0-3 spaces of indent, an
+ * optional list-item prefix, then three or more backticks or tildes — and their
+ * INDENT (the column the fence content lives at) is recorded. Closers are
+ * recognised STRICTLY: the same fence character, at least the opening run
+ * length, only whitespace after, AND an indent from the opener's indent to three
+ * past it. A closer shallower than its opener is fence content, so a list-item
+ * fence (`- ` + run) stays open until a closer at the list's content column; and
+ * in general an unrecognised or too-shallow closer keeps the fence OPEN — more
+ * skipping, the safe direction for every indent corner. A naive symmetric toggle
+ * diverged four probe-verified ways, each releasing a quoted marker: a mismatched
+ * char/run, a list-item opener, trailing content on the fence line, and a
+ * too-shallow closer to a list-item fence.
  */
-/**
- * CommonMark-correct fenced-code tracking, biased toward SKIPPING. A QUOTED
- * `Layer walked:` marker must never read as a live receipt — that is the
- * credit/release direction — so openers are recognised GENEROUSLY (0-3 spaces of
- * indent, an optional list-item prefix, then three or more backticks or tildes;
- * whatever follows is ignored) and closers STRICTLY (the same fence character,
- * at least the opening run length, at most 3 spaces of indent, and only
- * whitespace after). A naive symmetric toggle diverged from CommonMark three
- * probe-verified ways, each releasing a quoted marker: a mismatched fence line
- * (`~~~` inside a ``` block, or a shorter run) closed early, a list-item fence
- * (`- ` then the run) never opened, and a fence line with trailing content
- * closed a block GitHub keeps open.
- */
-function opensFence(line: string): { char: string; len: number } | null {
-  const m = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)]) +)?(`{3,}|~{3,})/.exec(line);
-  return m ? { char: m[1][0], len: m[1].length } : null;
+function opensFence(
+  line: string,
+): { char: string; len: number; indent: number } | null {
+  const m = /^( {0,3})((?:[-*+]|\d{1,9}[.)]) +)?(`{3,}|~{3,})/.exec(line);
+  if (m === null) return null;
+  return {
+    char: m[3][0],
+    len: m[3].length,
+    indent: (m[1] + (m[2] ?? '')).length,
+  };
 }
 
 function closesFence(
   line: string,
-  fence: { char: string; len: number },
+  fence: { char: string; len: number; indent: number },
 ): boolean {
-  const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
-  return m !== null && m[1][0] === fence.char && m[1].length >= fence.len;
+  const m = /^( *)(`{3,}|~{3,})[ \t]*$/.exec(line);
+  if (m === null) return false;
+  const indent = m[1].length;
+  return (
+    m[2][0] === fence.char &&
+    m[2].length >= fence.len &&
+    indent >= fence.indent &&
+    indent <= fence.indent + 3
+  );
 }
 
 /**
@@ -235,7 +246,7 @@ function closesFence(
  * "a return that QUOTES the marker is not USING it" invariant, in one place.
  */
 function* usedLines(finalText: string): Generator<string> {
-  let fence: { char: string; len: number } | null = null;
+  let fence: { char: string; len: number; indent: number } | null = null;
   for (const line of finalText.split(/\r?\n/)) {
     if (fence) {
       if (closesFence(line, fence)) fence = null;
@@ -254,6 +265,13 @@ function* usedLines(finalText: string): Generator<string> {
   }
 }
 
+/**
+ * The layer ids an auditor return RECEIPTS via the structured marker, validated
+ * against the taxonomy (an unknown id is ignored, never coined). Reads only the
+ * USED lines (`usedLines` strips fenced code, blockquotes and indented code) —
+ * this skill reviews its own PRs, and a return that QUOTES the marker is not
+ * USING it.
+ */
 export function parseLayerReceipts(
   finalText: string,
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
@@ -296,8 +314,6 @@ export interface LayerCoverage {
   covered: Record<string, boolean>;
   /** Ids no return covered — the owed scope a converged loop would hide. */
   uncovered: string[];
-  /** For each covered id, the indices of the returns that covered it. */
-  coveredBy: Record<string, number[]>;
 }
 
 /**
@@ -325,11 +341,13 @@ export function layerCoverage(
   const covered: Record<string, boolean> = {};
   const uncovered: string[] = [];
   for (const layer of taxonomy) {
+    // `coveredBy` is a local tally only — which returns hit each layer is not a
+    // fact any production reader needs, just the boolean that derives from it.
     const hit = coveredBy[layer.id].length > 0;
     covered[layer.id] = hit;
     if (!hit) uncovered.push(layer.id);
   }
-  return { covered, uncovered, coveredBy };
+  return { covered, uncovered };
 }
 
 /** Ids no return covered — the short answer `layerCoverage` wraps. */

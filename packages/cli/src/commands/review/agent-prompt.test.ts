@@ -2341,6 +2341,10 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(b).toContain('Retry counters');
     expect(c).toContain('Early returns');
     for (const p of [a, b, c]) expect(p).toContain('do not attempt the others');
+    // invariant-a's collection check owes a matching delete for every REMOVAL
+    // operation a modeled system has, not only object teardown — the add-only
+    // shape (a `definedBodies` map that never handles `unset -f`).
+    expect(a).toContain('unset -f');
   });
 
   it('gives invariant-c the recursive-evaluator state-return contract', () => {

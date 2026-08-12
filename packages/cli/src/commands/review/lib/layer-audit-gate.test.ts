@@ -34,9 +34,15 @@ describe('layerAuditGate', () => {
     writeFileSync(planPath(), JSON.stringify(plan));
   const env = {} as NodeJS.ProcessEnv;
 
-  // A reader that returns receipts covering exactly the named layers.
+  // Receipts covering exactly the named layers, one return each.
   const returns = (...covered: string[]) =>
     covered.map((id) => `Layer walked: ${id} — examined.`);
+
+  // Wrap a reader result: the corroborated returns plus how many identity-matched
+  // reverse auditors ran at all (defaults to one per corroborated return).
+  const reader =
+    (corroborated: string[], identityMatched = corroborated.length) =>
+    () => ({ corroborated, identityMatched });
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'layer-gate-'));
@@ -44,15 +50,15 @@ describe('layerAuditGate', () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('is inert with no plan path', () => {
-    expect(layerAuditGate(undefined, env, () => returns()).unreviewed).toEqual(
-      [],
-    );
+    expect(
+      layerAuditGate(undefined, env, reader(returns())).unreviewed,
+    ).toEqual([]);
   });
 
   it('is inert on a plan with no repository context', () => {
     writePlan({ srcDiffLines: 10 });
     expect(
-      layerAuditGate(planPath(), env, () => returns('lexing')).unreviewed,
+      layerAuditGate(planPath(), env, reader(returns('lexing'))).unreviewed,
     ).toEqual([]);
   });
 
@@ -60,15 +66,17 @@ describe('layerAuditGate', () => {
     writePlan({ repositoryContext: context(['some-other-domain']) });
     // Even with token-only coverage, no sentinel domain → no cap at all.
     expect(
-      layerAuditGate(planPath(), env, () => returns('lexing')).unreviewed,
+      layerAuditGate(planPath(), env, reader(returns('lexing'))).unreviewed,
     ).toEqual([]);
   });
 
   it('owes an entry per unwalked layer once the diff is marked a modeled system', () => {
     writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
     // Token layers walked; the state layers were not — the #8687 shape.
-    const out = layerAuditGate(planPath(), env, () =>
-      returns('lexing', 'expansion'),
+    const out = layerAuditGate(
+      planPath(),
+      env,
+      reader(returns('lexing', 'expansion')),
     ).unreviewed;
     expect(out.some((e) => e.includes('scope-propagation'))).toBe(true);
     expect(out.some((e) => e.includes('resolution-order'))).toBe(true);
@@ -100,22 +108,40 @@ describe('layerAuditGate', () => {
 
   it('owes nothing when every layer was walked', () => {
     writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
-    const out = layerAuditGate(planPath(), env, () =>
-      returns(
-        'lexing',
-        'expansion',
-        'scope-propagation',
-        'resolution-order',
-        'inheritance',
-        'toctou',
+    const out = layerAuditGate(
+      planPath(),
+      env,
+      reader(
+        returns(
+          'lexing',
+          'expansion',
+          'scope-propagation',
+          'resolution-order',
+          'inheritance',
+          'toctou',
+        ),
       ),
     ).unreviewed;
     expect(out).toEqual([]);
   });
 
-  it('does NOT cap when no auditor return exists — the reverse-audit-ran floor owns that', () => {
+  it('does NOT cap when no reverse auditor ran — the reverse-audit-ran floor owns that', () => {
     writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
-    expect(layerAuditGate(planPath(), env, () => []).unreviewed).toEqual([]);
+    // Zero identity-matched auditors: the floor caps "the auditor never ran".
+    expect(layerAuditGate(planPath(), env, reader([], 0)).unreviewed).toEqual(
+      [],
+    );
+  });
+
+  it('owes every layer when auditors ran but none read their territory', () => {
+    writePlan({ repositoryContext: context([MODELED_SYSTEM_DOMAIN]) });
+    // Identity-matched auditors ran, but none was corroborated by a territory
+    // read (a diff-read failure, a budget stop, universal parroting). The floor
+    // has no diff-read requirement, so it will not cap this — the gate must,
+    // owing all six layers rather than deferring.
+    const out = layerAuditGate(planPath(), env, reader([], 2)).unreviewed;
+    expect(out).toHaveLength(6);
+    expect(out.some((e) => e.includes('scope-propagation'))).toBe(true);
   });
 
   it('fails open on an invalid repository context', () => {
@@ -124,13 +150,13 @@ describe('layerAuditGate', () => {
       repositoryContext: { ...context([MODELED_SYSTEM_DOMAIN]), version: 2 },
     });
     expect(
-      layerAuditGate(planPath(), env, () => returns('lexing')).unreviewed,
+      layerAuditGate(planPath(), env, reader(returns('lexing'))).unreviewed,
     ).toEqual([]);
   });
 
   it('fails open on an unreadable plan', () => {
     expect(
-      layerAuditGate(join(dir, 'nope.json'), env, () => returns('lexing'))
+      layerAuditGate(join(dir, 'nope.json'), env, reader(returns('lexing')))
         .unreviewed,
     ).toEqual([]);
   });
