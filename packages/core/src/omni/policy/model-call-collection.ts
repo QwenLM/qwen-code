@@ -146,7 +146,7 @@ export async function collectModelPolicyCall(params: {
     delete finalArguments['outputDir'];
     delete finalArguments['resourceId'];
 
-    await memory.commitPolicySucceeded({
+    const commit = await memory.commitPolicySucceeded({
       invocationId: batch.invocationId,
       source,
       executionOrigin: batch.executionOrigin,
@@ -164,6 +164,16 @@ export async function collectModelPolicyCall(params: {
       completedAt: new Date().toISOString(),
       outputs,
     });
+    // `created: false` is a content-identity replay: the same file already
+    // recorded this execution (a same-invocation retry, or a degradation
+    // cache hit). Worth distinguishing in the log, because "no new
+    // execution appeared in memory.json" otherwise reads identically to a
+    // collection that silently did nothing.
+    debugLogger.debug(
+      `omni memory: ${commit?.created === false ? 'replayed' : 'recorded'} ` +
+        `${batch.toolName} (${batch.executionOrigin.kind}) with ` +
+        `${outputs.length} output(s)`,
+    );
   } catch (err) {
     if (signal?.aborted) return;
     debugLogger.debug(

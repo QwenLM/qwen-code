@@ -211,6 +211,29 @@ describe('processToolResultOmniMedia', () => {
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key3');
   });
 
+  it('keeps the recall handle on a guard-rejected part', async () => {
+    // The bind happens before the guard rules, so the session already has a
+    // record of this media. Withholding the handle too would make the
+    // rejection the one path that strands a recorded resource: the model
+    // cannot see the bytes AND cannot ask memory about them — while the
+    // omission branch, whose verdict is identical, does hand the handle over.
+    const { OmniTransportGuardError } = await import('./guard.js');
+    const rejection = new OmniTransportGuardError(
+      'x.png exceeds the omni upload limit',
+    );
+    rejection.sessionResourceId = 'media-6-ab12';
+    deliverMock.mockRejectedValueOnce(rejection);
+
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', PNG_BYTES)],
+      cfg({ image: true }),
+      signal,
+    );
+
+    expect(result[0]!.text).toContain('media-6-ab12');
+    expect(result[1]!.text).toMatch(/withheld by the omni transport guard/);
+  });
+
   it('withholds the part when guard-stage PROCESSING fails (never inline the rejected bytes)', async () => {
     // A guard-policy execution failure arrives as OmniTransportGuardError
     // with the underlying error as `cause` (see processMediaForOmniDelivery's

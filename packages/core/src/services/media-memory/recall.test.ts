@@ -331,6 +331,26 @@ describe('MediaMemoryRecallService — filters, limit, ranking', () => {
     expect(result.entries[0].role).toBe('transcript');
   });
 
+  it('ranks a Chinese query by partial phrase overlap', async () => {
+    // Chinese writes without separators, so splitting on them yielded ONE
+    // token per phrase, scored by whole-substring containment: unless an
+    // entry repeated the caller's exact phrasing, every candidate scored
+    // zero and ordering silently collapsed to newest-first. Here the
+    // transcript is the OLDEST entry, so newest-first would rank it last.
+    const source = await recognizeMovie();
+    await commitTranscript(source, '机器人独自走在海滩上，梦见了狗。');
+    await commitDegrade(source);
+    const resourceId = bindSource(source);
+
+    const result = await recallService().recall({
+      resourceIds: [resourceId],
+      // Not a substring of the transcript — overlapping in phrasing only.
+      query: '机器人在海滩梦见什么',
+    });
+
+    expect(result.entries[0].role).toBe('transcript');
+  });
+
   it('caps request limit at the configured maxEntries', async () => {
     const source = await recognizeMovie();
     await commitDegrade(source);

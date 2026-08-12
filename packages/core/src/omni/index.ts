@@ -559,6 +559,18 @@ export async function processMediaForOmniDelivery(
     final,
     sourceFileRef,
   )?.resourceId;
+  /** A guard verdict that carries the source handle with it, so a caller
+   * withholding the bytes can still tell the model what to recall. */
+  const guardRejection = (
+    message: string,
+    options?: { cause?: unknown },
+  ): OmniTransportGuardError => {
+    const err = new OmniTransportGuardError(message, options);
+    if (sessionResourceId !== undefined) {
+      err.sessionResourceId = sessionResourceId;
+    }
+    return err;
+  };
   /** Media deliverables beyond the primary (multi-output fixed policies). */
   let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
@@ -857,7 +869,7 @@ export async function processMediaForOmniDelivery(
         // over the limit" already stands, so consumers with an inline
         // fallback (the tool-result funnel) must withhold the bytes, not
         // fall back to delivering exactly what the guard rejected.
-        throw new OmniTransportGuardError(
+        throw guardRejection(
           `Transport-guard processing failed for ${displayName}: ` +
             `${sanitizeErrorMessage(err, [final.filePath, store.getOmniRootDir()])}`,
           { cause: err },
@@ -880,7 +892,7 @@ export async function processMediaForOmniDelivery(
       if (deliveries.length !== 1) {
         // Same guard-error class as the pass failure above: the violation
         // verdict stands, so inline fallbacks must withhold.
-        throw new OmniTransportGuardError(
+        throw guardRejection(
           `Transport-guard policies produced ${deliveries.length} media deliverables for ${displayName}; exactly one is supported.`,
         );
       }
@@ -909,7 +921,7 @@ export async function processMediaForOmniDelivery(
   }
   if (guard.violation) {
     if (!processingConfig) {
-      throw new OmniTransportGuardError(guard.violation);
+      throw guardRejection(guard.violation);
     }
     debugLogger.debug(
       `omni ${final.recognized.modality} explicitly omitted (transport guard): ${guard.violation}`,

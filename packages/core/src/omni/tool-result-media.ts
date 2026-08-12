@@ -104,6 +104,9 @@ export async function processToolResultOmniMedia(
     // which would report a tool that succeeded as failed.
     const store = new OmniObjectStore(config.storage.getQwenDir());
     let tempPath: string | undefined;
+    // Hoisted out of the try: the guard-rejection path below names the part
+    // in the handle annotation it emits.
+    const displayName = inline.displayName ?? `tool-media.${top}`;
     try {
       // Symlink-guarded (fail closed → this part stays inline): a link
       // planted at downloads/ would redirect the write outside the store.
@@ -115,7 +118,6 @@ export async function processToolResultOmniMedia(
         `${randomBytes(8).toString('hex')}.part`,
       );
       await fs.writeFile(tempPath, bytes, { mode: 0o600 });
-      const displayName = inline.displayName ?? `tool-media.${top}`;
       const delivery = await processMediaForOmniDelivery(tempPath, config, {
         expectedModality: sniffed.modality,
         signal,
@@ -213,7 +215,21 @@ export async function processToolResultOmniMedia(
         // rationale ("produced locally, already in memory") covers only
         // failures of the *transfer*.
         changed = true;
+        // The source was bound before the guard ruled, and the omission
+        // branch with the identical "over-limit, withheld" verdict does
+        // disclose its handle — so withholding it here would be the one
+        // path that strands a resource the session already recorded.
         return [
+          ...(err.sessionResourceId
+            ? [
+                {
+                  text: formatResourceHandleText(
+                    displayName,
+                    err.sessionResourceId,
+                  ),
+                },
+              ]
+            : []),
           {
             text: `[Tool media part withheld by the omni transport guard: ${err.message}]`,
           },

@@ -157,11 +157,9 @@ export async function runOmniMemorySideQuery(params: {
   try {
     manifest = await service.candidateSummaries(resourceIds);
   } catch (err) {
-    return {
-      result: null,
-      reason: `manifest_failed: ${err instanceof Error ? err.message : err}`,
-      resourceIds,
-    };
+    const reason = `manifest_failed: ${err instanceof Error ? err.message : err}`;
+    debugLogger.debug(`omni sideQuery recall degraded: ${reason}`);
+    return { result: null, reason, resourceIds };
   }
   if (manifest.length === 0) {
     return { result: null, reason: 'no_candidates', resourceIds };

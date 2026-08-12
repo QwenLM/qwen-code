@@ -18,6 +18,16 @@ export const DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES = 1024 * 1024 * 1024;
  * surface the message; there is no silent degradation. Messages must stay
  * free of absolute paths (they can reach model-visible content). */
 export class OmniTransportGuardError extends Error {
+  /**
+   * Session handle for the SOURCE, when delivery had already bound one
+   * before the guard's verdict (memory design M §5.2). A rejection is the
+   * case where recall matters most — the model never sees the media, so
+   * this handle is its only remaining route to the content — and every
+   * throw site sits downstream of the bind, so dropping it would strand
+   * the resource for the rest of the session.
+   */
+  sessionResourceId?: string;
+
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'OmniTransportGuardError';

@@ -202,11 +202,48 @@ function expectedChannels(mediaType: OmniModality): MediaChannel[] {
   }
 }
 
+/** Character classes that write without spaces between words. A run of
+ * these cannot be split on separators, so it is indexed as overlapping
+ * character bigrams instead. */
+const UNSEGMENTED =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+/** Split a separator-delimited run into maximal same-class segments, so a
+ * mixed run like `480p字幕` yields `480p` and `字幕` rather than bigrams
+ * that straddle the boundary. */
+const SEGMENT_RUN =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+|[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+
+/**
+ * Query terms for relevance ordering.
+ *
+ * Splitting on separators alone works for languages that write with them
+ * and fails completely for those that do not: `机器人的梦想 剧情` became the
+ * two whole phrases `机器人的梦想` and `剧情`, each scored by substring
+ * containment — so unless an entry repeated the caller's exact phrasing,
+ * every candidate scored zero and ordering silently collapsed to
+ * newest-first. Runs in unsegmented scripts therefore become overlapping
+ * character bigrams, which match partial phrasings the way word tokens do.
+ */
 function tokenize(query: string): string[] {
-  return query
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) => t.length > 1);
+  const tokens = new Set<string>();
+  for (const run of query.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    for (const segment of run.match(SEGMENT_RUN) ?? []) {
+      if (!UNSEGMENTED.test(segment)) {
+        if (segment.length > 1) tokens.add(segment);
+        continue;
+      }
+      const chars = [...segment];
+      if (chars.length === 1) {
+        tokens.add(segment);
+        continue;
+      }
+      for (let i = 0; i + 1 < chars.length; i++) {
+        tokens.add(chars[i] + chars[i + 1]);
+      }
+    }
+  }
+  return [...tokens];
 }
 
 /** Temporal-overlap scope filter. Entries without a temporal scope speak

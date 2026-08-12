@@ -2955,6 +2955,18 @@ export class GeminiClient {
             systemReminders.push(
               formatOmniMemorySideQueryReminder(omniRecall.result),
             );
+          } else if (omniRecall?.reason) {
+            // A degraded passive recall is invisible by construction: the
+            // turn proceeds normally, just without the memory it was
+            // supposed to carry. With a pinned-but-unavailable selector
+            // model that is a permanent outage of the feature with nothing
+            // to see, so the reason is recorded (memory design M §9.3
+            // obliges recording it) rather than dropped on the floor.
+            debugLogger.debug(
+              `omni passive media-memory recall degraded ` +
+                `(${omniRecall.reason}) for ` +
+                `${omniRecall.resourceIds.length} resource(s)`,
+            );
           }
         }
 
