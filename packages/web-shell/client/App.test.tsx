@@ -105,6 +105,7 @@ type ChatEditorTestProps = {
 type AddWorkspaceDialogTestProps = {
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
+  onSuggest?: (prefix: string) => Promise<unknown>;
   onPick?: () => Promise<string | undefined>;
   displayNameEnabled?: boolean;
   persistenceSupported?: boolean;
@@ -8368,7 +8369,7 @@ describe('App session callbacks', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const { container } = renderApp();
+    const { container, rerender } = renderApp();
     await flush();
 
     act(() => {
@@ -8381,6 +8382,16 @@ describe('App session callbacks', () => {
       displayNameEnabled: true,
       persistenceSupported: true,
     });
+    // The dialog's fetch effect re-runs on every onSuggest identity
+    // change, so App must pass the memoized workspace action itself,
+    // not a per-render closure; pin the reference across a re-render.
+    expect(testState.latestAddWorkspaceDialogProps?.onSuggest).toBe(
+      mockWorkspaceActions.suggestWorkspacePaths,
+    );
+    rerender();
+    expect(testState.latestAddWorkspaceDialogProps?.onSuggest).toBe(
+      mockWorkspaceActions.suggestWorkspacePaths,
+    );
     mockWorkspaceActions.pickWorkspaceDirectory.mockResolvedValue({
       kind: 'workspace-directory-picker',
       selected: true,
