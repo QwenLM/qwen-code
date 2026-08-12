@@ -1607,6 +1607,18 @@ export class BackgroundTaskRegistry {
     const label = this.buildDisplayLabel(entry);
     const displayLine = `Background agent "${label}" ${statusText}.`;
 
+    const ownerId = entry.parentAgentId ?? null;
+    let remaining = 0;
+    for (const candidate of this.agents.values()) {
+      if (
+        candidate.isBackgrounded &&
+        (candidate.parentAgentId ?? null) === ownerId &&
+        (candidate.status === 'running' || candidate.status === 'paused')
+      ) {
+        remaining++;
+      }
+    }
+
     const xmlParts: string[] = [
       '<task-notification>',
       `<task-id>${escapeXml(entry.agentId)}</task-id>`,
@@ -1617,6 +1629,8 @@ export class BackgroundTaskRegistry {
     xmlParts.push(
       `<status>${escapeXml(entry.status)}</status>`,
       `<summary>Agent "${escapeXml(entry.description)}" ${statusText}.</summary>`,
+      `<remaining>${remaining}</remaining>`,
+      `<all-terminal>${remaining === 0}</all-terminal>`,
     );
     if (entry.result) {
       xmlParts.push(`<result>${escapeXml(entry.result)}</result>`);

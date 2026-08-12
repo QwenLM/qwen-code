@@ -2141,6 +2141,75 @@ describe('BackgroundTaskRegistry', () => {
   });
 
   describe('notification XML', () => {
+    it('reports owner-scoped remaining background agents until all are terminal', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('top-a'));
+      registry.register(makeRegistration('top-b'));
+      registry.register(
+        makeRegistration('nested', { parentAgentId: 'parent-agent' }),
+      );
+      registry.register(
+        makeRegistration('foreground', { isBackgrounded: false }),
+      );
+
+      registry.complete('top-a', 'done');
+      registry.fail('nested', 'boom');
+      registry.fail('top-b', 'boom');
+
+      expect(callback).toHaveBeenCalledTimes(3);
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>false</all-terminal>',
+      );
+      expect(callback.mock.calls[1]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[1]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+      expect(callback.mock.calls[2]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[2]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+    });
+
+    it('updates remaining counts for cancellations emitted by abortAll', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('cancel-a'));
+      registry.register(makeRegistration('cancel-b'));
+
+      registry.abortAll();
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>false</all-terminal>',
+      );
+      expect(callback.mock.calls[1]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[1]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+    });
+
+    it('treats a cancelled agent awaiting notification as terminal', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('cancelled'));
+      registry.register(makeRegistration('completed'));
+
+      registry.cancel('cancelled');
+      registry.complete('completed', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+    });
+
     it('includes output-file tag when outputFile is set', () => {
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
