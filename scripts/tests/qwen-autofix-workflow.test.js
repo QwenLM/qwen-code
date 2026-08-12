@@ -11581,6 +11581,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     restoreClash = false,
     hugeFail = false,
     noIdentity = false,
+    baselineNoIdentity = false,
     trackedDirt = false,
     commFail = false,
   }) => {
@@ -11662,6 +11663,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           '      echo "stub build FAILED at $head"',
           '      if [[ "${NO_IDENTITY:-}" == "1" ]]; then',
           // vite/esbuild shape: a red build with no tsc diagnostic at all.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${BASELINE_NO_IDENTITY:-}" == "1" ]]; then',
+          // Same shape restricted to the baseline leg — the head keeps its
+          // tsc identity while the baseline loses its.
           '        echo "error during build: something exploded"; exit 1',
           '      fi',
           '      if [[ "$head" == "${BASELINE_SHA:-}" && "${TRACKED_DIRT:-}" == "1" ]]; then',
@@ -11749,6 +11755,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
             NO_IDENTITY: noIdentity ? '1' : '',
+            BASELINE_NO_IDENTITY: baselineNoIdentity ? '1' : '',
             TRACKED_DIRT: trackedDirt ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
@@ -11949,6 +11956,23 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.stdout).toContain('DIFFERENT reason');
     // The same repair handoff as the green path — the dist/ warning must
     // seed this rejection too.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+  });
+
+  it('charges the round when the baseline fails without a failure identity', () => {
+    // Mirror of the head-side noIdentity shape on the other leg: the
+    // baseline crashes vite/esbuild-style with no tsc diagnostic, so its
+    // signature is empty and identity cannot be established — fail
+    // closed and charge the round, with the same repair handoff (and
+    // dist/ note) as the sibling retryable exits.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineNoIdentity: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
     expect(r.rejection).toContain('run npm run build before typecheck/tests');
   });
 
