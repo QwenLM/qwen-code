@@ -7,7 +7,7 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -19,13 +19,15 @@ import {
   subscribePendingPromptEvents,
   subscribePendingPromptVersion,
   useDaemonMidTurnInjected,
+  useDaemonSessionOwnerGuard,
   type DaemonSessionActions,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import {
-  type DaemonInputAnnotation,
-  type DaemonPendingPromptSummary,
-  type DaemonTranscriptStore,
+import type {
+  DaemonInputAnnotation,
+  DaemonMidTurnMessagesResult,
+  DaemonPendingPromptSummary,
+  DaemonTranscriptStore,
 } from '@qwen-code/sdk/daemon';
 import type { PromptImage } from '../adapters/promptTypes';
 import type { EditorHandle } from './useComposerCore';
@@ -41,7 +43,9 @@ interface RefBox<T> {
 
 interface UseQueuedPromptsArgs {
   connected: boolean;
+  writeBlocked?: boolean;
   sessionId?: string;
+  workspaceCwd?: string;
   clientId?: string;
   /**
    * Whether the daemon advertises `session_mid_turn_message_mutation`. Gates the
@@ -50,6 +54,13 @@ interface UseQueuedPromptsArgs {
    * ids without the route isn't sent a DELETE it answers with a 404.
    */
   canMutateMidTurn: boolean;
+  /**
+   * Whether the daemon advertises `session_mid_turn_message_query`. Gates the
+   * daemon-owned queue lifecycle. With it, accepted messages are restored and
+   * reconciled by id across drain or idle promotion; without it the hook keeps
+   * the legacy local fallback used by older daemons.
+   */
+  canQueryMidTurn: boolean;
   streamingState: DaemonStreamingState;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
@@ -140,9 +151,12 @@ export interface UseQueuedPromptsResult {
 
 export function useQueuedPrompts({
   connected,
+  writeBlocked = false,
   sessionId,
+  workspaceCwd,
   clientId,
   canMutateMidTurn,
+  canQueryMidTurn,
   streamingState,
   sessionActions,
   store,
@@ -150,14 +164,36 @@ export function useQueuedPrompts({
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const writeBlockedRef = useRef(writeBlocked);
+  writeBlockedRef.current = writeBlocked;
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const ownerTokenRef = useRef({ sessionId });
-  if (ownerTokenRef.current.sessionId !== sessionId) {
-    ownerTokenRef.current = { sessionId };
+  const ownerTokenRef = useRef({
+    sessionId,
+    workspaceCwd,
+    snapshot: sessionOwnerGuard.capture(),
+  });
+  if (
+    ownerTokenRef.current.sessionId !== sessionId ||
+    ownerTokenRef.current.workspaceCwd !== workspaceCwd ||
+    !ownerTokenRef.current.snapshot.isCurrent()
+  ) {
+    ownerTokenRef.current = {
+      sessionId,
+      workspaceCwd,
+      snapshot: sessionOwnerGuard.capture(),
+    };
   }
+  const ownerToken = ownerTokenRef.current;
+  const isCurrentOwnerTokenRef = useRef(
+    (token: typeof ownerToken) =>
+      ownerTokenRef.current === token && token.snapshot.isCurrent(),
+  );
+  const queuedPromptsOwnerRef = useRef(ownerToken);
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
+  const latestWorkspaceCwdRef = useRef(workspaceCwd);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
@@ -165,10 +201,15 @@ export function useQueuedPrompts({
   const completionCallbacksRef = useRef<Map<string, () => void>>(new Map());
   const completedPromptIdsRef = useRef<Set<string>>(new Set());
   const completedPromptIdOrderRef = useRef<string[]>([]);
+  const pendingMidTurnAdmissionsRef = useRef<
+    Map<string, { prompt: QueuedPrompt; workspaceCwd?: string }>
+  >(new Map());
   const appendedBeforeResponsePromptIdsRef = useRef<Set<string>>(new Set());
   const removedBeforeResponsePromptIdsRef = useRef<Set<string>>(new Set());
   const latestStreamingStateRef = useRef(streamingState);
   const refreshRequestSeqRef = useRef(0);
+  /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
+  const midTurnReconcileSeqRef = useRef(0);
   const restoredPromptIdsRef = useRef<Set<number>>(new Set());
   const pendingStartedByPromptIdRef = useRef<Map<string, string>>(new Map());
 
@@ -186,37 +227,33 @@ export function useQueuedPrompts({
   }, []);
 
   latestSessionIdRef.current = sessionId;
+  latestWorkspaceCwdRef.current = workspaceCwd;
+  const streamingIdle = streamingState === 'idle';
+  useLayoutEffect(() => {
+    midTurnReconcileSeqRef.current += 1;
+  }, [streamingIdle]);
   latestStreamingStateRef.current = streamingState;
 
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
-  );
+  const visibleQueuedPrompts =
+    queuedPromptsOwnerRef.current === ownerToken ? queuedPrompts : [];
+  const queuedTexts = visibleQueuedPrompts.map((prompt) => prompt.text);
 
   useEffect(() => {
     queuedPromptsRef.current = queuedPrompts;
   }, [queuedPrompts]);
 
-  useEffect(() => {
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    completionCallbacksRef.current = new Map();
-    completedPromptIdsRef.current = new Set();
-    completedPromptIdOrderRef.current = [];
-    appendedBeforeResponsePromptIdsRef.current = new Set();
-    removedBeforeResponsePromptIdsRef.current = new Set();
-    for (const controller of submitAbortControllersRef.current) {
-      controller.abort();
-    }
-    submitAbortControllersRef.current.clear();
-    removingServerPromptIdsRef.current = new Set();
-    displayedServerPromptIdsRef.current = new Set();
-    restoredPromptIdsRef.current = new Set();
-    pendingStartedByPromptIdRef.current = new Map();
-    initialRefreshSessionIdRef.current = undefined;
-    midTurnEnqueueAbortRef.current?.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [sessionId]);
+  const settleCompletionCallback = useCallback(
+    (promptId: string, onComplete: () => void) => {
+      if (completedPromptIdsRef.current.delete(promptId)) {
+        completedPromptIdOrderRef.current =
+          completedPromptIdOrderRef.current.filter((id) => id !== promptId);
+        onComplete();
+        return;
+      }
+      completionCallbacksRef.current.set(promptId, onComplete);
+    },
+    [],
+  );
 
   const syncServerQueuedPrompts = useCallback(
     (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
@@ -231,7 +268,9 @@ export function useQueuedPrompts({
           continue;
         }
         const existingIndex = next.findIndex(
-          (p) => p.serverPromptId === serverPrompt.promptId,
+          (p) =>
+            p.serverPromptId === serverPrompt.promptId ||
+            p.midTurnMessageId === serverPrompt.promptId,
         );
         const hasDisplayedPrompt = displayedServerPromptIdsRef.current.has(
           serverPrompt.promptId,
@@ -246,6 +285,10 @@ export function useQueuedPrompts({
             ...(next[existingIndex]!.payloadCompleteness === 'summary-only'
               ? { text: serverPrompt.text }
               : {}),
+            midTurnState: undefined,
+            midTurnMessageId: undefined,
+            midTurnFailedAction: undefined,
+            serverPromptId: serverPrompt.promptId,
             serverState: serverPrompt.state,
           };
           continue;
@@ -312,7 +355,7 @@ export function useQueuedPrompts({
         });
         if (requestSeq !== refreshRequestSeqRef.current) return 'superseded';
         if (
-          ownerTokenRef.current !== ownerToken ||
+          !isCurrentOwnerTokenRef.current(ownerToken) ||
           latestSessionIdRef.current !== targetSessionId
         ) {
           return 'skipped';
@@ -330,6 +373,163 @@ export function useQueuedPrompts({
       }
     },
     [connected, sessionActions, sessionId, syncServerQueuedPrompts],
+  );
+
+  const applyMidTurnSnapshot = useCallback(
+    (
+      snapshot: DaemonMidTurnMessagesResult,
+      targetSessionId: string,
+      applyPromoted: boolean,
+    ): Set<string> => {
+      const settledIds = new Set(snapshot.settledMessageIds);
+      const promotedIds = new Set(snapshot.promotedMessageIds);
+      for (const message of snapshot.messages) {
+        pendingMidTurnAdmissionsRef.current.delete(message.messageId);
+      }
+      for (const messageId of settledIds) {
+        pendingMidTurnAdmissionsRef.current.delete(messageId);
+        const callback = completionCallbacksRef.current.get(messageId);
+        completionCallbacksRef.current.delete(messageId);
+        callback?.();
+      }
+      for (const messageId of promotedIds) {
+        pendingMidTurnAdmissionsRef.current.delete(messageId);
+      }
+      const waitingIds = new Set(
+        snapshot.messages.map((message) => message.messageId),
+      );
+      const current = queuedPromptsRef.current;
+      let next = current.filter(
+        (prompt) =>
+          !(
+            (prompt.midTurnState !== undefined ||
+              prompt.admissionOutcome === 'unknown') &&
+            prompt.midTurnMessageId !== undefined &&
+            !prompt.isEditing &&
+            !prompt.isRemoving &&
+            (settledIds.has(prompt.midTurnMessageId) ||
+              (applyPromoted && promotedIds.has(prompt.midTurnMessageId)))
+          ),
+      );
+      next = next.map((prompt) =>
+        prompt.admissionOutcome === 'unknown' &&
+        prompt.midTurnMessageId !== undefined &&
+        waitingIds.has(prompt.midTurnMessageId)
+          ? {
+              ...prompt,
+              midTurnState: 'queued',
+              admissionOutcome: undefined,
+              payloadAvailable: undefined,
+            }
+          : prompt,
+      );
+      if (next.length !== current.length) {
+        const retainedIds = new Set(next.map((prompt) => prompt.id));
+        for (const prompt of current) {
+          if (retainedIds.has(prompt.id) || !prompt.onComplete) continue;
+          if (
+            applyPromoted &&
+            prompt.midTurnMessageId &&
+            promotedIds.has(prompt.midTurnMessageId)
+          ) {
+            settleCompletionCallback(
+              prompt.midTurnMessageId,
+              prompt.onComplete,
+            );
+          } else {
+            prompt.onComplete();
+          }
+        }
+      }
+      const localIds = new Set(
+        next
+          .map((prompt) => prompt.midTurnMessageId ?? prompt.serverPromptId)
+          .filter((id): id is string => id !== undefined),
+      );
+      const restoredRows: QueuedPrompt[] = [];
+      for (const message of snapshot.messages) {
+        if (localIds.has(message.messageId)) continue;
+        restoredRows.push({
+          id: nextQueuedPromptIdRef.current++,
+          sessionId: targetSessionId,
+          text: message.text,
+          midTurnState: 'queued',
+          midTurnMessageId: message.messageId,
+        });
+      }
+      if (restoredRows.length > 0) next = [...next, ...restoredRows];
+      if (!areQueuedPromptsEqual(current, next)) {
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+      }
+      if (!applyPromoted) {
+        for (const messageId of promotedIds) waitingIds.add(messageId);
+      }
+      return waitingIds;
+    },
+    [settleCompletionCallback],
+  );
+
+  const pruneMissingMidTurnRows = useCallback(
+    (waitingIds: ReadonlySet<string>, targetSessionId: string) => {
+      const current = queuedPromptsRef.current;
+      const next = current.filter(
+        (prompt) =>
+          prompt.sessionId !== targetSessionId ||
+          prompt.midTurnState !== 'queued' ||
+          prompt.midTurnMessageId === undefined ||
+          prompt.isEditing ||
+          prompt.isRemoving ||
+          waitingIds.has(prompt.midTurnMessageId),
+      );
+      if (next.length === current.length) return;
+      const retainedIds = new Set(next.map((prompt) => prompt.id));
+      for (const prompt of current) {
+        if (!retainedIds.has(prompt.id)) prompt.onComplete?.();
+      }
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+    },
+    [],
+  );
+
+  const reconcileMidTurnMessages = useCallback(
+    async (
+      targetSessionId: string,
+      opts?: { signal?: AbortSignal; seq?: number },
+    ): Promise<DaemonMidTurnMessagesResult | undefined> => {
+      const expectedSeq = opts?.seq ?? ++midTurnReconcileSeqRef.current;
+      const expectedOwnerToken = ownerTokenRef.current;
+      const isCurrent = () =>
+        !opts?.signal?.aborted &&
+        !writeBlockedRef.current &&
+        isCurrentOwnerTokenRef.current(expectedOwnerToken) &&
+        latestSessionIdRef.current === targetSessionId &&
+        expectedSeq === midTurnReconcileSeqRef.current;
+      if (!isCurrent()) return undefined;
+      const snapshot = await sessionActions.getMidTurnMessages({
+        signal: opts?.signal,
+      });
+      if (!snapshot || !isCurrent()) {
+        if (isCurrent()) await refreshPendingPrompts(targetSessionId);
+        return undefined;
+      }
+      const pendingResult = await refreshPendingPrompts(targetSessionId);
+      if (!isCurrent()) return undefined;
+      const waitingIds = applyMidTurnSnapshot(
+        snapshot,
+        targetSessionId,
+        pendingResult === 'refreshed',
+      );
+      pruneMissingMidTurnRows(waitingIds, targetSessionId);
+      return snapshot;
+    },
+    [
+      applyMidTurnSnapshot,
+      pruneMissingMidTurnRows,
+      refreshPendingPrompts,
+      sessionActions,
+    ],
   );
 
   const restoreQueuedPrompts = useCallback((prompts: QueuedPrompt[]) => {
@@ -359,7 +559,7 @@ export function useQueuedPrompts({
       expectedOwnerToken = ownerTokenRef.current,
     ): boolean => {
       if (
-        ownerTokenRef.current !== expectedOwnerToken ||
+        !isCurrentOwnerTokenRef.current(expectedOwnerToken) ||
         (targetSessionId !== undefined &&
           latestSessionIdRef.current !== targetSessionId)
       ) {
@@ -417,6 +617,54 @@ export function useQueuedPrompts({
     },
     [editorRef],
   );
+  const restoreQueuedPromptsToEditorRef = useRef(restoreQueuedPromptsToEditor);
+  restoreQueuedPromptsToEditorRef.current = restoreQueuedPromptsToEditor;
+
+  useEffect(() => {
+    restoredPromptIdsRef.current = new Set();
+    const retainedAdmissions = [
+      ...pendingMidTurnAdmissionsRef.current.entries(),
+    ].filter(
+      ([, entry]) =>
+        entry.prompt.sessionId === sessionId &&
+        entry.workspaceCwd === workspaceCwd,
+    );
+    const retainedAdmissionIds = new Set(
+      retainedAdmissions.map(([messageId]) => messageId),
+    );
+    const retainedCompletionCallbacks = new Map(
+      [...completionCallbacksRef.current.entries()].filter(([promptId]) =>
+        retainedAdmissionIds.has(promptId),
+      ),
+    );
+    const interruptedPrompts = queuedPromptsRef.current.filter(
+      (prompt) =>
+        prompt.midTurnState === 'submitting' ||
+        prompt.midTurnFailedAction === 'edit',
+    );
+    if (interruptedPrompts.length > 0) {
+      restoreQueuedPromptsToEditorRef.current(interruptedPrompts);
+    }
+    queuedPromptsOwnerRef.current = ownerToken;
+    const retainedPrompts = retainedAdmissions.map(([, entry]) => entry.prompt);
+    queuedPromptsRef.current = retainedPrompts;
+    setQueuedPrompts(retainedPrompts);
+    completionCallbacksRef.current = retainedCompletionCallbacks;
+    completedPromptIdsRef.current = new Set();
+    completedPromptIdOrderRef.current = [];
+    appendedBeforeResponsePromptIdsRef.current = new Set();
+    removedBeforeResponsePromptIdsRef.current = new Set();
+    for (const controller of submitAbortControllersRef.current) {
+      controller.abort();
+    }
+    submitAbortControllersRef.current.clear();
+    removingServerPromptIdsRef.current = new Set();
+    displayedServerPromptIdsRef.current = new Set();
+    pendingStartedByPromptIdRef.current = new Map();
+    initialRefreshSessionIdRef.current = undefined;
+    midTurnEnqueueAbortRef.current?.abort();
+    midTurnEnqueueAbortRef.current = null;
+  }, [ownerToken, sessionId, workspaceCwd]);
 
   const appendLocalQueuedPrompt = useCallback(
     (prompt: QueuedPrompt, promptId: string) => {
@@ -446,25 +694,36 @@ export function useQueuedPrompts({
   const prevPendingVersionRef = useRef(pendingPromptVersion);
   const initialRefreshSessionIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!connected || !sessionId) return;
+    if (!connected) {
+      initialRefreshSessionIdRef.current = undefined;
+      return;
+    }
+    if (!sessionId) return;
 
     const versionChanged =
       prevPendingVersionRef.current !== pendingPromptVersion;
     prevPendingVersionRef.current = pendingPromptVersion;
     if (!versionChanged) {
-      if (queuedPromptsRef.current.length > 0) return;
-      if (streamingState === 'idle') return;
+      if (!canQueryMidTurn && queuedPromptsRef.current.length > 0) return;
+      if (streamingState === 'idle' && !canQueryMidTurn) return;
       if (initialRefreshSessionIdRef.current === sessionId) return;
       initialRefreshSessionIdRef.current = sessionId;
     }
 
-    void refreshPendingPrompts();
+    if (canQueryMidTurn) {
+      void reconcileMidTurnMessages(sessionId);
+    } else {
+      void refreshPendingPrompts();
+    }
   }, [
     pendingPromptVersion,
     connected,
     sessionId,
     streamingState,
+    canQueryMidTurn,
+    ownerToken,
     refreshPendingPrompts,
+    reconcileMidTurnMessages,
   ]);
 
   const pendingPromptEvents = useSyncExternalStore(
@@ -480,6 +739,7 @@ export function useQueuedPrompts({
       handled.push(event);
       const promptId = event.data.promptId;
       if (!promptId) continue;
+      pendingMidTurnAdmissionsRef.current.delete(promptId);
       if (event.type === 'pending_prompt_started') {
         if (removingServerPromptIdsRef.current.has(promptId)) {
           continue;
@@ -498,6 +758,9 @@ export function useQueuedPrompts({
               (item) => item.serverPromptId === promptId,
             ) ??
             queuedPromptsRef.current.find(
+              (item) => item.midTurnMessageId === promptId,
+            ) ??
+            queuedPromptsRef.current.find(
               (item) =>
                 !item.serverPromptId &&
                 item.serverState === 'submitting' &&
@@ -506,10 +769,22 @@ export function useQueuedPrompts({
                 item.text === eventText,
             );
           if (prompt) {
+            if (prompt.onComplete) {
+              settleCompletionCallback(promptId, prompt.onComplete);
+            }
             appendLocalQueuedPrompt(prompt, promptId);
             if (!prompt.serverPromptId) {
               appendedBeforeResponsePromptIdsRef.current.add(promptId);
             }
+          } else if (
+            eventText &&
+            !queuedPromptsRef.current.some(
+              (item) =>
+                !item.serverPromptId && item.serverState === 'submitting',
+            )
+          ) {
+            displayedServerPromptIdsRef.current.add(promptId);
+            store.appendLocalUserMessage(eventText, undefined, undefined);
           }
           if (!prompt?.serverPromptId) {
             pendingStartedByPromptIdRef.current.set(promptId, eventText);
@@ -568,22 +843,11 @@ export function useQueuedPrompts({
     pendingPromptEvents,
     sessionId,
     clientId,
+    store,
     refreshPendingPrompts,
+    settleCompletionCallback,
     rememberCompletedPromptId,
   ]);
-
-  const settleCompletionCallback = useCallback(
-    (promptId: string, onComplete: () => void) => {
-      if (completedPromptIdsRef.current.delete(promptId)) {
-        completedPromptIdOrderRef.current =
-          completedPromptIdOrderRef.current.filter((id) => id !== promptId);
-        onComplete();
-        return;
-      }
-      completionCallbacksRef.current.set(promptId, onComplete);
-    },
-    [],
-  );
 
   const submitPendingPrompt = useCallback(
     (prompt: QueuedPrompt) => {
@@ -603,7 +867,7 @@ export function useQueuedPrompts({
         .then((result) => {
           submitAbortControllersRef.current.delete(submitAbort);
           if (
-            ownerTokenRef.current !== ownerToken ||
+            !isCurrentOwnerTokenRef.current(ownerToken) ||
             latestSessionIdRef.current !== targetSessionId
           ) {
             return;
@@ -725,7 +989,7 @@ export function useQueuedPrompts({
         .catch((error: unknown) => {
           submitAbortControllersRef.current.delete(submitAbort);
           if (
-            ownerTokenRef.current !== ownerToken ||
+            !isCurrentOwnerTokenRef.current(ownerToken) ||
             latestSessionIdRef.current !== targetSessionId
           ) {
             return;
@@ -771,6 +1035,7 @@ export function useQueuedPrompts({
 
   const fallbackToPendingPrompt = useCallback(
     (id: number) => {
+      if (writeBlockedRef.current) return;
       const current = queuedPromptsRef.current;
       const index = current.findIndex(
         (prompt) => prompt.id === id && prompt.midTurnState !== undefined,
@@ -805,12 +1070,144 @@ export function useQueuedPrompts({
       const trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0) return true;
       const targetSessionId = latestSessionIdRef.current;
+      const targetWorkspaceCwd = latestWorkspaceCwdRef.current;
       const ownerToken = ownerTokenRef.current;
       const shouldInsertMidTurn =
         latestStreamingStateRef.current !== 'idle' &&
         (images?.length ?? 0) === 0 &&
         (inputAnnotations?.length ?? 0) === 0 &&
         !isCommandPrompt(trimmed);
+      const midTurnMessageId =
+        shouldInsertMidTurn && canQueryMidTurn
+          ? `webui_${
+              typeof crypto !== 'undefined' &&
+              typeof crypto.randomUUID === 'function'
+                ? crypto.randomUUID()
+                : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+            }`
+          : undefined;
+
+      if (shouldInsertMidTurn && canQueryMidTurn && midTurnMessageId) {
+        const pendingAdmission: QueuedPrompt = {
+          id: nextQueuedPromptIdRef.current++,
+          sessionId: targetSessionId,
+          text: trimmed,
+          midTurnMessageId,
+          admissionOutcome: 'unknown',
+          payloadCompleteness: 'complete',
+          payloadAvailable: true,
+        };
+        pendingMidTurnAdmissionsRef.current.set(midTurnMessageId, {
+          prompt: pendingAdmission,
+          workspaceCwd: targetWorkspaceCwd,
+        });
+        if (onComplete) {
+          settleCompletionCallback(midTurnMessageId, onComplete);
+        }
+        void sessionActions
+          .enqueueMidTurnMessage(trimmed, { messageId: midTurnMessageId })
+          .then(async (result) => {
+            if (!result.accepted) {
+              completionCallbacksRef.current.delete(midTurnMessageId);
+              if (
+                latestSessionIdRef.current !== targetSessionId ||
+                latestWorkspaceCwdRef.current !== targetWorkspaceCwd
+              ) {
+                return;
+              }
+              const pendingAdmissionStillOwned =
+                pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+              if (!pendingAdmissionStillOwned) return;
+              const next = queuedPromptsRef.current.filter(
+                (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
+              );
+              queuedPromptsRef.current = next;
+              setQueuedPrompts(next);
+              restoreQueuedPromptsToEditor(
+                [pendingAdmission],
+                targetSessionId,
+                true,
+              );
+              reportError(
+                new Error('Daemon rejected mid-turn message'),
+                t('queue.queueFailed'),
+              );
+              return;
+            }
+            if (
+              latestSessionIdRef.current === targetSessionId &&
+              latestWorkspaceCwdRef.current === targetWorkspaceCwd &&
+              targetSessionId
+            ) {
+              await reconcileMidTurnMessages(targetSessionId);
+            }
+            pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+          })
+          .catch(async (error: unknown) => {
+            if (
+              latestSessionIdRef.current !== targetSessionId ||
+              latestWorkspaceCwdRef.current !== targetWorkspaceCwd ||
+              !targetSessionId
+            ) {
+              return;
+            }
+            const snapshot = await reconcileMidTurnMessages(targetSessionId);
+            if (!snapshot) {
+              if (!pendingMidTurnAdmissionsRef.current.has(midTurnMessageId)) {
+                return;
+              }
+              if (
+                !queuedPromptsRef.current.some(
+                  (prompt) =>
+                    prompt.midTurnMessageId === midTurnMessageId ||
+                    prompt.serverPromptId === midTurnMessageId,
+                )
+              ) {
+                const next = [
+                  ...queuedPromptsRef.current,
+                  {
+                    id: nextQueuedPromptIdRef.current++,
+                    sessionId: targetSessionId,
+                    text: trimmed,
+                    midTurnMessageId,
+                    admissionOutcome: 'unknown' as const,
+                    payloadCompleteness: 'complete' as const,
+                    payloadAvailable: true,
+                  },
+                ];
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+              }
+              reportError(error, t('queue.admissionUnknown'));
+              return;
+            }
+            const pendingAdmissionStillOwned =
+              pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
+            const known =
+              snapshot.messages.some(
+                (message) => message.messageId === midTurnMessageId,
+              ) ||
+              snapshot.settledMessageIds.includes(midTurnMessageId) ||
+              snapshot.promotedMessageIds.includes(midTurnMessageId);
+            if (known || !pendingAdmissionStillOwned) return;
+            completionCallbacksRef.current.delete(midTurnMessageId);
+            restoreQueuedPromptsToEditor(
+              [
+                {
+                  id: nextQueuedPromptIdRef.current++,
+                  sessionId: targetSessionId,
+                  text: trimmed,
+                  images: images ? [...images] : undefined,
+                  payloadCompleteness: 'complete',
+                },
+              ],
+              targetSessionId,
+            );
+            reportError(error, t('queue.queueFailed'));
+          });
+        return true;
+      }
+
       const prompt: QueuedPrompt = {
         id: nextQueuedPromptIdRef.current++,
         sessionId: targetSessionId,
@@ -821,7 +1218,9 @@ export function useQueuedPrompts({
         onAdmitted,
         payloadCompleteness: 'complete',
         ...(shouldInsertMidTurn
-          ? { midTurnState: 'submitting' }
+          ? {
+              midTurnState: 'submitting',
+            }
           : { serverState: 'submitting' }),
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, prompt];
@@ -832,15 +1231,14 @@ export function useQueuedPrompts({
         return true;
       }
 
-      let abort = midTurnEnqueueAbortRef.current;
-      if (!abort) {
-        abort = new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
-      }
+      const abort = midTurnEnqueueAbortRef.current ?? new AbortController();
+      midTurnEnqueueAbortRef.current = abort;
       void sessionActions
-        .enqueueMidTurnMessage(trimmed, { signal: abort.signal })
+        .enqueueMidTurnMessage(trimmed, {
+          signal: abort.signal,
+        })
         .then((result) => {
-          if (ownerTokenRef.current !== ownerToken) return;
+          if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
           const current = queuedPromptsRef.current;
           const index = current.findIndex((item) => item.id === prompt.id);
           if (index === -1) return;
@@ -859,28 +1257,45 @@ export function useQueuedPrompts({
           };
           queuedPromptsRef.current = next;
           setQueuedPrompts(next);
-        });
+        })
+        .catch(() => {});
       return true;
     },
-    [fallbackToPendingPrompt, sessionActions, submitPendingPrompt],
+    [
+      canQueryMidTurn,
+      fallbackToPendingPrompt,
+      reconcileMidTurnMessages,
+      reportError,
+      restoreQueuedPromptsToEditor,
+      sessionActions,
+      settleCompletionCallback,
+      submitPendingPrompt,
+      t,
+    ],
   );
 
   const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
     useDaemonMidTurnInjected();
-  // DECLARATION ORDER IS LOAD-BEARING: this effect must stay declared ABOVE the
-  // idle effect below. When an injection frame and the idle transition land in
-  // the same React batch, effects run in declaration order, so this clears the
-  // injected row's midTurnState first — otherwise the idle effect's
-  // fallbackToPendingPrompt claims that row and resubmits a message the model
-  // already received (double delivery).
+  // Keep injection echoes ahead of idle handling for legacy daemons, whose
+  // local rows still fall back to the ordinary queue at the turn boundary.
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
+    for (const batch of midTurnInjectedBatches) {
+      if (batch.sessionId !== sessionId) continue;
+      for (const messageId of batch.messageIds ?? []) {
+        pendingMidTurnAdmissionsRef.current.delete(messageId);
+        const callback = completionCallbacksRef.current.get(messageId);
+        completionCallbacksRef.current.delete(messageId);
+        callback?.();
+      }
+    }
     const current = queuedPromptsRef.current;
     const next = removeInjectedFromQueue(
       current,
       midTurnInjectedBatches,
       sessionId,
       clientId,
+      canQueryMidTurn,
     );
     if (next) {
       const retainedIds = new Set(next.map((prompt) => prompt.id));
@@ -893,34 +1308,66 @@ export function useQueuedPrompts({
     consumeMidTurnInjected(
       midTurnInjectedBatches.filter((batch) => batch.sessionId === sessionId),
     );
-  }, [midTurnInjectedBatches, sessionId, clientId, consumeMidTurnInjected]);
+  }, [
+    midTurnInjectedBatches,
+    sessionId,
+    clientId,
+    canQueryMidTurn,
+    consumeMidTurnInjected,
+  ]);
 
   useEffect(() => {
-    if (streamingState !== 'idle') return;
+    if (streamingState !== 'idle' || writeBlocked) return;
     const ctrl = midTurnEnqueueAbortRef.current;
     if (ctrl) {
       ctrl.abort();
       midTurnEnqueueAbortRef.current = null;
     }
     for (const prompt of queuedPromptsRef.current) {
-      if (prompt.midTurnFailedAction) {
-        const next = queuedPromptsRef.current.filter(
-          (item) => item.id !== prompt.id,
-        );
-        queuedPromptsRef.current = next;
-        setQueuedPrompts(next);
-        if (prompt.midTurnFailedAction === 'edit') {
-          restoreQueuedPromptsToEditor([prompt], prompt.sessionId);
-        }
-      } else if (
-        prompt.midTurnState &&
-        !prompt.isEditing &&
-        !prompt.isRemoving
-      ) {
-        fallbackToPendingPrompt(prompt.id);
+      if (!prompt.midTurnFailedAction) continue;
+      const next = queuedPromptsRef.current.filter(
+        (item) => item.id !== prompt.id,
+      );
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+      if (prompt.midTurnFailedAction === 'edit') {
+        restoreQueuedPromptsToEditor([prompt], prompt.sessionId);
       }
     }
-  }, [streamingState, fallbackToPendingPrompt, restoreQueuedPromptsToEditor]);
+    if (!canQueryMidTurn) {
+      for (const prompt of queuedPromptsRef.current) {
+        if (
+          prompt.midTurnState &&
+          !prompt.midTurnFailedAction &&
+          !prompt.isEditing &&
+          !prompt.isRemoving
+        ) {
+          fallbackToPendingPrompt(prompt.id);
+        }
+      }
+    }
+    if (!canQueryMidTurn) return;
+    // Query-capable daemons own accepted rows. Never POST them again at idle;
+    // only project the authoritative mid-turn and pending snapshots.
+    const reconcileCtrl = new AbortController();
+    const targetSessionId = latestSessionIdRef.current;
+    if (!targetSessionId) return;
+    const seq = ++midTurnReconcileSeqRef.current;
+    void reconcileMidTurnMessages(targetSessionId, {
+      signal: reconcileCtrl.signal,
+      seq,
+    });
+    return () => {
+      reconcileCtrl.abort();
+    };
+  }, [
+    streamingState,
+    writeBlocked,
+    canQueryMidTurn,
+    fallbackToPendingPrompt,
+    restoreQueuedPromptsToEditor,
+    reconcileMidTurnMessages,
+  ]);
 
   const popQueuedPromptForEdit = useCallback(
     (id?: number): QueuedPrompt | null => {
@@ -981,15 +1428,15 @@ export function useQueuedPrompts({
             sessionId: targetSessionId,
           },
         );
-        if (ownerTokenRef.current !== ownerToken) return false;
         removingPromptIds.delete(target.serverPromptId);
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return result.removed;
         if (!result.removed) {
           setQueuedPromptFlags(target.id, {
             isEditing: false,
             isRemoving: false,
           });
           await refreshPendingPrompts(targetSessionId);
-          if (ownerTokenRef.current !== ownerToken) return false;
+          if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
           reportError(
             new Error('Prompt could not be removed from queue'),
             fallback,
@@ -998,7 +1445,7 @@ export function useQueuedPrompts({
         }
         completionCallbacksRef.current.delete(target.serverPromptId);
         const refreshResult = await refreshPendingPrompts(targetSessionId);
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return true;
         if (refreshResult === 'failed') {
           setQueuedPromptFlags(target.id, {
             isEditing: false,
@@ -1011,14 +1458,14 @@ export function useQueuedPrompts({
         }
         return true;
       } catch (error) {
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         removingPromptIds.delete(target.serverPromptId);
         setQueuedPromptFlags(target.id, {
           isEditing: false,
           isRemoving: false,
         });
         const refreshResult = await refreshPendingPrompts(targetSessionId);
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         if (refreshResult !== 'refreshed') {
           restoreQueuedPrompts([target]);
         }
@@ -1051,6 +1498,7 @@ export function useQueuedPrompts({
       ) {
         return false;
       }
+      midTurnReconcileSeqRef.current += 1;
       const failedAction = flags.isEditing ? 'edit' : 'delete';
       setQueuedPromptFlags(target.id, {
         ...flags,
@@ -1061,7 +1509,7 @@ export function useQueuedPrompts({
           target.midTurnMessageId,
           { sessionId: target.sessionId },
         );
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return result.removed;
         const current = queuedPromptsRef.current;
         const latest = current.find((prompt) => prompt.id === target.id);
         if (!latest) return result.removed;
@@ -1072,6 +1520,20 @@ export function useQueuedPrompts({
           return false;
         }
         if (!result.removed) {
+          if (canQueryMidTurn) {
+            setQueuedPromptFlags(target.id, {
+              isEditing: false,
+              isRemoving: false,
+            });
+            if (target.sessionId) {
+              await reconcileMidTurnMessages(target.sessionId);
+            }
+            reportError(
+              new Error('Message was already delivered or completed'),
+              fallback,
+            );
+            return false;
+          }
           const settledAtIdle = latestStreamingStateRef.current === 'idle';
           if (settledAtIdle) {
             const next = current.filter((prompt) => prompt.id !== target.id);
@@ -1095,11 +1557,22 @@ export function useQueuedPrompts({
         setQueuedPrompts(next);
         return true;
       } catch (error) {
-        if (ownerTokenRef.current !== ownerToken) return false;
+        if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
         const latest = queuedPromptsRef.current.find(
           (prompt) => prompt.id === target.id,
         );
         if (latest?.midTurnMessageId === target.midTurnMessageId) {
+          if (canQueryMidTurn) {
+            setQueuedPromptFlags(target.id, {
+              isEditing: false,
+              isRemoving: false,
+            });
+            if (target.sessionId) {
+              await reconcileMidTurnMessages(target.sessionId);
+            }
+            reportError(error, fallback);
+            return false;
+          }
           const settledAtIdle = latestStreamingStateRef.current === 'idle';
           if (settledAtIdle) {
             const next = queuedPromptsRef.current.filter(
@@ -1120,7 +1593,14 @@ export function useQueuedPrompts({
         return false;
       }
     },
-    [canMutateMidTurn, reportError, sessionActions, setQueuedPromptFlags],
+    [
+      canMutateMidTurn,
+      canQueryMidTurn,
+      reconcileMidTurnMessages,
+      reportError,
+      sessionActions,
+      setQueuedPromptFlags,
+    ],
   );
 
   const removeQueuedPrompt = useCallback(
@@ -1179,7 +1659,11 @@ export function useQueuedPrompts({
       ) {
         return false;
       }
-      if (ownerTokenRef.current !== ownerToken) return false;
+      if (!isCurrentOwnerTokenRef.current(ownerToken)) return false;
+      if (target.midTurnMessageId) {
+        completionCallbacksRef.current.delete(target.midTurnMessageId);
+        pendingMidTurnAdmissionsRef.current.delete(target.midTurnMessageId);
+      }
       const next = queuedPromptsRef.current.map((prompt) =>
         prompt.id === id
           ? {
@@ -1210,7 +1694,6 @@ export function useQueuedPrompts({
 
   const editQueuedPrompt = useCallback(
     async (id: number) => {
-      const editOwnerToken = ownerTokenRef.current;
       const target = queuedPromptsRef.current.find((p) => p.id === id);
       if (!target || target.serverState === 'submitting') return;
       if (
@@ -1227,12 +1710,7 @@ export function useQueuedPrompts({
           t('queue.editFailed'),
         );
         if (removed) {
-          restoreQueuedPromptsToEditor(
-            [target],
-            target.sessionId,
-            false,
-            editOwnerToken,
-          );
+          restoreQueuedPromptsToEditor([target]);
         }
         return;
       }
@@ -1243,12 +1721,7 @@ export function useQueuedPrompts({
           t('queue.editFailed'),
         );
         if (!removed) return;
-        restoreQueuedPromptsToEditor(
-          [target],
-          target.sessionId,
-          false,
-          editOwnerToken,
-        );
+        restoreQueuedPromptsToEditor([target]);
         return;
       }
       const popped = popQueuedPromptForEdit(id);
@@ -1291,7 +1764,6 @@ export function useQueuedPrompts({
       return true;
     }
     if (target.serverState !== 'queued') return false;
-    const editOwnerToken = ownerTokenRef.current;
     void (async () => {
       const removed = await removeServerPromptForAction(
         target,
@@ -1299,12 +1771,7 @@ export function useQueuedPrompts({
         t('queue.editFailed'),
       );
       if (removed) {
-        restoreQueuedPromptsToEditor(
-          [target],
-          target.sessionId,
-          false,
-          editOwnerToken,
-        );
+        restoreQueuedPromptsToEditor([target]);
       }
     })().catch((error: unknown) => {
       reportError(error, t('queue.editFailed'));
@@ -1415,7 +1882,7 @@ export function useQueuedPrompts({
       );
 
       if (
-        ownerTokenRef.current !== clearOwnerToken ||
+        !isCurrentOwnerTokenRef.current(clearOwnerToken) ||
         latestSessionIdRef.current !== clearSessionId
       ) {
         return;
@@ -1449,7 +1916,7 @@ export function useQueuedPrompts({
   }, [refreshPendingPrompts, reportError, store, t, sessionActions]);
 
   return {
-    queuedPrompts,
+    queuedPrompts: visibleQueuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,

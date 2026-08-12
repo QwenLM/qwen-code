@@ -39,15 +39,23 @@ const sessions = [
   },
 ];
 
+const releaseSessionMock = vi.fn().mockResolvedValue(undefined);
+let scopedSessionsOptions: unknown;
+
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
-    sessions,
-    loading: false,
-    error: undefined,
-    releaseSession: vi.fn().mockResolvedValue(undefined),
-  }),
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: (_workspaceCwd: unknown, options: unknown) => {
+    scopedSessionsOptions = options;
+    return {
+      sessions,
+      loading: false,
+      error: undefined,
+      releaseSession: releaseSessionMock,
+    };
+  },
 }));
 
 const { ReleaseSessionDialog } = await import('./ReleaseSessionDialog');
@@ -110,6 +118,10 @@ describe('ReleaseSessionDialog selection', () => {
   it('keeps the cursor and the confirmed target separate', () => {
     mount();
 
+    expect(scopedSessionsOptions).toEqual({
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
     // The dialog opens with no highlight at all; Enter has nothing to act on.
     expect(rows().some(isCursor)).toBe(false);
     expect(rows().some(isConfirmed)).toBe(false);

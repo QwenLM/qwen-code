@@ -145,13 +145,20 @@ interface ParsedClaudeModelVersion {
 function parseClaudeModelVersion(
   model: string,
 ): ParsedClaudeModelVersion | null {
+  // The minor separator accepts both `-` (Anthropic canonical, e.g.
+  // `claude-opus-4-8`) and `.` (LiteLLM/Vertex/Bedrock alias convention, e.g.
+  // `claude-opus-4.8`). Without the `.` branch a dotted alias parses as
+  // `{major, minor:0}`, silently disabling adaptive thinking, the
+  // temperature-rejection gate, and the version-gated effort tiers for 4.6+
+  // models — which surfaces as a server 400 the first time the harness sends
+  // `thinking.type.enabled` to an Opus 4.7+ / 5.x model group.
   const match = model
     .toLowerCase()
     .match(
       new RegExp(
         `claude-(${CLAUDE_MODEL_FAMILIES.join(
           '|',
-        )})-(\\d+)(?:-(\\d{1,2})(?!\\d))?`,
+        )})-(\\d+)(?:[-.](\\d{1,2})(?!\\d))?`,
       ),
     );
   if (!match) {
