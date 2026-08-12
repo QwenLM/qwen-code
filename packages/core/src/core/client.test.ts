@@ -5100,7 +5100,7 @@ hello
       let settleRecall:
         | ((value: {
             prompt: string;
-            selectedDocs: ReturnType<typeof fastDoc>[];
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
             strategy: 'model';
           }) => void)
         | undefined;
@@ -5177,7 +5177,7 @@ hello
       let settleRecall:
         | ((value: {
             prompt: string;
-            selectedDocs: ReturnType<typeof fastDoc>[];
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
             strategy: 'model';
           }) => void)
         | undefined;
