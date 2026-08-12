@@ -112,7 +112,9 @@
         margin: -1px;
         padding: 0;
         overflow: hidden;
+        border: 0;
         clip: rect(0, 0, 0, 0);
+        clip-path: inset(50%);
         white-space: nowrap;
       }
       @keyframes mark-pulse {
@@ -124,6 +126,28 @@
       @media (prefers-reduced-motion: reduce) {
         body[data-state='starting'] .mark {
           animation: none;
+        }
+        body[data-state='starting'] .status {
+          position: static;
+          width: auto;
+          height: auto;
+          margin: 18px 0 0;
+          overflow: visible;
+          clip: auto;
+          clip-path: none;
+          white-space: normal;
+          grid-template-columns: 1fr;
+          color: #8d98aa;
+          background: none;
+          text-align: center;
+        }
+        body[data-state='starting'] .status > :first-child,
+        body[data-state='starting'] .status > div > :not(#title) {
+          display: none;
+        }
+        body[data-state='starting'] #title {
+          font-size: 13px;
+          font-weight: 500;
         }
       }
       h1 {
@@ -140,7 +164,7 @@
       }
       .status {
         display: grid;
-        grid-template-columns: 22px 1fr;
+        grid-template-columns: 22px minmax(0, 1fr);
         gap: 14px;
         margin-top: 40px;
         padding: 22px 24px;

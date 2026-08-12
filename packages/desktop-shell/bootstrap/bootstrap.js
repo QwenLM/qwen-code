@@ -14,7 +14,7 @@ const update = document.querySelector('#update');
 const version = document.querySelector('#version');
 
 let currentWorkspace = '';
-let runtimeStatus;
+let snapshotOverrideStatus;
 let updateVersion;
 
 function setWorkspace(path) {
@@ -32,12 +32,12 @@ function setStatus(kind, heading, message, failure = '') {
   retry.hidden = kind !== 'error';
   choose.hidden = kind === 'starting';
   choose.disabled = kind === 'starting';
-  setWorkspace(kind === 'error' ? currentWorkspace : '');
+  setWorkspace(kind === 'starting' ? '' : currentWorkspace);
 }
 
 async function chooseWorkspace() {
   if (!invoke) return;
-  runtimeStatus = 'starting';
+  snapshotOverrideStatus = 'starting';
   setStatus(
     'starting',
     'Opening workspace',
@@ -60,7 +60,7 @@ async function chooseWorkspace() {
 
 async function retryRuntime() {
   if (!invoke) return;
-  runtimeStatus = 'starting';
+  snapshotOverrideStatus = 'starting';
   setStatus(
     'starting',
     'Restarting Qwen Code',
@@ -129,7 +129,7 @@ async function initialize() {
 
   await Promise.all([
     listen('runtime-starting', ({ payload }) => {
-      runtimeStatus = 'starting';
+      snapshotOverrideStatus = 'starting';
       currentWorkspace = String(payload || '');
       setStatus(
         'starting',
@@ -138,14 +138,13 @@ async function initialize() {
       );
     }),
     listen('runtime-failed', ({ payload }) => {
-      runtimeStatus = 'failed';
+      snapshotOverrideStatus = 'failed';
       setStatus(
         'error',
         'Qwen Code could not start',
         'Review the details, open the log, or choose another workspace.',
         String(payload),
       );
-      setWorkspace(currentWorkspace);
     }),
     listen('update-available', ({ payload }) => {
       updateVersion = String(payload);
@@ -157,8 +156,8 @@ async function initialize() {
   const state = await invoke('bootstrap_state');
   version.textContent = `Desktop ${state.desktopVersion}`;
   currentWorkspace ||= String(state.workspace || '');
-  if (runtimeStatus) {
-    if (runtimeStatus === 'failed') setWorkspace(currentWorkspace);
+  if (snapshotOverrideStatus) {
+    if (snapshotOverrideStatus === 'failed') setWorkspace(currentWorkspace);
     return;
   }
   if (state.status === 'starting') {
@@ -180,7 +179,6 @@ async function initialize() {
       'Review the details, open the log, or choose another workspace.',
       state.error,
     );
-    setWorkspace(currentWorkspace);
   } else {
     setStatus(
       'idle',

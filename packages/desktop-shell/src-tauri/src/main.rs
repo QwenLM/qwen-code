@@ -933,6 +933,10 @@ mod tests {
             bootstrap_workspace(None, Some(persisted.clone())),
             Some(persisted)
         );
+        assert_eq!(
+            bootstrap_workspace(Some((PathBuf::from("/tmp/first-launch"), true)), None),
+            Some(PathBuf::from("/tmp/first-launch")),
+        );
         assert_eq!(bootstrap_workspace(None, None), None);
     }
 
