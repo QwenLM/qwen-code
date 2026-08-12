@@ -12,6 +12,11 @@ const TREE_VERIFY_INTERVAL_MS = 250;
 // refusal path in tests.
 export function loadPtyBackend() {
   if (process.env.TUI_PARITY_NO_PTY === '1') return null;
+  // script(1)-allocated PTY is opt-in (TUI_PARITY_PTY=script) for renderers that
+  // reject node-pty; default remains node-pty (works for Ink).
+  if (process.env.TUI_PARITY_PTY === 'script') {
+    return { kind: 'script', spawn: spawnScriptPty };
+  }
   try {
     const require = createRequire(import.meta.url);
     const mod = require('@lydell/node-pty');
@@ -21,6 +26,30 @@ export function loadPtyBackend() {
   } catch {
     return null;
   }
+}
+
+// Wrap script(1) so it exposes the node-pty-like interface (onData/kill/p).
+function spawnScriptPty(cmd, args, opts = {}) {
+  const tmp = `/tmp/tui-parity-script-${randomUUID()}.log`;
+  const child = spawn('script', ['-q', tmp, cmd, ...args], {
+    env: opts.env ?? process.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  return {
+    pid: child.pid,
+    onData: (cb) => child.stdout.on('data', (d) => cb(d.toString('utf8'))),
+    onExit: (cb) => child.on('exit', (code, sig) => cb({ exitCode: code, signal: sig })),
+    kill: (sig) => {
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {}
+      }
+    },
+    write: (d) => child.stdin.write(d),
+  };
 }
 
 export function handshakeMarkerFound(stdoutText, nonce) {
@@ -146,7 +175,23 @@ export function capture(command, options = {}) {
     let ptyProc = null;
     let child = null;
     let nonce = null;
-    if (tty === 'native') {
+    if (tty === 'script') {
+      // script(1)-based PTY: some renderers (OpenTUI) accept a script-allocated
+      // PTY but not the node-pty backend. Capture script's stdout as the stream.
+      const tmp = `/tmp/tui-parity-script-${randomUUID()}.log`;
+      ttyEvidence.backend = 'script';
+      ttyEvidence.allocated = true;
+      try {
+        child = spawn('script', ['-q', tmp, ...command], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: true,
+          env: childEnv,
+        });
+      } catch (err) {
+        settle({ spawnError: err.message });
+        return;
+      }
+    } else if (tty === 'native') {
       backend = loadPtyBackend();
       if (!backend) {
         settle({ spawnError: PTY_REFUSAL });
