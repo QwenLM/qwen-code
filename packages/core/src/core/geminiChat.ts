@@ -1776,6 +1776,22 @@ export class GeminiChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  /**
+   * MAX_TOKENS output-recovery turns whose durable JSONL record is deferred.
+   * The recovery loop merges the split model turns back into one turn in
+   * `this.history` (via `coalesceRecoveryPairs`), but the transcript record is
+   * append-only and cannot be merged after the fact. So each MAX_TOKENS turn
+   * and its continuations stash their record args here instead of writing
+   * immediately, and the recovery block flushes exactly one merged record
+   * (derived from the coalesced history turn) once recovery settles — keeping
+   * the durable record and in-memory history in agreement the same way the
+   * transport-cut continuation path does. A list, so every degraded exit
+   * (escalation discard, functionCall skip, abandonment) stays lossless.
+   */
+  private deferredMaxTokensRecords: Array<
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+  > = [];
+
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
   /**
@@ -2788,6 +2804,11 @@ export class GeminiChat {
               transportContinuationPrefix.length > 0
                 ? transportContinuationPrefix
                 : undefined,
+              // Defer the record if this turn truncates at MAX_TOKENS and the
+              // recovery block (below) will own it — unless the user pinned
+              // maxOutputTokens, in which case recovery is disabled and the
+              // turn records normally.
+              hasUserMaxTokensOverride ? undefined : 'on-max-tokens',
             );
 
             lastFinishReason = undefined;
@@ -3297,6 +3318,7 @@ export class GeminiChat {
             requestContents: Content[];
             params: SendMessageParameters;
             rollback: () => void;
+            recordDeferral?: 'on-max-tokens' | 'always';
           },
           retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
             type: StreamEventType.RETRY,
@@ -3314,6 +3336,8 @@ export class GeminiChat {
                 prompt_id,
                 requestOverrides,
                 turnGoalContext,
+                undefined,
+                attemptState.recordDeferral,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3387,6 +3411,10 @@ export class GeminiChat {
             ) {
               self.history.pop();
             }
+            // The truncated turn's deferred record must follow history: the
+            // escalated attempt replaces it wholesale, so discard the stash to
+            // avoid persisting an output the live session threw away.
+            self.deferredMaxTokensRecords.length = 0;
             // Signal UI to discard partial output
             yield {
               type: StreamEventType.RETRY,
@@ -3406,6 +3434,8 @@ export class GeminiChat {
               requestContents,
               params: escalatedParams,
               rollback: () => self.popPendingPartialAssistantTurn(),
+              // Still a possible MAX_TOKENS turn the recovery loop will own.
+              recordDeferral: 'on-max-tokens',
             }))) {
               if (event.type === StreamEventType.RETRY) {
                 yield event;
@@ -3541,6 +3571,10 @@ export class GeminiChat {
                     ),
                     params: iterationParams,
                     rollback: rollbackRecoveryAttempt,
+                    // Always defer: even the final STOP continuation must be
+                    // coalesced into the single merged record, not written
+                    // separately.
+                    recordDeferral: 'always',
                   };
                 },
                 { type: StreamEventType.RETRY, isContinuation: true },
@@ -3587,8 +3621,37 @@ export class GeminiChat {
           // persist as a synthetic user turn in durable history. The user
           // never sent that message, and leaving it in history would bias
           // later turns and pollute compression / replay / export.
-          if (successfulRecoveries > 0) {
-            self.coalesceRecoveryPairs(successfulRecoveries);
+          const coalescedPairs =
+            successfulRecoveries > 0
+              ? self.coalesceRecoveryPairs(successfulRecoveries)
+              : 0;
+
+          // Flush the deferred JSONL records. When every recovery pair merged
+          // cleanly into one history turn, write a single record whose parts ARE
+          // that coalesced turn's — so the durable transcript `--resume` reads
+          // matches in-memory history byte-for-byte (the same single-source-of-
+          // truth rule the transport-cut continuation path follows). If nothing
+          // coalesced (recovery skipped on a functionCall turn) or the merge
+          // bailed defensively, fall back to the per-attempt records, which
+          // still match the un-coalesced history.
+          const deferredRecords = self.deferredMaxTokensRecords;
+          self.deferredMaxTokensRecords = [];
+          if (deferredRecords.length > 0) {
+            const mergedTurn = self.history[self.history.length - 1];
+            if (
+              successfulRecoveries > 0 &&
+              coalescedPairs === successfulRecoveries &&
+              mergedTurn?.role === 'model'
+            ) {
+              self.chatRecordingService?.recordAssistantTurn({
+                ...deferredRecords[deferredRecords.length - 1]!,
+                message: mergedTurn.parts ?? [],
+              });
+            } else {
+              for (const record of deferredRecords) {
+                self.chatRecordingService?.recordAssistantTurn(record);
+              }
+            }
           }
         }
 
@@ -3862,6 +3925,29 @@ export class GeminiChat {
           }
           self.clearPendingPartialState();
         }
+        // Flush any MAX_TOKENS records still deferred when the block did not
+        // reach its own emit point — consumer abandonment mid-recovery (the
+        // generator's `.return()` runs this `finally`) or a throw escaping the
+        // recovery block (e.g. the escalated attempt exhausting invalid-stream
+        // retries). Written as-is (per attempt): lossless, and identical to the
+        // pre-fix output for these degraded paths. The normal path already
+        // drained and cleared the list before getting here.
+        if (self.deferredMaxTokensRecords.length > 0) {
+          const stranded = self.deferredMaxTokensRecords;
+          self.deferredMaxTokensRecords = [];
+          for (const record of stranded) {
+            try {
+              self.chatRecordingService?.recordAssistantTurn(record);
+            } catch (recordErr) {
+              debugLogger.error(
+                '[RECOVERY_FLUSH] Failed to persist deferred JSONL record: ' +
+                  (recordErr instanceof Error
+                    ? recordErr.message
+                    : String(recordErr)),
+              );
+            }
+          }
+        }
       }
     })();
   }
@@ -3887,6 +3973,7 @@ export class GeminiChat {
     },
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    recordDeferral?: 'on-max-tokens' | 'always',
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3968,6 +4055,7 @@ export class GeminiChat {
       streamResponse,
       goalContext,
       transportContinuationPrefix,
+      recordDeferral,
     );
   }
 
@@ -4443,6 +4531,13 @@ export class GeminiChat {
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    // When the MAX_TOKENS output-recovery flow owns this turn, defer its record
+    // instead of writing immediately so the recovery block can emit one merged
+    // record. `'on-max-tokens'` defers only if the turn finishes MAX_TOKENS
+    // (a normal STOP still records now); `'always'` defers unconditionally,
+    // used for recovery continuations whose final attempt ends STOP but must
+    // still be coalesced. See `deferredMaxTokensRecords`.
+    recordDeferral?: 'on-max-tokens' | 'always',
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4462,6 +4557,10 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    // Finish-reason *value* seen anywhere in the stream, captured before the
+    // `isToolResultContinuation` block below can delete it off the chunk. Used
+    // only to decide record deferral for the MAX_TOKENS recovery flow.
+    let observedFinishReason: FinishReason | undefined;
     const protocolTagDetector = new LeadingProtocolTagLeakDetector();
     let pendingProtocolParts: Part[] = [];
     const takePendingProtocolParts = (): Part[] => {
@@ -4518,6 +4617,15 @@ export class GeminiChat {
         hasFinishReason ||=
           chunk?.candidates?.some((candidate) => candidate.finishReason) ??
           false;
+        // Mirror the outer send loop's `lastFinishReason` derivation exactly
+        // (last-wins, `candidates[0]`) so the record-deferral decision agrees
+        // with the recovery-entry decision even on a malformed multi-finish
+        // stream — otherwise a `STOP`-before-`MAX_TOKENS` stream could record
+        // immediately while recovery still runs, stranding a record on disk.
+        const chunkFinishReason = chunk?.candidates?.[0]?.finishReason;
+        if (chunkFinishReason) {
+          observedFinishReason = chunkFinishReason as FinishReason;
+        }
 
         if (isValidResponse(chunk)) {
           const candidate = chunk.candidates?.[0];
@@ -4989,6 +5097,16 @@ export class GeminiChat {
         // `--resume` rehydrates a turn the live session correctly
         // discarded.
         this.pendingPartialAssistantRecord = recordArgs;
+      } else if (
+        recordDeferral === 'always' ||
+        (recordDeferral === 'on-max-tokens' &&
+          observedFinishReason === FinishReason.MAX_TOKENS)
+      ) {
+        // MAX_TOKENS output-recovery owns this turn: stash the record so the
+        // recovery block can emit a single merged one matching coalesced
+        // history. The append-only transcript cannot be coalesced after the
+        // fact, so it must not be written here.
+        this.deferredMaxTokensRecords.push(recordArgs);
       } else {
         this.chatRecordingService?.recordAssistantTurn(recordArgs);
       }
@@ -5082,11 +5200,16 @@ export class GeminiChat {
    *
    * If any pair doesn't match that shape the method bails defensively
    * rather than corrupting history.
+   *
+   * Returns the number of pairs actually merged. The deferred-record flush
+   * relies on this: it emits one merged transcript record only when every pair
+   * coalesced (return value === pairCount), otherwise it keeps the per-attempt
+   * records so the durable transcript still matches the un-merged history.
    */
-  private coalesceRecoveryPairs(pairCount: number): void {
+  private coalesceRecoveryPairs(pairCount: number): number {
     for (let i = 0; i < pairCount; i++) {
       const len = this.history.length;
-      if (len < 3) return;
+      if (len < 3) return i;
 
       const modelContinuation = this.history[len - 1]!;
       const userRecovery = this.history[len - 2]!;
@@ -5097,7 +5220,7 @@ export class GeminiChat {
         userRecovery.role !== 'user' ||
         precedingModel.role !== 'model'
       ) {
-        return;
+        return i;
       }
 
       precedingModel.parts = appendRecoveryContinuationParts(
@@ -5107,6 +5230,7 @@ export class GeminiChat {
       // Drop the (userRecovery, modelContinuation) pair.
       this.history.splice(len - 2, 2);
     }
+    return pairCount;
   }
 }
 

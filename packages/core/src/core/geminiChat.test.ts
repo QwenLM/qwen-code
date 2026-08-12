@@ -13079,6 +13079,168 @@ describe('GeminiChat', async () => {
       expect(text).toBe('Alpha shared recovery suffix and continuation');
     });
 
+    it('records the coalesced recovery turn once, matching in-memory history', async () => {
+      // The JSONL transcript that `--resume` / `--continue` reads is written
+      // by `recordAssistantTurn`, not by `this.history`. `coalesceRecoveryPairs`
+      // merges the split recovery turns back into one model turn in history, so
+      // the durable record must be a single turn with the same text — otherwise
+      // resume rehydrates the duplicated, split turn the live session merged.
+      // (Sibling of the transport-cut continuation invariant fixed by #8624.)
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk([{ text: 'Alpha shared recovery suffix' }], 'MAX_TOKENS'),
+        ]),
+        makeStream([
+          makeChunk(
+            [{ text: 'shared recovery suffix and continuation' }],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-record-once',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyLast = recordingChat.getHistory().at(-1)!;
+      const historyText = historyLast.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(historyText).toBe('Alpha shared recovery suffix and continuation');
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedMessage = recordAssistantTurn.mock.calls[0]![0]
+        .message as Array<{ text?: string }>;
+      const recordedText = recordedMessage.find(
+        (part) => part.text !== undefined,
+      )?.text;
+      expect(recordedText).toBe(historyText);
+    });
+
+    it('records one merged turn on the non-escalation recovery path', async () => {
+      // No discarded initial attempt here (model does not escalate), so the
+      // truncated turn is deferred directly and merged with its continuation.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-direct-recovery-record',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const historyText = recordingChat
+        .getHistory()
+        .at(-1)!
+        .parts?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(historyText).toBe('Hello ending.');
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recorded = (
+        recordAssistantTurn.mock.calls[0]![0].message as Array<{
+          text?: string;
+        }>
+      ).find((part) => part.text !== undefined)?.text;
+      expect(recorded).toBe(historyText);
+    });
+
+    it('still records the truncated turn once when recovery is skipped for a functionCall', async () => {
+      // Recovery is skipped when the truncated turn carries a functionCall, but
+      // deferral must never lose that turn's durable record.
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      const streams = [
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-pro',
+        { message: 'write a file' },
+        'prompt-recovery-skip-record',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      const recordedParts = recordAssistantTurn.mock.calls[0]![0]
+        .message as Array<{ functionCall?: unknown }>;
+      expect(recordedParts.some((part) => part.functionCall)).toBe(true);
+    });
+
     it('should coalesce recovery text that replays a previous tail anchor', async () => {
       const streams = [
         makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
