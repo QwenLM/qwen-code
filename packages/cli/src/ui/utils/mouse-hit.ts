@@ -11,18 +11,16 @@ import {
   measureElementPosition,
   type ElementMetrics,
 } from './measure-element-position.js';
+import { findItemAtLayoutRow, type VisibleItemRect } from './list-mouse.js';
 
 type ElementHitMode = 'rect' | 'row';
 
 function containsPoint(
   rect: ElementMetrics,
   point: { x: number; y: number },
-  mode: ElementHitMode,
 ): boolean {
   const containsRow = point.y >= rect.y && point.y < rect.y + rect.height;
-  return mode === 'row'
-    ? containsRow
-    : containsRow && point.x >= rect.x && point.x < rect.x + rect.width;
+  return containsRow && point.x >= rect.x && point.x < rect.x + rect.width;
 }
 
 /**
@@ -56,12 +54,24 @@ export function findElementAtMouseEvent(
     return null;
   }
 
+  if (mode === 'row') {
+    const rects: VisibleItemRect[] = [];
+    for (let index = 0; index < elements.length; index++) {
+      const element = elements[index];
+      if (!element) continue;
+      const rect = measureElementPosition(element);
+      if (rect.height <= 0) continue;
+      rects.push({ index, top: rect.y, height: rect.height });
+    }
+    return findItemAtLayoutRow(rects, point.y);
+  }
+
   for (let index = 0; index < elements.length; index++) {
     const element = elements[index];
     if (!element) continue;
     const rect = measureElementPosition(element);
-    if (rect.height <= 0 || (mode === 'rect' && rect.width <= 0)) continue;
-    if (containsPoint(rect, point, mode)) return index;
+    if (rect.height <= 0 || rect.width <= 0) continue;
+    if (containsPoint(rect, point)) return index;
   }
 
   return null;
