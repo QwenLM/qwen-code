@@ -121,16 +121,19 @@ re-checked immediately before the mutation, mirroring every existing lever.
   at 100 with loud saturation warnings, and an enumeration failure degrades
   to an error row — the dashboard write (which carries the liveness
   watermark) always runs.
-- **The summary posts before the label removal**, dedup'd by its own marker,
-  so a failed comment leaves both labels in place and the whole release
-  retries next tick; a failed removal finds the marker and retries only the
-  DELETE.
+- **The summary posts before the label removal**, dedup'd by its own marker
+  scoped to the current pause cycle (only markers newer than the latest cap
+  notice count), so a failed comment leaves both labels in place and the
+  whole release retries next tick; a failed removal finds the marker and
+  retries only the DELETE; and a re-armed-and-re-capped PR still gets its
+  second summary.
 - **Stale-label heal:** a fork PR released by hand gets no release ack (the
   route suppresses fork `unlabeled` events), so nothing else clears its
   `needs-human`. The shepherd watches the awaiting-human pool for a
-  human-actor `unlabeled` event on the takeover label and clears the stale
-  label (bounded per tick, skip-vetoed, and never triggered by the bot's own
-  auto-release).
+  human-actor `unlabeled` event on the takeover label that is NEWER than the
+  latest label-apply (a stale unlabel from an earlier takeover cycle must
+  never heal this cycle's label), and clears the stale label — bounded per
+  tick, skip-vetoed, and never triggered by the bot's own auto-release.
 - **Shepherd timing:** 15-minute tick with a per-tick release cap — a backlog
   of expired PRs drains over a few ticks rather than one burst.
 

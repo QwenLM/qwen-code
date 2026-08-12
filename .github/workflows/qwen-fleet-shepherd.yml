@@ -521,6 +521,10 @@ jobs:
             echo "::warning::AUTO_RELEASE_DAYS '${AUTO_RELEASE_DAYS}' is not numeric; using 3"
             AUTO_RELEASE_DAYS=3
           fi
+          # Leading zeros pass the regex but bash reads 08/09 as bad octal at
+          # the -ge comparison — normalize to base 10 so a zero-padded
+          # variable cannot silently kill the lever.
+          AUTO_RELEASE_DAYS=$((10#${AUTO_RELEASE_DAYS}))
           # sort:updated-asc keeps the stalest PRs in view when a pool
           # outgrows the window; the saturation warning keeps the residual
           # truncation loud. The LEVER's population deliberately comes from
@@ -723,9 +727,10 @@ jobs:
                       # place so the whole release retries next tick, and a
                       # failed removal finds the marker and only retries the
                       # DELETE. Neither half can strand the other.
-                      SUMMARY_POSTED="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                      SUMMARY_POSTED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg term "${TERM_TS}" '
                         [ .[] | select((.user.login // "") == $ab)
                           | select((.body // "") | contains("<!-- fleet-shepherd auto-release -->"))
+                          | select((.created_at // "") > $term)
                         ] | length' /tmp/tk-ic.json)"
                       if [[ "${SUMMARY_POSTED}" == "0" ]]; then
                         if act "#${PR}: post auto-release summary" \
@@ -739,7 +744,7 @@ jobs:
                         # The release HAPPENED when the label lands off, so
                         # that is what counts against the per-tick budget.
                         if act "#${PR}: auto-release takeover (paused ${PAUSE_D}d)" \
-                          gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" > /dev/null; then
+                          gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')"; then
                           RELEASES=$(( RELEASES + 1 ))
                           NOTE="auto-released after ${PAUSE_D}d paused"
                         else
@@ -757,10 +762,18 @@ jobs:
                 # the escalation label there), clear the stale label. The
                 # shepherd's own auto-release authenticates as the bot and
                 # is NOT a heal trigger.
-                UNLABEL_ACTOR="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg ab "${AUTOFIX_BOT}" '
+                # ...only a human unlabel NEWER than the latest label-apply
+                # counts — an unlabel from an EARLIER takeover cycle must
+                # never heal this cycle's label.
+                LATEST_LABEL_TS="$(jq -r --arg tl "${TAKEOVER_LABEL}" '
+                  [ .[] | select((.event // "") == "labeled")
+                    | select((.label.name // "") == $tl)
+                    | .created_at ] | max // ""' /tmp/tk-ev.json)"
+                UNLABEL_ACTOR="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg ab "${AUTOFIX_BOT}" --arg ll "${LATEST_LABEL_TS}" '
                   [ .[] | select((.event // "") == "unlabeled")
                     | select((.label.name // "") == $tl)
                     | select((.actor.login // "") != $ab)
+                    | select((.created_at // "") > $ll)
                     | .actor.login ] | last // ""' /tmp/tk-ev.json)"
                 NOTE='loop stopped — needs a human decision (merge / close / split / re-engage)'
                 if [[ -n "${UNLABEL_ACTOR}" ]]; then
@@ -769,7 +782,7 @@ jobs:
                   elif live_skip "${PR}"; then
                     NOTE="$(skip_note cleanup)"
                   elif act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (manual release by @${UNLABEL_ACTOR})" \
-                    gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" > /dev/null; then
+                    gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
                     CLEANUPS=$(( CLEANUPS + 1 ))
                     NOTE="cleared stale escalation label (released by @${UNLABEL_ACTOR})"
                   else

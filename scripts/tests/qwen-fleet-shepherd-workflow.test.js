@@ -950,14 +950,26 @@ exit 1`;
     );
     // The stale-label heal (R1-13): a HUMAN unlabeled event on an
     // awaiting-human PR clears the stale escalation label — budgeted,
-    // skip-vetoed, and never triggered by the bot's own auto-release.
+    // skip-vetoed, never triggered by the bot's own auto-release, and (R2-1)
+    // correlated to the CURRENT takeover cycle: only an unlabel newer than
+    // the latest label-apply counts, so a human unlabel from an EARLIER
+    // cycle cannot heal this cycle's label.
     expect(workflow).toContain('"${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}"');
-    const unlabelJq = workflow.match(
-      /UNLABEL_ACTOR="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
+    const latestLabelJq = workflow.match(
+      /LATEST_LABEL_TS="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
     )?.[1];
+    const unlabelJq = workflow.match(
+      /UNLABEL_ACTOR="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" --arg ab "\$\{AUTOFIX_BOT\}" --arg ll "\$\{LATEST_LABEL_TS\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
+    )?.[1];
+    expect(latestLabelJq).toBeTruthy();
     expect(unlabelJq).toBeTruthy();
-    const runUnlabel = (events) =>
-      execFileSync(
+    const runUnlabel = (events) => {
+      const ll = execFileSync(
+        'jq',
+        ['-r', '--arg', 'tl', 'autofix/takeover', latestLabelJq],
+        { encoding: 'utf8', input: JSON.stringify(events) },
+      ).trim();
+      return execFileSync(
         'jq',
         [
           '-r',
@@ -967,16 +979,27 @@ exit 1`;
           '--arg',
           'ab',
           'qwen-code-dev-bot',
+          '--arg',
+          'll',
+          ll,
           unlabelJq,
         ],
         { encoding: 'utf8', input: JSON.stringify(events) },
       ).trim();
+    };
+    // Same-cycle manual release → heal fires.
     expect(
       runUnlabel([
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-01T00:00:00Z',
+        },
         {
           event: 'unlabeled',
           label: { name: 'autofix/takeover' },
           actor: { login: 'wenshao' },
+          created_at: '2026-08-02T00:00:00Z',
         },
       ]),
     ).toBe('wenshao');
@@ -985,9 +1008,38 @@ exit 1`;
     expect(
       runUnlabel([
         {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-01T00:00:00Z',
+        },
+        {
           event: 'unlabeled',
           label: { name: 'autofix/takeover' },
           actor: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-08-02T00:00:00Z',
+        },
+      ]),
+    ).toBe('');
+    // R2-1's two-cycle fixture: cycle-1 human release, cycle-2 re-label +
+    // bot auto-release — the stale human event must NOT heal cycle 2.
+    expect(
+      runUnlabel([
+        {
+          event: 'unlabeled',
+          label: { name: 'autofix/takeover' },
+          actor: { login: 'wenshao' },
+          created_at: '2026-08-01T00:00:00Z',
+        },
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-02T00:00:00Z',
+        },
+        {
+          event: 'unlabeled',
+          label: { name: 'autofix/takeover' },
+          actor: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-08-05T00:00:00Z',
         },
       ]),
     ).toBe('');
@@ -995,6 +1047,24 @@ exit 1`;
     expect(workflow).toMatch(
       /clear stale \$\{NEEDS_HUMAN_LABEL\}[\s\S]{0,300}gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}"/,
     );
+    // act() echoes its own DRY-RUN preview / failure warning — the two new
+    // DELETE levers must not swallow that with a redirect (R2-5).
+    const actDeleteSites = workflow.match(
+      /act "[^\n]+" \\\n\s+gh api -X DELETE[^\n]+/g,
+    );
+    expect(actDeleteSites?.length).toBeGreaterThanOrEqual(2);
+    for (const site of actDeleteSites ?? []) {
+      expect(site).not.toContain('> /dev/null');
+    }
+    // A zero-padded variable must not kill the lever: base-10 normalize
+    // after the numeric guard (R2-6).
+    expect(workflow).toContain(
+      'AUTO_RELEASE_DAYS=$((10#${AUTO_RELEASE_DAYS}))',
+    );
+    // The summary dedup is scoped to THIS pause cycle — markers older than
+    // the latest cap notice don't suppress a second release's summary
+    // (R2-4).
+    expect(workflow).toContain('select((.created_at // "") > $term)');
     // Tick summary and dashboard header report the same counters (R1-12).
     expect(workflow).toContain(
       '✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS})',
