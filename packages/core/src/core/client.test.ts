@@ -100,6 +100,7 @@ import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { formatFunctionSchemaBlocks } from '../tools/function-schema-rendering.js';
 import { getFunctionSchemaFingerprint } from '../tools/tool-registry.js';
+import { buildSessionRecoveryPlanFromApiHistory } from './session-recovery.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   __resetActiveGoalStoreForTests,
@@ -1767,6 +1768,162 @@ describe('Gemini Client (client.ts)', () => {
         restoredSchemaText,
       );
       expect(reg.clearProxySchemaPresentations).not.toHaveBeenCalled();
+    });
+
+    it('does not hide a dangling deferred call behind a restored schema reminder', async () => {
+      const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: { type: 'object' },
+      };
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name)
+          ? ({} as never)
+          : name === 'cron_create'
+            ? ({ schema: cronCreateSchema } as never)
+            : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === 'cron_create',
+      );
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'proxy-success',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: { name: 'cron_create', arguments: {} },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'proxy-success',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'created' },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'proxy-dangling',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: { name: 'cron_create', arguments: {} },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const reminderIndex = history.findIndex((entry) =>
+        entry.parts?.some((part) =>
+          part.text?.includes(
+            'Current schemas for deferred tools restored from session history',
+          ),
+        ),
+      );
+      const danglingCallIndex = history.findIndex((entry) =>
+        entry.parts?.some((part) => part.functionCall?.id === 'proxy-dangling'),
+      );
+      expect(reminderIndex).toBeGreaterThanOrEqual(0);
+      expect(reminderIndex).toBeLessThan(danglingCallIndex);
+      expect(history.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+        'proxy-dangling',
+      );
+      const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+        sessionId: 'resume-with-dangling-proxy',
+        apiHistory: history.slice(0, -1),
+      });
+      expect(recoveryPlan.kind).toBe('interrupted_turn');
+      expect(recoveryPlan.continuation?.parts[0]?.functionResponse?.id).toBe(
+        'proxy-dangling',
+      );
+    });
+
+    it('keeps a trailing user prompt after a restored schema reminder', async () => {
+      const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: { type: 'object' },
+      };
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name)
+          ? ({} as never)
+          : name === 'cron_create'
+            ? ({ schema: cronCreateSchema } as never)
+            : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === 'cron_create',
+      );
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'proxy-success',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: { name: 'cron_create', arguments: {} },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'proxy-success',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'created' },
+              },
+            } as never,
+          ],
+        },
+        { role: 'user', parts: [{ text: 'finish the setup' }] },
+      ]);
+
+      const history = client.getHistory();
+      const reminderIndex = history.findIndex((entry) =>
+        entry.parts?.some((part) =>
+          part.text?.includes(
+            'Current schemas for deferred tools restored from session history',
+          ),
+        ),
+      );
+      const promptIndex = history.findIndex((entry) =>
+        entry.parts?.some((part) => part.text === 'finish the setup'),
+      );
+      expect(reminderIndex).toBeGreaterThanOrEqual(0);
+      expect(reminderIndex).toBeLessThan(promptIndex);
+      expect(
+        buildSessionRecoveryPlanFromApiHistory({
+          sessionId: 'resume-with-prompt',
+          apiHistory: history,
+        }).kind,
+      ).toBe('interrupted_prompt');
     });
 
     it.each([

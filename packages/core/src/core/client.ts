@@ -121,6 +121,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSystemReminderContent,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from '../utils/environmentContext.js';
@@ -128,6 +129,7 @@ import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
+import { detectTurnInterruption } from './turn-interruption.js';
 import {
   getFunctionSchemaFingerprint,
   type DeferredToolSummary,
@@ -1822,20 +1824,41 @@ export class GeminiClient {
                 }
               }
               if (restoredSchemas.length > 0) {
+                const restoredSchemaReminder: Content = {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: wrapSystemReminder(
+                        'Current schemas for deferred tools restored from session history:\n\n' +
+                          formatFunctionSchemaBlocks(restoredSchemas) +
+                          '\n\nTo call a restored deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
+                      ),
+                    },
+                  ],
+                };
+                let reminderInsertionIndex = effectiveExtraHistory.length;
+                const interruption = detectTurnInterruption(
+                  effectiveExtraHistory,
+                );
+                if (interruption.kind === 'interrupted_turn') {
+                  reminderInsertionIndex -= 1;
+                } else if (interruption.kind === 'interrupted_prompt') {
+                  while (reminderInsertionIndex > 0) {
+                    const entry =
+                      effectiveExtraHistory[reminderInsertionIndex - 1];
+                    if (
+                      entry?.role !== 'user' ||
+                      isSystemReminderContent(entry)
+                    ) {
+                      break;
+                    }
+                    reminderInsertionIndex -= 1;
+                  }
+                }
                 effectiveExtraHistory = [
-                  ...effectiveExtraHistory,
-                  {
-                    role: 'user',
-                    parts: [
-                      {
-                        text: wrapSystemReminder(
-                          'Current schemas for deferred tools restored from session history:\n\n' +
-                            formatFunctionSchemaBlocks(restoredSchemas) +
-                            '\n\nTo call a restored deferred tool on a later turn, use `deferred_tool_call` with `name` set to the exact function name above and `arguments` matching that function schema.',
-                        ),
-                      },
-                    ],
-                  },
+                  ...effectiveExtraHistory.slice(0, reminderInsertionIndex),
+                  restoredSchemaReminder,
+                  ...effectiveExtraHistory.slice(reminderInsertionIndex),
                 ];
                 for (const schema of restoredSchemas) {
                   if (schema.name) {
