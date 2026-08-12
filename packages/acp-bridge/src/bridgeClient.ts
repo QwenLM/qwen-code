@@ -9,6 +9,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type {
   Client,
+  ContentBlock,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
@@ -83,6 +84,11 @@ import type {
   SessionArtifactInput,
   SessionArtifactStore,
 } from './sessionArtifacts.js';
+import {
+  isSessionMediaReference,
+  type SessionMediaReference,
+  type SessionMediaStore,
+} from './sessionMedia.js';
 
 /**
  * Validate a channel-wide active-work snapshot off the wire.
@@ -605,6 +611,7 @@ export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
   artifacts: SessionArtifactStore;
+  media: SessionMediaStore;
   recordingDegraded: boolean;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
@@ -1177,8 +1184,8 @@ export class BridgeClient implements Client {
    * between tool batches to pull any messages the browser queued mid-turn. We splice the per-session
    * queue, return them to the child as the response, and — when non-empty —
    * publish a `mid_turn_message_injected` SSE frame so the browser can move
-   * those messages out of its pending queue (a dedupe signal, not a transcript
-   * render). Unknown methods reject with ACP `methodNotFound` (-32601), matching
+   * those messages out of its pending queue and render the immediate echo.
+   * Unknown methods reject with ACP `methodNotFound` (-32601), matching
    * the SDK's
    * default for an unimplemented client surface; the child's drain caller
    * treats that as "drain unsupported" and stops asking.
@@ -1227,15 +1234,13 @@ export class BridgeClient implements Client {
     // The drain always carries a sessionId; without one we can't route it on a
     // multi-session channel (and `resolveEntry(undefined)` would throw there),
     // so answer with an empty drain rather than poisoning the turn.
-    if (!sessionId) return { messages: [], hasQueuedPrompt: false };
+    if (!sessionId) return { messages: [], items: [], hasQueuedPrompt: false };
     const entry = this.resolveEntry(sessionId);
-    if (!entry) return { messages: [], hasQueuedPrompt: false };
+    if (!entry) return { messages: [], items: [], hasQueuedPrompt: false };
     const drained = entry.midTurnMessageQueue.splice(0);
     if (drained.length > 0) {
-      // Record the handoff so clients that lost their bookkeeping (page
-      // refresh) or missed the echo frame below can reconcile via
-      // `getMidTurnMessages` instead of resending an already-injected
-      // message as the next turn. Ring is bounded; oldest ids evicted.
+      // Claim the ids before media I/O yields so retries and removals cannot
+      // observe a drained message as neither queued nor settled.
       for (const item of drained) {
         entry.settledMidTurnMessageIds.push(item.messageId);
       }
@@ -1250,9 +1255,55 @@ export class BridgeClient implements Client {
         );
       }
     }
+    const items: Array<{
+      messageId: string;
+      displayText: string;
+      content: ContentBlock[];
+      mediaReferences?: SessionMediaReference[];
+    }> = await Promise.all(
+      drained.map(async (item) => {
+        try {
+          const mediaReferences = (item.content ?? []).filter(
+            isSessionMediaReference,
+          );
+          return {
+            messageId: item.messageId,
+            displayText: item.text,
+            content: [
+              ...(item.text
+                ? [{ type: 'text' as const, text: item.text }]
+                : []),
+              ...(await entry.media.resolveContent(item.content ?? [])),
+            ],
+            ...(mediaReferences.length > 0 ? { mediaReferences } : {}),
+          };
+        } catch (error) {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} could not resolve media for message ${JSON.stringify(item.messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          );
+          return {
+            messageId: item.messageId,
+            displayText: item.text,
+            content: [
+              {
+                type: 'text' as const,
+                text: item.text
+                  ? `${item.text}\n[Attached media is no longer available]`
+                  : '[Attached media is no longer available]',
+              },
+            ],
+          };
+        }
+      }),
+    );
     // Queue-only entries are private coordinator steering, not UI transcript.
     const echoed = drained.filter((item) => !item.queueOnly);
     const messages = drained.map((item) => item.text);
+    // Structured twin of `messages` carrying any queued media blocks. The ACP
+    // child prefers `items` when present and falls back to `messages`, so
+    // text-only entries surface as a single text block and old children keep
+    // working unchanged. References travel beside the resolved content so the
+    // child can persist replay-safe metadata rather than inline bytes.
     const hasQueuedPrompt = entry.pendingPromptList.some(
       (prompt) =>
         prompt.state === 'queued' && !prompt.abortController.signal.aborted,
@@ -1270,6 +1321,15 @@ export class BridgeClient implements Client {
           sessionId: entry.sessionId,
           messages: echoed.map((item) => item.text),
           messageIds: echoed.map((item) => item.messageId),
+          // Carry the structured `items` twin (content blocks per message) so
+          // the browser-side echo renderer can show attached images alongside
+          // the message text. Older consumers that don't read this field keep
+          // working unchanged.
+          items: echoed.map((item) => ({
+            ...(item.content && item.content.length > 0
+              ? { content: item.content }
+              : {}),
+          })),
         },
       });
       writeStderrLine(
@@ -1278,7 +1338,7 @@ export class BridgeClient implements Client {
           : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
       );
     }
-    return { messages, hasQueuedPrompt };
+    return { messages, items, hasQueuedPrompt };
   }
 
   private async handleExternalToolGuardPrepare(

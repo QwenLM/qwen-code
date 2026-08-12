@@ -127,6 +127,7 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   retryable?: boolean;
   source?: string;
   data?: unknown;
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

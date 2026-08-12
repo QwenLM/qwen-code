@@ -442,6 +442,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_source_metadata',
   'session_side_task',
   'session_prompt',
+  'session_media',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -1201,6 +1202,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     worktree: { slug: string; path: string; branch: string };
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
+  const sessionMedia = new Map<string, { data: Buffer; mimeType: string }>();
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ??
     (() => ({ accepted: true, messageId: 'mid-default' }));
@@ -2201,12 +2203,29 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    enqueueMidTurnMessage(sessionId, message, context, messageId) {
+    async storeSessionMedia(_sessionId, data, mimeType) {
+      const mediaId = `media-${sessionMedia.size + 1}`;
+      sessionMedia.set(mediaId, { data: Buffer.from(data), mimeType });
+      return {
+        type: 'image',
+        mediaId,
+        mimeType,
+        size: data.byteLength,
+      };
+    },
+    async readSessionMedia(_sessionId, mediaId) {
+      return sessionMedia.get(mediaId);
+    },
+    async removeSessionMedia(_sessionId, mediaId) {
+      return sessionMedia.delete(mediaId);
+    },
+    enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
         sessionId,
         message,
         ...(context ? { context } : {}),
         ...(messageId ? { messageId } : {}),
+        ...(options ? { options } : {}),
       });
       return enqueueMidTurnImpl(sessionId, message, context, messageId);
     },
@@ -9222,6 +9241,88 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('session media', () => {
+    it('uploads and reads session-scoped binary media', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const uploaded = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(bytes);
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'image',
+        mediaId: 'media-1',
+        mimeType: 'image/png',
+        size: bytes.length,
+      });
+
+      const downloaded = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .buffer(true);
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers['content-type']).toBe('image/png');
+      expect(downloaded.body).toEqual(bytes);
+
+      const removed = await request(app)
+        .delete('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(removed.status).toBe(200);
+      expect(removed.body).toEqual({ removed: true });
+
+      const missing = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(missing.status).toBe(404);
+    });
+
+    it('rejects non-image uploads', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'audio/wav')
+        .send(Buffer.from([1]));
+
+      expect(response.status).toBe(400);
+    });
+
+    it('reports the media route 8 MiB body limit accurately', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(Buffer.alloc(8 * 1024 * 1024 + 1));
+
+      expect(response.status).toBe(413);
+      expect(response.body).toEqual({
+        error: 'Request body too large (max 8 MiB)',
+      });
+    });
+  });
+
   describe('POST /session/:id/mid-turn-message', () => {
     const midTurnPost = (
       app: ReturnType<typeof createServeApp>,
@@ -9320,6 +9421,60 @@ describe('createServeApp', () => {
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
         message: '   ',
       });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
+    it('forwards validated media blocks to the bridge', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'see this',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'see this',
+          options: {
+            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+          },
+        },
+      ]);
+    });
+
+    it('admits an empty message when media blocks are present', async () => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: '',
+        content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+      });
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toHaveLength(1);
+    });
+
+    it.each([
+      ['not an array', { message: 'hi', content: 'nope' }],
+      ['empty array', { message: 'hi', content: [] }],
+      ['non-object block', { message: 'hi', content: ['block'] }],
+      [
+        'unknown block type',
+        { message: 'hi', content: [{ type: 'text', text: 'hi' }] },
+      ],
+      [
+        'missing data',
+        { message: 'hi', content: [{ type: 'image', mimeType: 'image/png' }] },
+      ],
+      [
+        'mismatched mimeType',
+        {
+          message: 'hi',
+          content: [{ type: 'image', data: 'aW1n', mimeType: 'audio/mp3' }],
+        },
+      ],
+    ])('400 when `content` is invalid: %s', async (_label, body) => {
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', body);
       expect(res.status).toBe(400);
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });

@@ -525,6 +525,8 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canInjectMidTurnMedia =
+    connection.capabilities?.features.includes('session_media') === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -542,6 +544,7 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canInjectMidTurnMedia,
     streamingState,
     sessionActions: actions,
     store,
@@ -1054,6 +1057,7 @@ export function ChatPane({
           onEdit={editQueuedPrompt}
           onRestoreUnknown={restoreUnknownQueuedPrompt}
           onDiscardUnknown={discardUnknownQueuedPrompt}
+          onImagePreview={handleImagePreview}
         />
         {unknownPromptAdmission && (
           <div

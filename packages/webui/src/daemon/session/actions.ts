@@ -24,16 +24,26 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  DaemonSessionMediaReference,
   PermissionResponse,
+  PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
-import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  DaemonPendingPromptLimitError,
+  isDaemonTurnError,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
 import { extractHttpStatus } from './httpErrors.js';
 import {
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
 } from './mappers.js';
-import { toDaemonPromptContent } from './promptContent.js';
+import {
+  daemonPromptImageToBlob,
+  toDaemonPromptContent,
+} from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
   withActionTimeout,
@@ -215,6 +225,9 @@ export function createDaemonSessionActions({
   getTransitionOrigin = () => 'action',
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
+  let mediaClient = sessionRef.current?.client;
+  let mediaClientId = sessionRef.current?.clientId;
+  let mediaClientSessionId = sessionRef.current?.sessionId;
   let noticeOwner = sessionRef.current;
   let reasoningActionToken = 0;
   let appliedReasoningActionToken = 0;
@@ -258,6 +271,65 @@ export function createDaemonSessionActions({
     );
     setSourceBoundOperationInFlight(false);
   }
+
+  async function promptContentWithUploadedMedia(
+    session: DaemonSessionClient,
+    text: string,
+    images: ReadonlyArray<{ data: string; mimeType: string }>,
+    signal?: AbortSignal,
+  ): Promise<{
+    content: PromptContentBlock[];
+    references: DaemonSessionMediaReference[];
+  }> {
+    const supportsMediaUpload =
+      getConnection().capabilities?.features.includes('session_media') === true;
+    if (
+      images.length === 0 ||
+      !supportsMediaUpload ||
+      typeof session.uploadMedia !== 'function'
+    ) {
+      return { content: toDaemonPromptContent(text, images), references: [] };
+    }
+    const results = await Promise.allSettled(
+      images.map(
+        async (image) =>
+          await session.uploadMedia(
+            daemonPromptImageToBlob(image),
+            image.mimeType,
+            signal,
+          ),
+      ),
+    );
+    const references = results.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (!failure) {
+      return { content: [{ type: 'text', text }, ...references], references };
+    }
+    await removeUploadedMedia(session, references);
+    if (extractHttpStatus(failure.reason) === 404) {
+      return { content: toDaemonPromptContent(text, images), references: [] };
+    }
+    throw failure.reason;
+  }
+
+  async function removeUploadedMedia(
+    session: DaemonSessionClient,
+    references: readonly DaemonSessionMediaReference[],
+  ): Promise<void> {
+    await Promise.allSettled(
+      references.map(
+        async (reference) => await session.removeMedia(reference.mediaId),
+      ),
+    );
+  }
+
+  const isDefinitePromptAdmissionRejection = (error: unknown) =>
+    error instanceof DaemonHttpError ||
+    error instanceof DaemonPendingPromptLimitError;
 
   const isCurrentLogicalSession = (session: DaemonSessionClient) => {
     const current = sessionRef.current;
@@ -596,20 +668,38 @@ export function createDaemonSessionActions({
             inputAnnotations ? { inputAnnotations } : undefined,
           );
         }
+        const uploaded = await promptContentWithUploadedMedia(
+          session,
+          text,
+          normalizedImages,
+          ctrl.signal,
+        );
+        if (ctrl.signal.aborted) {
+          await removeUploadedMedia(session, uploaded.references);
+          ctrl.signal.throwIfAborted();
+        }
         const promptRequest: Record<string, unknown> = {
-          prompt: toDaemonPromptContent(text, normalizedImages),
+          prompt: uploaded.content,
         };
+        options?.onAdmissionStarted?.();
         if (inputAnnotations) {
           promptRequest['_meta'] = { inputAnnotations };
         }
         if (options?.retry) {
           promptRequest['retry'] = true;
         }
-        options?.onAdmissionStarted?.();
-        const accepted = await session.submitPrompt(
-          promptRequest as Parameters<typeof session.submitPrompt>[0],
-          ctrl.signal,
-        );
+        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        try {
+          accepted = await session.submitPrompt(
+            promptRequest as Parameters<typeof session.submitPrompt>[0],
+            ctrl.signal,
+          );
+        } catch (error) {
+          if (isDefinitePromptAdmissionRejection(error)) {
+            await removeUploadedMedia(session, uploaded.references);
+          }
+          throw error;
+        }
         if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
           restartEventStream(sessionId);
         }
@@ -681,8 +771,14 @@ export function createDaemonSessionActions({
           inputAnnotations ? { inputAnnotations } : undefined,
         );
       }
+      const uploaded = await promptContentWithUploadedMedia(
+        session,
+        text,
+        normalizedImages,
+        options?.signal,
+      );
       const promptRequest: Record<string, unknown> = {
-        prompt: toDaemonPromptContent(text, normalizedImages),
+        prompt: uploaded.content,
       };
       if (inputAnnotations) {
         promptRequest['_meta'] = { inputAnnotations };
@@ -690,13 +786,22 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
-      const accepted = await session.submitPrompt(
-        promptRequest as Parameters<typeof session.submitPrompt>[0],
-      );
+      let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+      try {
+        accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
+        );
+      } catch (error) {
+        if (isDefinitePromptAdmissionRejection(error)) {
+          await removeUploadedMedia(session, uploaded.references);
+        }
+        throw error;
+      }
       if (options?.signal?.aborted) {
         try {
           const removal = await session.removePendingPrompt(accepted.promptId);
           if (removal.removed) {
+            await removeUploadedMedia(session, uploaded.references);
             return { promptId: accepted.promptId, removedAfterAbort: true };
           }
         } catch (err) {
@@ -1491,9 +1596,51 @@ export function createDaemonSessionActions({
       }
     },
 
+    async uploadMedia(image, opts) {
+      requireStableSession();
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Media upload failed',
+        'send_prompt',
+      );
+      const mimeType =
+        image.mimeType ?? image.mediaType ?? image.media_type ?? 'image/*';
+      mediaClient = session.client;
+      mediaClientId = session.clientId;
+      mediaClientSessionId = session.sessionId;
+      return await session.uploadMedia(
+        daemonPromptImageToBlob(image),
+        mimeType,
+        opts?.signal,
+      );
+    },
+
+    async removeMedia(mediaId, opts) {
+      const session = sessionRef.current;
+      if (opts?.sessionId && session?.sessionId !== opts.sessionId) {
+        const client = session?.client ?? mediaClient;
+        if (!client) return false;
+        const targetClientId =
+          getPersistedClientId(opts.sessionId) ??
+          (mediaClientSessionId === opts.sessionId ? mediaClientId : undefined);
+        return targetClientId
+          ? await client.removeSessionMedia(opts.sessionId, mediaId, {
+              clientId: targetClientId,
+            })
+          : await client.removeSessionMedia(opts.sessionId, mediaId);
+      }
+      if (!session) return false;
+      return await session.removeMedia(mediaId);
+    },
+
     async enqueueMidTurnMessage(
       message: string,
-      opts?: { signal?: AbortSignal; messageId?: string },
+      opts?: {
+        signal?: AbortSignal;
+        messageId?: string;
+        content?: PromptContentBlock[];
+      },
     ): Promise<DaemonMidTurnMessageResult> {
       if (isCrossSessionTransitionPending()) return { accepted: false };
       // Calls without an id are the old-daemon compatibility path and fall back

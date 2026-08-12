@@ -60,6 +60,7 @@ export function publishSidechannelMidTurnInjected(
       sessionId: data.sessionId,
       messages: [...data.messages],
       ...(data.messageIds ? { messageIds: [...data.messageIds] } : {}),
+      ...(data.items ? { items: [...data.items] } : {}),
       ...(data.originatorClientId
         ? { originatorClientId: data.originatorClientId }
         : {}),
@@ -124,8 +125,8 @@ function notifyMidTurnInjectedListeners(): void {
 /**
  * Parse a raw daemon SSE frame into the injected-messages payload, or
  * `undefined` if the frame is not a well-formed `mid_turn_message_injected`
- * event. Filters out non-string / empty entries; returns `undefined` when
- * nothing usable remains.
+ * event. Empty text slots are preserved so `messages`, `messageIds`, and
+ * media `items` remain index-aligned for image-only messages.
  */
 export function parseSidechannelMidTurnInjected(
   event: unknown,
@@ -141,16 +142,34 @@ export function parseSidechannelMidTurnInjected(
   if (typeof sessionId !== 'string' || !Array.isArray(messages)) {
     return undefined;
   }
-  const stringMessages = messages.filter(
-    (message): message is string =>
-      typeof message === 'string' && message.length > 0,
-  );
-  if (stringMessages.length === 0) return undefined;
+  if (!messages.every((message) => typeof message === 'string')) {
+    return undefined;
+  }
+  const stringMessages = messages as string[];
+  const items = dataRecord['items'];
+  const alignedItems =
+    Array.isArray(items) && items.length === messages.length
+      ? items
+      : undefined;
+  const hasMedia =
+    alignedItems !== undefined &&
+    alignedItems.some(
+      (item) =>
+        !!item &&
+        typeof item === 'object' &&
+        Array.isArray((item as Record<string, unknown>)['content']) &&
+        ((item as Record<string, unknown>)['content'] as unknown[]).some(
+          (block) =>
+            !!block &&
+            typeof block === 'object' &&
+            (block as Record<string, unknown>)['type'] === 'image',
+        ),
+    );
+  if (!stringMessages.some(Boolean) && !hasMedia) return undefined;
   const messageIds = dataRecord['messageIds'];
   const stringMessageIds =
     Array.isArray(messageIds) &&
     messageIds.length === messages.length &&
-    stringMessages.length === messages.length &&
     messageIds.every(
       (messageId) => typeof messageId === 'string' && messageId.length > 0,
     )
@@ -163,6 +182,9 @@ export function parseSidechannelMidTurnInjected(
     sessionId,
     messages: stringMessages,
     ...(stringMessageIds ? { messageIds: stringMessageIds } : {}),
+    ...(alignedItems
+      ? { items: alignedItems as DaemonMidTurnMessageInjectedData['items'] }
+      : {}),
     ...(typeof originatorClientId === 'string' ? { originatorClientId } : {}),
   };
 }

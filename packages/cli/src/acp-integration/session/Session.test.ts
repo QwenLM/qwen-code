@@ -4210,6 +4210,65 @@ describe('Session', () => {
       ]);
     });
 
+    it('records daemon media references for transcript replay', async () => {
+      const mediaReference = {
+        type: 'image' as const,
+        mediaId: 'media-1',
+        mimeType: 'image/png',
+        size: 3,
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'describe this' },
+          { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        ],
+        _meta: {
+          'qwen.daemon.mediaReferences': [mediaReference],
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'describe this',
+        undefined,
+        {
+          displayText: 'describe this',
+          hookContext: '',
+          mediaReferences: [mediaReference],
+        },
+      );
+    });
+
+    it('records every media reference allowed by the session store', async () => {
+      const mediaReferences = Array.from({ length: 256 }, (_, index) => ({
+        type: 'image' as const,
+        mediaId: `media-${index}`,
+        mimeType: 'image/png',
+        size: 3,
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'describe these' }],
+        _meta: {
+          'qwen.daemon.mediaReferences': mediaReferences,
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'describe these',
+        undefined,
+        expect.objectContaining({ mediaReferences }),
+      );
+    });
+
     it('rejects model-only prompts without trusted invocation context', async () => {
       await expect(
         session.prompt(
@@ -10013,6 +10072,32 @@ describe('Session', () => {
                 },
               ],
               displayText: 'please inspect this image',
+              mediaReferences: [
+                {
+                  type: 'image',
+                  mediaId: 'image-1',
+                  mimeType: 'image/png',
+                  size: 8,
+                },
+              ],
+            },
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'cHVyZS1pbWFnZQ==',
+                },
+              ],
+              displayText: '',
+              mediaReferences: [
+                {
+                  type: 'image',
+                  mediaId: 'image-2',
+                  mimeType: 'image/png',
+                  size: 10,
+                },
+              ],
             },
           ],
         });
@@ -10088,6 +10173,21 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(midTurnParts, 'please inspect this image');
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [{ text: '\n[User message received during tool execution]: ' }],
+          '',
+          undefined,
+          [
+            {
+              type: 'image',
+              mediaId: 'image-2',
+              mimeType: 'image/png',
+              size: 10,
+            },
+          ],
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           'Unknown ContentBlock type: video',
         );

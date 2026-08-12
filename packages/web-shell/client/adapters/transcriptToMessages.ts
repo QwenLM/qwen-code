@@ -44,7 +44,6 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
 interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
-  midTurnInserted?: (message: string) => string;
   modelStreamInterrupted?: string;
 }
 
@@ -234,15 +233,40 @@ function getSessionBranchDisplayName(data: unknown): string | null {
     : null;
 }
 
-function getMidTurnInjectedText(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const messages = (data as { messages?: unknown }).messages;
-  if (!Array.isArray(messages)) return null;
-  const text = messages
-    .filter((message): message is string => typeof message === 'string')
-    .join('\n')
-    .trim();
-  return text || null;
+/**
+ * Extract image content blocks from mid-turn injected message items.
+ * Returns an array of {data, mimeType} objects for rendering in the transcript.
+ */
+function getMidTurnInjectedImages(
+  data: unknown,
+): Array<{ data: string; mimeType: string }> | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const type = (block as { type?: unknown }).type;
+      const blockData = (block as { data?: unknown }).data;
+      const mimeType = (block as { mimeType?: unknown }).mimeType;
+
+      if (
+        type === 'image' &&
+        typeof blockData === 'string' &&
+        typeof mimeType === 'string'
+      ) {
+        images.push({ data: blockData, mimeType });
+      }
+    }
+  }
+
+  return images.length > 0 ? images : undefined;
 }
 
 function isBackgroundNotificationBlock(
@@ -369,6 +393,23 @@ export function transcriptBlocksToDaemonMessages(
         const inputAnnotations = Array.isArray(meta?.inputAnnotations)
           ? (meta.inputAnnotations as DaemonInputAnnotation[])
           : undefined;
+        const images = textBlock.images?.map((img) => ({
+          data: img.data,
+          mimeType: img.mimeType || 'image/*',
+        }));
+        if (source === 'mid_turn_message_injected') {
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source,
+            timestamp: blockTime,
+            ...(images && images.length > 0 ? { images } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -378,11 +419,8 @@ export function transcriptBlocksToDaemonMessages(
           ...(inputAnnotations ? { inputAnnotations } : {}),
         };
         // Attach images if present
-        if (textBlock.images && textBlock.images.length > 0) {
-          msg.images = textBlock.images.map((img) => ({
-            data: img.data,
-            mimeType: img.mimeType || 'image/*',
-          }));
+        if (images && images.length > 0) {
+          msg.images = images;
         }
         messages.push(msg);
         break;
@@ -727,16 +765,10 @@ export function transcriptBlocksToDaemonMessages(
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
             : null;
-        const midTurnInsertedText =
-          statusBlock.source === 'mid_turn_message_injected'
-            ? getMidTurnInjectedText(statusBlock.data)
-            : null;
         const text =
           branchDisplayName && options.labels?.branchSuccess
             ? options.labels.branchSuccess(branchDisplayName)
-            : midTurnInsertedText && options.labels?.midTurnInserted
-              ? options.labels.midTurnInserted(midTurnInsertedText)
-              : statusBlock.text;
+            : statusBlock.text;
         if (isIgnoredWebShellStatus(text)) break;
         const todos = parsePlanTodos(text);
         if (todos) {
@@ -754,6 +786,12 @@ export function transcriptBlocksToDaemonMessages(
         // transcript avoids hiding global messages such as SSE lag warnings,
         // malformed-event debug lines, or shell result notices inside
         // whichever subAgent happened to be active.
+        // Mid-turn injected messages may carry image content blocks — extract
+        // them so the renderer can show thumbnails alongside the text echo.
+        const midTurnInjectedImages =
+          statusBlock.source === 'mid_turn_message_injected'
+            ? getMidTurnInjectedImages(statusBlock.data)
+            : undefined;
         messages.push({
           id: block.id,
           role: 'system',
@@ -762,6 +800,7 @@ export function transcriptBlocksToDaemonMessages(
           timestamp: blockTime,
           ...(statusBlock.source ? { source: statusBlock.source } : {}),
           ...(statusBlock.data !== undefined ? { data: statusBlock.data } : {}),
+          ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
         });
         needsNewContentMessage = true;
         break;

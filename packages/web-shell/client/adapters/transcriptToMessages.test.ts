@@ -448,28 +448,81 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('localizes structured mid-turn inserted status blocks', () => {
-    const messages = transcriptBlocksToDaemonMessages(
-      [
-        statusBlock('mid-1', 'Inserted message: hello', 1, {
-          source: 'mid_turn_message_injected',
-          data: { sessionId: 's1', messages: ['你好'] },
-        }),
-      ],
-      {
-        labels: {
-          midTurnInserted: (message) => `已插入消息：${message}`,
-        },
-      },
-    );
+  it('shows structured mid-turn inserted text without a status prefix', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '你好', 1, {
+        source: 'mid_turn_message_injected',
+        data: { sessionId: 's1', messages: ['你好'] },
+      }),
+    ]);
 
     expect(messages).toEqual([
       expect.objectContaining({
         role: 'system',
-        content: '已插入消息：你好',
+        content: '你好',
         source: 'mid_turn_message_injected',
         data: { sessionId: 's1', messages: ['你好'] },
       }),
+    ]);
+  });
+
+  it('extracts images from mid-turn injected message items', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'look at this', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['look at this'],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'look at this',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
+  it('keeps replayed mid-turn user blocks as inserted messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('mid-1', 'user', 'with image', 1, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+      textBlock('mid-2', 'user', 'text only', 2, false, {
+        meta: {
+          source: 'mid_turn_message_injected',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'system',
+        content: 'with image',
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      },
+      {
+        role: 'system',
+        content: 'text only',
+        source: 'mid_turn_message_injected',
+      },
     ]);
   });
 

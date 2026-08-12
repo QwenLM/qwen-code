@@ -20,6 +20,8 @@ const sdkMock = vi.hoisted(() => {
   const pendingEventListeners = new Set<() => void>();
   const mock = {
     actions: {
+      uploadMedia: vi.fn(),
+      removeMedia: vi.fn(),
       enqueueMidTurnMessage: vi.fn(),
       getMidTurnMessages: vi.fn(),
       submitPrompt: vi.fn(),
@@ -96,6 +98,7 @@ interface HarnessOptions {
   clientId?: string;
   canMutateMidTurn?: boolean;
   canQueryMidTurn?: boolean;
+  canInjectMidTurnMedia?: boolean;
   streamingState?: DaemonStreamingState;
 }
 
@@ -130,6 +133,7 @@ function createHarness() {
       clientId: opts.clientId ?? CLIENT_ID,
       canMutateMidTurn: opts.canMutateMidTurn ?? true,
       canQueryMidTurn: opts.canQueryMidTurn ?? true,
+      canInjectMidTurnMedia: opts.canInjectMidTurnMedia ?? true,
       streamingState: opts.streamingState ?? 'responding',
       sessionActions: sdkMock.actions as never,
       store: stableStore as never,
@@ -181,6 +185,15 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       (_message: string, opts?: { messageId?: string }) =>
         Promise.resolve({ accepted: true, messageId: opts?.messageId }),
     );
+    sdkMock.actions.uploadMedia.mockImplementation(
+      async (image: { mimeType?: string }) => ({
+        type: 'image',
+        mediaId: 'media-1',
+        mimeType: image.mimeType ?? 'image/png',
+        size: 3,
+      }),
+    );
+    sdkMock.actions.removeMedia.mockResolvedValue(true);
     sdkMock.actions.getMidTurnMessages.mockResolvedValue({
       messages: [],
       settledMessageIds: [],
@@ -197,6 +210,50 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     vi.restoreAllMocks();
     sdkMock.injectedBatches = [];
     sdkMock.pendingEvents = [];
+  });
+
+  it('does not restore a row from a snapshot older than its injection', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      let resolveSnapshot: ((value: unknown) => void) | undefined;
+      sdkMock.actions.getMidTurnMessages.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSnapshot = resolve;
+          }),
+      );
+
+      await act(async () => {
+        harness.result().enqueuePrompt('already injected');
+        await Promise.resolve();
+      });
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      expect(messageId).toEqual(expect.any(String));
+
+      sdkMock.injectedBatches = [
+        {
+          sessionId: 'session-a',
+          messages: ['already injected'],
+          messageIds: [messageId],
+        },
+      ];
+      await harness.render({ streamingState: 'responding' });
+      expect(sdkMock.actions.getMidTurnMessages).toHaveBeenCalledTimes(3);
+      await act(async () => {
+        resolveSnapshot?.({
+          messages: [{ messageId, text: 'already injected' }],
+          settledMessageIds: [],
+          promotedMessageIds: [],
+        });
+        await Promise.resolve();
+      });
+
+      expect(harness.result().queuedPrompts).toEqual([]);
+    } finally {
+      await harness.dispose();
+    }
   });
 
   it('restores queued rows lost to a page refresh from the daemon snapshot', async () => {
@@ -1359,7 +1416,11 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         harness
           .result()
-          .enqueuePrompt('lost in transit', undefined, onComplete);
+          .enqueuePrompt(
+            'lost in transit',
+            [{ data: 'aW1n', media_type: 'image/png' }],
+            onComplete,
+          );
       });
       for (let i = 0; i < 3; i++) {
         await act(async () => {
@@ -1369,6 +1430,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
 
       // The daemon never saw the message: hand the text back for a retry.
       expect(harness.editor.setText).toHaveBeenCalledWith('lost in transit');
+      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith('media-1', {
+        sessionId: 'session-a',
+      });
       expect(harness.reportError).toHaveBeenCalledTimes(1);
       expect(onComplete).not.toHaveBeenCalled();
 
@@ -1622,6 +1686,469 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         'settled late',
         undefined,
         undefined,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('attaches images as content blocks on the mid-turn push', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('look at this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'look at this',
+        expect.objectContaining({
+          messageId: expect.any(String),
+          content: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        }),
+      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('removes uploaded media when mid-turn admission is rejected', async () => {
+    sdkMock.actions.enqueueMidTurnMessage.mockResolvedValueOnce({
+      accepted: false,
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('look at this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith('media-1', {
+        sessionId: 'session-a',
+      });
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('does not enqueue uploaded media into a different session', async () => {
+    let finishUpload:
+      | ((reference: {
+          type: 'image';
+          mediaId: string;
+          mimeType: string;
+          size: number;
+        }) => void)
+      | undefined;
+    sdkMock.actions.uploadMedia.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ sessionId: 'session-a' });
+      act(() => {
+        harness
+          .result()
+          .enqueuePrompt('look at this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await harness.render({ sessionId: 'session-b' });
+      await act(async () => {
+        finishUpload?.({
+          type: 'image',
+          mediaId: 'media-a',
+          mimeType: 'image/png',
+          size: 3,
+        });
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith('media-a', {
+        sessionId: 'session-a',
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('injects an image-only message mid-turn', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('', [{ data: 'aW1n', media_type: 'image/png' }]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        '',
+        expect.objectContaining({
+          messageId: expect.any(String),
+          content: [
+            {
+              type: 'image',
+              mediaId: 'media-1',
+              mimeType: 'image/png',
+              size: 3,
+            },
+          ],
+        }),
+      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores media immediately when upload fails before admission', async () => {
+    sdkMock.actions.uploadMedia.mockRejectedValueOnce(
+      new Error('upload failed'),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('keep this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(harness.editor.setText).toHaveBeenCalledWith('keep this');
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('removes successful uploads when another image fails', async () => {
+    sdkMock.actions.uploadMedia
+      .mockResolvedValueOnce({
+        type: 'image',
+        mediaId: 'uploaded-before-failure',
+        mimeType: 'image/png',
+        size: 3,
+      })
+      .mockRejectedValueOnce(new Error('second upload failed'));
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('keep this', [
+          { data: 'aW1nMQ==', media_type: 'image/png' },
+          { data: 'aW1nMg==', media_type: 'image/png' },
+        ]);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.removeMedia).toHaveBeenCalledWith(
+        'uploaded-before-failure',
+        { sessionId: 'session-a' },
+      );
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps the images on an accepted media row through reconciliation', async () => {
+    // The daemon snapshot is text-only; the row rebuilt from it must still
+    // carry the images so display and edit/restore don't lose them.
+    sdkMock.actions.getMidTurnMessages.mockImplementation(async () => {
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      return {
+        messages: messageId ? [{ messageId, text: 'look at this' }] : [],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      };
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('look at this', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        text: 'look at this',
+        midTurnState: 'queued',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores images to the editor when editing a queued media row', async () => {
+    sdkMock.actions.getMidTurnMessages.mockImplementation(async () => {
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      return {
+        messages: messageId ? [{ messageId, text: 'edit me' }] : [],
+        settledMessageIds: [],
+        promotedMessageIds: [],
+      };
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('edit me', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const row = harness.result().queuedPrompts[0];
+      expect(row?.images).toEqual([{ data: 'aW1n', media_type: 'image/png' }]);
+
+      await act(async () => {
+        harness.result().editQueuedPrompt(row!.id);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // The daemon entry is removed and the full payload (text + images) is
+      // restored to the editor.
+      expect(sdkMock.actions.removeMidTurnMessage).toHaveBeenCalled();
+      expect(harness.editor.setText).toHaveBeenCalledWith('edit me');
+      expect(harness.editor.restoreImages).toHaveBeenCalledWith([
+        { data: 'aW1n', media_type: 'image/png' },
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps images when a media message is promoted into the pending-prompt FIFO', async () => {
+    // Settle race: the turn ends while the POST is in flight, so the daemon
+    // promotes the message instead of draining it. It then surfaces as a
+    // pending-prompt (server) row — that row must still carry the images so
+    // the queue shows them and editing restores them.
+    sdkMock.actions.getMidTurnMessages.mockImplementation(async () => {
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      return {
+        messages: [],
+        settledMessageIds: [],
+        promotedMessageIds: messageId ? [messageId] : [],
+      };
+    });
+    sdkMock.actions.getPendingPrompts.mockImplementation(async () => {
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      return {
+        pendingPrompts: messageId
+          ? [
+              {
+                promptId: messageId,
+                text: 'promoted note',
+                queuedAt: Date.now(),
+                state: 'queued' as const,
+              },
+            ]
+          : [],
+      };
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('promoted note', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        text: 'promoted note',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores images from the snapshot after a refresh (no in-memory admission)', async () => {
+    // Page-refresh case: nothing was enqueued this mount, so there is no pending
+    // admission to salvage from — the daemon snapshot's media blocks are the
+    // only source and must rebuild the row's images.
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-refresh',
+          text: 'refreshed note',
+          content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        text: 'refreshed note',
+        midTurnState: 'queued',
+        midTurnMessageId: 'm-refresh',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('restores images from pending-prompt content after a refresh', async () => {
+    // Page-refresh case for a promoted message: nothing was enqueued this
+    // mount, so there is no pending admission to salvage from — the daemon's
+    // getPendingPrompts content field is the only source and must rebuild the
+    // row's images.
+    sdkMock.actions.getPendingPrompts.mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'p-refresh',
+          text: 'refreshed prompt',
+          content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+          queuedAt: Date.now(),
+          state: 'queued' as const,
+        },
+      ],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        text: 'refreshed prompt',
+        serverPromptId: 'p-refresh',
+        images: [{ data: 'aW1n', media_type: 'image/png' }],
+      });
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps images on the next turn when the daemon lacks the media capability', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        canInjectMidTurnMedia: false,
+      });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('with image', [
+            { data: 'aW1n', media_type: 'image/png' },
+          ]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'with image',
+        expect.objectContaining({
+          images: [{ data: 'aW1n', media_type: 'image/png' }],
+        }),
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('keeps the whole message on the next turn when an image has no concrete mime type', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt('odd image', [
+            { data: 'aW1n', media_type: 'image/*' },
+          ]);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'odd image',
+        expect.objectContaining({
+          images: [{ data: 'aW1n', media_type: 'image/*' }],
+        }),
       );
     } finally {
       await harness.dispose();

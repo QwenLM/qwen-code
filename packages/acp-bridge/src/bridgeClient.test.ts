@@ -70,6 +70,7 @@ import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
+import { SessionMediaStore } from './sessionMedia.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -3003,6 +3004,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
           promptActive?: boolean;
+          media?: SessionMediaStore;
         }
       | undefined,
     ownsSession?: (sessionId: string) => boolean,
@@ -3010,6 +3012,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const resolvedEntry = entry
       ? {
           ...entry,
+          media: entry.media ?? new SessionMediaStore(),
           pendingPromptList: entry.pendingPromptList ?? [],
           settledMidTurnMessageIds: entry.settledMidTurnMessageIds ?? [],
         }
@@ -3071,6 +3074,28 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         'anonymous ordinary',
         'second',
       ],
+      items: [
+        {
+          messageId: 'mid-1',
+          displayText: 'first',
+          content: [{ type: 'text', text: 'first' }],
+        },
+        {
+          messageId: 'internal',
+          displayText: '<realtime_delegation />',
+          content: [{ type: 'text', text: '<realtime_delegation />' }],
+        },
+        {
+          messageId: 'anonymous-ui',
+          displayText: 'anonymous ordinary',
+          content: [{ type: 'text', text: 'anonymous ordinary' }],
+        },
+        {
+          messageId: 'mid-2',
+          displayText: 'second',
+          content: [{ type: 'text', text: 'second' }],
+        },
+      ],
       hasQueuedPrompt: false,
     });
     // Queue emptied so the same messages can't be re-injected on the next batch.
@@ -3092,11 +3117,191 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         sessionId: 'sess:drain',
         messages: ['first', 'anonymous ordinary', 'second'],
         messageIds: ['mid-1', 'anonymous-ui', 'mid-2'],
+        // Echo frame carries content blocks per message (empty here — text-only).
+        items: [{}, {}, {}],
       },
     });
     // The session-wide frame omits internal anonymous steering while the child
     // still receives it in queue order.
     expect(publish.mock.calls[0][0].originatorClientId).toBeUndefined();
+  });
+
+  it('echo frame carries media content blocks for image-bearing messages', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const image = {
+      type: 'image',
+      data: 'base64data',
+      mimeType: 'image/png',
+    } as const;
+    const entry = {
+      sessionId: 'sess:media',
+      activePromptId: 'prompt-media',
+      midTurnMessageQueue: [
+        {
+          messageId: 'mid-text',
+          text: 'plain',
+        },
+        {
+          messageId: 'mid-image',
+          text: 'look at this',
+          content: [image],
+        },
+      ],
+      settledMidTurnMessageIds: [],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:media', entry);
+
+    await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:media',
+    });
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0][0]).toMatchObject({
+      type: 'mid_turn_message_injected',
+      data: {
+        sessionId: 'sess:media',
+        messages: ['plain', 'look at this'],
+        messageIds: ['mid-text', 'mid-image'],
+        items: [{}, { content: [image] }],
+      },
+    });
+  });
+
+  it('resolves media references for the child and preserves their replay metadata', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const media = new SessionMediaStore();
+    try {
+      const reference = await media.put(Uint8Array.of(1, 2, 3), 'image/png');
+      const entry = {
+        sessionId: 'sess:media-reference',
+        midTurnMessageQueue: [
+          {
+            messageId: 'mid-reference',
+            text: 'look',
+            content: [reference],
+          },
+        ],
+        settledMidTurnMessageIds: [] as string[],
+        events: { publish },
+        media,
+      };
+      const client = makeClientWithEntry('sess:media-reference', entry);
+
+      await expect(
+        client.extMethod('craft/drainMidTurnQueue', {
+          sessionId: 'sess:media-reference',
+        }),
+      ).resolves.toMatchObject({
+        items: [
+          {
+            content: [
+              { type: 'text', text: 'look' },
+              { type: 'image', data: 'AQID', mimeType: 'image/png' },
+            ],
+            mediaReferences: [reference],
+          },
+        ],
+      });
+    } finally {
+      await media.close();
+    }
+  });
+
+  it('claims drained ids before media resolution yields', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const media = {
+      resolveContent: vi.fn(async (content: MidTurnQueueEntry['content']) => {
+        await gate;
+        return content ?? [];
+      }),
+    } as unknown as SessionMediaStore;
+    const entry = {
+      sessionId: 'sess:slow-media',
+      midTurnMessageQueue: [
+        {
+          messageId: 'mid-slow',
+          text: 'look',
+          content: [
+            { type: 'image' as const, data: 'AQID', mimeType: 'image/png' },
+          ],
+        },
+      ],
+      settledMidTurnMessageIds: [] as string[],
+      events: { publish: vi.fn().mockReturnValue(true) },
+      media,
+    };
+    const client = makeClientWithEntry('sess:slow-media', entry);
+
+    const drain = client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:slow-media',
+    });
+    await Promise.resolve();
+
+    expect(entry.midTurnMessageQueue).toEqual([]);
+    expect(entry.settledMidTurnMessageIds).toEqual(['mid-slow']);
+
+    release();
+    await expect(drain).resolves.toMatchObject({
+      messages: ['look'],
+      items: [{ messageId: 'mid-slow' }],
+    });
+  });
+
+  it('degrades an expired media item without blocking later messages', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const queued = {
+      messageId: 'mid-expired',
+      text: 'look at this',
+      content: [
+        {
+          type: 'image' as const,
+          mediaId: 'expired',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+    };
+    const entry = {
+      sessionId: 'sess:expired',
+      midTurnMessageQueue: [
+        queued,
+        { messageId: 'mid-ok', text: 'keep going' },
+      ],
+      settledMidTurnMessageIds: [] as string[],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:expired', entry);
+
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:expired',
+      }),
+    ).resolves.toMatchObject({
+      messages: ['look at this', 'keep going'],
+      items: [
+        {
+          messageId: 'mid-expired',
+          content: [
+            {
+              type: 'text',
+              text: 'look at this\n[Attached media is no longer available]',
+            },
+          ],
+        },
+        {
+          messageId: 'mid-ok',
+          content: [{ type: 'text', text: 'keep going' }],
+        },
+      ],
+    });
+
+    expect(entry.midTurnMessageQueue).toEqual([]);
+    expect(entry.settledMidTurnMessageIds).toEqual(['mid-expired', 'mid-ok']);
+    expect(publish).toHaveBeenCalledOnce();
   });
 
   it('does not publish an injected frame for anonymous steering', async () => {
@@ -3121,6 +3326,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       }),
     ).resolves.toEqual({
       messages: ['<realtime_delegation />'],
+      items: [
+        {
+          messageId: 'internal',
+          displayText: '<realtime_delegation />',
+          content: [{ type: 'text', text: '<realtime_delegation />' }],
+        },
+      ],
       hasQueuedPrompt: false,
     });
     expect(entry.settledMidTurnMessageIds).toEqual(['internal']);
@@ -3160,6 +3372,23 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
     expect(result).toEqual({
       messages: ['a', 'b', 'c'],
+      items: [
+        {
+          messageId: 'mid-a',
+          displayText: 'a',
+          content: [{ type: 'text', text: 'a' }],
+        },
+        {
+          messageId: 'mid-b',
+          displayText: 'b',
+          content: [{ type: 'text', text: 'b' }],
+        },
+        {
+          messageId: 'mid-c',
+          displayText: 'c',
+          content: [{ type: 'text', text: 'c' }],
+        },
+      ],
       hasQueuedPrompt: false,
     });
     expect(entry.midTurnMessageQueue).toEqual([]);
@@ -3208,6 +3437,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       // (a) the child still receives the message despite the dropped echo.
       expect(result).toEqual({
         messages: ['still-delivered'],
+        items: [
+          {
+            messageId: 'mid-delivered',
+            displayText: 'still-delivered',
+            content: [{ type: 'text', text: 'still-delivered' }],
+          },
+        ],
         hasQueuedPrompt: false,
       });
       expect(entry.midTurnMessageQueue).toEqual([]);
@@ -3236,7 +3472,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:empty',
     });
 
-    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
+    expect(result).toEqual({
+      messages: [],
+      items: [],
+      hasQueuedPrompt: false,
+    });
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -3282,7 +3522,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const result = await client.extMethod('craft/drainMidTurnQueue', {
       sessionId: 'sess:absent',
     });
-    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
+    expect(result).toEqual({ messages: [], items: [], hasQueuedPrompt: false });
   });
 
   it('short-circuits to an empty drain when no sessionId is supplied', async () => {
@@ -3302,7 +3542,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       Infinity,
     );
     const result = await client.extMethod('craft/drainMidTurnQueue', {});
-    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
+    expect(result).toEqual({ messages: [], items: [], hasQueuedPrompt: false });
   });
 
   it('reports only complete, non-aborted queued prompts', async () => {
@@ -3334,14 +3574,14 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       client.extMethod('craft/drainMidTurnQueue', {
         sessionId: 'sess:queued',
       }),
-    ).resolves.toEqual({ messages: [], hasQueuedPrompt: true });
+    ).resolves.toEqual({ messages: [], items: [], hasQueuedPrompt: true });
 
     queued.abortController.abort();
     await expect(
       client.extMethod('craft/drainMidTurnQueue', {
         sessionId: 'sess:queued',
       }),
-    ).resolves.toEqual({ messages: [], hasQueuedPrompt: false });
+    ).resolves.toEqual({ messages: [], items: [], hasQueuedPrompt: false });
   });
 
   it('claims only for the live running owner and reports queued competition', async () => {

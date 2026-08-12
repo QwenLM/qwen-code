@@ -37,7 +37,13 @@ import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../conversations/session-source.js';
-import type { Application, Request, RequestHandler, Response } from 'express';
+import express, {
+  type Application,
+  type ErrorRequestHandler,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
@@ -53,6 +59,7 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
+  type BridgePromptContentBlock,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -3305,6 +3312,114 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/media',
+    mutate(),
+    express.raw({ type: 'image/*', limit: '8mb' }),
+    ((error, _req, res, next) => {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        error.status === 413
+      ) {
+        res.status(413).json({ error: 'Request body too large (max 8 MiB)' });
+        return;
+      }
+      next(error);
+    }) satisfies ErrorRequestHandler,
+    withOwnerMutableSession(
+      'POST /session/:id/media',
+      async (req, res, sessionId, runtime) => {
+        const contentType = req.headers['content-type']
+          ?.split(';', 1)[0]
+          ?.trim()
+          .toLowerCase();
+        if (
+          !contentType ||
+          !contentType.startsWith('image/') ||
+          !Buffer.isBuffer(req.body) ||
+          req.body.byteLength === 0
+        ) {
+          res.status(400).json({
+            error:
+              'request body must contain image/* bytes with a matching Content-Type',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const reference = await runtime.bridge.storeSessionMedia(
+            sessionId,
+            req.body,
+            contentType,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(201).json(reference);
+        } catch (error) {
+          if (error instanceof RangeError) {
+            res.status(413).json({ error: error.message });
+            return;
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/media/:mediaId',
+    withOwnerReadSession(
+      'GET /session/:id/media/:mediaId',
+      async (req, res, sessionId, runtime) => {
+        const mediaId = req.params['mediaId'];
+        if (!mediaId) {
+          res.status(400).json({ error: '`mediaId` is required' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const media = await runtime.bridge.readSessionMedia(
+          sessionId,
+          mediaId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        if (!media) {
+          res.status(404).json({ error: 'session media not found' });
+          return;
+        }
+        res.setHeader('Content-Type', media.mimeType);
+        res.setHeader('Content-Length', String(media.data.byteLength));
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        res.status(200).send(media.data);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/media/:mediaId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/media/:mediaId',
+      async (req, res, sessionId, runtime) => {
+        const mediaId = req.params['mediaId'];
+        if (!mediaId) {
+          res.status(400).json({ error: '`mediaId` is required' });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const removed = await runtime.bridge.removeSessionMedia(
+          sessionId,
+          mediaId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json({ removed });
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/prompt',
     mutate(),
     withOwnerMutableSession(
@@ -4756,9 +4871,73 @@ export function registerSessionRoutes(
         // stores the trimmed string, so checking the raw length would reject input
         // whose real content fits but is padded with whitespace.
         const trimmed = typeof message === 'string' ? message.trim() : '';
-        if (trimmed.length === 0) {
+        // Optional image blocks injected mid-turn alongside the
+        // text. Validate strictly here — the ACP child silently drops blocks
+        // that fail its own `isContentBlock` check, so a malformed block would
+        // vanish from the turn without any error. Media size is bounded by the
+        // global request body limit.
+        const rawContent = body['content'];
+        let mediaBlocks: BridgePromptContentBlock[] | undefined;
+        if (rawContent !== undefined) {
+          if (!Array.isArray(rawContent) || rawContent.length === 0) {
+            res.status(400).json({
+              error: '`content` must be a non-empty array of media blocks',
+            });
+            return;
+          }
+          mediaBlocks = [];
+          for (const block of rawContent) {
+            if (
+              typeof block !== 'object' ||
+              block === null ||
+              Array.isArray(block)
+            ) {
+              res.status(400).json({
+                error: 'each `content` entry must be a media content block',
+              });
+              return;
+            }
+            const record = block as Record<string, unknown>;
+            const type = record['type'];
+            const data = record['data'];
+            const mediaId = record['mediaId'];
+            const mimeType = record['mimeType'];
+            const size = record['size'];
+            const inline = typeof data === 'string' && data.length > 0;
+            const reference =
+              typeof mediaId === 'string' &&
+              mediaId.length > 0 &&
+              typeof size === 'number' &&
+              Number.isSafeInteger(size) &&
+              size > 0;
+            if (
+              type !== 'image' ||
+              inline === reference ||
+              typeof mimeType !== 'string' ||
+              !mimeType.startsWith(`${type}/`)
+            ) {
+              res.status(400).json({
+                error:
+                  'each `content` entry must be an image block with either `data`, or `mediaId` and `size`, plus a matching `mimeType`',
+              });
+              return;
+            }
+            mediaBlocks.push(
+              inline
+                ? ({ type, data, mimeType } as BridgePromptContentBlock)
+                : ({
+                    type,
+                    mediaId,
+                    mimeType,
+                    size,
+                  } as BridgePromptContentBlock),
+            );
+          }
+        }
+        if (trimmed.length === 0 && mediaBlocks === undefined) {
           res.status(400).json({
-            error: '`message` is required and must be a non-empty string',
+            error:
+              '`message` must be a non-empty string, or `content` must carry at least one media block',
           });
           return;
         }
@@ -4791,6 +4970,7 @@ export function registerSessionRoutes(
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
+          mediaBlocks ? { content: mediaBlocks } : undefined,
         );
         res.status(200).json(result);
       },

@@ -573,24 +573,54 @@ function normalizeMidTurnMessageInjected(
   if (!isRecord(event.data)) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  const messages = Array.isArray(event.data['messages'])
-    ? event.data['messages'].filter(
-        (message): message is string =>
-          typeof message === 'string' && message.length > 0,
-      )
-    : [];
-  if (messages.length === 0) {
+  const data = event.data;
+  const rawMessages = data['messages'];
+  const messages =
+    Array.isArray(rawMessages) &&
+    rawMessages.every(
+      (message): message is string => typeof message === 'string',
+    )
+      ? rawMessages
+      : [];
+  const items = data['items'];
+  const hasMedia =
+    Array.isArray(items) &&
+    items.some(
+      (item) =>
+        isRecord(item) &&
+        Array.isArray(item['content']) &&
+        item['content'].some(
+          (block) => isRecord(block) && block['type'] === 'image',
+        ),
+    );
+  if (messages.length === 0 || (!messages.some(Boolean) && !hasMedia)) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
-  return [
-    {
+  const messageIds = Array.isArray(data['messageIds'])
+    ? data['messageIds']
+    : [];
+  return messages.map((text, index) => {
+    const item = Array.isArray(items) ? items[index] : undefined;
+    const messageId = messageIds[index];
+    return {
       ...base,
       type: 'status',
-      text: `Inserted message: ${messages.join('\n')}`,
+      text,
       source: 'mid_turn_message_injected',
-      data: event.data,
-    },
-  ];
+      data: {
+        ...data,
+        messages: [text],
+        ...(Array.isArray(items)
+          ? { items: item !== undefined ? [item] : [] }
+          : {}),
+        ...(typeof messageId === 'string'
+          ? { messageIds: [messageId] }
+          : Array.isArray(data['messageIds'])
+            ? { messageIds: [] }
+            : {}),
+      },
+    };
+  });
 }
 
 function createBase(
@@ -720,7 +750,15 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
-            return [{ ...base, type: 'user.image.delta', data, mimeType }];
+            return [
+              {
+                ...base,
+                type: 'user.image.delta',
+                data,
+                mimeType,
+                ...(meta ? { meta } : {}),
+              },
+            ];
           }
           return [];
         }

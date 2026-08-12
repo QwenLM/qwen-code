@@ -379,3 +379,65 @@ describe('SystemMessage — goal status activation', () => {
     window.removeEventListener('web-shell-goal-status-active', handler);
   });
 });
+
+describe('SystemMessage — inline images', () => {
+  it('renders image thumbnails when images prop is provided', () => {
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toBe('data:image/png;base64,base64data');
+    expect(img?.className).toContain('chatImageThumb');
+  });
+
+  it('makes images clickable when onImagePreview is provided', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="look at this"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[{ data: 'base64data', mimeType: 'image/png' }]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    const img = container.querySelector('img');
+    expect(img?.className).toContain('chatImageThumbInteractive');
+
+    act(() => {
+      img?.click();
+    });
+
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,base64data',
+      'User uploaded image 1',
+    );
+  });
+
+  it('renders multiple images in a row', () => {
+    const container = render(
+      <SystemMessage
+        content="look at these"
+        variant="info"
+        source="mid_turn_message_injected"
+        images={[
+          { data: 'img1', mimeType: 'image/png' },
+          { data: 'img2', mimeType: 'image/jpeg' },
+        ]}
+      />,
+    );
+
+    const imgs = container.querySelectorAll('img');
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0]?.getAttribute('src')).toBe('data:image/png;base64,img1');
+    expect(imgs[1]?.getAttribute('src')).toBe('data:image/jpeg;base64,img2');
+  });
+});

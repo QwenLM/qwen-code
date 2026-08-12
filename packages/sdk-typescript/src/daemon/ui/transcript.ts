@@ -245,7 +245,7 @@ function applyDaemonTranscriptEvent(
           '',
           event.eventId,
           event.serverTimestamp,
-          undefined,
+          event.meta,
           event.sourceRecordIds,
         ) as DaemonTextTranscriptBlock;
         block.images = [{ data: event.data, mimeType: event.mimeType }];
@@ -257,6 +257,7 @@ function applyDaemonTranscriptEvent(
           | DaemonTextTranscriptBlock
           | undefined;
         if (block && block.kind === 'user') {
+          if (event.meta) block.meta = { ...block.meta, ...event.meta };
           // Use immutable update to avoid mutating a shared array reference
           block.images = [
             ...(block.images ?? []),

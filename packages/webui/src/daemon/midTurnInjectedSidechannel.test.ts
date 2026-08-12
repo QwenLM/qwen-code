@@ -91,13 +91,57 @@ describe('parseSidechannelMidTurnInjected', () => {
     ).toEqual({ sessionId: 's-1', messages: ['hi'] });
   });
 
-  it('filters non-string and empty entries', () => {
+  it('preserves empty slots for image-only messages', () => {
     expect(
       parseSidechannelMidTurnInjected({
         type: 'mid_turn_message_injected',
-        data: { sessionId: 's-1', messages: ['keep', '', 42, 'also'] },
+        data: {
+          sessionId: 's-1',
+          messages: [''],
+          messageIds: ['mid-image'],
+          items: [
+            {
+              content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+            },
+          ],
+        },
       }),
-    ).toEqual({ sessionId: 's-1', messages: ['keep', 'also'] });
+    ).toEqual({
+      sessionId: 's-1',
+      messages: [''],
+      messageIds: ['mid-image'],
+      items: [
+        {
+          content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+        },
+      ],
+    });
+  });
+
+  it('drops misaligned items', () => {
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: ['first', 'second'],
+          items: [
+            {
+              content: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+            },
+          ],
+        },
+      }),
+    ).toEqual({ sessionId: 's-1', messages: ['first', 'second'] });
+  });
+
+  it('rejects non-string message entries to preserve index alignment', () => {
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: { sessionId: 's-1', messages: ['keep', 42] },
+      }),
+    ).toBeUndefined();
   });
 
   it('returns undefined for wrong type, missing data, or no usable messages', () => {
@@ -184,6 +228,33 @@ describe('mid-turn injected sidechannel pub/sub', () => {
     messageIds[0] = 'mutated';
     expect(getSidechannelMidTurnInjected()).toEqual([
       { sessionId: 's-1', messages: ['a'], messageIds: ['mid-1'] },
+    ]);
+  });
+
+  it('copies items when publishing', () => {
+    const items = [
+      {
+        content: [
+          { type: 'image' as const, data: 'aW1n', mimeType: 'image/png' },
+        ],
+      },
+    ];
+    publishSidechannelMidTurnInjected({
+      sessionId: 's-1',
+      messages: ['a'],
+      items,
+    });
+    items.splice(0);
+    expect(getSidechannelMidTurnInjected()).toEqual([
+      {
+        sessionId: 's-1',
+        messages: ['a'],
+        items: [
+          {
+            content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
+          },
+        ],
+      },
     ]);
   });
 

@@ -127,6 +127,7 @@ export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
   type: 'user.image.delta';
   data: string;
   mimeType: string;
+  meta?: DaemonTextDeltaMeta;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {

@@ -196,11 +196,13 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MEDIA_REFERENCES_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { SessionMediaReference } from '@qwen-code/acp-bridge/sessionMedia';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -346,6 +348,47 @@ const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const MAX_DAEMON_MEDIA_REFERENCES = 256;
+
+function readDaemonMediaReferences(
+  value: unknown,
+): SessionMediaReference[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DAEMON_MEDIA_REFERENCES
+  ) {
+    return undefined;
+  }
+  const references: SessionMediaReference[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return undefined;
+    }
+    const reference = item as Record<string, unknown>;
+    if (
+      reference['type'] !== 'image' ||
+      typeof reference['mediaId'] !== 'string' ||
+      reference['mediaId'].length === 0 ||
+      reference['mediaId'].length > 128 ||
+      typeof reference['mimeType'] !== 'string' ||
+      reference['mimeType'].length === 0 ||
+      reference['mimeType'].length > 128 ||
+      typeof reference['size'] !== 'number' ||
+      !Number.isSafeInteger(reference['size']) ||
+      reference['size'] <= 0
+    ) {
+      return undefined;
+    }
+    references.push({
+      type: reference['type'],
+      mediaId: reference['mediaId'],
+      mimeType: reference['mimeType'],
+      size: reference['size'],
+    });
+  }
+  return references;
+}
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -859,7 +902,12 @@ const TRANSIENT_FS_CODES: readonly string[] = [
 
 type DrainedMidTurnMessage =
   | { kind: 'text'; message: string }
-  | { kind: 'structured'; content: ContentBlock[]; displayText: string };
+  | {
+      kind: 'structured';
+      content: ContentBlock[];
+      displayText: string;
+      mediaReferences?: SessionMediaReference[];
+    };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
@@ -1028,7 +1076,7 @@ function getStructuredMidTurnDisplayText(
     .join('\n')
     .trim();
 
-  return text || '[User message with attachments]';
+  return text;
 }
 
 function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
@@ -1045,6 +1093,9 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
           item['displayText'],
         );
         if (content.length === 0) return [];
+        const mediaReferences = readDaemonMediaReferences(
+          item['mediaReferences'],
+        );
         return [
           {
             kind: 'structured',
@@ -1053,6 +1104,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               content,
               item['displayText'],
             ),
+            ...(mediaReferences ? { mediaReferences } : {}),
           },
         ];
       },
@@ -1094,7 +1146,9 @@ function isValidMidTurnDrainResponse(
         isRecord(item) &&
         Array.isArray(item['content']) &&
         item['content'].length > 0 &&
-        item['content'].every(isContentBlock),
+        item['content'].every(isContentBlock) &&
+        (item['mediaReferences'] === undefined ||
+          readDaemonMediaReferences(item['mediaReferences']) !== undefined),
     );
   }
 
@@ -3906,10 +3960,11 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const promptDisplayTextValue =
+              promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
             const promptDisplayText =
-              typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
-              'string'
-                ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+              typeof promptDisplayTextValue === 'string'
+                ? promptDisplayTextValue
                 : undefined;
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
@@ -4019,11 +4074,15 @@ export class Session implements SessionContext {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
+              const mediaReferences = readDaemonMediaReferences(
+                promptMetadata?.[DAEMON_MEDIA_REFERENCES_META_KEY],
+              );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined) {
+              if (promptDisplayText !== undefined || mediaReferences) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                  displayText: promptDisplayText,
+                  displayText: promptDisplayText ?? promptText,
                   hookContext: '',
+                  ...(mediaReferences ? { mediaReferences } : {}),
                 });
               } else if (goalTurn) {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
@@ -6421,9 +6480,26 @@ export class Session implements SessionContext {
         }
       }
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
-      this.config
-        .getChatRecordingService()
-        ?.recordMidTurnUserMessage(built, displayText);
+      const recorder = this.config.getChatRecordingService();
+      if (message.kind === 'structured' && message.mediaReferences) {
+        const everyMediaBlockHasAReference =
+          message.mediaReferences.length ===
+          message.content.filter(
+            (block) => block.type === 'image' || block.type === 'audio',
+          ).length;
+        if (everyMediaBlockHasAReference) {
+          recorder?.recordMidTurnUserMessage(
+            built.filter((part) => part.inlineData === undefined),
+            displayText,
+            undefined,
+            message.mediaReferences,
+          );
+        } else {
+          recorder?.recordMidTurnUserMessage(built, displayText);
+        }
+      } else {
+        recorder?.recordMidTurnUserMessage(built, displayText);
+      }
       parts.push(...built);
     }
     return parts;
