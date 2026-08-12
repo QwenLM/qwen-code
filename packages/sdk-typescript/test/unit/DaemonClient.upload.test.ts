@@ -155,6 +155,21 @@ describe('uploadWorkspaceFile', () => {
     ).rejects.toThrow(/invalid upload response body/);
   });
 
+  it('rejects a non-JSON 2xx fetch body with the same labeled error as XHR', async () => {
+    // Proxy/captive-portal interstitials answer 200 + HTML; both transports
+    // must reject with the labeled error (not a bare SyntaxError on fetch).
+    const { fetch } = recordingFetch(
+      () => new Response('<html>interstitial</html>', { status: 200 }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    await expect(
+      client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data: new Uint8Array([1]),
+      }),
+    ).rejects.toThrow(/invalid upload response body/);
+  });
+
   it('uses the workspace-qualified route via workspaceByCwd', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(201, uploadResult),
@@ -577,6 +592,44 @@ describe('uploadWorkspaceFile', () => {
         }),
       ).rejects.toMatchObject({ name: 'AbortError' });
       expect(FakeXMLHttpRequest.latest).toBeUndefined();
+    });
+
+    it('propagates the caller abort reason on a pre-aborted signal', async () => {
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+      const sentinel = new Error('sentinel');
+      const ctrl = new AbortController();
+      ctrl.abort(sentinel);
+
+      await expect(
+        client.uploadWorkspaceFile({
+          path: 'a.bin',
+          data: new Uint8Array([1]),
+          signal: ctrl.signal,
+          onProgress: () => {},
+        }),
+      ).rejects.toBe(sentinel);
+    });
+
+    it('propagates the caller abort reason through xhr abort', async () => {
+      // Matches the fetch transport (AbortSignal.any carries the reason):
+      // callers keying on `err === reason` must see the same rejection
+      // whether or not progress reporting selected the XHR path.
+      const client = new DaemonClient({ baseUrl: 'http://daemon' });
+      const sentinel = new Error('sentinel');
+      const ctrl = new AbortController();
+
+      const promise = client
+        .uploadWorkspaceFile({
+          path: 'a.bin',
+          data: new Uint8Array([1]),
+          signal: ctrl.signal,
+          onProgress: () => {},
+        })
+        .catch((caught: unknown) => caught);
+      expect(FakeXMLHttpRequest.latest).toBeDefined();
+
+      ctrl.abort(sentinel);
+      await expect(promise).resolves.toBe(sentinel);
     });
 
     it('rejects a 2xx response with a non-JSON body like the fetch path', async () => {

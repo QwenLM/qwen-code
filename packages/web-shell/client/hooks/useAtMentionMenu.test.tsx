@@ -69,7 +69,7 @@ function Harness({
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
-  onUploadRequest?: (targetDir: string) => void;
+  onUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
 }) {
   harnessDisabledRef.current = disabled;
   latest = useAtMentionMenu({
@@ -106,7 +106,7 @@ function mount({
     to: number;
     tag: WebShellComposerTag;
   }) => StateEffect<unknown>;
-  onUploadRequest?: (targetDir: string) => void;
+  onUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
 } = {}) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -217,11 +217,53 @@ describe('useAtMentionMenu', () => {
       changes: { from: 0, to: 1, insert: '' },
       selection: { anchor: 0 },
     });
-    expect(onUploadRequest).toHaveBeenCalledWith('.');
+    expect(onUploadRequest).toHaveBeenCalledWith('.', expect.any(Function));
     // The mention must be removed before the picker opens: the native file
     // dialog blocks the event loop, so anything deferred until after it
     // would stay visible (or be skipped) for the whole picker session.
     expect(order).toEqual(['dispatch', 'upload']);
+  });
+
+  it('restores the removed mention through the restore callback', async () => {
+    vi.useFakeTimers();
+    const view = makeView('hello @src/');
+    const dispatched: unknown[] = [];
+    view.dispatch = vi.fn((tr: unknown) => {
+      dispatched.push(tr);
+    });
+    let restoreQuery: (() => void) | undefined;
+    const onUploadRequest = vi.fn(
+      (_targetDir: string, restore?: () => void) => {
+        restoreQuery = restore;
+      },
+    );
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(dispatched).toHaveLength(1);
+
+    // A picker canceled without an upload must give the typed query back.
+    act(() => restoreQuery!());
+    expect(dispatched).toHaveLength(2);
+    expect(dispatched[1]).toEqual({
+      changes: { from: 6, insert: '@src/' },
+      selection: { anchor: 11 },
+    });
   });
 
   it('uploads into the directory shown by a typed path query', async () => {
@@ -250,7 +292,7 @@ describe('useAtMentionMenu', () => {
     // upload item must target the displayed directory.
     expect(latest!.state?.items[0]?.id).toBe('upload-file');
     act(() => expect(latest!.accept(0)).toBe(true));
-    expect(onUploadRequest).toHaveBeenCalledWith('src');
+    expect(onUploadRequest).toHaveBeenCalledWith('src', expect.any(Function));
   });
 
   it('hides the upload item while filtering files with an entry query', async () => {
@@ -302,6 +344,44 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.enterCategory(0));
     await runDebounce();
     harnessDisabledRef.current = true;
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(onUploadRequest).not.toHaveBeenCalled();
+    expect(latest!.state).toBeNull();
+  });
+
+  it('keeps the typed query when a stale upload item outlives the handler', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@src/');
+    const onUploadRequest = vi.fn();
+    const actions = {
+      listDirectory: vi.fn().mockResolvedValue({
+        kind: 'list' as const,
+        path: 'src',
+        entries: [],
+        truncated: false,
+      }),
+    };
+    mount({ view, builtinProviders: ['files'], onUploadRequest, actions });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    expect(latest!.state?.items[0]?.id).toBe('upload-file');
+
+    // Upload availability can vanish while the menu stays open (items are
+    // only recomputed on a workspace-key change): accepting the stale item
+    // must close the menu without eating the typed query.
+    act(() => {
+      root!.render(
+        <Harness
+          view={view}
+          builtinProviders={['files']}
+          onUploadRequest={undefined}
+          actions={actions}
+        />,
+      );
+    });
     act(() => expect(latest!.accept(0)).toBe(true));
 
     expect(view.dispatch).not.toHaveBeenCalled();

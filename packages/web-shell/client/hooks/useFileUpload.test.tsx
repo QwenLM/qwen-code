@@ -477,6 +477,12 @@ describe('useFileUpload', () => {
       await act(async () => vi.advanceTimersByTimeAsync(10_000));
       expect(latest!.uploads).toHaveLength(1);
       expect(latest!.uploads[0]?.status).toBe('error');
+
+      // The strip's dismiss button is the only escape hatch for a settled
+      // error row: removal must work even though the id is absent from the
+      // active/queue structures.
+      act(() => latest!.removeUpload(latest!.uploads[0]!.id));
+      expect(latest!.uploads).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }
@@ -760,6 +766,54 @@ describe('useFileUpload', () => {
     });
     expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
     expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it('drains a file queued while a stale-generation loop winds down', async () => {
+    const gates: Array<Deferred<void>> = [];
+    const client: FileUploadClient = {
+      uploadWorkspaceFile: vi.fn((req) => {
+        const gate = deferred<void>();
+        gates.push(gate);
+        return gate.promise.then(() => ({
+          kind: 'file_upload' as const,
+          path: req.path,
+          sizeBytes: 3,
+          hash: `sha256:${'f'.repeat(64)}`,
+        }));
+      }),
+    };
+    render({ client, maxBytes: MAX, targetKey: 'ws:/a' });
+
+    act(() => {
+      latest!.uploadFiles([makeFile('a.txt')], '.');
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+
+    // Switch targets while a.txt is in flight, then drop a fresh file
+    // BEFORE the aborted request settles: the stale loop still holds
+    // processingRef, so uploadFiles' own processQueue call is swallowed.
+    render({ client, maxBytes: MAX, targetKey: 'ws:/b' });
+    act(() => {
+      latest!.uploadFiles([makeFile('fresh.txt')], '.');
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(latest!.uploads.map((u) => u.status)).toEqual(['pending']);
+
+    // Settling the stale generation must re-drain the fresh item.
+    await act(async () => {
+      gates[0].reject(
+        new DOMException('This operation was aborted', 'AbortError'),
+      );
+    });
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      gates[1].resolve();
+    });
+    expect(latest!.uploads[0]).toMatchObject({
+      status: 'done',
+      resultPath: 'fresh.txt',
+    });
   });
 
   it('never uploads a queued item after the target workspace switches', async () => {

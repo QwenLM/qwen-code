@@ -1310,6 +1310,7 @@ export const ChatEditor = memo(
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const uploadPickerTargetRef = useRef('.');
     const uploadPickerTargetKeyRef = useRef('');
+    const uploadPickerRestoreRef = useRef<(() => void) | undefined>(undefined);
 
     // Resolve the upload target BEFORE useComposerCore so the @ panel's upload
     // item can be capability-gated (hidden on daemons without the feature).
@@ -1350,9 +1351,10 @@ export const ChatEditor = memo(
       50 * 1024 * 1024;
 
     const triggerFilePicker = useCallback(
-      (targetDir: string) => {
+      (targetDir: string, restoreQuery?: () => void) => {
         uploadPickerTargetRef.current = targetDir;
         uploadPickerTargetKeyRef.current = uploadTarget?.targetKey ?? '';
+        uploadPickerRestoreRef.current = restoreQuery;
         fileInputRef.current?.click();
       },
       [uploadTarget?.targetKey],
@@ -1459,6 +1461,15 @@ export const ChatEditor = memo(
       uploadDragDepthRef.current = 0;
       setUploadDragActive(false);
     }, []);
+    // Shell regions outside the drop-handling surface (e.g. the upload
+    // strip) must still cancel file drags; an uncancelled drop navigates
+    // the tab to the file, tearing down the SPA mid-turn.
+    const cancelShellFileDrag = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+      },
+      [],
+    );
     // `uploadFiles` is a stable callback from the hook; depend on it (not the
     // freshly-created `fileUpload` object) so these handlers are not rebuilt
     // on every render.
@@ -1505,6 +1516,7 @@ export const ChatEditor = memo(
         const files = Array.from(event.target.files ?? []);
         const targetDir = uploadPickerTargetRef.current;
         const capturedKey = uploadPickerTargetKeyRef.current;
+        uploadPickerRestoreRef.current = undefined;
         event.target.value = '';
         // Only upload if the target workspace is unchanged since the picker
         // opened; otherwise a stale directory path would land in the newly
@@ -1520,6 +1532,19 @@ export const ChatEditor = memo(
       },
       [uploadFiles, insertUploadReference, uploadTarget?.targetKey],
     );
+    useEffect(() => {
+      // React only wires `cancel` on <dialog>; the file input needs a native
+      // listener. `cancel` does not bubble, so delegation cannot see it.
+      const input = fileInputRef.current;
+      if (!uploadEnabled || !input) return;
+      const onCancel = () => {
+        const restore = uploadPickerRestoreRef.current;
+        uploadPickerRestoreRef.current = undefined;
+        restore?.();
+      };
+      input.addEventListener('cancel', onCancel);
+      return () => input.removeEventListener('cancel', onCancel);
+    }, [uploadEnabled]);
 
     useEffect(() => {
       if (!uploadDragActive) return;
@@ -2158,6 +2183,8 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        onDragOver={cancelShellFileDrag}
+        onDrop={cancelShellFileDrag}
       >
         {fileUpload.uploads.length > 0 && (
           <div className={styles.uploadStrip} data-web-shell-upload-strip>

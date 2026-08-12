@@ -1116,10 +1116,12 @@ export interface UseComposerCoreOptions {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /**
    * Invoked when the user selects the @ panel's "Upload file" item, with the
-   * directory currently being browsed. The composer opens a file picker and
-   * uploads into that directory. When absent, the upload item is hidden.
+   * directory currently being browsed and a callback that re-inserts the
+   * removed mention query when the picker closes without an upload. The
+   * composer opens a file picker and uploads into that directory. When
+   * absent, the upload item is hidden.
    */
-  onFileUploadRequest?: (targetDir: string) => void;
+  onFileUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }

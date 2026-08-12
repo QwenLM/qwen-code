@@ -174,11 +174,12 @@ export interface UseAtMentionMenuOptions {
   }) => StateEffect<unknown>;
   /**
    * Invoked when the user selects the synthetic "Upload file" item in the
-   * file provider. Receives the directory currently being browsed. The
-   * composer opens a file picker and uploads into that directory. When absent
-   * (upload unsupported), the item is hidden.
+   * file provider. Receives the directory currently being browsed and a
+   * callback that re-inserts the mention query removed before the picker
+   * opened — call it when the picker closes without an upload so the typed
+   * text is not lost. When absent (upload unsupported), the item is hidden.
    */
-  onUploadRequest?: (targetDir: string) => void;
+  onUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
 }
 
 const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
@@ -1856,24 +1857,34 @@ export function useAtMentionMenu({
         lastSelectedProviderIdRef.current = current.selectedProviderId;
       }
       if (item.kind === 'upload') {
-        if (disabledRef.current) {
+        // Menu items are not recomputed when upload availability changes,
+        // so a stale item can be accepted after the handler disappears;
+        // dropping the typed query in that case would silently eat it.
+        if (disabledRef.current || !onUploadRequest) {
           close();
           return true;
         }
+        const removedText = view.state.sliceDoc(current.from, current.to);
         view.dispatch({
           changes: { from: current.from, to: current.to, insert: '' },
           selection: { anchor: current.from },
         });
-        if (onUploadRequest) {
-          // Typed queries (`@src/`) browse a directory derived from the query
-          // text without syncing fileDirectoryRef, so re-derive the same
-          // directory the panel is displaying.
-          const { dirPath } = splitFileQuery(
-            current.query,
-            fileDirectoryRef.current,
-          );
-          onUploadRequest(dirPath);
-        }
+        // Typed queries (`@src/`) browse a directory derived from the query
+        // text without syncing fileDirectoryRef, so re-derive the same
+        // directory the panel is displaying.
+        const { dirPath } = splitFileQuery(
+          current.query,
+          fileDirectoryRef.current,
+        );
+        onUploadRequest(dirPath, () => {
+          // The doc can change while the picker is open (e.g. a session
+          // switch); restoring past the end would throw.
+          if (current.from > view.state.doc.length) return;
+          view.dispatch({
+            changes: { from: current.from, insert: removedText },
+            selection: { anchor: current.from + removedText.length },
+          });
+        });
         close();
         return true;
       }

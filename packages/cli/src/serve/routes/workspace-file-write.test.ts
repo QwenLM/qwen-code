@@ -617,9 +617,12 @@ describe('POST /file/upload', () => {
     async (name) => {
       // `docs/` does not exist: rejection must come from the basename
       // pre-check, before parent resolution, gate slots, and body buffering.
+      // Both branches answer with the same parse_error envelope, so only the
+      // admission-specific message pins which check rejected.
       const res = await upload(`docs/${name}`).send(Buffer.from('x'));
       expect(res.status).toBe(400);
       expect(res.body.errorKind).toBe('parse_error');
+      expect(res.body.error).toContain('suspicious pattern');
       await expect(
         fsp.stat(path.join(h.workspace, name)),
       ).rejects.toMatchObject({ code: 'ENOENT' });
@@ -989,6 +992,81 @@ describe('POST /file/upload', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it('frees gate slots when clients disconnect mid body-buffering', async () => {
+    // A slow chunked body passes admission and holds its gate slot while the
+    // raw parser buffers. Destroying the socket before any response must
+    // free the slot via the gate's pre-handler `close` listener — without it
+    // four such disconnects saturate the process-global gate until restart.
+    const server = h.app.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const openSlowUpload = (name: string) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: `/file/upload?path=${encodeURIComponent(name)}`,
+        headers: {
+          Host: loopbackHost(),
+          Authorization: 'Bearer secret',
+          'Content-Type': 'application/octet-stream',
+          'Transfer-Encoding': 'chunked',
+        },
+      });
+      req.on('error', () => {});
+      // A single chunk with no end: the parser keeps buffering forever.
+      req.write(Buffer.from('x'));
+      return req;
+    };
+    try {
+      // Five slow uploads for a four-slot gate: four hold slots while the
+      // fifth is rejected busy (no slot consumed). The spare keeps the
+      // saturation probe from squeezing a slow request out of a slot.
+      const slow = [
+        openSlowUpload('slow-a.bin'),
+        openSlowUpload('slow-b.bin'),
+        openSlowUpload('slow-c.bin'),
+        openSlowUpload('slow-d.bin'),
+        openSlowUpload('slow-e.bin'),
+      ];
+
+      // Let every slow request finish admission and reach the gate before
+      // probing: an early probe would itself occupy the fourth slot and
+      // push a still-admitting slow request out of the gate. Probe until
+      // the next upload is busy.
+      await new Promise((r) => setTimeout(r, 500));
+      await vi.waitFor(
+        async () => {
+          const res = await upload('probe.bin').send(Buffer.from('x'));
+          expect(res.status).toBe(429);
+        },
+        { timeout: 10_000 },
+      );
+
+      for (const req of slow) req.destroy();
+
+      // All four slots must come back from the pre-handler `close` release:
+      // a leaked slot would surface as a 429 in every retry of this burst.
+      await vi.waitFor(
+        async () => {
+          const after = await Promise.all([
+            upload('f.bin').send(Buffer.from('x')),
+            upload('g.bin').send(Buffer.from('x')),
+            upload('h.bin').send(Buffer.from('x')),
+            upload('i.bin').send(Buffer.from('x')),
+          ]);
+          for (const res of after) {
+            expect(res.status).toBe(201);
+          }
+        },
+        { timeout: 10_000 },
+      );
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 30_000);
 
   it('frees gate slots when oversized chunked bodies are rejected after admission', async () => {
     // A chunked body carries no Content-Length, so it passes the admission

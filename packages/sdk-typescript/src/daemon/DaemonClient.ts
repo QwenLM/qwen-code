@@ -1941,9 +1941,15 @@ export class DaemonClient {
       },
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, label);
-        const body = (await res.json()) as unknown;
-        // Match the XHR path's shape check so the two transports fail
-        // identically on malformed 2xx bodies.
+        const text = await res.text();
+        let body: unknown;
+        try {
+          body = text ? JSON.parse(text) : undefined;
+        } catch {
+          body = text;
+        }
+        // Match the XHR path's parse-then-shape-check so the two transports
+        // fail identically on malformed 2xx bodies.
         if (!body || typeof body !== 'object' || !('path' in body)) {
           throw new Error(`${label}: invalid upload response body`);
         }
@@ -1977,7 +1983,10 @@ export class DaemonClient {
     return await new Promise<DaemonWorkspaceFileUploadResult>(
       (resolve, reject) => {
         if (req.signal?.aborted) {
-          reject(new DOMException('The operation was aborted.', 'AbortError'));
+          reject(
+            req.signal.reason ??
+              new DOMException('The operation was aborted.', 'AbortError'),
+          );
           return;
         }
         const xhr = new XMLHttpRequest();
@@ -2033,7 +2042,10 @@ export class DaemonClient {
         };
         xhr.onabort = () => {
           cleanup();
-          reject(new DOMException('The operation was aborted.', 'AbortError'));
+          reject(
+            req.signal?.reason ??
+              new DOMException('The operation was aborted.', 'AbortError'),
+          );
         };
         if (req.signal) {
           abortListener = () => xhr.abort();

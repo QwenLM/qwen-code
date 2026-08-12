@@ -106,7 +106,10 @@ const composerCoreState = vi.hoisted(() => ({
   clearImageDragState: vi.fn(),
   addTags: vi.fn(),
   shellMode: false,
-  onFileUploadRequest: undefined as ((targetDir: string) => void) | undefined,
+  imageDragActive: false,
+  onFileUploadRequest: undefined as
+    | ((targetDir: string, restoreQuery?: () => void) => void)
+    | undefined,
 }));
 
 // Controllable `useOptionalWorkspace()` value for file-upload gating tests.
@@ -153,7 +156,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   return {
     ...actual,
     useComposerCore: (options?: {
-      onFileUploadRequest?: (targetDir: string) => void;
+      onFileUploadRequest?: (
+        targetDir: string,
+        restoreQuery?: () => void,
+      ) => void;
     }) => {
       composerCoreState.onFileUploadRequest = options?.onFileUploadRequest;
       return {
@@ -171,7 +177,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         hasContent: false,
         canSubmit: false,
         pendingImageBatchCount: 0,
-        imageDragActive: false,
+        imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
         imageTransferHandlers: {
           onDropCapture: composerCoreState.imageDropCapture,
@@ -281,6 +287,7 @@ afterEach(() => {
   composerCoreState.imageDropCapture.mockReset();
   composerCoreState.clearImageDragState.mockReset();
   composerCoreState.addTags.mockReset();
+  composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
@@ -1589,6 +1596,24 @@ describe('ChatEditor file upload gating', () => {
     }
   });
 
+  it('suppresses the image-drag highlight while an upload drag is active', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    composerCoreState.imageDragActive = true;
+    const container = renderChatEditor({});
+    const surface = container.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    expect(surface.getAttribute('data-image-drag-active')).toBe('true');
+
+    dispatchDrag(surface, 'dragenter', ['Files']);
+    expect(surface.getAttribute('data-upload-drag-active')).toBe('true');
+    expect(surface.hasAttribute('data-image-drag-active')).toBe(false);
+
+    dispatchDrag(surface, 'dragleave', ['Files']);
+    expect(surface.hasAttribute('data-upload-drag-active')).toBe(false);
+    expect(surface.getAttribute('data-image-drag-active')).toBe('true');
+  });
+
   it('ignores file drag-and-drop while the composer is disabled', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
@@ -1695,6 +1720,31 @@ describe('ChatEditor file upload gating', () => {
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
+  it('cancels file drops on the upload strip so the tab cannot navigate', () => {
+    // The 1-byte cap yields a persistent error row without any HTTP call, so
+    // the strip — which renders outside the drop-handling surface — exists.
+    const workspace = makeWorkspace(['workspace_file_upload'], true, 1);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['xx'], 'large.txt')]);
+    const strip = container.querySelector('[data-web-shell-upload-strip]')!;
+    expect(strip).not.toBeNull();
+
+    // Without the shell-level guard the browser navigates the tab to a file
+    // released over the strip, tearing down the SPA mid-turn.
+    const dragOver = dispatchDrag(strip, 'dragover', ['Files']);
+    expect(dragOver.defaultPrevented).toBe(true);
+    const drop = dispatchDrag(
+      strip,
+      'drop',
+      ['Files'],
+      [new File(['yy'], 'other.txt')],
+    );
+    expect(drop.defaultPrevented).toBe(true);
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+  });
+
   it('uploads picker selections into the captured directory and inserts a tag', async () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     workspace.client.uploadWorkspaceFile.mockResolvedValue({
@@ -1752,6 +1802,62 @@ describe('ChatEditor file upload gating', () => {
     );
   });
 
+  it('restores the removed mention when the upload picker is canceled', () => {
+    uploadWorkspaceState.current = makeWorkspace(['workspace_file_upload']);
+    const container = renderChatEditor({});
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+
+    // The @ panel passes a restore callback for the mention it deleted
+    // before opening the picker; a canceled picker must invoke it exactly
+    // once (one picker session, one undo).
+    const restore = vi.fn();
+    act(() => {
+      composerCoreState.onFileUploadRequest?.('docs', restore);
+    });
+    act(() => {
+      input.dispatchEvent(new Event('cancel'));
+    });
+    expect(restore).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      input.dispatchEvent(new Event('cancel'));
+    });
+    expect(restore).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not restore the mention once the picker produced a change', () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'notes.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'a'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+
+    const restore = vi.fn();
+    act(() => {
+      composerCoreState.onFileUploadRequest?.('docs', restore);
+    });
+    Object.defineProperty(input, 'files', {
+      value: [new File(['abc'], 'notes.txt')],
+      configurable: true,
+    });
+    act(() => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    act(() => {
+      input.dispatchEvent(new Event('cancel'));
+    });
+    expect(restore).not.toHaveBeenCalled();
+  });
+
   it('ignores picker changes whose captured target no longer matches', () => {
     const workspace = makeWorkspace(['workspace_file_upload']);
     uploadWorkspaceState.current = workspace;
@@ -1767,10 +1873,21 @@ describe('ChatEditor file upload gating', () => {
       value: [new File(['abc'], 'notes.txt')],
       configurable: true,
     });
+    let inputValue = 'C:\\fakepath\\notes.txt';
+    Object.defineProperty(input, 'value', {
+      configurable: true,
+      get: () => inputValue,
+      set: (next: string) => {
+        inputValue = next;
+      },
+    });
     act(() => {
       input.dispatchEvent(new Event('change', { bubbles: true }));
     });
 
+    // Positive control: the handler ran (it always clears the input), so
+    // the negative assertion proves the stale-target guard blocked it.
+    expect(input.value).toBe('');
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
@@ -1821,6 +1938,33 @@ describe('ChatEditor file upload gating', () => {
       ],
       { placement: 'inline', position: 'end' },
     );
+    // The strip must explain why the final name differs from the drop.
+    const row = container.querySelector(
+      '[data-web-shell-upload-strip] [data-status="done"]',
+    );
+    expect(row?.textContent).toContain('Saved as report (1).txt');
+  });
+
+  it('shows the plain Uploaded copy when the file kept its name', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    workspace.client.uploadWorkspaceFile.mockResolvedValue({
+      kind: 'file_upload',
+      path: 'report.txt',
+      sizeBytes: 3,
+      hash: `sha256:${'e'.repeat(64)}`,
+    });
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]')!;
+
+    dispatchDrag(editor, 'drop', ['Files'], [new File(['abc'], 'report.txt')]);
+    await act(async () => {});
+
+    const row = container.querySelector(
+      '[data-web-shell-upload-strip] [data-status="done"]',
+    );
+    expect(row?.textContent).toContain('Uploaded');
+    expect(row?.textContent).not.toContain('Saved as');
   });
 
   it('falls back to the 50 MiB default when a capable daemon omits the limit', async () => {
@@ -2022,16 +2166,32 @@ describe('ChatEditor file upload gating', () => {
         composerCoreState.onFileUploadRequest?.('docs');
       });
       rerenderChatEditor(container, { atWorkspaceCwd: '/secondary' });
+      // Premise pin: the switched-to target keeps the input mounted; an
+      // unmounted input would make the dispatch below vacuous.
+      expect(
+        container.querySelector('[data-web-shell-upload-input]'),
+      ).not.toBeNull();
 
       Object.defineProperty(input, 'files', {
         value: [new File(['abc'], 'notes.txt')],
         configurable: true,
+      });
+      let inputValue = 'C:\\fakepath\\notes.txt';
+      Object.defineProperty(input, 'value', {
+        configurable: true,
+        get: () => inputValue,
+        set: (next: string) => {
+          inputValue = next;
+        },
       });
       act(() => {
         input.dispatchEvent(new Event('change', { bubbles: true }));
       });
       await act(async () => {});
 
+      // Positive control: the handler ran (it always clears the input), so
+      // the negative assertions prove the stale-target guard blocked it.
+      expect(input.value).toBe('');
       expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
       expect(qualifiedClient.uploadWorkspaceFile).not.toHaveBeenCalled();
     });
