@@ -1230,6 +1230,7 @@ export class ModelsConfig {
         if (savedBaseUrlSource) {
           this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
         }
+        this.applyCatalogModalities(resolved.id, savedBaseUrl, resolved.envKey);
       }
 
       this.strictModelProviderSelection = true;

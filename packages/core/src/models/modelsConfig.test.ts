@@ -180,6 +180,54 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('keeps catalog modalities for a settings-sourced session endpoint after auth sync', () => {
+    const settingsBaseUrl = 'https://openrouter.ai/api/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'vendor/image-model' }],
+      },
+      generationConfig: {
+        model: 'vendor/image-model',
+        baseUrl: settingsBaseUrl,
+      },
+      generationConfigSources: {
+        model: {
+          kind: 'settings',
+          settingsPath: 'model.name',
+        },
+        baseUrl: {
+          kind: 'settings',
+          settingsPath: 'model.generationConfig.baseUrl',
+        },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          api: settingsBaseUrl,
+          models: {
+            'vendor/image-model': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+    });
+
+    modelsConfig.syncAfterAuthRefresh(
+      AuthType.USE_OPENAI,
+      'vendor/image-model',
+    );
+
+    expect(modelsConfig.getGenerationConfig()).toMatchObject({
+      baseUrl: settingsBaseUrl,
+      modalities: { image: true },
+    });
+  });
+
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

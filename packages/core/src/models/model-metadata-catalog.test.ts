@@ -1334,6 +1334,40 @@ describe('loadModelMetadataCatalog', () => {
     expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2);
   });
 
+  it('backs off after failed refreshes when workspace proxies alternate', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(dir);
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const close = vi.fn(async () => undefined);
+    const EnvHttpProxyAgent = vi.fn(() => ({ close }));
+    const undiciFetch = vi.fn(async () => {
+      throw new Error('proxy offline');
+    });
+    runtimeFetchMock.loadUndici.mockResolvedValue({
+      EnvHttpProxyAgent,
+      fetch: undiciFetch,
+    });
+
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await loadModelMetadataCatalog({ proxyUrl: 'second-proxy:8080' });
+
+    expect(undiciFetch).toHaveBeenCalledOnce();
+    expect(EnvHttpProxyAgent).toHaveBeenCalledOnce();
+
+    now += 60 * 60 * 1000;
+    await loadModelMetadataCatalog({ proxyUrl: 'first-proxy:8080' });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(2));
+
+    expect(undiciFetch).toHaveBeenCalledTimes(2);
+    expect(EnvHttpProxyAgent).toHaveBeenCalledTimes(2);
+  });
+
   it('does not refetch a fresh shared catalog when workspace proxies alternate', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);

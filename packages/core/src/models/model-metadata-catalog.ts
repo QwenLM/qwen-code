@@ -68,6 +68,7 @@ interface CatalogState {
   refresh?: Promise<void>;
   refreshTimer?: ReturnType<typeof setTimeout>;
   options?: LoadModelMetadataCatalogOptions;
+  lastRefreshAttemptAt?: number;
   lastSuccessfulRefreshAt?: number;
 }
 
@@ -90,6 +91,13 @@ function isCatalogFresh(state: CatalogState): boolean {
   return (
     state.lastSuccessfulRefreshAt !== undefined &&
     Date.now() - state.lastSuccessfulRefreshAt < CACHE_TTL_MS
+  );
+}
+
+function isRefreshBackoffActive(state: CatalogState): boolean {
+  return (
+    state.lastRefreshAttemptAt !== undefined &&
+    Date.now() - state.lastRefreshAttemptAt < CACHE_TTL_MS
   );
 }
 
@@ -283,6 +291,7 @@ function refreshCatalog(
   if (state.refresh) return;
 
   const refreshOptions = state.options ?? {};
+  state.lastRefreshAttemptAt = Date.now();
   state.refresh = fetchAndCache(cachePath, refreshOptions)
     .then((catalog) => {
       state.current = catalog;
@@ -364,7 +373,8 @@ export function loadModelMetadataCatalog(
     if (
       optionsChanged &&
       options.cachePath === undefined &&
-      !isCatalogFresh(state)
+      !isCatalogFresh(state) &&
+      !isRefreshBackoffActive(state)
     ) {
       refreshCatalog(state, cachePath, true);
     }
