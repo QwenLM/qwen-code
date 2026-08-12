@@ -250,11 +250,14 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 `liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
 window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
 (default 4 MiB, hard ceiling 256 MiB). The in-flight `liveJournal` is
-separately capped by `BridgeOptions.maxJournalEvents` (default 10 000) and
-`BridgeOptions.maxJournalBytes` (default 8 MiB). If older retained replay was
-dropped, `compactedReplay[0]` is the id-less `history_truncated` marker; if
-journal entries were dropped, `liveJournal[0]` carries a `history_truncated`
-marker with `scope: 'live_journal'`. The full persisted transcript remains on
+separately capped by `BridgeOptions.maxJournalEvents` (default 10 000 replay
+entries) and `BridgeOptions.maxJournalBytes` (default 8 MiB of serialized
+source events). Consecutive compatible text or thought chunks share a replay
+entry, with at most 256 source events per entry; other event and attribution
+boundaries remain intact. If older retained replay was dropped,
+`compactedReplay[0]` is the id-less `history_truncated` marker; if journal
+entries were dropped, `liveJournal[0]` carries a `history_truncated` marker
+with `scope: 'live_journal'`. Its retained and truncated counts describe source events, not replay entries. The full persisted transcript remains on
 disk and is not exposed by this bridge response.
 `BridgeClientRequestContext` is the request context threaded through bridge
 calls; it carries `clientId`, `fromLoopback: boolean`, and `promptId`.

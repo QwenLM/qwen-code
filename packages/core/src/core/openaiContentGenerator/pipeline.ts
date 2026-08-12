@@ -1126,6 +1126,12 @@ export class ContentGenerationPipeline {
       if (typed['enable_thinking'] === false) {
         delete typed['enable_thinking'];
       }
+      // `reasoning_effort: 'none'` is the tiered family's canonical disable
+      // shape (the provider canonicalizes the extra_body escape hatch into
+      // it); a thinking-mandatory model rejects it like the boolean shapes.
+      if (typed['reasoning_effort'] === 'none') {
+        delete typed['reasoning_effort'];
+      }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
         | undefined;
@@ -1142,6 +1148,7 @@ export class ContentGenerationPipeline {
 
     const typed = providerRequest as unknown as Record<string, unknown>;
     const reasoningEffort = typed['reasoning_effort'];
+    const thinkingBudget = typed['thinking_budget'];
     // DashScope rejects forced tool selection while thinking is enabled
     // ("The tool_choice parameter does not support being set to required or
     // object in thinking mode"). Both field clauses are family-gated like
@@ -1158,12 +1165,13 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
+            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
             (typeof reasoningEffort === 'string' &&
               reasoningEffort !== 'none'))))
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
       );
       delete typed['tool_choice'];
     }
