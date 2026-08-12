@@ -206,6 +206,8 @@ function decodePart(value: string): string | undefined {
   }
 }
 
+// Parent ids reach filesystem paths, so they keep the strict charset;
+// agent ids are comparison-only and may use the round-trippable space.
 function isValidVirtualParentSessionId(value: string): boolean {
   return (
     value.length > 0 &&

@@ -170,7 +170,7 @@ describe('VirtualSubagentSessions', () => {
     ).toBeUndefined();
   });
 
-  it('rejects an oversized parent part under the total session id cap', () => {
+  it('rejects an oversized parent part above the part length cap', () => {
     const parentPart = Buffer.from('a'.repeat(600), 'utf8').toString(
       'base64url',
     );
@@ -179,6 +179,21 @@ describe('VirtualSubagentSessions', () => {
     expect(
       parseVirtualSubagentSessionId(`subagent.${parentPart}.${agentPart}`),
     ).toBeUndefined();
+  });
+
+  it('rejects an oversized session id at the parse-side total length cap', () => {
+    // Both decoded parts sit exactly at the part length cap, so only the
+    // total length check can reject this id.
+    const parentPart = Buffer.from('a'.repeat(500), 'utf8').toString(
+      'base64url',
+    );
+    const agentPart = Buffer.from('界'.repeat(500), 'utf8').toString(
+      'base64url',
+    );
+    const sessionId = `subagent.${parentPart}.${agentPart}`;
+
+    expect(sessionId).toHaveLength(2677);
+    expect(parseVirtualSubagentSessionId(sessionId)).toBeUndefined();
   });
 
   it.each(['general-purpose-agent:8', 'general-purpose-agent/8'])(
