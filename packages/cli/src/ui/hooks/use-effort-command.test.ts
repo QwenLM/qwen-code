@@ -26,6 +26,7 @@ describe('useEffortCommand', () => {
       getModel: vi.fn().mockReturnValue('unregistered-model'),
       setReasoningEffort,
       getReasoningEffort,
+      getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     settings = {
       setValue,
@@ -77,6 +78,7 @@ describe('useEffortCommand', () => {
       getModel: vi.fn().mockReturnValue('unregistered-model'),
       setReasoningEffort,
       getReasoningEffort: vi.fn().mockReturnValue('xhigh'),
+      getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     const { result } = renderHook(() =>
       useEffortCommand(settings, config, addItem),
@@ -99,6 +101,7 @@ describe('useEffortCommand', () => {
       // Thinking disabled: setReasoningEffort is a no-op, so the read-back
       // returns something other than the requested tier.
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     const { result } = renderHook(() =>
       useEffortCommand(settings, config, addItem),
@@ -143,6 +146,28 @@ describe('useEffortCommand', () => {
     expect(item.type).toBe('info');
     expect(item.text).toContain('xhigh');
     expect(item.text).toContain('normalized from high');
+  });
+
+  it('warns in-chat when a static thinking knob overrides the tier', () => {
+    const addItem = vi.fn();
+    config = {
+      getModel: vi.fn().mockReturnValue('unregistered-model'),
+      setReasoningEffort,
+      getReasoningEffort: vi.fn().mockReturnValue('max'),
+      getReasoningEffortOverride: vi.fn().mockReturnValue({
+        source: 'samplingParams',
+        field: 'thinking_budget',
+      }),
+    } as unknown as Config;
+    const { result } = renderHook(() =>
+      useEffortCommand(settings, config, addItem),
+    );
+
+    act(() => result.current.handleEffortSelect('max'));
+
+    const [item] = addItem.mock.calls[0];
+    expect(item.text).toContain('samplingParams.thinking_budget');
+    expect(item.text).toContain('will remain effective');
   });
 
   it('does not apply registry tiers to an active runtime snapshot', () => {

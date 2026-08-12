@@ -24,6 +24,7 @@ import {
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
 import { mergeModelReasoningPreference } from '../../config/model-reasoning-preferences.js';
+import { formatEffortChangeMessage } from './effort-utils.js';
 
 const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');
 
@@ -112,7 +113,7 @@ export const effortCommand: SlashCommand = {
     const effectiveTier = registration?.effort
       ? normalizeModelReasoningEffort(registration, tier)!
       : tier;
-    const applied = applyReasoningEffort(config, effectiveTier);
+    applyReasoningEffort(config, effectiveTier);
     // `model.reasoningPreferences` is scoped independently from
     // `modelProviders`; persist to the scope that owns the `model` key so the
     // write cannot be shadowed by a higher-precedence scope's entry.
@@ -133,42 +134,10 @@ export const effortCommand: SlashCommand = {
       settings.setValue(scope, 'model.reasoningEffort', tier);
     }
 
-    // `setReasoningEffort` is a no-op when thinking is explicitly disabled
-    // (`reasoning: false`), so effort cannot silently re-enable it. The tier is
-    // still persisted for future sessions, but report that it won't take effect
-    // yet instead of a misleading success message.
-    if (!applied) {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t(
-          'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-          { tier: effectiveTier },
-        ),
-      };
-    }
-
-    // Report the requested tier, not an effective one: provider adapters clamp
-    // per active model (e.g. 'max' → 'high' on most Anthropic models, xhigh/max
-    // → HIGH on Gemini), and that resolution happens per request at send time,
-    // so the actual tier on the wire may differ from what's shown here.
-    if (effectiveTier !== tier) {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t(
-          'Reasoning effort: {{tier}} (normalized from {{requested}} for the active model).',
-          { tier: effectiveTier, requested: tier },
-        ),
-      };
-    }
     return {
       type: 'message',
       messageType: 'info',
-      content: t(
-        'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-        { tier },
-      ),
+      content: formatEffortChangeMessage(config, effectiveTier, tier),
     };
   },
 };

@@ -4299,6 +4299,149 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('reasoning effort override', () => {
+    it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { thinking_budget: 4096 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+    });
+
+    it('does not report an identical static effort or a non-tiered model', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { reasoning_effort: 'max' },
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+
+      config.getContentGeneratorConfig().model = 'qwen3.7-max';
+      config.getContentGeneratorConfig().extra_body = {
+        thinking_budget: 4096,
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+
+    it.each([
+      {
+        name: 'extra_body enable_thinking disable',
+        extra_body: { enable_thinking: false },
+        expected: { source: 'extra_body', field: 'enable_thinking' },
+      },
+      {
+        name: 'different extra_body effort',
+        extra_body: { reasoning_effort: 'high' },
+        expected: { source: 'extra_body', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams enable_thinking disable',
+        samplingParams: { enable_thinking: false },
+        expected: { source: 'samplingParams', field: 'enable_thinking' },
+      },
+      {
+        name: 'samplingParams budget',
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+      {
+        name: 'different samplingParams effort',
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'identical samplingParams effort',
+        samplingParams: { reasoning_effort: 'max' },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch over a samplingParams disable',
+        extra_body: { enable_thinking: true },
+        samplingParams: { enable_thinking: false },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams enable_thinking on-switch',
+        samplingParams: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams effort under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams budget under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+    ])('resolves $name', ({ extra_body, samplingParams, expected }) => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body,
+        samplingParams,
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual(expected);
+    });
+
+    it('does not report an override for a non-DashScope endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: { effort: 'max' },
+        samplingParams: { thinking_budget: 2048 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+  });
+
   describe('refreshAuth', () => {
     it('preserves reasoning budget tokens across a thinking toggle', async () => {
       const config = new Config({

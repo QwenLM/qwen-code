@@ -49,6 +49,11 @@ import {
   resolveModelReasoningControls,
 } from '../core/model-reasoning-controls.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
+import {
+  DashScopeOpenAICompatibleProvider,
+  selectDashScopeThinkingKnob,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -677,7 +682,12 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   };
 }
 
-export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini' | 'Qoder';
+export type ExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
 export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
@@ -848,6 +858,7 @@ export class MCPServerConfig {
      */
     readonly scope?: McpServerScope,
     readonly alwaysLoadTools?: boolean,
+    readonly agentPluginV1?: boolean,
   ) {}
 }
 
@@ -1703,6 +1714,15 @@ export interface SubSessionSpawnResult {
 export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
+
+/**
+ * A higher-priority static DashScope thinking knob that shadows the global
+ * reasoning-effort tier on the wire (see getReasoningEffortOverride).
+ */
+export type ReasoningEffortOverride = {
+  source: 'extra_body' | 'samplingParams';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+};
 
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
@@ -4292,6 +4312,63 @@ export class Config {
       apply(runtimeCfg);
     }
     apply(this.modelsConfig?.getGenerationConfig());
+  }
+
+  /**
+   * Return a higher-priority static DashScope knob that shadows the current
+   * global effort on qwen3.8-max, so interactive callers can report the
+   * effective outcome instead of confirming a tier that will not reach the
+   * wire. The provider resolves extra_body before samplingParams before the
+   * unified reasoning setting; same-layer explicit effort still wins budget.
+   */
+  getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
+    const cfg = this.getContentGeneratorConfig();
+    if (
+      !cfg ||
+      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
+      !isTieredEffortWireModel(cfg.model)
+    ) {
+      return undefined;
+    }
+
+    const currentEffort = this.getReasoningEffort();
+    const selected = selectDashScopeThinkingKnob(
+      cfg.model,
+      cfg.extra_body,
+      cfg.samplingParams,
+      currentEffort,
+    );
+    if (
+      !selected ||
+      selected.source === 'reasoning' ||
+      (selected.field === 'reasoning_effort' &&
+        selected.value === currentEffort)
+    ) {
+      return undefined;
+    }
+    if (selected.field === 'enable_thinking' && selected.value === true) {
+      // An on-switch never blocks the tier — the wire drops the switch and
+      // ships it — so only a request-level effort override can still shadow
+      // the current tier from under it.
+      if (selected.source !== 'extra_body') {
+        return undefined;
+      }
+      const below = selectDashScopeThinkingKnob(
+        cfg.model,
+        undefined,
+        cfg.samplingParams,
+        currentEffort,
+      );
+      if (
+        below?.source === 'samplingParams' &&
+        below.field === 'reasoning_effort' &&
+        below.value !== currentEffort
+      ) {
+        return { source: below.source, field: below.field };
+      }
+      return undefined;
+    }
+    return { source: selected.source, field: selected.field };
   }
 
   /**

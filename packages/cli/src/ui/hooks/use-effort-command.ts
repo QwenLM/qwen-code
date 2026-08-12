@@ -18,8 +18,8 @@ import {
   getPersistScopeForModelSelection,
 } from '../../config/modelProvidersScope.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import { t } from '../../i18n/index.js';
 import { mergeModelReasoningPreference } from '../../config/model-reasoning-preferences.js';
+import { formatEffortChangeMessage } from '../commands/effort-utils.js';
 
 interface UseEffortCommandReturn {
   isEffortDialogOpen: boolean;
@@ -55,7 +55,7 @@ export const useEffortCommand = (
         const effectiveEffort = registration?.effort
           ? normalizeModelReasoningEffort(registration, effort)!
           : effort;
-        const applied = applyReasoningEffort(config, effectiveEffort);
+        applyReasoningEffort(config, effectiveEffort);
         // Mirror the slash-command path: `model.reasoningPreferences` is
         // scoped independently from `modelProviders`, so persist to the scope
         // owning the `model` key to avoid shadowed writes.
@@ -81,35 +81,13 @@ export const useEffortCommand = (
         // still persisted for future sessions, but say it won't take effect
         // until thinking is re-enabled.
         if (addItem) {
-          if (!applied) {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text: t(
-                  'Reasoning effort set to {{tier}}, but thinking is currently disabled — it will take effect when thinking is re-enabled.',
-                  { tier: effectiveEffort },
-                ),
-              },
-              Date.now(),
-            );
-          } else {
-            addItem(
-              {
-                type: MessageType.INFO,
-                text:
-                  effectiveEffort === effort
-                    ? t(
-                        'Reasoning effort: {{tier}} (requested; the effective tier depends on the active provider/model).',
-                        { tier: effort },
-                      )
-                    : t(
-                        'Reasoning effort: {{tier}} (normalized from {{requested}} for the active model).',
-                        { tier: effectiveEffort, requested: effort },
-                      ),
-              },
-              Date.now(),
-            );
-          }
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: formatEffortChangeMessage(config, effectiveEffort, effort),
+            },
+            Date.now(),
+          );
         }
       } finally {
         setIsEffortDialogOpen(false);
