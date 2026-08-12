@@ -96,6 +96,8 @@ describe('token plan provider', () => {
         })),
         mergeStrategy: 'prepend-and-remove-owned',
         ownsModel: expect.any(Function),
+        retainCurrentModelAcrossEndpoints: true,
+        ownsModelAcrossEndpoints: expect.any(Function),
       },
     ]);
     expect(plan.providerState).toEqual({

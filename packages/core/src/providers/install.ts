@@ -70,7 +70,13 @@ function applyModelProvidersPatch(
     if (patch.mergeStrategy === 'replace-owned') {
       updatedModels = [...preservedModels, ...patch.models];
     } else if (firstRemovedIndex < 0) {
-      updatedModels = [...patch.models, ...preservedModels];
+      const collidesWithPreservedModel = patch.models.some((incoming) =>
+        preservedModels.some((existing) => existing.id === incoming.id),
+      );
+      updatedModels =
+        patch.retainCurrentModelAcrossEndpoints && collidesWithPreservedModel
+          ? [...preservedModels, ...patch.models]
+          : [...patch.models, ...preservedModels];
     } else {
       // Updating an existing endpoint must not reorder sibling endpoints.
       // Duplicate model ids are resolved by first match, so prepending a
@@ -257,11 +263,15 @@ export async function applyProviderInstallPlan(
       const currentBaseUrl = settings.getValue('model.baseUrl') as
         | string
         | undefined;
-      const retainAcrossEndpoints = (plan.modelProviders ?? []).some(
+      const retainAcrossEndpoints = (plan.modelProviders ?? []).filter(
         (patch) => patch.retainCurrentModelAcrossEndpoints,
       );
-      const offeredModels = retainAcrossEndpoints
-        ? (updatedModelProviders[plan.authType] ?? [])
+      const offeredModels = retainAcrossEndpoints.length
+        ? (updatedModelProviders[plan.authType] ?? []).filter((model) =>
+            retainAcrossEndpoints.some((patch) =>
+              patch.ownsModelAcrossEndpoints?.(model),
+            ),
+          )
         : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&

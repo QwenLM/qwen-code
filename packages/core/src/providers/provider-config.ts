@@ -323,7 +323,12 @@ export function buildInstallPlan(
         mergeStrategy: 'prepend-and-remove-owned' as const,
         ...(ownsModel ? { ownsModel } : {}),
         ...(config.mergeModelsByIdentity && Array.isArray(config.baseUrl)
-          ? { retainCurrentModelAcrossEndpoints: true }
+          ? {
+              retainCurrentModelAcrossEndpoints: true,
+              ...(providerOwnsModel
+                ? { ownsModelAcrossEndpoints: providerOwnsModel }
+                : {}),
+            }
           : {}),
       },
     ],

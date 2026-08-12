@@ -395,7 +395,8 @@ export function useProviderUpdates(
         const customIds = installedOwnedModels
           .filter(
             (model) =>
-              model.baseUrl === undefined ||
+              (!providerCfg.mergeModelsByIdentity &&
+                model.baseUrl === undefined) ||
               normalizeBaseUrlForMatching(model.baseUrl) ===
                 normalizeBaseUrlForMatching(resolved),
           )

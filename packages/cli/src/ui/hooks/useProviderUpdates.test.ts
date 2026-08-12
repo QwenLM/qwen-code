@@ -473,6 +473,53 @@ describe('useProviderUpdates', () => {
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 
+  it('does not re-home a baseUrl-less Kimi model during an endpoint update', async () => {
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const apiTemplate = buildProviderTemplate(kimiProvider, apiUrl);
+    const legacyCustom = {
+      id: 'legacy-custom',
+      envKey: 'MOONSHOT_API_KEY',
+      name: '[Kimi API] legacy-custom',
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'kimi'
+    ] = { baseUrl: apiUrl, version: 'old-version-hash' };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...apiTemplate, legacyCustom],
+    };
+    mockConfig.getModel.mockReturnValue('kimi-k3');
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: apiUrl,
+      apiKeyEnvKey: 'MOONSHOT_API_KEY',
+    });
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+    const reloaded =
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
+        AuthType.USE_OPENAI
+      ];
+    expect(
+      reloaded.filter((model: { id: string }) => model.id === legacyCustom.id),
+    ).toEqual([legacyCustom]);
+  });
+
   it('isolates same-envKey API regions during an endpoint update', async () => {
     // api-china and api-international share MOONSHOT_API_KEY, the name
     // prefix, and identical model lists; updating one must leave the other

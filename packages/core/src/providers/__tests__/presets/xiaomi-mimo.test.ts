@@ -15,6 +15,7 @@ import {
   findProviderByCredentials,
   findProviderById,
   getAllProviderBaseUrls,
+  resolveMetadataKey,
   xiaomiMimoProvider,
 } from '@qwen-code/qwen-code-core';
 
@@ -27,6 +28,7 @@ describe('xiaomiMimoProvider', () => {
       envKey: 'MIMO_API_KEY',
       apiKeyPlaceholder: 'sk-... or tp-...',
       modelsEditable: true,
+      mergeModelsByIdentity: true,
       uiGroup: 'third-party',
     });
 
@@ -69,6 +71,11 @@ describe('xiaomiMimoProvider', () => {
     });
 
     expect(plan.env).toEqual({ MIMO_API_KEY: 'tp-mimo' });
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      retainCurrentModelAcrossEndpoints: true,
+      ownsModel: expect.any(Function),
+      ownsModelAcrossEndpoints: expect.any(Function),
+    });
     expect(plan.modelProviders?.[0]?.models).toEqual([
       expect.objectContaining({
         id: 'mimo-v2.5-pro',
@@ -101,7 +108,7 @@ describe('xiaomiMimoProvider', () => {
     });
 
     expect(plan.providerState).toEqual({
-      'providerMetadata.xiaomi-mimo': {
+      [`providerMetadata.${resolveMetadataKey(xiaomiMimoProvider, baseUrl)}`]: {
         baseUrl,
         version: computeModelListVersion(template),
       },

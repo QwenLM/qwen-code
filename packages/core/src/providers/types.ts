@@ -156,6 +156,8 @@ export interface ProviderModelProvidersPatch {
   ownsModel?: (model: ProviderModelConfig) => boolean;
   /** Keep a selected sibling endpoint model when it survives this patch. */
   retainCurrentModelAcrossEndpoints?: boolean;
+  /** Identify this provider's models across all of its sibling endpoints. */
+  ownsModelAcrossEndpoints?: (model: ProviderModelConfig) => boolean;
 }
 
 /**

@@ -28,6 +28,7 @@ import {
   TOKEN_PLAN_ENV_KEY,
   TOKEN_PLAN_GLOBAL_BASE_URL,
   tokenPlanProvider,
+  xiaomiMimoProvider,
 } from '../index.js';
 
 function createAdapter(modelProviders: ModelProvidersConfig = {}) {
@@ -419,6 +420,122 @@ describe('applyProviderInstallPlan', () => {
       chinaCustom,
       ...intlModels,
     ]);
+  });
+
+  it('does not let another provider suppress a new provider selection', async () => {
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'deepseek-chat',
+          name: '[DeepSeek] deepseek-chat',
+          baseUrl: 'https://api.deepseek.com',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+      ],
+    });
+    adapter.getValue.mockImplementation((key: string) =>
+      key === 'model.name' ? 'deepseek-chat' : '',
+    );
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: KIMI_CODE_BASE_URL,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: ['k3-256k'],
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, {
+      settings: adapter,
+      doRefreshAuth: false,
+    });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'k3-256k');
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'model.baseUrl',
+      KIMI_CODE_BASE_URL,
+    );
+  });
+
+  it('keeps id-only sibling endpoint resolution stable on first install', async () => {
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const chinaModels = buildProviderTemplate(kimiProvider, chinaUrl);
+    const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: chinaModels,
+    });
+    adapter.getValue.mockImplementation((key: string) =>
+      key === 'model.name' ? 'kimi-k3' : '',
+    );
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: intlUrl,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: intlModels.map((model) => model.id),
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, {
+      settings: adapter,
+      doRefreshAuth: false,
+    });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      ...chinaModels,
+      ...intlModels,
+    ]);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
+  });
+
+  it('keeps Xiaomi MiMo sibling endpoint models during install', async () => {
+    const payGoUrl = 'https://api.xiaomimimo.com/v1';
+    const tokenUrl = 'https://token-plan-cn.xiaomimimo.com/v1';
+    const payGoModels = buildProviderTemplate(xiaomiMimoProvider, payGoUrl);
+    const tokenModels = buildProviderTemplate(xiaomiMimoProvider, tokenUrl);
+    const payGoCustom = {
+      id: 'mimo-custom',
+      name: '[Xiaomi MiMo] mimo-custom',
+      baseUrl: payGoUrl,
+      envKey: 'MIMO_API_KEY',
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...payGoModels, payGoCustom],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return 'mimo-v2.5-pro';
+      if (key === 'model.baseUrl') return payGoUrl;
+      return '';
+    });
+    const plan = buildInstallPlan(xiaomiMimoProvider, {
+      baseUrl: tokenUrl,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: tokenModels.map((model) => model.id),
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, {
+      settings: adapter,
+      doRefreshAuth: false,
+    });
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      ...payGoModels,
+      payGoCustom,
+      ...tokenModels,
+    ]);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
   });
 
   it.each([

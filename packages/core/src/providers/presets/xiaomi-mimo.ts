@@ -57,5 +57,6 @@ export const xiaomiMimoProvider: ProviderConfig = {
     baseUrl === 'https://api.xiaomimimo.com/v1'
       ? 'https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call'
       : 'https://mimo.mi.com/docs/tokenplan/subscription',
+  mergeModelsByIdentity: true,
   uiGroup: 'third-party',
 };
