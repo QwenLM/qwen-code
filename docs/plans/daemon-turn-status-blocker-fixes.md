@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work from exact PR head `3493ae055c0a4440c51a9013d3f47493381475bd`.
+- Round 7 verification starts from exact PR head `e733b25d1bd386620a2c22862da5c4fb3a0319cf`.
 - “Within the system limit” means the current active transcript chain scanned backward for at most 10 pages × 500 records, with 4 MiB per page.
 - Preserve `GET /session/:id/turns/:promptId` and `/turns/current`, client-id authorization, and the 32,768-character prompt/result cap.
 - Agent-side model settlement keeps the existing best-effort recording behavior; bridge-owned pre-dispatch outcomes are acknowledged only after their strict transcript write succeeds.
@@ -150,3 +150,26 @@
 - [ ] Ask the read-only test-engineer agent to audit every Critical as either public-daemon E2E or a deterministic component-level fault-injection regression.
 - [ ] Perform two consecutive clean full-diff self-audit passes; any edit resets the count.
 - [ ] Re-fetch PR head/state, confirm the reviewed base has not moved, then commit and push without force.
+
+### Task 8: Close Round 7 critical durability and compatibility gaps
+
+**Files:**
+
+- Modify: `packages/acp-bridge/src/bridge.ts`
+- Modify: `packages/cli/src/acp-integration/session/Session.ts`
+- Modify: `packages/channels/base/src/AcpBridge.ts`
+- Modify: `packages/channels/base/src/DaemonChannelBridge.ts`
+- Test: corresponding collocated test files.
+
+**Interfaces:**
+
+- Consumes: bridge prompt admission/forwarding, child session teardown, transcript replay, rewind turn indexes, and ACP diagnostic updates.
+- Produces: durable bridge-owned terminals while the child writer remains available, consistent rewind identities, and Channel-visible diagnostics that remain excluded from `resultText`.
+
+- [x] Add a failing forward-rejection test proving a dispatched request rejected before child admission is strictly persisted.
+- [x] Add failing close/kill tests proving queued prompts are durably cancelled before child teardown; a refused close leaves the session live but truthfully keeps the close-request cancellations.
+- [x] Add failing replay/rewind tests where mid-turn and structural user records do not advance the turn-result index.
+- [x] Add failing early continue/retry tests proving settlement uses the current turn index rather than the next index.
+- [x] Add failing ACP and daemon Channel tests proving diagnostic messages remain visible while discrete background messages remain excluded.
+- [x] Implement the minimum production changes needed to make each regression pass, one red-green cycle at a time.
+- [x] Run the complete owning test files, build, typecheck, targeted real-daemon E2E, and two clean diff-audit passes.

@@ -708,6 +708,8 @@ export class DaemonChannelBridge
             text
           ) {
             this.emit('backgroundResponse', sessionId, text);
+          } else if (meta['source'] === 'diagnostic' && text) {
+            this.emit('textChunk', sessionId, text);
           }
           break;
         }

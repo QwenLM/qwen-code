@@ -381,6 +381,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             content.text
           ) {
             this.emit('backgroundResponse', sessionId, content.text);
+          } else if (
+            meta['source'] === 'diagnostic' &&
+            content?.type === 'text' &&
+            content.text
+          ) {
+            this.emit('textChunk', sessionId, content.text);
           }
           break;
         }

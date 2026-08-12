@@ -2657,6 +2657,133 @@ describe('Session', () => {
       ]);
     });
 
+    it('does not count a mid-turn user record as a rewindable turn', () => {
+      session.primeTurnFromHistory([
+        chatRecord({
+          uuid: 'user-a',
+          message: { role: 'user', parts: [{ text: 'first' }] },
+        }),
+        chatRecord({
+          uuid: 'tool-result-a',
+          parentUuid: 'user-a',
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-a',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+          },
+        }),
+        chatRecord({
+          uuid: 'mid-turn-a',
+          parentUuid: 'tool-result-a',
+          subtype: 'mid_turn_user_message',
+          message: {
+            role: 'user',
+            parts: [{ text: 'also check tests' }],
+          },
+        }),
+        chatRecord({
+          uuid: 'turn-result-a',
+          parentUuid: 'mid-turn-a',
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: 'daemon-prompt-a',
+            state: 'completed',
+            stopReason: 'end_turn',
+            endedAt: 1,
+          },
+        }),
+        chatRecord({
+          uuid: 'user-b',
+          parentUuid: 'turn-result-a',
+          message: { role: 'user', parts: [{ text: 'second' }] },
+        }),
+      ]);
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ functionCall: { name: 'read_file' } }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-a',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+            { text: 'also check tests' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      session.rewindToTurn(1);
+
+      expect(session.getRetainedTurnResultPromptIds()).toContain(
+        'daemon-prompt-a',
+      );
+    });
+
+    it('does not count a pure system reminder as a rewindable turn', () => {
+      session.primeTurnFromHistory([
+        chatRecord({
+          uuid: 'user-a',
+          message: { role: 'user', parts: [{ text: 'first' }] },
+        }),
+        chatRecord({
+          uuid: 'reminder-a',
+          parentUuid: 'user-a',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: `${SYSTEM_REMINDER_OPEN}structural${SYSTEM_REMINDER_CLOSE}`,
+              },
+            ],
+          },
+        }),
+        chatRecord({
+          uuid: 'turn-result-a',
+          parentUuid: 'reminder-a',
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: 'daemon-prompt-a',
+            state: 'completed',
+            stopReason: 'end_turn',
+            endedAt: 1,
+          },
+        }),
+      ]);
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      session.rewindToTurn(1);
+
+      expect(session.getRetainedTurnResultPromptIds()).toContain(
+        'daemon-prompt-a',
+      );
+    });
+
     it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
@@ -5164,6 +5291,49 @@ describe('Session', () => {
           mockChatRecordingService.recordTurnResult.mock.calls[0][0].startedAt,
         ).toBeUndefined();
       });
+
+      it.each([
+        ['continue', 'qwen.daemon.continueLastTurn'],
+        ['retry', 'qwen.daemon.retry'],
+      ])(
+        'keeps an early %s failure attached to the current turn',
+        async (_label, metadataKey) => {
+          const countSpy = vi
+            .spyOn(session, 'getRewindableUserTurnCount')
+            .mockReturnValue(2);
+          mockConfig.assertCanStartTurn = vi
+            .fn()
+            .mockRejectedValue(new Error('admission failed'));
+          const promptId = `early-${_label}-failure`;
+
+          await expect(
+            session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: '' }],
+                _meta: { [metadataKey]: true },
+              },
+              { ...trustedContext, promptId },
+            ),
+          ).rejects.toThrow('admission failed');
+          countSpy.mockRestore();
+
+          const history: Content[] = [
+            { role: 'user', parts: [{ text: 'first' }] },
+            { role: 'model', parts: [{ text: 'first reply' }] },
+            { role: 'user', parts: [{ text: 'second' }] },
+            { role: 'model', parts: [{ text: 'second reply' }] },
+            { role: 'user', parts: [{ text: 'third' }] },
+            { role: 'model', parts: [{ text: 'third reply' }] },
+          ];
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+          session.rewindToTurn(2);
+
+          expect(session.getRetainedTurnResultPromptIds()).toContain(promptId);
+        },
+      );
 
       it('records an error when awaited turn finalization fails', async () => {
         (

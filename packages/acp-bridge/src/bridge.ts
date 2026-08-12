@@ -1373,6 +1373,17 @@ function terminalStatusRecord(
   };
 }
 
+interface StrictTerminalPersistence {
+  promise: Promise<void>;
+  state: 'pending' | 'succeeded' | 'failed';
+  turnResult: TurnResultRecordPayload;
+}
+
+const strictTerminalPersistences = new WeakMap<
+  SessionEntry,
+  Map<string, StrictTerminalPersistence>
+>();
+
 /** Reuse one channel-exit rejection instead of adding a listener per call. */
 function getTransportClosedReject(entry: SessionEntry): Promise<never> {
   if (!entry.transportClosedReject) {
@@ -1398,6 +1409,7 @@ function publishPromptTerminal(
   entry: SessionEntry,
   pendingEntry: PendingPromptEntry,
   terminal: PromptTerminal,
+  options?: { persistIfDispatched?: boolean },
 ): void {
   if (pendingEntry.terminalPublished) {
     // Dedup here is the designed steady state, not an anomaly: deadline
@@ -1412,29 +1424,14 @@ function publishPromptTerminal(
   pendingEntry.terminalPublished = true;
   const status = rememberTerminalTurnStatus(entry, pendingEntry, terminal);
   if (
-    !pendingEntry.dispatched &&
+    (!pendingEntry.dispatched || options?.persistIfDispatched === true) &&
     pendingEntry.terminalPersistence === undefined
   ) {
-    pendingEntry.terminalPersistence = Promise.race([
-      withTimeout(
-        entry.connection.extMethod(
-          SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
-          {
-            sessionId: entry.sessionId,
-            turnResult: terminalStatusRecord(status),
-          },
-        ),
-        entry.terminalPersistenceTimeoutMs,
-        SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
-      ),
-      getTransportClosedReject(entry),
-    ]).then(
-      () => undefined,
-      (error: unknown) => {
-        writeStderrLine(
-          `[turn-result] session=${entry.sessionId} promptId=${pendingEntry.promptId} action=persist_failed error=${extractErrorMessage(error)}`,
-        );
-      },
+    startStrictTerminalPersistence(
+      entry,
+      pendingEntry.promptId,
+      terminalStatusRecord(status),
+      pendingEntry,
     );
   }
   const originatorClientId = pendingEntry.originatorClientId;
@@ -1472,6 +1469,58 @@ function publishPromptTerminal(
   }
 }
 
+function startStrictTerminalPersistence(
+  entry: SessionEntry,
+  promptId: string,
+  turnResult: TurnResultRecordPayload,
+  pendingEntry?: PendingPromptEntry,
+): StrictTerminalPersistence {
+  const attempt: StrictTerminalPersistence = {
+    state: 'pending',
+    promise: Promise.resolve(),
+    turnResult,
+  };
+  let attempts = strictTerminalPersistences.get(entry);
+  if (!attempts) {
+    attempts = new Map();
+    strictTerminalPersistences.set(entry, attempts);
+  }
+  attempts.set(promptId, attempt);
+  attempt.promise = Promise.race([
+    withTimeout(
+      entry.connection.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+        {
+          sessionId: entry.sessionId,
+          turnResult,
+        },
+      ),
+      entry.terminalPersistenceTimeoutMs,
+      SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+    ),
+    getTransportClosedReject(entry),
+  ]).then(
+    () => {
+      attempt.state = 'succeeded';
+      if (attempts.get(promptId) === attempt) attempts.delete(promptId);
+    },
+    (error: unknown) => {
+      attempt.state = 'failed';
+      throw error;
+    },
+  );
+  const observed = attempt.promise.then(
+    () => undefined,
+    (error: unknown) => {
+      writeStderrLine(
+        `[turn-result] session=${entry.sessionId} promptId=${promptId} action=persist_failed error=${extractErrorMessage(error)}`,
+      );
+    },
+  );
+  if (pendingEntry) pendingEntry.terminalPersistence = observed;
+  return attempt;
+}
+
 /**
  * Publish an error terminal for every prompt still pending on a session
  * that is being torn down (close/kill/channel crash/daemon shutdown), then
@@ -1502,6 +1551,51 @@ function flushPromptTerminals(
       /* listeners must not break teardown */
     }
   }
+}
+
+async function cancelQueuedPromptsBeforeTeardown(
+  entry: SessionEntry,
+): Promise<void> {
+  const queued = entry.pendingPromptList.filter(
+    (pending) => !pending.dispatched && !pending.terminalPublished,
+  );
+  for (const pending of queued) {
+    pending.removed = true;
+    try {
+      pending.abortController.abort(
+        new DOMException('Prompt cancelled by session teardown', 'AbortError'),
+      );
+    } catch {
+      /* listeners must not break teardown */
+    }
+    try {
+      entry.events.publish({
+        type: 'pending_prompt_completed',
+        promptId: pending.promptId,
+        data: {
+          sessionId: entry.sessionId,
+          promptId: pending.promptId,
+          state: 'removed',
+        },
+        ...(pending.originatorClientId
+          ? { originatorClientId: pending.originatorClientId }
+          : {}),
+      });
+    } catch {
+      /* bus may be closed during teardown */
+    }
+    publishPromptTerminal(entry, pending, { kind: 'cancelled' });
+  }
+  const attempts = strictTerminalPersistences.get(entry);
+  if (!attempts) return;
+  await Promise.all(
+    [...attempts.entries()].map(([promptId, current]) =>
+      current.state === 'pending'
+        ? current.promise
+        : startStrictTerminalPersistence(entry, promptId, current.turnResult)
+            .promise,
+    ),
+  );
 }
 
 function hasControlCharacter(value: string): boolean {
@@ -6176,6 +6270,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
       entry.pendingInteractions.clear();
+      await cancelQueuedPromptsBeforeTeardown(entry);
+    } catch (error) {
+      entry.closing = false;
+      throw error;
+    }
+    try {
       agentSessionClosed = await notifyAgentSessionClose(
         entry,
         ci,
@@ -7329,7 +7429,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             publishPromptTerminal(entry, pendingEntry, { kind: 'cancelled' });
             return;
           }
-          publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
+          publishPromptTerminal(
+            entry,
+            pendingEntry,
+            { kind: 'error', err },
+            { persistIfDispatched: true },
+          );
         },
       );
       // Tail swallows failures so subsequent prompts still run. The caller
@@ -10385,6 +10490,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
       entry.pendingInteractions.clear();
+      try {
+        await cancelQueuedPromptsBeforeTeardown(entry);
+      } catch (error) {
+        entry.closing = false;
+        throw error;
+      }
       try {
         await notifyAgentSessionClose(entry, ci, 'killSession', {
           throwOnFailure: true,

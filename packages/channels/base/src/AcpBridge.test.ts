@@ -513,6 +513,37 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('returns a discrete diagnostic when no model answer is available', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Session token limit exceeded.',
+            },
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
+          },
+        });
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Session token limit exceeded.',
+    );
+  });
+
   it('emits a completed background response separately from the active turn', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

@@ -96,6 +96,7 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
+  isReplayTurnStartType,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -1336,13 +1337,24 @@ function readTelemetryPromptId(payload: unknown): string | undefined {
 }
 
 function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
+  if (
+    !isReplayTurnStartType(record.type, record.subtype) ||
+    record.subtype === 'realtime_message'
+  ) {
     return false;
   }
-  return (
-    record.message?.parts?.some(
-      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
-    ) ?? false
+  const message = record.message;
+  if (!message?.parts || isSystemReminderContent(message)) return false;
+  if (message.parts.some((part) => 'functionResponse' in part)) return false;
+  if (
+    message.parts.some(
+      (part) => 'text' in part && isTodoStopGuardPromptText(part.text),
+    )
+  ) {
+    return false;
+  }
+  return message.parts.some(
+    (part) => typeof part.text === 'string' && part.text.trim().length > 0,
   );
 }
 
@@ -5331,6 +5343,10 @@ export class Session implements SessionContext {
     const { text, truncated } = truncateTurnText(
       extractTurnPromptText(params.prompt),
     );
+    const metadata = params._meta as Record<string, unknown> | undefined;
+    const continuesCurrentTurn =
+      metadata?.[DAEMON_RETRY_META_KEY] === true ||
+      metadata?.[DAEMON_CONTINUE_META_KEY] === true;
     return {
       promptId: invocationContext.promptId,
       ...(invocationContext.originatorClientId !== undefined
@@ -5338,6 +5354,11 @@ export class Session implements SessionContext {
         : {}),
       promptText: text,
       promptTextTruncated: truncated,
+      ...(continuesCurrentTurn
+        ? {
+            turnIndex: Math.max(0, this.getRewindableUserTurnCount() - 1),
+          }
+        : {}),
       resultSegments: new Map(),
       resultCapturedChars: 0,
       resultSegmentsTruncated: false,

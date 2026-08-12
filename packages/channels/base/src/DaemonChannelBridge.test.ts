@@ -630,6 +630,48 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('returns a discrete diagnostic when no model answer is available', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Session token limit exceeded.',
+            },
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'max_tokens' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'Session token limit exceeded.',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
   it('emits the completed background response without appending it to the active turn', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
