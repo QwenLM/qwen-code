@@ -30,7 +30,6 @@ type MessageCreateParamsNonStreaming =
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
-import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 import { buildAnthropicUsageMetadata } from './usage.js';
 import {
@@ -49,6 +48,7 @@ import {
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
 import {
   reportAnthropicEvent,
   reportAnthropicFollowingRequest,
@@ -1209,6 +1209,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let finishReason: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
+    const deferredToolCalls: GenerateContentResponse[] = [];
+    let hasEmptyToolCall = false;
     const collectedResponses: GenerateContentResponse[] = [];
     let messageStartUsagePending = false;
     const takePendingMessageStartUsage = () => {
@@ -1359,13 +1361,34 @@ export class AnthropicContentGenerator implements ContentGenerator {
           const index = event.index ?? 0;
           const blockState = blocks.get(index);
           if (blockState?.type === 'tool_use') {
-            const args = safeJsonParse(blockState.inputJson || '{}', {});
+            const inputJson = blockState.inputJson;
+            let parsedArgs: unknown = {};
+            if (inputJson) {
+              try {
+                parsedArgs = JSON.parse(inputJson);
+              } catch {
+                throw new InvalidStreamError(
+                  'Anthropic stream contained malformed tool call arguments.',
+                  'MALFORMED_TOOL_CALL',
+                );
+              }
+            }
+            if (
+              typeof parsedArgs !== 'object' ||
+              parsedArgs === null ||
+              Array.isArray(parsedArgs)
+            ) {
+              throw new InvalidStreamError(
+                'Anthropic stream contained malformed tool call arguments.',
+                'MALFORMED_TOOL_CALL',
+              );
+            }
             const chunk = this.buildGeminiChunk(
               {
                 functionCall: {
                   id: blockState.id,
                   name: blockState.name,
-                  args,
+                  args: parsedArgs,
                 },
               },
               messageId,
@@ -1373,8 +1396,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
               undefined,
               takePendingMessageStartUsage(),
             );
-            collectedResponses.push(chunk);
-            yield chunk;
+            hasEmptyToolCall ||= !inputJson;
+            deferredToolCalls.push(chunk);
           }
           blocks.delete(index);
           break;
@@ -1383,6 +1406,27 @@ export class AnthropicContentGenerator implements ContentGenerator {
           const stopReasonValue = event.delta.stop_reason;
           if (stopReasonValue) {
             finishReason = stopReasonValue;
+            if (
+              [...blocks.values()].some((block) => block.type === 'tool_use')
+            ) {
+              throw new InvalidStreamError(
+                'Anthropic stream contained malformed tool call arguments.',
+                'MALFORMED_TOOL_CALL',
+              );
+            }
+            if (deferredToolCalls.length > 0) {
+              if (hasEmptyToolCall && stopReasonValue !== 'tool_use') {
+                throw new InvalidStreamError(
+                  'Anthropic stream contained malformed tool call arguments.',
+                  'MALFORMED_TOOL_CALL',
+                );
+              }
+              for (const chunk of deferredToolCalls.splice(0)) {
+                collectedResponses.push(chunk);
+                yield chunk;
+              }
+              hasEmptyToolCall = false;
+            }
           }
 
           // Some Anthropic-compatible providers may include additional usage fields
@@ -1475,6 +1519,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
         default:
           break;
       }
+    }
+
+    if (
+      deferredToolCalls.length > 0 ||
+      [...blocks.values()].some((block) => block.type === 'tool_use')
+    ) {
+      throw new InvalidStreamError(
+        'Anthropic stream contained malformed tool call arguments.',
+        'MALFORMED_TOOL_CALL',
+      );
     }
   }
 
