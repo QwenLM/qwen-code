@@ -80,16 +80,10 @@
         gap: 18px;
       }
       .mark {
-        display: grid;
-        place-items: center;
         width: 58px;
         height: 58px;
-        border-radius: 18px;
-        background: linear-gradient(145deg, #7f6dff, #4d34df);
-        box-shadow: 0 14px 34px rgba(88, 63, 226, 0.38);
-        font:
-          700 26px/1 ui-monospace,
-          monospace;
+        object-fit: contain;
+        filter: drop-shadow(0 14px 24px rgba(88, 63, 226, 0.38));
       }
       body[data-state='starting'] {
         background: #070b12;
@@ -277,7 +271,7 @@
     <main>
       <section class="shell" aria-live="polite">
         <div class="brand">
-          <div class="mark">Q</div>
+          <img class="mark" src="qwen-code-logo.svg" alt="Qwen Code" />
           <div class="brand-copy">
             <h1>Qwen Code</h1>
             <p class="eyebrow">Desktop workspace</p>

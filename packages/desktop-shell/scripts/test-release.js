@@ -56,6 +56,12 @@ try {
 }
 
 async function testBootstrapWorkspaceVisibility() {
+  const bootstrapHtml = fs.readFileSync(
+    path.join(packageDir, 'bootstrap', 'index.html'),
+    'utf8',
+  );
+  assert.match(bootstrapHtml, /class="mark" src="qwen-code-logo\.svg"/);
+  assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
   const elements = {};
   const element = (selector) => {
     elements[selector] ??= {
