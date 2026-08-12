@@ -5979,18 +5979,39 @@ exit 1
     expect(workflow).toContain(
       "GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'",
     );
-    expect(prepareBranchAndFeedbackStep).toContain(
-      '[[ ! "${GROWTH_BUDGET_SRC_LINES}" =~ ^[0-9]{1,7}$ ]]',
-    );
-    expect(prepareBranchAndFeedbackStep).toContain(
-      '[[ ! "${GROWTH_BUDGET_TEST_LINES}" =~ ^[0-9]{1,7}$ ]]',
-    );
+    // The sanitize fallback is REPLAYED, not just pinned: it is the sole
+    // protection against a malformed repo variable reaching the octal-
+    // parsing [[ -gt ]] comparisons, in both failure directions.
+    const sanitizeBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ ! "\$\{GROWTH_BUDGET_SRC_LINES\}"[\s\S]*?GROWTH_BUDGET_TEST_LINES=400\n\s+fi)/,
+    )?.[1];
+    expect(sanitizeBlock).toBeTruthy();
+    // Last line only: the fallback path also emits its ::warning:: lines.
+    const sanitized = (src, test) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BUDGET_SRC_LINES='${src}'\nGROWTH_BUDGET_TEST_LINES='${test}'\n${sanitizeBlock}\nprintf '\\n%s %s' "$GROWTH_BUDGET_SRC_LINES" "$GROWTH_BUDGET_TEST_LINES"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .split('\n')
+        .pop();
+    // Plain counts (zero included) pass through untouched.
+    expect(sanitized('400', '0')).toBe('400 0');
+    // Garbage falls back…
+    expect(sanitized('400abc', 'twelve')).toBe('400 400');
+    // …and so do zero-padded values: bash [[ -gt ]] would read '0400' as
+    // octal 256 and raise on '0900', silently disabling the brake.
+    expect(sanitized('0400', '0900')).toBe('400 400');
 
     // Measurement: replay the real block against a real repo. Test lines are
-    // *.test.* / *.spec.* files, __snapshots__/, test-utils/, and
+    // *.test.* / *.spec.* files, __snapshots__/, __tests__/, test-utils/, and
     // integration-tests/ (by DIRECTORY, not file naming); binary files count
     // as zero; deletions subtract; mechanical churn (root and nested
-    // lockfiles, the regenerated settings schema) never burns the budget.
+    // lockfiles, the regenerated settings schema) never burns the budget —
+    // on EITHER side of the src/test split, even under a test directory.
     const measureBlock = prepareBranchAndFeedbackStep.match(
       /(# Binary files report[\s\S]*?NET_SRC=\$\(\( NET_TOTAL - NET_TEST \)\))/,
     )?.[1];
@@ -6016,7 +6037,7 @@ exit 1
       writeFileSync(join(dir, 'src', 'app.ts'), 'b1\nb2\nb3\nb4\nb5\nb6\nb7\n');
       // tests: +3 appended, +5 spec, +4 snapshot, +2 test-utils, +2
       // integration-tests helper (a non-test filename proves the directory
-      // pathspec) = net +16
+      // pathspec) plus +2 __tests__ setup below = net +18
       writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\nt3\nt4\nt5\n');
       writeFileSync(join(dir, 'src', 'util.spec.ts'), 's1\ns2\ns3\ns4\ns5\n');
       writeFileSync(
@@ -6025,6 +6046,15 @@ exit 1
       );
       writeFileSync(join(dir, 'src', 'test-utils', 'helper.ts'), 'h1\nh2\n');
       writeFileSync(join(dir, 'integration-tests', 'helper.ts'), 'i1\ni2\n');
+      // __tests__/ helper without a .test./.spec. suffix is test code…
+      mkdirSync(join(dir, 'src', '__tests__'));
+      writeFileSync(join(dir, 'src', '__tests__', 'setup.ts'), 'u1\nu2\n');
+      // …and a lockfile under a test directory is mechanical churn on BOTH
+      // sides of the split, or NET_SRC would be corrupted by the subtraction.
+      writeFileSync(
+        join(dir, 'integration-tests', 'package-lock.json'),
+        'k1\nk2\nk3\nk4\nk5\nk6\n',
+      );
       writeFileSync(
         join(dir, 'assets', 'logo.bin'),
         Buffer.from([0x00, 0x01, 0x02, 0x00]),
@@ -6061,7 +6091,7 @@ exit 1
         ],
         { encoding: 'utf8', cwd: dir },
       );
-      expect(measured).toBe('20 16 4');
+      expect(measured).toBe('22 18 4');
       expect(measureBlock).toContain(
         "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
       );
@@ -6125,7 +6155,7 @@ exit 1
     expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
     expect(
       pushAndReportStep.split(
-        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${WINDOW:-none} -->',
+        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
       ).length - 1,
     ).toBe(2);
     expect(
@@ -6141,6 +6171,14 @@ exit 1
     expect(pushAndReportStep).toContain(
       "GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'",
     );
+    // The marker is written under the key the baseline was READ under
+    // (LIVE_REARM_KEY), not the matrix WINDOW: a supersede-exempt conflict
+    // round can report under a stale WINDOW after a re-arm, and a marker
+    // under that dead key would hide the round's pushed growth from every
+    // later read in the live window.
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'",
+    );
     expect(prepareBranchAndFeedbackStep).toContain(
       'growth_base_new=${GROWTH_BASE_NEW}',
     );
@@ -6149,6 +6187,9 @@ exit 1
     );
     expect(prepareBranchAndFeedbackStep).toContain(
       'growth_base_test=${BASE_TEST}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_win=${LIVE_REARM_KEY}',
     );
 
     // The deferred preamble names the actual cause — a maintainer reading
@@ -6160,6 +6201,37 @@ exit 1
     expect(prepareBranchAndFeedbackStep).toContain(
       '已进入仅处理 Critical 的模式：${CAUSE_ZH}',
     );
+    // The cause construction is REPLAYED across the three engagement shapes,
+    // in both languages: a growth-only trip must never announce the round
+    // threshold, signs render naturally (no '+-120'), and EN/ZH always name
+    // the same cause.
+    const causeBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_CLAUSE_EN="the PR's diff grew[\s\S]*?CAUSE_ZH="\$\{ROUNDS_CLAUSE_ZH\}"\n\s+fi)/,
+    )?.[1];
+    expect(causeBlock).toBeTruthy();
+    const causeFor = (rounds, growth, growthSrc, growthTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const growthOnly = causeFor('false', 'true', -120, 500);
+    expect(growthOnly[0]).toContain('src -120 / test 500');
+    expect(growthOnly[0]).not.toContain('rounds are complete');
+    expect(growthOnly[0]).not.toContain('+-');
+    expect(growthOnly[1]).toContain('源码 -120 / 测试 500');
+    expect(growthOnly[1]).not.toContain('轮次');
+    const roundsOnly = causeFor('true', 'false', 0, 0);
+    expect(roundsOnly[0]).toBe('5 change-producing rounds are complete');
+    expect(roundsOnly[0]).not.toContain('diff grew');
+    expect(roundsOnly[1]).toContain('已完成 5 个产生改动的轮次');
+    const both = causeFor('true', 'true', 900, 20);
+    expect(both[0]).toContain('rounds are complete and');
+    expect(both[0]).toContain('src 900 / test 20');
+    expect(both[1]).toContain('轮次，且');
   });
 
   it('requires the address path to run verification and record it as evidence', () => {

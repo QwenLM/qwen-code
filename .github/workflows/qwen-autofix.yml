@@ -4052,27 +4052,44 @@ jobs:
           # Growth-triggered Critical-only reuses the round brake's entire
           # deferral machinery below; the human batch budget stays
           # round-scoped, so maintainer feedback flows exactly as today.
-          if [[ ! "${GROWTH_BUDGET_SRC_LINES}" =~ ^[0-9]{1,7}$ ]]; then
-            echo "::warning::GROWTH_BUDGET_SRC_LINES='${GROWTH_BUDGET_SRC_LINES}' is not a line count; using 400"
+          # Leading zeros are rejected, not just non-digits: bash [[ -gt ]]
+          # reads a zero-padded operand as OCTAL, so '0400' would compare as
+          # 256 (the brake fires early) and '0900' raises "value too great
+          # for base" inside [[ ]], which under an if-condition silently
+          # evaluates false — the brake never engages. Both violate the
+          # documented fallback promise, so pad-shaped values fall back too.
+          if [[ ! "${GROWTH_BUDGET_SRC_LINES}" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+            echo "::warning::GROWTH_BUDGET_SRC_LINES='${GROWTH_BUDGET_SRC_LINES}' is not a plain line count; using 400"
             GROWTH_BUDGET_SRC_LINES=400
           fi
-          if [[ ! "${GROWTH_BUDGET_TEST_LINES}" =~ ^[0-9]{1,7}$ ]]; then
-            echo "::warning::GROWTH_BUDGET_TEST_LINES='${GROWTH_BUDGET_TEST_LINES}' is not a line count; using 400"
+          if [[ ! "${GROWTH_BUDGET_TEST_LINES}" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+            echo "::warning::GROWTH_BUDGET_TEST_LINES='${GROWTH_BUDGET_TEST_LINES}' is not a plain line count; using 400"
             GROWTH_BUDGET_TEST_LINES=400
           fi
           # Binary files report "-" in numstat; count them as 0 lines.
           sum_numstat() { awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }'; }
-          TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
+          # __tests__/ is part of the repo's existing test-file definition
+          # (AGENTS.md's triage line-counting rule, repo-hygiene's
+          # PROD_EXCLUDE): helpers under it without a .test./.spec. suffix
+          # are still test code, not source.
+          TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
           # Mechanical churn must not burn the budget: one dependency bump
           # rewrites hundreds of package-lock.json lines and one
           # `generate:settings-schema` run regenerates the committed schema —
           # skimmed, not reviewed, so they measure no review burden. Keep the
           # list tight and name generated artifacts EXACTLY; a broad glob
-          # would silently exempt hand-written files from the budget. None of
-          # these can match TEST_PATHSPEC, so NET_SRC stays a clean subtraction.
+          # would silently exempt hand-written files from the budget. Applied
+          # to BOTH measurements: a lockfile can live under a test directory
+          # (integration-tests/package-lock.json), and excluding it from one
+          # side only would corrupt the NET_SRC subtraction.
           GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
-          NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" | sum_numstat)"
-          NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" | sum_numstat)"
+          # An orphan-history branch (fork takeover / adoption admits one —
+          # nothing on this job's fetch requires a common ancestor) has no
+          # merge base: the three-dot diff exits 128. Fail OPEN to zero like
+          # the merge-tree conflict probe above — an unmeasurable PR skips
+          # the brake rather than dying red at measurement every round.
+          NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TOTAL=0
+          NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TEST=0
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -4095,6 +4112,14 @@ jobs:
             echo "growth_base_new=${GROWTH_BASE_NEW}"
             echo "growth_base_src=${BASE_SRC}"
             echo "growth_base_test=${BASE_TEST}"
+            # The key the baseline was READ under. The report must write the
+            # marker under this same key, not the matrix WINDOW: a conflict
+            # round is exempt from the supersede discard, so it can run with
+            # a stale WINDOW after a re-arm — a marker written under that
+            # dead key would be invisible to every later read and the
+            # round's pushed growth would escape the budget for the rest of
+            # the live window.
+            echo "growth_base_win=${LIVE_REARM_KEY}"
           } >> "${GITHUB_OUTPUT}"
           echo "📏 net diff src ${NET_SRC} / test ${NET_TEST} lines (window baseline ${BASE_SRC}/${BASE_TEST}, growth ${GROWTH_SRC}/${GROWTH_TEST}, budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
 
@@ -4183,8 +4208,11 @@ jobs:
             # Name the cause(s) precisely: a maintainer reading "after five
             # rounds" on a round-2 PR that tripped the GROWTH budget would
             # reasonably conclude the brake misfired.
-            GROWTH_CLAUSE_EN="the PR's diff grew src +${GROWTH_SRC} / test +${GROWTH_TEST} net lines beyond this counting window's baseline (budgets: ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
-            GROWTH_CLAUSE_ZH="本计数窗口内 diff 净增长已达 源码 +${GROWTH_SRC} / 测试 +${GROWTH_TEST} 行（预算 ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}）"
+            # No literal '+' prefix: the values are signed (either dimension
+            # can shrink while the other trips the brake), and '+-120' in
+            # the cause line reads like a misfire to exactly its audience.
+            GROWTH_CLAUSE_EN="the PR's diff grew src ${GROWTH_SRC} / test ${GROWTH_TEST} net lines beyond this counting window's baseline (budgets: ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
+            GROWTH_CLAUSE_ZH="本计数窗口内 diff 净增长已达 源码 ${GROWTH_SRC} / 测试 ${GROWTH_TEST} 行（预算 ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}）"
             ROUNDS_CLAUSE_EN="${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds are complete"
             ROUNDS_CLAUSE_ZH="已完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次"
             if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' && "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
@@ -4836,6 +4864,11 @@ jobs:
           GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'
           GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'
           GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'
+          # The window key prepare READ the baseline under (LIVE_REARM_KEY),
+          # not the matrix WINDOW: conflict rounds are supersede-exempt and
+          # can report under a stale WINDOW after a re-arm; the marker must
+          # land under the key later reads will use.
+          GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
         run: |-
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
@@ -5104,7 +5137,7 @@ jobs:
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
               echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
               if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
-                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${WINDOW:-none} -->"
+                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
@@ -5128,13 +5161,31 @@ jobs:
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
               echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
               if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
-                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${WINDOW:-none} -->"
+                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
 
-          gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
+          # Bounded retry on the report post: this one comment carries the
+          # round's ENTIRE persisted state (autofix-eval watermark/round,
+          # redcheck head, growth baseline). The push has already landed, so
+          # a transient API failure here loses the marker while keeping the
+          # growth — the retry scan would re-anchor the baseline at the
+          # post-push size and re-evaluate feedback it already addressed.
+          # Three attempts bound that to genuine outages; the final failure
+          # keeps today's semantics (step fails, no marker, next scan
+          # retries the round).
+          REPORT_POSTED='false'
+          for attempt in 1 2 3; do
+            if gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; then
+              REPORT_POSTED='true'
+              break
+            fi
+            echo "::warning::report post attempt ${attempt} failed for PR #${PR}; retrying"
+            sleep 10
+          done
+          [[ "${REPORT_POSTED}" == 'true' ]] || exit 1
 
           # Takeover milestone digest — roughly every 10 rounds. The takeover
           # cap (100) bounds runaway but says nothing about when a human
