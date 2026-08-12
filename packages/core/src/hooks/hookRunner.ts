@@ -599,7 +599,7 @@ export class HookRunner {
       if (shellConfig.shell === 'powershell' && /^\s*"/.test(command)) {
         if (hookConfig.shell === 'powershell') {
           const errorMessage =
-            'Command is a bare-quoted path for an explicit powershell shell; prefix it with the call operator (&) or add arguments';
+            'Command starts with a quoted path under an explicit powershell shell; prefix it with the call operator (&) so PowerShell executes it instead of echoing it';
           debugLogger.warn(
             `Hook configuration error (non-fatal): ${errorMessage}`,
           );

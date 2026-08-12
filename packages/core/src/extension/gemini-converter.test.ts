@@ -36,6 +36,9 @@ vi.mock('node:fs', async (importOriginal) => {
 describe('convertGeminiToQwenConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // readExtensionManifest checks existsSync before reading; these unit tests
+    // mock readFileSync and assume the manifest file is present.
+    vi.mocked(fs.existsSync).mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -85,6 +88,40 @@ describe('convertGeminiToQwenConfig', () => {
     expect(result.settings?.[0].name).toBe('Setting1');
   });
 
+  it('declares hooks when the default hooks/hooks.json file exists', () => {
+    const mockDir = '/mock/extension/dir';
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({ name: 'x', version: '1.0.0' }),
+    );
+    // Manifest exists; hooks/hooks.json also exists.
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p: unknown) =>
+        String(p).endsWith('gemini-extension.json') ||
+        String(p).endsWith(path.join('hooks', 'hooks.json')),
+    );
+
+    const result = convertGeminiToQwenConfig(mockDir);
+
+    expect(result.hooks).toBe('hooks/hooks.json');
+  });
+
+  it('omits hooks when no default hooks/hooks.json file exists', () => {
+    const mockDir = '/mock/extension/dir';
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({ name: 'x', version: '1.0.0' }),
+    );
+    // Manifest exists; hooks/hooks.json does not.
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p: unknown) =>
+        String(p).endsWith('gemini-extension.json') &&
+        !String(p).endsWith(path.join('hooks', 'hooks.json')),
+    );
+
+    const result = convertGeminiToQwenConfig(mockDir);
+
+    expect(result.hooks).toBeUndefined();
+  });
+
   it('should throw error for missing name', () => {
     const mockDir = '/mock/extension/dir';
     const invalidConfig = {
@@ -111,6 +148,32 @@ describe('convertGeminiToQwenConfig', () => {
     );
   });
 
+  it('throws a precise error for a non-object MCP server entry', () => {
+    const mockDir = '/mock/extension/dir';
+    const invalidConfig = {
+      name: 'test-extension',
+      version: '1.0.0',
+      mcpServers: { bad: null },
+    };
+
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(invalidConfig));
+
+    expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
+      /server entries must be JSON objects/,
+    );
+  });
+
+  it('throws a precise error when the manifest is absent', () => {
+    const mockDir = '/mock/extension/dir';
+    // readExtensionManifest returns null for a missing file; the converter
+    // surfaces a clear not-found error instead of a bare deref.
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
+      /Gemini extension config not found/,
+    );
+  });
+
   it('throws when gemini-extension.json resolves through a symlink outside the extension', () => {
     const mockDir = '/mock/extension/dir';
     // realPathWithin resolves the config path first: pretend it points outside
@@ -120,7 +183,7 @@ describe('convertGeminiToQwenConfig', () => {
     );
 
     expect(() => convertGeminiToQwenConfig(mockDir)).toThrow(
-      /resolves through a symlink outside the extension/,
+      /resolves through a symlink outside/,
     );
   });
 });
@@ -160,13 +223,15 @@ describe('isGeminiExtensionConfig', () => {
     expect(isGeminiExtensionConfig(mockDir)).toBe(false);
   });
 
-  it('should return false for invalid config content', () => {
+  it('throws for config content that is not a JSON object', () => {
     const mockDir = '/mock/invalid/dir';
 
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue('null');
 
-    expect(() => isGeminiExtensionConfig(mockDir)).toThrow(/expected a JSON object/);
+    expect(() => isGeminiExtensionConfig(mockDir)).toThrow(
+      /expected a JSON object/,
+    );
   });
 
   it('should return false for config missing required fields', () => {
@@ -195,7 +260,7 @@ describe('isGeminiExtensionConfig', () => {
     expect(isGeminiExtensionConfig(mockDir)).toBe(true);
   });
 
-  it('returns false when gemini-extension.json symlink escapes during detection', () => {
+  it('throws when gemini-extension.json symlink escapes during detection', () => {
     const mockDir = '/mock/extension/dir';
 
     vi.mocked(fs.existsSync).mockReturnValue(true);

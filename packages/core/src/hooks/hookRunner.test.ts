@@ -1092,10 +1092,12 @@ describe('HookRunner', () => {
       const spawnArgs = mockSpawn.mock.calls[0];
       // Should use powershell executable with -NoProfile
       expect(spawnArgs[0]).toBe('powershell');
+      // An unquoted command needs no `&` call-operator prefix — only a
+      // bare-quoted path would be echoed instead of executed.
       expect(spawnArgs[1]).toEqual([
         '-NoProfile',
         '-Command',
-        expect.any(String),
+        'Write-Output test',
       ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
@@ -1121,11 +1123,9 @@ describe('HookRunner', () => {
         );
         const spawnArgs = mockSpawn.mock.calls[0];
         expect(spawnArgs[0]).toBe('powershell');
-        expect(spawnArgs[1]).toEqual([
-          '-NoProfile',
-          '-Command',
-          expect.any(String),
-        ]);
+        // An unquoted command needs no `&` call-operator prefix — only a
+        // bare-quoted path would be echoed instead of executed.
+        expect(spawnArgs[1]).toEqual(['-NoProfile', '-Command', 'echo test']);
       } finally {
         spy.mockRestore();
       }
@@ -1173,7 +1173,7 @@ describe('HookRunner', () => {
       );
       expect(mockSpawn).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('bare-quoted path');
+      expect(result.error?.message).toContain('quoted path');
     });
 
     it('uses the same powershell config for explicit shell and cmd fallback', async () => {
@@ -1213,6 +1213,10 @@ describe('HookRunner', () => {
         // (-NoProfile -Command), differing only in the trailing command string.
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
+        // An unquoted command needs no `&` call-operator prefix on either
+        // path — only a bare-quoted path would be echoed instead of executed.
+        expect(explicitArgs[2]).toBe('Write-Output explicit');
+        expect(fallbackArgs[2]).toBe('Write-Output fallback');
       } finally {
         spy.mockRestore();
       }

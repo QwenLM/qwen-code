@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('Extension:path-confinement');
 
@@ -53,7 +54,7 @@ export function readExtensionManifest(
   }
   if (!realPathWithin(filePath, extensionDir)) {
     throw new Error(
-      `${filename} at ${filePath} resolves through a symlink outside the package`,
+      `${stripAnsiAndControl(filename)} at ${stripAnsiAndControl(filePath)} resolves through a symlink outside the package`,
     );
   }
   let parsed: unknown;
@@ -61,12 +62,12 @@ export function readExtensionManifest(
     parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   } catch (error) {
     throw new Error(
-      `Invalid ${filename} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+      `Invalid ${stripAnsiAndControl(filename)} at ${stripAnsiAndControl(filePath)}: ${stripAnsiAndControl(error instanceof Error ? error.message : String(error))}`,
     );
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(
-      `Invalid ${filename} at ${filePath}: expected a JSON object`,
+      `Invalid ${stripAnsiAndControl(filename)} at ${stripAnsiAndControl(filePath)}: expected a JSON object`,
     );
   }
   return parsed as Record<string, unknown>;
@@ -130,4 +131,62 @@ export function resolvePluginRelativeFile(
     );
     return null;
   }
+}
+
+/**
+ * Leniently reads a subsidiary JSON file (hooks/mcp/lsp) inside an extension
+ * dir. `fileRef` may be absolute (must stay within `extensionDir`) or relative;
+ * a missing file returns null; an unparseable body, a non-object body, or a
+ * path escaping the extension logs a warning and returns null. Core manifests
+ * use the strict {@link readExtensionManifest} (defects throw).
+ */
+export function readExtraJsonFile(
+  extensionDir: string,
+  fileRef: string,
+): Record<string, unknown> | null {
+  let filePath: string;
+  if (path.isAbsolute(fileRef)) {
+    // Absolute path: only an existing file can escape via symlink; a missing
+    // one is ignored by the existsSync below.
+    if (fs.existsSync(fileRef) && !realPathWithin(fileRef, extensionDir)) {
+      debugLogger.warn(
+        `Ignoring "${fileRef}"; it resolves through a symlink outside the extension.`,
+      );
+      return null;
+    }
+    filePath = fileRef;
+  } else {
+    try {
+      filePath = resolvePathWithin(extensionDir, fileRef, (kind) => {
+        if (kind === 'escapes') {
+          return `Ignoring path "${fileRef}"; it escapes the extension directory.`;
+        }
+        return `Ignoring path "${fileRef}"; it resolves through a symlink outside the extension directory.`;
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to parse ${stripAnsiAndControl(fileRef)}: ${stripAnsiAndControl(error instanceof Error ? error.message : String(error))}`,
+    );
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    debugLogger.warn(
+      `Invalid ${stripAnsiAndControl(fileRef)}: expected a JSON object`,
+    );
+    return null;
+  }
+  return parsed as Record<string, unknown>;
 }

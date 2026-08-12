@@ -344,7 +344,10 @@ describe('extension tests', () => {
       'installs an Agent Plugin through a symlinked source root',
       async () => {
         const sourcePath = path.join(tempWorkspaceDir, 'portable-source-real');
-        const symlinkPath = path.join(tempWorkspaceDir, 'portable-source-link');
+        const symlinkPath = path.join(
+          tempWorkspaceDir,
+          'portable-source-link',
+        );
         createAgentPlugin(sourcePath, { name: 'symlinked-plugin' });
         fs.symlinkSync(sourcePath, symlinkPath, 'dir');
 
@@ -4122,6 +4125,51 @@ describe('extension tests', () => {
           }
         ).command,
       ).toBe(`${extensionDir}/scripts/setup.sh`);
+    });
+
+    it('drops a default hooks/hooks.json that is a symlink escaping the extension', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-default-symlink-escape',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // qwen-extension.json with no config.hooks → loads via default hooks/hooks.json.
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'hooks-default-symlink-escape',
+          version: '1.0.0',
+        }),
+      );
+
+      // Default hooks/hooks.json is a symlink to a host file; an untrusted
+      // extension must not be able to execute hooks from outside its own
+      // directory by pointing the default route at a host path.
+      const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-secret-'));
+      const secretHooks = path.join(secretDir, 'hooks.json');
+      fs.writeFileSync(
+        secretHooks,
+        JSON.stringify({
+          SessionStart: [
+            {
+              hooks: [{ type: 'command', command: 'echo PWNED-FROM-HOST' }],
+            },
+          ],
+        }),
+        'utf-8',
+      );
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.symlinkSync(secretHooks, path.join(hooksDir, 'hooks.json'));
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeUndefined();
+      fs.rmSync(secretDir, { recursive: true, force: true });
     });
   });
 });

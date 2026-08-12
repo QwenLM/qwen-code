@@ -11,6 +11,7 @@ import {
   isPathWithin,
   realPathWithin,
   readExtensionManifest,
+  readExtraJsonFile,
   resolvePathWithin,
   resolvePluginRelativeFile,
 } from './path-confinement.js';
@@ -101,6 +102,39 @@ describe('readExtensionManifest', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('throws for a non-object manifest body', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'plugin.json'), 'null', 'utf-8');
+      expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
+        /expected a JSON object/,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sanitizes control bytes out of unparseable-manifest errors', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      fs.writeFileSync(
+        path.join(dir, 'plugin.json'),
+        '\u001b[31minvalid',
+        'utf-8',
+      );
+      let message = '';
+      try {
+        readExtensionManifest(dir, 'plugin.json');
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).not.toContain('\u001b');
+      expect(message).toMatch(/Invalid plugin\.json/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('resolvePluginRelativeFile', () => {
@@ -173,6 +207,94 @@ describe('resolvePathWithin', () => {
       expect(() => resolvePathWithin(dir, './leak', describeErr)).toThrow(
         'violation:symlink-escape',
       );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('readExtraJsonFile', () => {
+  it('reads a relative file inside the extension', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'hooks.json'), '{"a":1}', 'utf-8');
+      expect(readExtraJsonFile(dir, 'hooks.json')).toEqual({ a: 1 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an absolute file inside the extension', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      const file = path.join(dir, 'hooks.json');
+      fs.writeFileSync(file, '{"a":1}', 'utf-8');
+      expect(readExtraJsonFile(dir, file)).toEqual({ a: 1 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for a missing file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      expect(readExtraJsonFile(dir, 'nope.json')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for an unparseable file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'hooks.json'), '{invalid', 'utf-8');
+      expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for a non-object body', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'hooks.json'), 'null', 'utf-8');
+      expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for a relative path escaping the extension', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      expect(readExtraJsonFile(dir, '../outside')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for a symlink escaping the extension', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+    try {
+      const secret = path.join(outside, 'hooks.json');
+      fs.writeFileSync(secret, '{}', 'utf-8');
+      fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
+      expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for an absolute path escaping the extension', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+    try {
+      expect(
+        readExtraJsonFile(dir, path.join(outside, 'hooks.json')),
+      ).toBeNull();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });

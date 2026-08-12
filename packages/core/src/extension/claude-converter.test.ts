@@ -20,6 +20,7 @@ import {
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
 } from './claude-converter.js';
+import type { MCPServerConfig } from '../config/config.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
@@ -115,6 +116,18 @@ describe('convertClaudeToQwenConfig', () => {
     } as ClaudePluginConfig;
 
     expect(() => convertClaudeToQwenConfig(invalidConfig)).toThrow();
+  });
+
+  it('throws a precise error for a non-object MCP server entry', () => {
+    const claudeConfig = {
+      name: 'bad-mcp-plugin',
+      version: '1.0.0',
+      mcpServers: { bad: null } as unknown as Record<string, MCPServerConfig>,
+    } as ClaudePluginConfig;
+
+    expect(() => convertClaudeToQwenConfig(claudeConfig)).toThrow(
+      /server entries must be JSON objects/,
+    );
   });
 });
 
@@ -229,6 +242,17 @@ describe('isClaudePluginConfig', () => {
     expect(() => isClaudePluginConfig(testDir, 'missing')).toThrow(
       /not found: marketplace\.json does not list "missing"/,
     );
+  });
+
+  it('falls back to standalone when the marketplace omits pluginName but plugin.json matches', () => {
+    // marketplace.json lists only 'other'; plugin.json is named 'test-plugin'.
+    // An explicit pluginName install must route through the standalone branch.
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'other', source: './' }],
+    });
+    writeManifest('plugin.json', { name: 'test-plugin', version: '1.0.0' });
+
+    expect(isClaudePluginConfig(testDir, 'test-plugin')).toBe('standalone');
   });
 
   it('throws when pluginName is given but no Claude manifest exists', () => {
@@ -1052,9 +1076,21 @@ describe('convertClaudePluginPackage', () => {
 
     await expect(
       convertClaudePluginPackage(pluginSourceDir, 'evil'),
-    ).rejects.toThrow(/resolves through a symlink outside the plugin/);
+    ).rejects.toThrow(/resolves through a symlink outside the package/);
 
     fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws a precise error when marketplace.json is absent', async () => {
+    // readExtensionManifest returns null for a missing manifest; the converter
+    // surfaces a clear not-found error instead of falling through to a
+    // misleading generic failure.
+    const emptyDir = path.join(testDir, 'plugin-no-marketplace');
+    fs.mkdirSync(emptyDir, { recursive: true });
+
+    await expect(convertClaudePluginPackage(emptyDir, 'evil')).rejects.toThrow(
+      /Marketplace configuration not found/,
+    );
   });
 
   it('throws in strict mode when plugin.json is a symlink escaping the plugin', async () => {
@@ -1414,7 +1450,7 @@ describe('convertClaudePluginStandalone', () => {
     fs.writeFileSync(path.join(pluginDir, 'plugin.json'), 'null', 'utf-8');
 
     await expect(convertClaudePluginStandalone(testDir)).rejects.toThrow(
-      /Invalid plugin configuration/,
+      /expected a JSON object/,
     );
   });
 });

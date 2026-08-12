@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   convertCompatibleExtension,
   detectManifest,
@@ -17,6 +17,7 @@ import {
   AGENT_PLUGIN_SCHEMA_PREFIX,
 } from './agent-plugins-v1/index.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
+import * as claudeConverter from './claude-converter.js';
 
 describe('Agent Plugins extension conversion', () => {
   let pluginRoot: string;
@@ -182,30 +183,27 @@ describe('detectManifest', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('detects a Claude marketplace when a pluginName is given', () => {
-    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+  const writeClaude = (subpath: string, content: unknown, base = root) => {
+    fs.mkdirSync(path.join(base, '.claude-plugin'), { recursive: true });
     fs.writeFileSync(
-      path.join(root, '.claude-plugin', 'marketplace.json'),
-      JSON.stringify({
-        name: 'm',
-        owner: { name: 'o', email: 'o@e.com' },
-        plugins: [{ name: 'selected', version: '1.0.0', source: './src' }],
-      }),
+      path.join(base, '.claude-plugin', subpath),
+      JSON.stringify(content),
+      'utf-8',
     );
+  };
 
+  it('detects a Claude marketplace when pluginName is listed', () => {
+    writeClaude('marketplace.json', {
+      plugins: [{ name: 'selected', source: './' }],
+    });
     expect(detectManifest(root, 'selected')).toEqual({
       source: 'Claude',
       kind: 'marketplace',
     });
   });
 
-  it('detects a Claude standalone plugin', () => {
-    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, '.claude-plugin', 'plugin.json'),
-      JSON.stringify({ name: 'standalone', version: '1.0.0' }),
-    );
-
+  it('detects a Claude standalone plugin without pluginName', () => {
+    writeClaude('plugin.json', { name: 'standalone', version: '1.0.0' });
     expect(detectManifest(root)).toEqual({
       source: 'Claude',
       kind: 'standalone',
@@ -215,13 +213,9 @@ describe('detectManifest', () => {
   it('detects a Gemini extension', () => {
     fs.writeFileSync(
       path.join(root, 'gemini-extension.json'),
-      JSON.stringify({
-        name: 'gemini-ext',
-        version: '1.0.0',
-        description: 'd',
-      }),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
     );
-
     expect(detectManifest(root)).toEqual({ source: 'Gemini' });
   });
 
@@ -230,27 +224,24 @@ describe('detectManifest', () => {
     fs.writeFileSync(
       path.join(root, QODER_PLUGIN_MANIFEST),
       JSON.stringify({ name: 'qoder', version: '1.0.0' }),
+      'utf-8',
     );
-
     expect(detectManifest(root)).toEqual({ source: 'Qoder' });
   });
 
   it('prefers Claude over Gemini and Qoder', () => {
-    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, '.claude-plugin', 'plugin.json'),
-      JSON.stringify({ name: 'standalone', version: '1.0.0' }),
-    );
+    writeClaude('plugin.json', { name: 'standalone', version: '1.0.0' });
     fs.writeFileSync(
       path.join(root, 'gemini-extension.json'),
-      JSON.stringify({ name: 'gemini-ext', version: '1.0.0' }),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
     );
     fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
     fs.writeFileSync(
       path.join(root, QODER_PLUGIN_MANIFEST),
       JSON.stringify({ name: 'qoder', version: '1.0.0' }),
+      'utf-8',
     );
-
     expect(detectManifest(root)).toEqual({
       source: 'Claude',
       kind: 'standalone',
@@ -260,14 +251,15 @@ describe('detectManifest', () => {
   it('prefers Gemini over Qoder', () => {
     fs.writeFileSync(
       path.join(root, 'gemini-extension.json'),
-      JSON.stringify({ name: 'gemini-ext', version: '1.0.0' }),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
     );
     fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
     fs.writeFileSync(
       path.join(root, QODER_PLUGIN_MANIFEST),
       JSON.stringify({ name: 'qoder', version: '1.0.0' }),
+      'utf-8',
     );
-
     expect(detectManifest(root)).toEqual({ source: 'Gemini' });
   });
 
@@ -279,8 +271,186 @@ describe('detectManifest', () => {
     fs.writeFileSync(
       path.join(root, 'plugin.json'),
       JSON.stringify({ $schema: 'https://example.com/plugin.schema.json' }),
+      'utf-8',
     );
-
     expect(detectManifest(root)).toBeNull();
+  });
+
+  it('propagates a detection error when pluginName is specified', () => {
+    // A specified pluginName is a hard contract: a defective Claude manifest
+    // must surface its own error rather than silently installing a different
+    // format the user never asked for.
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      '{',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
+    );
+    expect(() => detectManifest(root, 'my-plugin')).toThrow(/Invalid/);
+  });
+
+  it('falls through to Gemini when Claude detection fails without pluginName', () => {
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      '{',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
+    );
+    expect(detectManifest(root)).toEqual({ source: 'Gemini' });
+  });
+
+  it('falls through to Qoder when both Claude and Gemini detection fail', () => {
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      '{',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      '{',
+      'utf-8',
+    );
+    fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, QODER_PLUGIN_MANIFEST),
+      JSON.stringify({ name: 'qoder', version: '1.0.0' }),
+      'utf-8',
+    );
+    expect(detectManifest(root)).toEqual({ source: 'Qoder' });
+  });
+
+  it('throws the recorded Claude error when nothing matches', () => {
+    // Defective Claude + Gemini manifests, no Qoder → the Claude probe error
+    // surfaces (??= keeps it first) instead of a generic "not found".
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      '{',
+      'utf-8',
+    );
+    fs.writeFileSync(path.join(root, 'gemini-extension.json'), '{', 'utf-8');
+    expect(() => detectManifest(root)).toThrow(/Invalid/);
+  });
+
+  it('throws the Gemini detection error when Claude returns null', () => {
+    // Claude probes clean (no manifest), Gemini is defective, no Qoder —
+    // the Gemini-side error recording (converterError ??= error) surfaces.
+    fs.writeFileSync(path.join(root, 'gemini-extension.json'), '{', 'utf-8');
+    expect(() => detectManifest(root)).toThrow(/Invalid/);
+  });
+});
+
+describe('convertCompatibleExtension', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'convert-extension-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns a native extension without conversion', async () => {
+    fs.writeFileSync(
+      path.join(root, 'qwen-extension.json'),
+      JSON.stringify({ name: 'native', version: '1.0.0' }),
+      'utf-8',
+    );
+    await expect(convertCompatibleExtension(root)).resolves.toEqual({
+      extensionDir: root,
+      originSource: 'QwenCode',
+      externalContent: false,
+    });
+  });
+
+  it('returns the directory unchanged when no manifest matches', async () => {
+    await expect(convertCompatibleExtension(root)).resolves.toEqual({
+      extensionDir: root,
+      originSource: 'QwenCode',
+      externalContent: false,
+    });
+  });
+
+  it('converts a Claude standalone plugin', async () => {
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'standalone', version: '1.0.0' }),
+      'utf-8',
+    );
+    const result = await convertCompatibleExtension(root);
+    expect(result.originSource).toBe('Claude');
+    expect(result.externalContent).toBe(false);
+    expect(
+      fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
+    ).toBe(true);
+  });
+
+  it('converts a detected Gemini extension', async () => {
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
+    );
+    const result = await convertCompatibleExtension(root);
+    expect(result.originSource).toBe('Gemini');
+    expect(
+      fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
+    ).toBe(true);
+  });
+
+  it('converts a detected Qoder plugin', async () => {
+    fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, QODER_PLUGIN_MANIFEST),
+      JSON.stringify({ name: 'qoder', version: '1.0.0' }),
+      'utf-8',
+    );
+    const result = await convertCompatibleExtension(root);
+    expect(result.originSource).toBe('Qoder');
+    expect(
+      fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
+    ).toBe(true);
+  });
+
+  it('forwards networkPolicy and AbortSignal to the marketplace converter', async () => {
+    // Pins the argument order: a swap would put an AbortSignal in the
+    // network-policy slot, and both are optional so the mistake would go
+    // unnoticed.
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        plugins: [{ name: 'selected', source: './plugin-src' }],
+      }),
+      'utf-8',
+    );
+    const pluginSrc = path.join(root, 'plugin-src');
+    fs.mkdirSync(path.join(pluginSrc, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginSrc, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'selected', version: '1.0.0' }),
+      'utf-8',
+    );
+    const spy = vi.spyOn(claudeConverter, 'convertClaudePluginPackage');
+    const policy = 'public' as const;
+    const signal = new AbortController().signal;
+
+    await convertCompatibleExtension(root, 'selected', policy, signal);
+
+    expect(spy).toHaveBeenCalledWith(root, 'selected', policy, signal);
+    spy.mockRestore();
   });
 });

@@ -338,4 +338,56 @@ describe('LspConfigLoader extension configs', () => {
     expect(configs).toHaveLength(1);
     expect(configs[0]?.env?.['EXT_ROOT']).toBe(extensionPath);
   });
+
+  it('ignores an lspServers path that escapes the extension dir', async () => {
+    // The referenced file lives outside the extension; readExtraJsonFile must
+    // refuse it (../ traversal) instead of loading an arbitrary host file.
+    mock({
+      '/outside/leak.json': JSON.stringify({
+        typescript: {
+          command: 'evil-server',
+        },
+      }),
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: '../leak.json',
+      },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+
+    expect(configs).toHaveLength(0);
+  });
+
+  it('ignores a missing lspServers file', async () => {
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: './not-there.json',
+      },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+
+    expect(configs).toHaveLength(0);
+  });
 });

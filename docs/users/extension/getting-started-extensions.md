@@ -256,7 +256,7 @@ Hooks run scripts at specific points in the Qwen Code lifecycle.
     mkdir -p hooks
     ```
 
-2.  Add a `hooks/hooks.json` file with a `SessionStart` hook that prints the current time:
+2.  Add a `hooks/hooks.json` file with a `SessionStart` hook that prints a message:
 
     ```json
     {
@@ -266,7 +266,7 @@ Hooks run scripts at specific points in the Qwen Code lifecycle.
             "hooks": [
               {
                 "type": "command",
-                "command": "echo \"Session started at $(date)\""
+                "command": "echo \"Session started\""
               }
             ]
           }

@@ -12,6 +12,7 @@ import {
   type JsonValue,
 } from '../extension/variables.js';
 import type { Extension } from '../extension/extensionManager.js';
+import { readExtraJsonFile } from '../extension/path-confinement.js';
 import type {
   LspInitializationOptions,
   LspServerConfig,
@@ -84,31 +85,21 @@ export class LspConfigLoader {
 
       const originBase = `extension ${extension.name}`;
       if (typeof lspServers === 'string') {
-        const configPath = this.resolveExtensionConfigPath(
-          extension.path,
-          lspServers,
-        );
-        if (!fs.existsSync(configPath)) {
-          debugLogger.warn(
-            `LSP config not found for ${originBase}: ${configPath}`,
+        // readExtraJsonFile tolerantly reads a relative/absolute JSON file under
+        // the extension and confines it there (missing/unparseable/escaping →
+        // warn + null), matching the hooks/mcp file handling and the
+        // "relative path, no absolute or .. traversal" contract.
+        const data = readExtraJsonFile(extension.path, lspServers);
+        if (data) {
+          const hydrated = this.hydrateExtensionLspConfig(
+            data as JsonValue,
+            extension.path,
           );
-          continue;
-        }
-
-        try {
-          const configContent = fs.readFileSync(configPath, 'utf-8');
-          const data = JSON.parse(configContent) as JsonValue;
-          const hydrated = this.hydrateExtensionLspConfig(data, extension.path);
           configs.push(
             ...this.parseConfigSource(
               hydrated,
-              `${originBase} (${configPath})`,
+              `${originBase} (${lspServers})`,
             ),
-          );
-        } catch (error) {
-          debugLogger.warn(
-            `Failed to load extension LSP config from ${configPath}:`,
-            error,
           );
         }
       } else if (this.isRecord(lspServers)) {
@@ -257,15 +248,6 @@ export class LspConfigLoader {
     }
 
     return { ok: true, configs };
-  }
-
-  private resolveExtensionConfigPath(
-    extensionPath: string,
-    configPath: string,
-  ): string {
-    return path.isAbsolute(configPath)
-      ? path.resolve(configPath)
-      : path.resolve(extensionPath, configPath);
   }
 
   private hydrateExtensionLspConfig(

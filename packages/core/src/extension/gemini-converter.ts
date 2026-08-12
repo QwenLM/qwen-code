@@ -16,11 +16,8 @@ import type { ExtensionSetting } from './extensionSettings.js';
 import { ExtensionStorage } from './storage.js';
 import { convertTomlToMarkdown } from '../utils/toml-to-markdown-converter.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  isPathWithin,
-  realPathWithin,
-  readExtensionManifest,
-} from './path-confinement.js';
+import { isPathWithin, readExtensionManifest } from './path-confinement.js';
+import { normalizeMcpServers } from './claude-converter.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
@@ -40,17 +37,17 @@ export interface GeminiExtensionConfig {
 export function convertGeminiToQwenConfig(
   extensionDir: string,
 ): ExtensionConfig {
-  const configFilePath = path.join(extensionDir, 'gemini-extension.json');
-  // The manifest may be a symlink in an untrusted clone; refuse to follow it
-  // outside the extension (would read an arbitrary JSON-shaped host file),
-  // matching the Claude-format manifest guards.
-  if (!realPathWithin(configFilePath, extensionDir)) {
+  // readExtensionManifest throws on a symlink escape, unparseable body, or
+  // non-object body; returns null when absent.
+  const geminiConfig = readExtensionManifest(
+    extensionDir,
+    'gemini-extension.json',
+  ) as GeminiExtensionConfig | null;
+  if (!geminiConfig) {
     throw new Error(
-      `Gemini extension config at ${configFilePath} resolves through a symlink outside the extension`,
+      `Gemini extension config not found at ${path.join(extensionDir, 'gemini-extension.json')}`,
     );
   }
-  const configContent = fs.readFileSync(configFilePath, 'utf-8');
-  const geminiConfig: GeminiExtensionConfig = JSON.parse(configContent);
   // Validate required fields
   if (!geminiConfig.name || !geminiConfig.version) {
     throw new Error(
@@ -60,13 +57,31 @@ export function convertGeminiToQwenConfig(
 
   const settings: ExtensionSetting[] | undefined = geminiConfig.settings;
 
+  // Server entries are validated/normalized through the shared helper so a
+  // non-object entry throws a precise error instead of a bare deref TypeError.
+  const mcpServers = geminiConfig.mcpServers
+    ? normalizeMcpServers(
+        geminiConfig.mcpServers,
+        path.join(extensionDir, 'gemini-extension.json'),
+      )
+    : undefined;
+
+  // Declare hooks explicitly when the extension ships the default
+  // hooks/hooks.json file, so the manifest is self-contained instead of relying
+  // on the runtime's implicit default-route load. The path string is kept (not
+  // expanded) so loadExtension hydrates `${extensionPath}`/variables at load.
+  const hooks = fs.existsSync(path.join(extensionDir, 'hooks', 'hooks.json'))
+    ? 'hooks/hooks.json'
+    : undefined;
+
   // Direct field mapping
   return {
     name: geminiConfig.name,
     version: geminiConfig.version,
-    mcpServers: geminiConfig.mcpServers as ExtensionConfig['mcpServers'],
+    mcpServers,
     contextFileName: geminiConfig.contextFileName,
     settings,
+    hooks,
   };
 }
 

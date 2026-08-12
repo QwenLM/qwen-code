@@ -33,7 +33,11 @@ import {
   recursivelyHydrateStrings,
   performVariableReplacement,
 } from './variables.js';
-import { readExtensionManifest, realPathWithin } from './path-confinement.js';
+import {
+  readExtensionManifest,
+  realPathWithin,
+  readExtraJsonFile,
+} from './path-confinement.js';
 import type { JsonValue } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -1506,13 +1510,21 @@ export class ExtensionManager {
               ? configHooksPath
               : hooksJsonPath;
 
-          try {
-            const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
-            const parsedHooks = JSON.parse(hooksContent);
-
+          // readExtraJsonFile tolerantly reads a subsidiary hooks file
+          // (missing/unparseable/non-object/escaping → warn + null) and
+          // confines both the config path and the default hooks/hooks.json
+          // against symlink escapes.
+          const parsedHooks = readExtraJsonFile(
+            effectiveExtensionPath,
+            hooksFilePath,
+          );
+          if (parsedHooks) {
             let hooksData;
-            if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
-              hooksData = parsedHooks.hooks as {
+            if (
+              parsedHooks['hooks'] &&
+              typeof parsedHooks['hooks'] === 'object'
+            ) {
+              hooksData = parsedHooks['hooks'] as {
                 [K in HookEventName]?: HookDefinition[];
               };
             } else {
@@ -1533,10 +1545,6 @@ export class ExtensionManager {
                 pathSeparator: path.sep,
               },
             ) as { [K in HookEventName]?: HookDefinition[] };
-          } catch (error) {
-            debugLogger.warn(
-              `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
-            );
           }
         }
       }
