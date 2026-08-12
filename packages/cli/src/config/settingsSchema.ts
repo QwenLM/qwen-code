@@ -728,6 +728,7 @@ const SETTINGS_SCHEMA = {
         options: [
           { value: 'text', label: 'Text' },
           { value: 'json', label: 'JSON' },
+          { value: 'stream-json', label: 'Stream JSON' },
         ],
       },
       showTimestamps: {

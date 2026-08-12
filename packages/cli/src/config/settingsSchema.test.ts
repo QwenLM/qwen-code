@@ -570,6 +570,19 @@ describe('SettingsSchema', () => {
       ]);
     });
 
+    it('should allow stream-json as an output.format the runtime honors', () => {
+      // The runtime reads `output.format` from settings.json via
+      // `normalizeOutputFormat`, which returns `OutputFormat.STREAM_JSON` for
+      // `"stream-json"` — a documented, first-class CLI output format. The
+      // settings schema drives VS Code validation of `.qwen/settings.json`, so
+      // it must not reject a value the runtime accepts and runs.
+      const format = getSettingsSchema().output?.properties.format;
+
+      expect(format.type).toBe('enum');
+      const values = format.options?.map((o: { value: string }) => o.value);
+      expect(values).toContain('stream-json');
+    });
+
     it('should have loadFromIncludeDirectories setting in schema', () => {
       expect(
         getSettingsSchema().context?.properties.loadFromIncludeDirectories,

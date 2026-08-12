@@ -227,10 +227,11 @@
       "type": "object",
       "properties": {
         "format": {
-          "description": "The format of the CLI output. Options: text, json",
+          "description": "The format of the CLI output. Options: text, json, stream-json",
           "enum": [
             "text",
-            "json"
+            "json",
+            "stream-json"
           ],
           "default": "text"
         },
