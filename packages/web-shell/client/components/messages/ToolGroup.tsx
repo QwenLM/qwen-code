@@ -567,7 +567,11 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
   return (
     <DefaultToolHeaderExtra
       description={info.description}
-      elapsed={isActiveToolStatus(info.tool.status) ? info.elapsed : ''}
+      elapsed={
+        info.kind === 'agent' || isActiveToolStatus(info.tool.status)
+          ? info.elapsed
+          : ''
+      }
     />
   );
 }
@@ -1304,7 +1308,16 @@ export const ToolLine = memo(function ToolLine({
     <div className={styles.line}>
       {hideHeader && isRunningTool && elapsed && (
         <div className={styles.lineMain}>
-          <span className={styles.lineElapsed}>{elapsed}</span>
+          <ToolHeaderExtra
+            info={{
+              kind: getToolHeaderKind(tool),
+              tool,
+              displayName,
+              description: '',
+              elapsed,
+              workspaceCwd,
+            }}
+          />
         </div>
       )}
       {!hideHeader && (

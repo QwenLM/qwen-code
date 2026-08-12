@@ -674,13 +674,19 @@ describe('tool row rendering', () => {
     vi.setSystemTime(6_000);
 
     try {
-      const container = renderToolGroup([
-        makeTool({
-          toolName: 'ReadFile',
-          status: 'in_progress',
-          startTime: 1_000,
-        }),
-      ]);
+      const container = renderToolGroup(
+        [
+          makeTool({
+            toolName: 'ReadFile',
+            status: 'in_progress',
+            startTime: 1_000,
+          }),
+        ],
+        {
+          renderToolHeaderExtra: (info) =>
+            info.elapsed ? <span>custom {info.elapsed}</span> : null,
+        },
+      );
       const summary = container.querySelector('button');
       expect(summary?.textContent).not.toContain('5s');
 
@@ -689,12 +695,12 @@ describe('tool row rendering', () => {
         '[class*="chatSummaryContentClip"]',
       );
       expect(content?.className).not.toContain('chatSummaryContentCollapsed');
-      expect(content?.textContent).toContain('5s');
+      expect(content?.textContent).toContain('custom 5s');
 
       act(() => {
         vi.advanceTimersByTime(1_000);
       });
-      expect(content?.textContent).toContain('6s');
+      expect(content?.textContent).toContain('custom 6s');
     } finally {
       vi.useRealTimers();
     }
@@ -726,6 +732,28 @@ describe('tool row rendering', () => {
     );
 
     expect(container.textContent).toContain('5s');
+  });
+
+  it.each([
+    ['completed', undefined],
+    ['failed', 'Agent process failed'],
+  ] as const)('shows meta for a %s agent', (status, reason) => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'Task',
+        status,
+        startTime: 1_000,
+        endTime: 6_000,
+        rawOutput: {
+          type: 'task_execution',
+          executionSummary: { outputTokens: 1_200 },
+          reason,
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain('5s');
+    if (reason) expect(container.textContent).toContain(reason);
   });
 
   it('shows a tool-kind icon on every expanded group row', () => {
