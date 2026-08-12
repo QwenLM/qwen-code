@@ -98,7 +98,9 @@ describe('terminal-bench integration', () => {
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const available = new Set(baseTestTasks.map((t) => t));
+    // Set<string>, not Set<of the literal union>: the whole point is to test
+    // arbitrary env-supplied ids for membership.
+    const available = new Set<string>(baseTestTasks);
     const unknown = selected.filter((s) => !available.has(s));
     if (unknown.length > 0) {
       throw new Error(

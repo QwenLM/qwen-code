@@ -13,7 +13,7 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
-import type { GoalSnapshotV2 } from '../goals/goal-protocol.js';
+import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   aggregateTranscriptRecordFragments,
@@ -1042,10 +1042,10 @@ async function readAggregatedRecords(
   }
 }
 
-async function readGoalStateBeforePosition(
+async function readGoalStatePayloadBeforePosition(
   index: TranscriptIndex,
   position: number,
-): Promise<GoalSnapshotV2 | undefined> {
+): Promise<GoalStateRecordPayloadV2 | undefined> {
   let low = 0;
   let high = index.goalStatePositions.length;
   while (low < high) {
@@ -1060,7 +1060,7 @@ async function readGoalStateBeforePosition(
   if (goalStatePosition === undefined) return undefined;
   const uuid = index.activeUuids[goalStatePosition]!;
   const [record] = await readAggregatedRecords(index, [uuid]);
-  return parseGoalStateRecordPayloadV2(record?.systemPayload)?.snapshot;
+  return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
 async function buildIndex(params: {
@@ -1375,7 +1375,7 @@ export class SessionTranscriptReader {
     const records = await readAggregatedRecords(index, pageUuids);
     const backwardGoalState =
       direction === 'backward'
-        ? await readGoalStateBeforePosition(index, nextPosition)
+        ? await readGoalStatePayloadBeforePosition(index, nextPosition)
         : undefined;
     const hasMore =
       direction === 'backward'
@@ -1412,7 +1412,12 @@ export class SessionTranscriptReader {
       ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
       ...(backwardGoalState
-        ? { replay: { goalState: backwardGoalState } }
+        ? {
+            replay: {
+              goalState: backwardGoalState.snapshot,
+              goalCause: backwardGoalState.cause,
+            },
+          }
         : cursor?.replay !== undefined
           ? { replay: cursor.replay }
           : {}),

@@ -12,7 +12,7 @@ import {
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { createHealthDemoRoutes } from './health-demo.js';
+import { createHealthRoutes } from './health.js';
 
 function makeRuntime(): WorkspaceRuntime {
   return {
@@ -30,9 +30,8 @@ function makeRuntime(): WorkspaceRuntime {
 
 function makeApp(workspaceRegistry: WorkspaceRegistry) {
   const app = express();
-  const { register } = createHealthDemoRoutes({
+  const { register } = createHealthRoutes({
     opts: { hostname: '127.0.0.1', requireAuth: false },
-    getPort: () => 4321,
     workspaceRegistry,
     getActiveSseCount: () => 0,
     getRateLimiter: () => undefined,
@@ -41,7 +40,7 @@ function makeApp(workspaceRegistry: WorkspaceRegistry) {
   return app;
 }
 
-describe('createHealthDemoRoutes /health', () => {
+describe('createHealthRoutes /health', () => {
   it('returns 503 degraded when a workspace entry is blocked', async () => {
     const registry = createSingleWorkspaceRegistry(makeRuntime());
     registry.beginReplacement(registry.primaryEntry, 'policy-2');

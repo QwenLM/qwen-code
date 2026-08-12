@@ -3,13 +3,14 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  BridgeSessionInfo,
-  ChannelAgentBridge,
-  ChannelAgentBridgeSessionOptions,
-  ChannelLoopToolHandler,
-  ToolCallEvent,
+import {
+  CHANNEL_PROMPT_META_KEY,
+  type AvailableCommand,
+  type BridgeSessionInfo,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
 import {
@@ -35,6 +36,7 @@ export interface DaemonChannelSessionClient {
   prompt(
     req: {
       prompt: Array<Record<string, unknown>>;
+      _meta?: Record<string, unknown>;
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
@@ -404,7 +406,13 @@ export class DaemonChannelBridge
     prompt.push({ type: 'text', text });
 
     try {
-      const result = await session.prompt({ prompt }, controller.signal);
+      const result = await session.prompt(
+        {
+          prompt,
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        },
+        controller.signal,
+      );
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
       // HTTP, non-202 responses) where turn_complete never arrives.
