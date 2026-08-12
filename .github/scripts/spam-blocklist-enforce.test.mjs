@@ -115,6 +115,20 @@ describe('spam-blocklist-enforce: credential scoping', () => {
       );
     });
 
+    it(`pins the ${name} action versions by full SHA`, () => {
+      // The step finders match by action-name prefix, so this is the only
+      // guard against a SHA downgraded to a mutable tag — one the upstream
+      // owner can repoint, in jobs that run on the write-scope token.
+      assert.equal(
+        checkoutStepOf(job).uses,
+        'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+      );
+      assert.equal(
+        scriptStepOf(job).uses,
+        'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3',
+      );
+    });
+
     it(`scopes the token to the ${name} script step, not job-level env`, () => {
       assert.equal(
         job.env,
