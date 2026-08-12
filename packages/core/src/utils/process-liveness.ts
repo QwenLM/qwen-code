@@ -22,26 +22,57 @@ import { isNodeError } from './errors.js';
 /**
  * True when the given PID belongs to a live process.
  *
- * `EPERM` means the process exists but is owned by another user — that is
- * still alive, and reporting it as dead would let one user's session sweep
- * another's record out of a shared registry directory.
+ * `EPERM` (and Windows' `EACCES`) means the process exists but is owned
+ * by another user — that is still alive, and reporting it as dead would
+ * let one user's session sweep another's record out of a shared registry
+ * directory.
  */
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    return true;
+    // A zombie answers kill(pid, 0) — the PID still exists — but the
+    // process has already exited and only waits for its parent to reap
+    // it. It will never act again, so for registry purposes it is dead;
+    // without this, a spawn-but-never-wait parent keeps the record
+    // listed for its entire lifetime.
+    return !isZombie(pid);
   } catch (err) {
-    return isNodeError(err) && err.code === 'EPERM';
+    return isNodeError(err) && (err.code === 'EPERM' || err.code === 'EACCES');
   }
+}
+
+/**
+ * True when `pid` is a zombie: exited but not yet reaped. Field 3
+ * (state) of the same `/proc/<pid>/stat` line the token parser reads
+ * carries it; `Z` is the one state that means "no longer running".
+ * Unreadable `/proc` degrades to "not a zombie" — the conservative
+ * direction, since the sweep only ever acts on a positive answer.
+ */
+function isZombie(pid: number): boolean {
+  if (process.platform !== 'linux') return false;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return false;
+  }
+  // The state is the first token after the parenthesized `comm`, which
+  // may itself contain spaces and ')' — anchor on the LAST ')'.
+  const commEnd = raw.lastIndexOf(')');
+  if (commEnd === -1) return false;
+  return raw
+    .slice(commEnd + 1)
+    .trimStart()
+    .startsWith('Z');
 }
 
 /**
  * An opaque token that changes when a PID is recycled, or `null` when the
  * platform does not expose one cheaply.
  *
- * Backed by `boot_id` plus the `starttime` field of `/proc/<pid>/stat` on
- * Linux — the process start time in clock ticks since boot. Two processes
+ * Backed by `boot_id` plus the `starttime` field of `/proc/<pid>/stat`
+ * on Linux — the process start time in clock ticks since boot. Two processes
  * sharing a PID within one boot will not share `starttime`; across a
  * reboot they can, and a registry record outlives a reboot whenever the
  * machine crashes or loses power, so the boot id is what makes every
@@ -98,24 +129,50 @@ export function readProcStartToken(pid: number): string | null {
 }
 
 /**
- * The kernel's per-boot UUID, or `null` when it cannot be read. Cached: it
- * cannot change while this process lives, and enumeration reads a token
- * per record.
+ * The kernel's per-boot UUID, or `null` when it cannot be read. Successes
+ * are cached — the value cannot change while this process lives, and
+ * enumeration reads a token per record — but failures are not: both
+ * first-read moments (startup registration, first concurrent sweep) are
+ * fd-pressure moments, and pinning the cache to a transient EMFILE would
+ * silently disable PID-reuse protection for the whole process lifetime.
  */
-let cachedBootId: string | null | undefined;
+let cachedBootId: string | undefined;
 
 function readBootId(): string | null {
-  if (cachedBootId === undefined) {
-    try {
-      const value = fs
-        .readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')
-        .trim();
-      cachedBootId = /^[0-9a-f-]+$/i.test(value) ? value : null;
-    } catch {
-      cachedBootId = null;
+  if (cachedBootId !== undefined) return cachedBootId;
+  try {
+    const value = fs
+      .readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')
+      .trim();
+    if (/^[0-9a-f-]+$/i.test(value)) {
+      cachedBootId = value;
+      return value;
     }
+  } catch {
+    // Retried on the next call.
   }
-  return cachedBootId;
+  return null;
+}
+
+/**
+ * The identity of the PID namespace this process lives in (the inode of
+ * `/proc/self/ns/pid`), or `null` where the platform does not expose it.
+ *
+ * PID numbers and start-time tokens are only meaningful within the
+ * namespace that assigned them: two sessions in separate namespaces can
+ * share one `~/.qwen` (host + devcontainer with a mounted home, sibling
+ * CI containers, NFS homes), and each side's sweep would otherwise judge
+ * the other's records by PIDs that resolve to nothing — or worse, to a
+ * different process — on its own side. Records carry this identity so a
+ * reader can tell its own namespace's records from a foreign one's.
+ */
+export function readPidNamespaceId(): number | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    return fs.statSync('/proc/self/ns/pid').ino;
+  } catch {
+    return null;
+  }
 }
 
 /**

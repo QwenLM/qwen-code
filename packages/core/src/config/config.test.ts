@@ -81,6 +81,7 @@ import {
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
+import * as sessionRegistry from '../services/session-registry.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
@@ -6073,6 +6074,10 @@ describe('Server Config (config.ts)', () => {
       return checked === oldRuntimeStatusPath || checked === newDir;
     });
 
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
     await config.relocateWorkingDirectory(newDir);
 
     expect(fs.renameSync).toHaveBeenCalledWith(
@@ -6084,8 +6089,16 @@ describe('Server Config (config.ts)', () => {
       workDir: newDir,
       qwenVersion: null,
     });
+    // The registry's DIRECTORY column is how a user tells two live
+    // sessions apart; the switch must reach it (and the directory-derived
+    // name) or `qwen sessions ps` keeps showing the folder that was left.
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+      cwd: newDir,
+      name: sessionRegistry.deriveSessionName(newDir, sessionId),
+    });
 
     writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
   });

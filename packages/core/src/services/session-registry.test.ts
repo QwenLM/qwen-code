@@ -18,6 +18,7 @@ import {
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
+import { readPidNamespaceId } from '../utils/process-liveness.js';
 
 /**
  * Records the paths `readRecord` stats, while the real filesystem does the
@@ -46,12 +47,20 @@ vi.mock('node:fs/promises', async () => {
 });
 
 vi.mock('../config/storage.js', () => {
-  let mockDir = '/tmp/session-registry-test';
+  let mockDir: string | null = '/tmp/session-registry-test';
   return {
     Storage: {
-      getGlobalQwenDir: () => mockDir,
+      getGlobalQwenDir: () => {
+        if (mockDir === null) {
+          // Simulates os.homedir() failing (HOME unset, passwd lookup
+          // gone) — the registry's "never throws" promise is tested
+          // against exactly this.
+          throw new Error('home directory unavailable');
+        }
+        return mockDir;
+      },
     },
-    __setMockGlobalDir: (d: string) => {
+    __setMockGlobalDir: (d: string | null) => {
       mockDir = d;
     },
   };
@@ -99,6 +108,10 @@ function liveBody(over: Record<string, unknown> = {}): Record<string, unknown> {
     schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
     pid: process.pid,
     procStart: null,
+    // Records planted here model a writer in THIS process, so the
+    // namespace identity is the caller's own — anything else would be
+    // skipped by the namespace guard before its fields even matter.
+    pidNs: readPidNamespaceId(),
     sessionId: 's',
     cwd: '/w',
     name: 'n',
@@ -131,8 +144,23 @@ describe('deriveSessionName', () => {
     expect(name).toMatch(/^[\w.-]+$/);
   });
 
+  it('keeps non-ASCII letters instead of stripping them to a dash', () => {
+    // An ASCII-only character class reduces every CJK basename to the
+    // same bare dash — zero identifying information for exactly the
+    // projects whose names are not ASCII.
+    const a = deriveSessionName('/home/u/项目', 's1');
+    const b = deriveSessionName('/home/u/別項目', 's1');
+    expect(a).toMatch(/^项目-[0-9a-f]{2}$/);
+    expect(b).toMatch(/^別項目-[0-9a-f]{2}$/);
+    expect(a).not.toBe(b);
+  });
+
   it('falls back to a placeholder when the basename is empty', () => {
     expect(deriveSessionName('/', 's1')).toMatch(/^session-[0-9a-f]{2}$/);
+  });
+
+  it('falls back to a placeholder when the basename strips to dashes only', () => {
+    expect(deriveSessionName('/w/!!!', 's1')).toMatch(/^session-[0-9a-f]{2}$/);
   });
 
   it('caps the basename at 32 characters so the name fits a table cell', () => {
@@ -163,6 +191,41 @@ describe('registerSession', () => {
     });
     expect(live[0].name).toMatch(/^app-[0-9a-f]{2}$/);
   });
+
+  it('records the writer’s PID namespace identity', async () => {
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    const raw = JSON.parse(
+      await fs.readFile(getSessionRecordPath(), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(raw['pidNs']).toBe(readPidNamespaceId());
+  });
+
+  it('records an explicit null qwenVersion when it is omitted', async () => {
+    // The key must exist as null, not be silently dropped by
+    // JSON.stringify(undefined): the record format has a declared
+    // schemaVersion, and schema drift on an optional field is still drift.
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    const raw = JSON.parse(
+      await fs.readFile(getSessionRecordPath(), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(raw).toHaveProperty('qwenVersion', null);
+  });
+
+  // Only Linux has a start token to record; elsewhere this is a visible
+  // skip rather than a test that passes without asserting.
+  it.runIf(process.platform === 'linux')(
+    'records the live start token on registration',
+    async () => {
+      // The writer side of the PID-reuse guard: a null token here would
+      // degrade every later liveness check to a bare kill(pid, 0) and
+      // let a recycled PID resurrect this record after exit.
+      await registerSession({ sessionId: 's1', cwd: '/w/app' });
+      const raw = JSON.parse(
+        await fs.readFile(getSessionRecordPath(), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(raw['procStart']).toMatch(/^[0-9a-f-]+:\d+$/i);
+    },
+  );
 
   // Windows synthesizes st_mode from file attributes and `chmod` can only
   // toggle the read-only bit, so permission assertions are meaningless
@@ -235,6 +298,25 @@ describe('registerSession', () => {
   });
 });
 
+describe('never-throw guarantee', () => {
+  it('every entry point resolves when the home directory cannot be resolved', async () => {
+    // `os.homedir()` throws when HOME is unset and the passwd lookup
+    // fails (some containers/CI images). `ps` has no catch on the
+    // strength of the registry's promise, so a rejection here would be
+    // an unhandled rejection in exactly that environment.
+    __setMockGlobalDir(null);
+
+    await expect(listLiveSessions()).resolves.toEqual([]);
+    await expect(
+      patchSessionRecord({ sessionId: 'new' }),
+    ).resolves.toBeUndefined();
+    await expect(
+      registerSession({ sessionId: 's1', cwd: '/w/app' }),
+    ).resolves.toBe(false);
+    await expect(unregisterSession()).resolves.toBeUndefined();
+  });
+});
+
 describe('patchSessionRecord', () => {
   it('updates a field without dropping the others', async () => {
     await registerSession({
@@ -279,6 +361,38 @@ describe('patchSessionRecord', () => {
     expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toEqual(foreign);
   });
 
+  it.runIf(process.platform === 'linux')(
+    'refuses to merge into a stale record left by a dead previous incarnation of this PID',
+    async () => {
+      // Session A died without unlinking (SIGKILL); PID P was recycled by
+      // session B whose registration failed. B's patch passes the pid
+      // comparison alone — only the start token proves the record is not
+      // A's, and without it the merge would graft B's fields onto A's
+      // startedAt/version/name and list the chimera as live.
+      const filePath = await writeRaw(
+        `${process.pid}.json`,
+        liveBody({ procStart: 'not-this-boot:1', sessionId: 'incarnation-a' }),
+      );
+
+      await patchSessionRecord({ sessionId: 'incarnation-b' });
+
+      expect(JSON.parse(await fs.readFile(filePath, 'utf8'))).toMatchObject({
+        sessionId: 'incarnation-a',
+      });
+    },
+  );
+
+  it('still patches a record written without a start token', async () => {
+    // Tokenless platforms must keep working through the pid comparison —
+    // the guard only fires when BOTH sides have a token to compare.
+    await writeRaw(`${process.pid}.json`, liveBody());
+
+    await patchSessionRecord({ sessionId: 'new' });
+
+    const [record] = await listLiveSessions();
+    expect(record.sessionId).toBe('new');
+  });
+
   const itPosixPatch = it.runIf(process.platform !== 'win32');
 
   itPosixPatch('keeps the record at 0600 across a patch', async () => {
@@ -310,16 +424,16 @@ describe('listLiveSessions', () => {
   });
 
   it('sweeps a record whose process is gone', async () => {
-    const filePath = await writeRaw(`${DEAD_PID}.json`, {
-      schemaVersion: 1,
-      pid: DEAD_PID,
-      procStart: null,
-      sessionId: 's-dead',
-      cwd: '/w/app',
-      name: 'app-aa',
-      startedAt: Date.now(),
-      qwenVersion: null,
-    });
+    const filePath = await writeRaw(
+      `${DEAD_PID}.json`,
+      liveBody({
+        pid: DEAD_PID,
+        sessionId: 's-dead',
+        cwd: '/w/app',
+        name: 'app-aa',
+        startedAt: Date.now(),
+      }),
+    );
 
     expect(await listLiveSessions()).toEqual([]);
     await expect(fs.stat(filePath)).rejects.toThrow();
@@ -332,20 +446,49 @@ describe('listLiveSessions', () => {
     async () => {
       // Our own PID is alive, but the recorded start token belongs to a
       // different process — so the record describes a session that is gone.
-      const filePath = await writeRaw(`${process.pid}.json`, {
-        schemaVersion: 1,
-        pid: process.pid,
-        procStart: 'not-this-boot:1',
-        sessionId: 's-recycled',
-        cwd: '/w/app',
-        name: 'app-aa',
-        startedAt: Date.now(),
-      });
+      const filePath = await writeRaw(
+        `${process.pid}.json`,
+        liveBody({
+          procStart: 'not-this-boot:1',
+          sessionId: 's-recycled',
+          cwd: '/w/app',
+          name: 'app-aa',
+          startedAt: Date.now(),
+        }),
+      );
 
       expect(await listLiveSessions()).toEqual([]);
       await expect(fs.stat(filePath)).rejects.toThrow();
     },
   );
+
+  it('neither lists nor sweeps a record from a different PID namespace, even a dead one', async () => {
+    // PID numbers do not resolve across the namespace boundary: kill(pid, 0)
+    // over here reports ESRCH for a process alive over there, and a
+    // "matching" starttime can belong to an unrelated process. Liveness
+    // proved on the wrong side is worse than no answer, so the record is
+    // left for a reader on the writer's own side — even when its PID
+    // looks dead here.
+    const filePath = await writeRaw(
+      `${DEAD_PID}.json`,
+      liveBody({ pid: DEAD_PID, pidNs: 1 }),
+    );
+
+    expect(await listLiveSessions()).toEqual([]);
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
+  it('does not list a foreign-namespace record under a live PID', async () => {
+    // The sharp end of the guard: without it this record passes plain
+    // liveness (the PID is us) and is listed as our session.
+    const filePath = await writeRaw(
+      `${process.pid}.json`,
+      liveBody({ pidNs: 1 }),
+    );
+
+    expect(await listLiveSessions()).toEqual([]);
+    await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
 
   it('ignores files that are not <pid>.json', async () => {
     await writeRaw('2026-planning-notes.json', { hello: 'world' });
@@ -440,6 +583,14 @@ describe('listLiveSessions', () => {
     expect(await listLiveSessions()).toEqual([liveBody()]);
   });
 
+  it('drops unknown fields rather than passing them on', async () => {
+    // Without the drop, arbitrary keys from a hand-planted <pid>.json
+    // would ride the typed record into `ps --json` output — and be
+    // re-persisted permanently by patchSessionRecord's merge.
+    await writeRaw(`${process.pid}.json`, { ...liveBody(), extraField: 'x' });
+    expect(await listLiveSessions()).toEqual([liveBody()]);
+  });
+
   it('nulls optional fields of the wrong type rather than passing them on', async () => {
     // A numeric `procStart` handed to `isSameProcess` would never equal the
     // string token it reads back, so a live session would be swept; a
@@ -503,14 +654,16 @@ describe('listLiveSessions', () => {
       cwd: '/w/app',
     });
     await patchSessionRecord({ startedAt: 1000 });
-    await writeRaw(`${process.ppid}.json`, {
-      schemaVersion: 1,
-      pid: process.ppid,
-      sessionId: 's-parent',
-      cwd: '/w/other',
-      name: 'other-bb',
-      startedAt: 2000,
-    });
+    await writeRaw(
+      `${process.ppid}.json`,
+      liveBody({
+        pid: process.ppid,
+        sessionId: 's-parent',
+        cwd: '/w/other',
+        name: 'other-bb',
+        startedAt: 2000,
+      }),
+    );
 
     const live = await listLiveSessions();
     expect(live.map((r) => r.sessionId)).toEqual(['s-parent', 's-self']);

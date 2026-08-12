@@ -33,6 +33,7 @@ function record(
     schemaVersion: 1,
     pid: 4242,
     procStart: '123',
+    pidNs: null,
     sessionId: 'sess-1',
     cwd: '/w/app',
     name: 'app-ab',
@@ -122,7 +123,9 @@ describe('qwen sessions ps', () => {
   it('says so plainly when nothing else is running', async () => {
     listLiveSessions.mockResolvedValue([]);
     await run({ json: false });
-    expect(stdout).toEqual(['No other Qwen Code sessions are running.']);
+    expect(stdout).toEqual([
+      'No other interactive Qwen Code sessions are running.',
+    ]);
   });
 
   it('emits one JSON object per line with no header', async () => {
@@ -139,10 +142,15 @@ describe('qwen sessions ps', () => {
     // still round-trips through JSON.parse but breaks every consumer that
     // reads it a line at a time, and drops no field on the way.
     const rec = record();
+    // Snapshotted before the run: the mock hands the handler the object
+    // itself, so computing the expectation afterwards would observe the
+    // very object the handler (mutatingly) emitted and could never catch
+    // an in-place field deletion.
+    const expected = JSON.stringify(rec);
     listLiveSessions.mockResolvedValue([rec]);
     await run({ json: true });
 
-    expect(stdout).toEqual([JSON.stringify(rec)]);
+    expect(stdout).toEqual([expected]);
     expect(stdout[0]).not.toContain('\n');
   });
 
@@ -154,7 +162,7 @@ describe('qwen sessions ps', () => {
 
   it('neutralizes control sequences coming from another process record', async () => {
     listLiveSessions.mockResolvedValue([
-      record({ name: 'ev[31mil\r', cwd: '/w/a\nb' }),
+      record({ name: 'ev[31mil\r', cwd: '/w/a\nb\tc' }),
     ]);
     await run({ json: false });
 
@@ -162,6 +170,11 @@ describe('qwen sessions ps', () => {
     expect(row).not.toContain('');
     expect(row).not.toContain('\r');
     expect(row).not.toContain('\n');
+    // sanitizeTerminalText deliberately preserves TAB for multi-line
+    // render sites; the one-line table cell drops it on top — a literal
+    // TAB in a cwd (legal in POSIX filenames) would otherwise expand to
+    // the next tab stop and misalign every column after AGE.
+    expect(row).not.toContain('\t');
   });
 
   it('strips bidi overrides that would reorder the rendered row', async () => {
@@ -172,6 +185,17 @@ describe('qwen sessions ps', () => {
 
     expect(stdout[1]).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
     expect(stdout[1]).toContain('/w/safe');
+  });
+
+  it('emits --json values raw, leaving terminal sanitization to the consumer', async () => {
+    // The contract the docs state: JSON output is data, not display.
+    // Bidi overrides that the table path strips must round-trip here —
+    // sanitizing them would rewrite the recorded path for every tooling
+    // consumer and diverge from the sibling `sessions list --json`.
+    listLiveSessions.mockResolvedValue([record({ cwd: '/w/\u202Ereorder' })]);
+    await run({ json: true });
+
+    expect(JSON.parse(stdout[0]).cwd).toBe('/w/\u202Ereorder');
   });
 
   it('truncates an over-long name instead of breaking the columns', async () => {

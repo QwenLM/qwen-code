@@ -18,7 +18,7 @@ vi.mock('./sessions/list.js', () => ({
 vi.mock('./sessions/ps.js', () => ({
   psCommand: {
     command: 'ps',
-    describe: 'List Qwen Code sessions running right now',
+    describe: 'List interactive Qwen Code sessions running right now',
   },
 }));
 

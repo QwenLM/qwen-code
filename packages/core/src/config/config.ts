@@ -216,7 +216,10 @@ import {
   clearRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
-import { patchSessionRecord } from '../services/session-registry.js';
+import {
+  deriveSessionName,
+  patchSessionRecord,
+} from '../services/session-registry.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -3963,8 +3966,13 @@ export class Config {
       // The registry's DIRECTORY column is how a user tells two live
       // sessions apart, so a mid-session directory switch has to reach it
       // too — otherwise `qwen sessions ps` keeps advertising the folder
-      // this session left.
-      await patchSessionRecord({ cwd: workDir });
+      // this session left. Unlike the /clear path, `name` follows: it is
+      // derived from the directory's basename, which is exactly what
+      // changed here.
+      await patchSessionRecord({
+        cwd: workDir,
+        name: deriveSessionName(workDir, this.sessionId),
+      });
     });
     await this.flushRuntimeStatusWrites();
   }

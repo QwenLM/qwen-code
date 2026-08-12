@@ -8,6 +8,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   isPidAlive,
   isSameProcess,
+  readPidNamespaceId,
   readProcStartToken,
 } from './process-liveness.js';
 
@@ -27,18 +28,21 @@ const BOOT_ID_PATH = '/proc/sys/kernel/random/boot_id';
  * wrong index off a real process still yields something that looks like a
  * valid token.
  */
-function statLine(comm: string, startTime: string): string {
+function statLine(comm: string, startTime: string, state = 'S'): string {
   // Fields 3..22. Once the parenthesised `comm` is stripped, field N sits
   // at index N - 3, so `startTime` (field 22, `starttime`) is the
   // twentieth entry. The neighbours are deliberately distinct values so an
-  // off-by-one read is visible.
+  // off-by-one read is visible. Field 3 is the process state.
   // prettier-ignore
   const fields = [
-    'S', '1', '2', '3', '4', '-1', '4194304', '100', '0', '200',
+    state, '1', '2', '3', '4', '-1', '4194304', '100', '0', '200',
     '0', '10', '20', '30', '40', '20', '0', '1', '0', startTime,
   ];
   return `4242 (${comm}) ${fields.join(' ')} 1000 2000 3000\n`;
 }
+
+const PID_NS_PATH = '/proc/self/ns/pid';
+const FAKE_PID_NS_INO = 4026531836;
 
 interface FakeProc {
   mod: typeof import('./process-liveness.js');
@@ -50,7 +54,12 @@ interface FakeProc {
  * the platform forced to Linux, so the parser is exercised on every CI
  * runner rather than only the Linux one.
  */
-async function withFakeProc(files: Record<string, string>): Promise<FakeProc> {
+async function withFakeProc(
+  files: Record<string, string>,
+  options: { pidNsIno?: number | null } = {},
+): Promise<FakeProc> {
+  const pidNsIno =
+    options.pidNsIno === undefined ? FAKE_PID_NS_INO : options.pidNsIno;
   const reads: string[] = [];
   vi.resetModules();
   vi.doMock('node:fs', () => ({
@@ -61,6 +70,13 @@ async function withFakeProc(files: Record<string, string>): Promise<FakeProc> {
         throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
       }
       return body;
+    },
+    statSync: (p: unknown) => {
+      reads.push(String(p));
+      if (String(p) === PID_NS_PATH && pidNsIno !== null) {
+        return { ino: pidNsIno };
+      }
+      throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
     },
   }));
   vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
@@ -108,6 +124,34 @@ describe('isPidAlive', () => {
       throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
     });
     expect(isPidAlive(4242)).toBe(false);
+  });
+
+  // On Windows the "process exists but is owned by another user" errno is
+  // EACCES, not EPERM; missing it there would let a sweep delete a live
+  // session's record.
+  it('treats EACCES — Windows’ other-user errno — as alive', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('access denied'), { code: 'EACCES' });
+    });
+    expect(isPidAlive(4242)).toBe(true);
+  });
+
+  it('treats a zombie — exited but unreaped — as dead on Linux', async () => {
+    // A zombie still answers kill(pid, 0): the PID exists until the parent
+    // reaps it. Only the state field of /proc/<pid>/stat proves it has
+    // already exited, so without the Z check the record stays listed for
+    // the parent's whole lifetime.
+    const { mod } = await withFakeProc({
+      '/proc/4242/stat': statLine('qwen', '987654', 'Z'),
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(mod.isPidAlive(4242)).toBe(false);
+  });
+
+  it('keeps a live process whose /proc state cannot be read', async () => {
+    const { mod } = await withFakeProc({});
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(mod.isPidAlive(4242)).toBe(true);
   });
 });
 
@@ -191,6 +235,22 @@ describe('readProcStartToken', () => {
     expect(reads.filter((p) => p.endsWith('/stat'))).toHaveLength(2);
   });
 
+  it('retries the boot id after a failed read instead of caching the failure', async () => {
+    // Both first-read moments — startup registration and the first
+    // concurrent sweep — are fd-pressure moments. Caching a transient
+    // EMFILE as a permanent null would silently disable PID-reuse
+    // protection for the whole process lifetime.
+    const files: Record<string, string> = {
+      '/proc/4242/stat': statLine('qwen', '987654'),
+    };
+    const { mod, reads } = await withFakeProc(files);
+
+    expect(mod.readProcStartToken(4242)).toBeNull();
+    files[BOOT_ID_PATH] = `${FAKE_BOOT_ID}\n`;
+    expect(mod.readProcStartToken(4242)).toBe(`${FAKE_BOOT_ID}:987654`);
+    expect(reads.filter((p) => p === BOOT_ID_PATH)).toHaveLength(2);
+  });
+
   it('rejects nonsense pids before touching /proc', async () => {
     const { mod, reads } = await withFakeProc({
       [BOOT_ID_PATH]: `${FAKE_BOOT_ID}\n`,
@@ -202,6 +262,23 @@ describe('readProcStartToken', () => {
     expect(mod.readProcStartToken(-1)).toBeNull();
     expect(mod.readProcStartToken(1.5)).toBeNull();
     expect(reads.filter((p) => p.endsWith('/stat'))).toEqual([]);
+  });
+});
+
+describe('readPidNamespaceId', () => {
+  it('returns the PID namespace inode on Linux', async () => {
+    const { mod } = await withFakeProc({});
+    expect(mod.readPidNamespaceId()).toBe(FAKE_PID_NS_INO);
+  });
+
+  it('returns null when the namespace file is unreadable', async () => {
+    const { mod } = await withFakeProc({}, { pidNsIno: null });
+    expect(mod.readPidNamespaceId()).toBeNull();
+  });
+
+  it('returns null on platforms without /proc', () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    expect(readPidNamespaceId()).toBeNull();
   });
 });
 

@@ -32,11 +32,14 @@
  *
  * ## Staleness
  *
- * A record is live when its PID is running *and* the recorded process
- * start token still matches (see `isSameProcess`) — a recycled PID must
- * not resurrect a dead session. Records that fail that check are swept
- * during enumeration; anything we cannot positively prove dead is left
- * alone.
+ * A record is live when it was written from the reader's own PID
+ * namespace and its PID is running *and* the recorded process start
+ * token still matches (see `isSameProcess`) — a recycled PID must not
+ * resurrect a dead session. Records that fail the liveness check are
+ * swept during enumeration; records from another PID namespace are
+ * neither listed nor swept, because PID numbers do not resolve across
+ * that boundary in either direction. Anything else we cannot positively
+ * prove dead is left alone.
  */
 
 import { createHash } from 'node:crypto';
@@ -47,6 +50,7 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   isSameProcess,
+  readPidNamespaceId,
   readProcStartToken,
 } from '../utils/process-liveness.js';
 
@@ -82,6 +86,11 @@ export interface SessionRegistryRecord {
   pid: number;
   /** Start-time token guarding against PID reuse; null where unavailable. */
   procStart: string | null;
+  /**
+   * PID-namespace identity of the writer (see `readPidNamespaceId`);
+   * null where the platform does not expose one.
+   */
+  pidNs: number | null;
   sessionId: string;
   cwd: string;
   /** Short human-facing label, unique-ish per session. */
@@ -115,11 +124,16 @@ export function getSessionRecordPath(): string {
  * immediately. Two hex characters keep it typeable while making a
  * same-directory collision unlikely rather than certain; callers that
  * need a guaranteed-unique handle should use the session id.
+ *
+ * Letters and digits are matched Unicode-aware: an ASCII-only class would
+ * strip a CJK basename down to a bare dash, leaving every such project
+ * with an identical, information-free label.
  */
 export function deriveSessionName(cwd: string, sessionId: string): string {
   const base = path
     .basename(cwd)
-    .replace(/[^\w.-]+/g, '-')
+    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
     .slice(0, 32);
   const suffix = createHash('sha256')
     .update(sessionId)
@@ -142,6 +156,7 @@ export async function registerSession(
     schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
     pid: process.pid,
     procStart: readProcStartToken(process.pid),
+    pidNs: readPidNamespaceId(),
     sessionId: fields.sessionId,
     cwd: fields.cwd,
     name: deriveSessionName(fields.cwd, fields.sessionId),
@@ -178,18 +193,39 @@ export async function registerSession(
  * No-ops when the record is missing: a session that failed to register
  * should not be resurrected by a later patch, because the resurrected
  * record would be missing whatever else registration would have set.
+ * `procStart` and `pidNs` are excluded from the patch for the same
+ * reason the pid is: they are the identity the sweep trusts, and a
+ * caller-supplied value could only corrupt it.
  */
 export async function patchSessionRecord(
-  patch: Partial<Omit<SessionRegistryRecord, 'pid' | 'schemaVersion'>>,
+  patch: Partial<
+    Omit<SessionRegistryRecord, 'pid' | 'schemaVersion' | 'procStart' | 'pidNs'>
+  >,
 ): Promise<void> {
-  const filePath = getSessionRecordPath();
   try {
+    // Inside the try: `getGlobalQwenDir()` resolves the home directory
+    // and can throw, and this function promises never to reject.
+    const filePath = getSessionRecordPath();
     const existing = await readRecord(filePath);
     // Missing, or not actually a record for this PID: `readRecord` does
     // not check the filename/contents agreement that `listLiveSessions`
     // insists on, so merging into a foreign `<pid>.json` would write back
     // a record the reader will neither show nor sweep — permanent litter.
     if (existing === null || existing.pid !== process.pid) return;
+    // The pid comparison alone also passes for a stale record left by a
+    // DEAD previous incarnation of this PID (session A dies without
+    // unlinking; the PID is recycled by session B whose registration
+    // failed). When both sides carry a start token, require it to agree
+    // before merging — otherwise the patch grafts B's fields onto A's
+    // record and lists the chimera as live.
+    const currentToken = readProcStartToken(process.pid);
+    if (
+      existing.procStart !== null &&
+      currentToken !== null &&
+      existing.procStart !== currentToken
+    ) {
+      return;
+    }
     await atomicWriteJSON(
       filePath,
       { ...existing, ...patch },
@@ -234,6 +270,7 @@ export async function listLiveSessions(): Promise<SessionRegistryRecord[]> {
     return [];
   }
 
+  const ownNamespace = readPidNamespaceId();
   const live: SessionRegistryRecord[] = [];
   await Promise.all(
     entries
@@ -247,6 +284,13 @@ export async function listLiveSessions(): Promise<SessionRegistryRecord[]> {
         // written by this code (or was renamed by hand). Skip it, and
         // never sweep it — we cannot reason about which PID it describes.
         if (`${record.pid}.json` !== name) return;
+
+        // A record from another PID namespace describes PIDs that do not
+        // resolve in ours: kill(pid, 0) reports ESRCH for a process that
+        // is alive over there, and a "matching" starttime can belong to
+        // an unrelated process. Neither listing nor sweeping is safe —
+        // leave it to a reader on the writer's own side.
+        if (record.pidNs !== ownNamespace) return;
 
         if (isSameProcess(record.pid, record.procStart)) {
           live.push(record);
@@ -318,12 +362,14 @@ async function readRecord(
   }
 
   const procStart = value['procStart'];
+  const pidNs = value['pidNs'];
   const qwenVersion = value['qwenVersion'];
 
   return {
     schemaVersion,
     pid,
     procStart: typeof procStart === 'string' ? procStart : null,
+    pidNs: typeof pidNs === 'number' && Number.isFinite(pidNs) ? pidNs : null,
     sessionId,
     cwd,
     name,

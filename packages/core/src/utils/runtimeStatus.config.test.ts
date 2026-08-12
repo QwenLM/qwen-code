@@ -18,6 +18,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtimeStatus.js';
+import {
+  listLiveSessions,
+  registerSession,
+  unregisterSession,
+} from '../services/session-registry.js';
 
 let tmpDir: string;
 let runtimeDir: string;
@@ -147,6 +152,52 @@ describe('Config.startNewSession runtime.json swap', () => {
     expect(entries.filter((e) => e.endsWith('.runtime.json'))).toEqual([
       `${sessionA}.runtime.json`,
     ]);
+  });
+});
+
+describe('Config.startNewSession session-registry patch', () => {
+  let prevQwenHome: string | undefined;
+
+  beforeEach(() => {
+    // Keep the registry inside this test's tmpdir — the patch seam must
+    // be exercised against the real registerSession/listLiveSessions
+    // round trip, and the default location is the runner's real home.
+    prevQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(tmpDir, 'qwen-home');
+  });
+
+  afterEach(async () => {
+    await unregisterSession();
+    if (prevQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = prevQwenHome;
+    }
+  });
+
+  it('keeps the registry record pointing at the swapped session id', async () => {
+    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+    const config = makeConfig(sessionA);
+    config.markRuntimeStatusEnabled();
+    await registerSession({
+      sessionId: sessionA,
+      cwd: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+
+    config.startNewSession(sessionB);
+
+    // Without the patch seam, `qwen sessions ps --json` would keep
+    // advertising sessionA's transcript for this live session — the exact
+    // stale-pointer bug the seam exists to prevent.
+    const after = await waitFor(async () => {
+      const [record] = await listLiveSessions();
+      return record?.sessionId === sessionB ? record : null;
+    });
+    expect(after).not.toBeNull();
+    expect(after!.pid).toBe(process.pid);
+    expect(after!.cwd).toBe(tmpDir);
   });
 });
 

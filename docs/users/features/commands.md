@@ -640,10 +640,10 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command              | Description                       | Usage Examples                                               |
-| -------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `qwen sessions list` | List recent conversation sessions | `qwen sessions list`, `qwen sessions list --json --limit 50` |
-| `qwen sessions ps`   | List sessions running right now   | `qwen sessions ps`, `qwen sessions ps --json`                |
+| Command              | Description                                 | Usage Examples                                               |
+| -------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list` | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| `qwen sessions ps`   | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
 
 #### `qwen sessions list`
 
@@ -685,10 +685,12 @@ qwen sessions list --json | jq .
 
 #### `qwen sessions ps`
 
-Lists the Qwen Code sessions running on this machine right now. `sessions
-list` walks saved transcripts ("what have I worked on"); this walks the
-live-process registry ("what is running at this moment"). Records left
-behind by a killed session are swept as they are found.
+Lists the interactive Qwen Code sessions running on this machine right
+now. `sessions list` walks saved transcripts ("what have I worked on");
+this walks the live-process registry ("what is running at this moment").
+Records left behind by a killed session are swept as they are found.
+Headless sessions (`qwen -p`) do not register with the live-process
+registry, so they are not shown.
 
 **Flags:**
 
@@ -706,11 +708,16 @@ Outputs JSON Lines on stdout, newest session first. Each line is a JSON
 object with fields:
 
 ```
-schemaVersion, pid, procStart, sessionId, cwd, name, startedAt, qwenVersion
+schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
+qwenVersion
 ```
 
 Nothing else is written to stdout — an empty listing prints nothing at
 all — so `qwen sessions ps --json | jq .` is safe to script against.
+
+JSON output is raw data: field values are emitted exactly as recorded,
+with no terminal sanitization. Treat them as data, and sanitize before
+rendering them in a terminal.
 
 **Examples:**
 
@@ -719,5 +726,7 @@ all — so `qwen sessions ps --json | jq .` is safe to script against.
 qwen sessions ps
 
 # Which directories are busy right now?
+# Note: `jq -r` renders the raw recorded value in your terminal (see the
+# raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
 ```

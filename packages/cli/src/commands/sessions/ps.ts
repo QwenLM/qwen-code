@@ -5,11 +5,16 @@
  */
 
 /**
- * `qwen sessions ps` — list the Qwen Code sessions running right now.
+ * `qwen sessions ps` — list the interactive Qwen Code sessions running
+ * right now.
  *
  * The sibling `qwen sessions list` walks saved transcripts; this walks the
  * live-process registry, so the two answer different questions: "what have
  * I worked on" versus "what is running on this machine at this moment".
+ *
+ * "Interactive" is a registration fact, not a filter: only the
+ * interactive UI registers sessions, so headless runs (`qwen -p`) never
+ * appear here.
  */
 
 import type { CommandModule, Argv } from 'yargs';
@@ -98,13 +103,18 @@ async function handlePs(argv: PsArgs): Promise<void> {
 
   if (argv.json) {
     for (const record of records) {
+      // Deliberately raw: field values are emitted exactly as recorded,
+      // with none of the table path's terminal sanitization. That keeps
+      // the output honest data for tooling (and matches the sibling
+      // `sessions list --json`); consumers that RENDER these values in a
+      // terminal own the sanitization.
       writeStdoutLine(JSON.stringify(record));
     }
     return;
   }
 
   if (records.length === 0) {
-    writeStdoutLine('No other Qwen Code sessions are running.');
+    writeStdoutLine('No other interactive Qwen Code sessions are running.');
     return;
   }
 
@@ -113,7 +123,7 @@ async function handlePs(argv: PsArgs): Promise<void> {
 
 export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
-  describe: 'List Qwen Code sessions running right now',
+  describe: 'List interactive Qwen Code sessions running right now',
   builder: (yargs: Argv) =>
     yargs.option('json', {
       type: 'boolean',
