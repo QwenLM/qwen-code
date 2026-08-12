@@ -925,6 +925,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const pumpTransitionRef = useRef<() => void>(() => undefined);
   const lifecycleRef = useRef(0);
   const sourceBoundOperationCountRef = useRef(0);
+  const controlledRetryPendingRef = useRef(false);
   const cancelTransitionRef = useRef<(reason: string) => void>(() => undefined);
   const controlledTransitionOriginRef = useRef(false);
   const transcriptHistoryRef = useRef<TranscriptHistoryState>({
@@ -935,6 +936,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   });
   const [transcriptHistoryState, setTranscriptHistoryState] =
     useState<TranscriptHistoryState>(transcriptHistoryRef.current);
+  const [controlledRetryNonce, setControlledRetryNonce] = useState(0);
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -1014,7 +1016,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     !knownCapabilities.features.includes(CLIENT_IDENTITY_FEATURE)
       ? clientId
       : initialClientIdDependencyRef.current;
-  if (legacyClientIdDependency) {
+  if (
+    knownCapabilities &&
+    !knownCapabilities.features.includes(CLIENT_IDENTITY_FEATURE) &&
+    legacyClientIdDependency
+  ) {
     clientIdRef.current = getStableClientId(legacyClientIdDependency);
   }
   const setConnectionSynchronous = useCallback(
@@ -1079,15 +1085,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         if (mountedRef.current || mountGeneration.current !== generation) {
           return;
         }
-        lifecycleRef.current += 1;
-        const intent = desiredTransitionRef.current;
-        desiredTransitionRef.current = undefined;
-        if (intent) {
-          if (intent.timeout !== undefined) clearTimeout(intent.timeout);
-          intent.reject(
-            new DOMException('Session transition interrupted', 'AbortError'),
-          );
-        }
+        cancelTransitionRef.current('Session transition interrupted');
         liveJournalRepairRef.current?.controller?.abort();
         liveJournalRepairRef.current = undefined;
         tryLiveJournalRepairRef.current = undefined;
@@ -1855,7 +1853,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
-          runnerActiveTurn = hasSessionActivePrompt();
+          runnerActiveTurn = false;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
           const pendingLoad = pendingSessionLoadRef.current;
@@ -2725,10 +2723,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ))
                 ) {
                   lastPromptTerminalEventId = event.id;
-                  runnerActiveTurn = hasSessionActivePrompt();
-                  if (!runnerActiveTurn) {
-                    queueMicrotask(pumpTransitionRef.current);
-                  }
+                  runnerActiveTurn = false;
+                  queueMicrotask(pumpTransitionRef.current);
                 }
                 const pendingRepair = liveJournalRepairRef.current;
                 if (
@@ -3418,16 +3414,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [addNotice, setConnectionSynchronous],
   );
 
-  const exposeCrossSessionFailure = useCallback(
-    (intent: CrossSessionIntent, error: unknown) => {
-      if (desiredTransitionRef.current !== intent) return;
-      desiredTransitionRef.current = undefined;
-      if (mountedRef.current) publishCrossSessionFailure(intent, error);
-      settleCrossSessionIntent(intent, error);
-    },
-    [publishCrossSessionFailure],
-  );
-
   const retireAttachment = useCallback(
     (session: DaemonSessionClient, intent: CrossSessionIntent) => {
       const clientId = session.clientId || intent.targetClientId;
@@ -3444,6 +3430,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [],
   );
 
+  const cleanupTransitionArtifacts = useCallback(
+    (
+      intent: CrossSessionIntent,
+      options: { preserveInFlightCapture?: boolean } = {},
+    ) => {
+      const candidate = intent.candidate;
+      intent.candidate = undefined;
+      if (candidate) retireAttachment(candidate, intent);
+      if (options.preserveInFlightCapture) return;
+      const control = runnerControlRef.current;
+      if (intent.capture && control?.capture === intent.capture) {
+        control.capture = undefined;
+      }
+    },
+    [retireAttachment],
+  );
+
+  const exposeCrossSessionFailure = useCallback(
+    (
+      intent: CrossSessionIntent,
+      error: unknown,
+      options?: { preserveInFlightCapture?: boolean },
+    ) => {
+      if (desiredTransitionRef.current !== intent) return;
+      cleanupTransitionArtifacts(intent, options);
+      desiredTransitionRef.current = undefined;
+      if (mountedRef.current) publishCrossSessionFailure(intent, error);
+      settleCrossSessionIntent(intent, error);
+    },
+    [cleanupTransitionArtifacts, publishCrossSessionFailure],
+  );
+
   const armTransitionDeadline = useCallback(
     (intent: CrossSessionIntent, capabilities: DaemonCapabilities) => {
       if (intent.deadlineStarted) return;
@@ -3453,25 +3471,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       if (timeoutMs === undefined) return;
       intent.deadlineAt = Date.now() + timeoutMs;
       intent.timeout = setTimeout(() => {
-        if (intent.candidate) {
-          retireAttachment(intent.candidate, intent);
-          intent.candidate = undefined;
-        }
-        const control = runnerControlRef.current;
-        if (
-          rawTransitionRef.current !== intent &&
-          control &&
-          control.capture === intent.capture
-        ) {
-          control.capture = undefined;
-        }
         exposeCrossSessionFailure(
           intent,
           new Error('Session transition timed out'),
+          {
+            preserveInFlightCapture: rawTransitionRef.current === intent,
+          },
         );
       }, timeoutMs);
     },
-    [exposeCrossSessionFailure, retireAttachment],
+    [exposeCrossSessionFailure],
   );
 
   const commitCrossSession = useCallback(
@@ -3785,6 +3794,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       exposeCrossSessionFailure(
         intent,
         new Error('Session transition timed out before restore started'),
+        {
+          preserveInFlightCapture: rawTransitionRef.current === intent,
+        },
       );
       return;
     }
@@ -3805,7 +3817,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         snapshot.clientId !== intent.sourceClientId ||
         snapshot.eventEpoch !== candidate.eventEpoch
       ) {
-        retireAttachment(candidate, intent);
         exposeCrossSessionFailure(
           intent,
           new Error(
@@ -3816,7 +3827,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         return;
       }
       if (intent.deadlineAt !== undefined && Date.now() >= intent.deadlineAt) {
-        retireAttachment(candidate, intent);
         exposeCrossSessionFailure(
           intent,
           new Error('Session transition timed out'),
@@ -3844,7 +3854,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           intent.capture,
         )
       ) {
-        retireAttachment(candidate, intent);
         exposeCrossSessionFailure(
           intent,
           new Error('Session refresh failed integrity validation'),
@@ -4082,14 +4091,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const intent = desiredTransitionRef.current;
       desiredTransitionRef.current = undefined;
       if (intent) {
-        if (intent.candidate) retireAttachment(intent.candidate, intent);
-        if (
-          rawTransitionRef.current !== intent &&
-          intent.capture &&
-          runnerControlRef.current?.capture === intent.capture
-        ) {
-          runnerControlRef.current.capture = undefined;
-        }
+        cleanupTransitionArtifacts(intent, {
+          preserveInFlightCapture: rawTransitionRef.current === intent,
+        });
         settleCrossSessionIntent(
           intent,
           new DOMException(reason, 'AbortError'),
@@ -4102,7 +4106,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         return next;
       });
     },
-    [retireAttachment, setConnectionSynchronous],
+    [cleanupTransitionArtifacts, setConnectionSynchronous],
   );
   cancelTransitionRef.current = cancelCrossSessionTransition;
 
@@ -4217,19 +4221,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         return current.promise;
       }
       if (current) {
-        if (current.candidate) {
-          retireAttachment(current.candidate, current);
-          current.candidate = undefined;
-        }
-        const control = runnerControlRef.current;
-        if (
-          rawTransitionRef.current !== current &&
-          current.capture &&
-          control &&
-          control.capture === current.capture
-        ) {
-          control.capture = undefined;
-        }
+        cleanupTransitionArtifacts(current, {
+          preserveInFlightCapture: rawTransitionRef.current === current,
+        });
         settleCrossSessionIntent(
           current,
           new DOMException(
@@ -4270,15 +4264,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const abort = () => {
           if (desiredTransitionRef.current !== intent) return;
           desiredTransitionRef.current = undefined;
-          if (intent.candidate) retireAttachment(intent.candidate, intent);
-          const control = runnerControlRef.current;
-          if (
-            rawTransitionRef.current !== intent &&
-            control &&
-            control.capture === intent.capture
-          ) {
-            control.capture = undefined;
-          }
+          cleanupTransitionArtifacts(intent, {
+            preserveInFlightCapture: rawTransitionRef.current === intent,
+          });
           settleCrossSessionIntent(
             intent,
             request.signal?.reason ??
@@ -4318,10 +4306,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [
       armTransitionDeadline,
       clientId,
+      cleanupTransitionArtifacts,
       publishCrossSessionFailure,
       resolvedBaseUrl,
       resolvedToken,
-      retireAttachment,
       setConnectionSynchronous,
     ],
   );
@@ -4420,8 +4408,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           desiredTransitionRef.current?.sameLogical === false,
         isSourceBoundOperationInFlight: () =>
           sourceBoundOperationCountRef.current > 0,
-        setSourceBoundOperationInFlight: (inFlight) =>
-          (sourceBoundOperationCountRef.current += inFlight ? 1 : -1),
+        setSourceBoundOperationInFlight: (inFlight) => {
+          sourceBoundOperationCountRef.current += inFlight ? 1 : -1;
+          if (
+            !inFlight &&
+            sourceBoundOperationCountRef.current === 0 &&
+            controlledRetryPendingRef.current
+          ) {
+            controlledRetryPendingRef.current = false;
+            queueMicrotask(() => {
+              if (mountedRef.current) {
+                setControlledRetryNonce((nonce) => nonce + 1);
+              }
+            });
+          }
+        },
         getTransitionOrigin: () => {
           const controlled = controlledTransitionOriginRef.current;
           controlledTransitionOriginRef.current = false;
@@ -4668,6 +4669,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ) {
       return;
     }
+    if (sessionId && sourceBoundOperationCountRef.current > 0) {
+      controlledRetryPendingRef.current = true;
+      return;
+    }
+    controlledRetryPendingRef.current = false;
     lastHandledSessionIdRef.current = sessionId;
     lastHandledWorkspaceRef.current = targetWorkspaceCwd;
     lastHandledClientIdRef.current = clientId;
@@ -4742,6 +4748,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     actions,
     clientId,
+    controlledRetryNonce,
     resolvedWorkspaceCwd,
     sessionId,
     setConnectionSynchronous,
