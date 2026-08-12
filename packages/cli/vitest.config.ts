@@ -148,7 +148,7 @@ export default defineConfig({
     testTimeout: 15000,
     // Load-sensitive tests (the serve/bridge suites spawn real processes and
     // wait on real timers) flake when a load spike starves them; a retry
-    // rides the spike out, while a real regression fails every attempt.
+    // rides the spike out, while a real deterministic regression fails every attempt.
     retry: 2,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],

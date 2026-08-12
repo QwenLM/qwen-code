@@ -18,7 +18,7 @@ export default defineConfig({
     testTimeout: 15000,
     // Load-sensitive tests (real subprocesses, tempdir I/O, WASM load) flake
     // when a load spike starves them; a retry rides the spike out, while a
-    // real regression fails every attempt.
+    // real deterministic regression fails every attempt.
     retry: 2,
     reporters: ['default', 'junit'],
     silent: true,

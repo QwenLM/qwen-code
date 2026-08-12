@@ -33,7 +33,7 @@ export default defineConfig({
     // Several suites spawn real subprocesses with real sleeps (the autofix
     // watchdog tests, install-script). On the shared self-hosted runner pool
     // a load spike slows or fails a spawn at random; a retry rides it out,
-    // while a real regression fails every attempt.
+    // while a real deterministic regression fails every attempt.
     retry: 2,
     coverage: {
       provider: 'v8',
