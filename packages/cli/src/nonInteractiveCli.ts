@@ -1090,18 +1090,35 @@ export async function runNonInteractive(
               break;
             case 'goal_control': {
               const { snapshot } = slashCommandResult.response;
-              observeGoalRuntime(await config.getGoalRuntimeReady());
+              const shouldRunGoalWorker =
+                snapshot.goal?.status === 'active' &&
+                (slashCommandResult.operation.kind === 'set' ||
+                  slashCommandResult.operation.kind === 'edit' ||
+                  slashCommandResult.operation.kind === 'resume');
+              try {
+                observeGoalRuntime(await config.getGoalRuntimeReady());
+              } catch (error) {
+                // `goalCommand` already degrades a persistence-unavailable
+                // `status`/`clear` into a successful empty snapshot; asking
+                // for the very runtime that just failed must not turn that
+                // answer back into an exit-1 crash. Only a snapshot that
+                // still needs a worker genuinely requires the runtime.
+                if (
+                  shouldRunGoalWorker ||
+                  !(error instanceof GoalPersistenceUnavailableError)
+                ) {
+                  throw error;
+                }
+                debugLogger.debug(
+                  '[runNonInteractive] canonical Goal runtime unavailable; answering goal_control from the degraded snapshot',
+                );
+              }
               emitGoalSnapshot(snapshot);
 
               const message = formatGoalState(
                 snapshot,
                 slashCommandResult.operation.kind,
               );
-              const shouldRunGoalWorker =
-                snapshot.goal?.status === 'active' &&
-                (slashCommandResult.operation.kind === 'set' ||
-                  slashCommandResult.operation.kind === 'edit' ||
-                  slashCommandResult.operation.kind === 'resume');
               if (!shouldRunGoalWorker) {
                 await emitNonInteractiveFinalMessage({
                   message,

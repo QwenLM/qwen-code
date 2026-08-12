@@ -1448,7 +1448,7 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.contextWindow).toBeUndefined();
   });
 
-  it('adds daemon goal status metadata to the transcript', async () => {
+  it('adds daemon goal set and paused status metadata to the transcript', async () => {
     const session = createMockSession({
       events: async function* goalStatusEvents() {
         yield {
@@ -1464,6 +1464,24 @@ describe('DaemonSessionProvider', () => {
                   kind: 'set',
                   condition: 'ship goal sync',
                   setAt: 1234,
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: {
+                  kind: 'paused',
+                  condition: 'ship goal sync',
+                  lastReason: 'waiting for review',
                 },
               },
             },
@@ -1496,6 +1514,16 @@ describe('DaemonSessionProvider', () => {
           kind: 'set',
           condition: 'ship goal sync',
           setAt: 1234,
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        text: '',
+        source: 'goal',
+        data: {
+          kind: 'paused',
+          condition: 'ship goal sync',
+          lastReason: 'waiting for review',
         },
       }),
     ]);

@@ -44,6 +44,7 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
@@ -617,6 +618,54 @@ describe('runNonInteractive', () => {
       });
     },
   );
+
+  // `goalCommand` degrades a persistence-unavailable `status`/`clear` into a
+  // successful empty snapshot. The headless consumer then re-requests the
+  // very runtime that just failed, so without swallowing that rejection the
+  // degradation is defeated in this mode only (interactive and ACP were fine).
+  it.each([
+    { input: '/goal', expectedText: 'No Goal is set.' },
+    { input: '/goal clear', expectedText: 'Goal cleared.' },
+  ])(
+    'answers $input from the degraded snapshot when goals cannot be persisted',
+    async ({ input, expectedText }) => {
+      setupMetricsMock();
+      mockGetCommands.mockReturnValue([goalCommand]);
+      mockConfig.getChatRecordingService.mockReturnValue(undefined);
+      mockConfig.getGoalRuntimeReady = vi.fn(async () => {
+        throw new GoalPersistenceUnavailableError('chat recording is disabled');
+      });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        input,
+        `goal-degraded-${input}`,
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(`${expectedText}\n`);
+    },
+  );
+
+  it('still fails a Goal operation that genuinely needs persistence', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    mockConfig.getGoalRuntimeReady = vi.fn(async () => {
+      throw new GoalPersistenceUnavailableError('chat recording is disabled');
+    });
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal ship it',
+      'goal-degraded-set',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+  });
 
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
