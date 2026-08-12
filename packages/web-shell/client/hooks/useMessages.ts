@@ -24,11 +24,11 @@ type Translator = (
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
-// Cap on transient-error rounds for one pending-agent set. After this many
-// erroring rounds the timer chain stops and agents still erroring are marked
-// failed so the UI unblocks. Healthy non-terminal responses back off on the
-// same delay ladder but do not consume this budget, so a long-running agent's
-// completion query keeps its retry tolerance.
+// Cap on consecutive transient-error rounds for one pending agent. An agent
+// whose own error count reaches the cap is marked failed so the UI unblocks,
+// while healthy siblings keep polling. Healthy non-terminal responses back
+// off on the same delay ladder but do not consume this budget, so a
+// long-running agent's completion query keeps its retry tolerance.
 const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // The daemon registers a launched background task shortly after the tool
 // call appears in the transcript, so a first `session_not_found` can race
@@ -41,8 +41,10 @@ export interface BackgroundAgentResolution {
 }
 
 interface ReconciliationRound {
-  resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
+  resolutions: Map<string, BackgroundAgentResolution>;
   errors: ReadonlyArray<{ callId: string; error: unknown }>;
+  notFounds: ReadonlyArray<string>;
+  succeeded: ReadonlyArray<string>;
 }
 
 export function transcriptBlocksToLocalizedMessages(
@@ -221,15 +223,15 @@ export function useMessagesFromBlocks(
   // Keyed by session + pending-agent set (not the notification key) so other
   // agents' notifications cannot reset the backoff and keep the retry delay
   // pinned at its base. `attempts` drives the backoff delay; `errorAttempts`
-  // counts only transient-error rounds toward the exhaustion budget.
+  // tracks consecutive transient-error rounds per callId toward the budget.
   const retryBackoffRef = useRef<{
     key: string;
     attempts: number;
-    errorAttempts: number;
+    errorAttempts: ReadonlyMap<string, number>;
   }>({
     key: '',
     attempts: 0,
-    errorAttempts: 0,
+    errorAttempts: new Map(),
   });
   const missingAgentMissesRef = useRef(new Map<string, number>());
   const lastConnectionKeyRef = useRef<string | undefined>(undefined);
@@ -243,7 +245,11 @@ export function useMessagesFromBlocks(
     if (lastConnectionKeyRef.current !== connectionKey) {
       lastConnectionKeyRef.current = connectionKey;
       missingAgentMissesRef.current.clear();
-      retryBackoffRef.current = { key: '', attempts: 0, errorAttempts: 0 };
+      retryBackoffRef.current = {
+        key: '',
+        attempts: 0,
+        errorAttempts: new Map(),
+      };
     }
     const sessionId = connection.sessionId;
     if (
@@ -273,6 +279,7 @@ export function useMessagesFromBlocks(
       }
     }
     const roundErrors: Array<{ callId: string; error: unknown }> = [];
+    const roundNotFounds: string[] = [];
     // A settled round that was already processed must not be reused: a
     // re-run (for example a client identity swap) would attach a second
     // handler and count the same round against the retry budget twice.
@@ -287,23 +294,23 @@ export function useMessagesFromBlocks(
                 sessionId,
                 callId,
               );
-              missingAgentMissesRef.current.delete(callId);
               return [callId, resolution] as const;
             } catch (error) {
-              if (isSubagentSessionNotFound(error, callId)) {
-                const misses =
-                  (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
-                missingAgentMissesRef.current.set(callId, misses);
-                if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
-                  return [callId, { status: 'failed' }] as const;
-                }
+              if (
+                isSubagentSessionNotFound(error, callId) ||
+                isSessionLevelNotFound(error)
+              ) {
+                // Both 404 shapes also occur while the daemon is racing
+                // registration or the owning workspace runtime is
+                // transiently inactive, so the active round's handler alone
+                // counts them against the missing-agent grace.
+                roundNotFounds.push(callId);
               } else if (
-                isSessionLevelNotFound(error) ||
-                (error instanceof DaemonHttpError &&
-                  error.status >= 400 &&
-                  error.status < 500 &&
-                  error.status !== 404 &&
-                  error.status !== 429)
+                error instanceof DaemonHttpError &&
+                error.status >= 400 &&
+                error.status < 500 &&
+                error.status !== 404 &&
+                error.status !== 429
               ) {
                 // Permanent client errors never recover on retry; make the
                 // card terminal so it can stop gating the UI. A 429 is the
@@ -317,15 +324,20 @@ export function useMessagesFromBlocks(
           }),
         ).then((results) => {
           const resolutions = new Map<string, BackgroundAgentResolution>();
+          const succeeded: string[] = [];
           results.forEach((result) => {
-            if (
-              result.status === 'fulfilled' &&
-              isTerminalBackgroundAgentStatus(result.value[1].status)
-            ) {
+            if (result.status !== 'fulfilled') return;
+            succeeded.push(result.value[0]);
+            if (isTerminalBackgroundAgentStatus(result.value[1].status)) {
               resolutions.set(result.value[0], result.value[1]);
             }
           });
-          return { resolutions, errors: roundErrors };
+          return {
+            resolutions,
+            errors: roundErrors,
+            notFounds: roundNotFounds,
+            succeeded,
+          };
         });
     const round = roundIsReusable
       ? cachedRound
@@ -334,93 +346,102 @@ export function useMessagesFromBlocks(
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     request
-      .then(({ resolutions, errors }) => {
+      .then(({ resolutions, errors, notFounds, succeeded }) => {
         if (!active) return;
         round.processed = true;
-        const unresolved = resolutions.size < callIds.length;
-        let scheduleRetry = false;
+        // Grace-miss accounting lives in the active handler, not the per-call
+        // closure: a superseded round's late 404 must not consume grace that
+        // belongs to the live round.
+        for (const callId of succeeded) {
+          missingAgentMissesRef.current.delete(callId);
+        }
+        for (const callId of notFounds) {
+          const misses = (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
+          missingAgentMissesRef.current.set(callId, misses);
+          if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
+            resolutions.set(callId, { status: 'failed' });
+          }
+        }
+        let unresolved = resolutions.size < callIds.length;
+        const failedCallIds: string[] = [];
         let retryDelayMs = BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS;
         if (unresolved) {
           const previous =
             retryBackoffRef.current.key === retryScopeKey
               ? retryBackoffRef.current
-              : { key: retryScopeKey, attempts: 0, errorAttempts: 0 };
+              : {
+                  key: retryScopeKey,
+                  attempts: 0,
+                  errorAttempts: new Map<string, number>(),
+                };
           const attempts = previous.attempts + 1;
-          // Healthy non-terminal responses back off but do not consume the
-          // failure budget; only transient errors do.
-          const errorAttempts =
-            previous.errorAttempts + (errors.length > 0 ? 1 : 0);
+          // Consecutive error rounds are tracked per callId so one agent's
+          // persistent errors cannot exhaust a shared budget and fail a
+          // healthy sibling; a callId absent from this round's errors
+          // resets implicitly. Healthy non-terminal responses back off but
+          // never consume the budget.
+          const errorAttempts = new Map<string, number>();
+          for (const entry of errors) {
+            const count = (previous.errorAttempts.get(entry.callId) ?? 0) + 1;
+            errorAttempts.set(entry.callId, count);
+            if (count >= BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
+              failedCallIds.push(entry.callId);
+              resolutions.set(entry.callId, { status: 'failed' });
+            }
+          }
+          unresolved = resolutions.size < callIds.length;
           retryDelayMs = Math.min(
             BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS * 2 ** (attempts - 1),
             BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS,
           );
-          if (errorAttempts < BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
-            retryBackoffRef.current = {
-              key: retryScopeKey,
-              attempts,
-              errorAttempts,
-            };
-            scheduleRetry = true;
-          } else {
-            retryBackoffRef.current = {
-              key: retryScopeKey,
-              attempts,
-              errorAttempts: BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS,
-            };
-          }
+          retryBackoffRef.current = unresolved
+            ? { key: retryScopeKey, attempts, errorAttempts }
+            : { key: retryScopeKey, attempts: 0, errorAttempts: new Map() };
         } else {
           retryBackoffRef.current = {
             key: retryScopeKey,
             attempts: 0,
-            errorAttempts: 0,
+            errorAttempts: new Map(),
           };
         }
-        const exhaustedFailures =
-          unresolved && !scheduleRetry
-            ? errors.map(
-                (entry) => [entry.callId, { status: 'failed' }] as const,
-              )
-            : [];
-        setResolutionSnapshot((current) => ({
-          sessionId,
-          resolutions: new Map([
-            ...(current?.sessionId === sessionId ? current.resolutions : []),
-            ...resolutions,
-            ...exhaustedFailures,
-          ]),
-        }));
-        if (!unresolved) return;
-        if (scheduleRetry) {
-          if (errors.length > 0) {
-            console.warn(
-              '[web-shell] background agent reconciliation retry scheduled',
-              {
-                sessionId,
-                callIds: errors.map((entry) => entry.callId),
-                errors: errors.map((entry) =>
-                  describeReconciliationError(entry.error),
-                ),
-              },
-            );
-          }
-          retryTimer = setTimeout(() => {
-            if (reconciliationRequestRef.current?.request === request) {
-              reconciliationRequestRef.current = undefined;
-            }
-            setReconciliationAttempt((attempt) => attempt + 1);
-          }, retryDelayMs);
-        } else if (exhaustedFailures.length > 0) {
+        if (failedCallIds.length > 0) {
           console.warn(
             '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
             {
               sessionId,
-              callIds: exhaustedFailures.map(([callId]) => callId),
+              callIds: failedCallIds,
               errors: errors.map((entry) =>
                 describeReconciliationError(entry.error),
               ),
             },
           );
         }
+        setResolutionSnapshot((current) => ({
+          sessionId,
+          resolutions: new Map([
+            ...(current?.sessionId === sessionId ? current.resolutions : []),
+            ...resolutions,
+          ]),
+        }));
+        if (!unresolved) return;
+        if (errors.length > 0) {
+          console.warn(
+            '[web-shell] background agent reconciliation retry scheduled',
+            {
+              sessionId,
+              callIds: errors.map((entry) => entry.callId),
+              errors: errors.map((entry) =>
+                describeReconciliationError(entry.error),
+              ),
+            },
+          );
+        }
+        retryTimer = setTimeout(() => {
+          if (reconciliationRequestRef.current?.request === request) {
+            reconciliationRequestRef.current = undefined;
+          }
+          setReconciliationAttempt((attempt) => attempt + 1);
+        }, retryDelayMs);
       })
       .catch(() => {
         if (reconciliationRequestRef.current?.request === request) {

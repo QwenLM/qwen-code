@@ -59,6 +59,12 @@ export function isSubagentSessionNotFound(
  * daemon could not find the parent session itself, so the body carries
  * `code: 'session_not_found'` with no identifying `toolCallId` (an
  * explicitly `null` id is treated the same as an absent one).
+ *
+ * A missing parent session is not the only producer: a multi-workspace
+ * daemon answers this same shape while the owning workspace entry is
+ * merely not active (for example draining before removal, or transitioning
+ * to a replacement runtime), which the daemon treats as reversible. Treat
+ * this error as recoverable, not as proof the session is permanently gone.
  */
 export function isSessionLevelNotFound(error: unknown): boolean {
   if (!(error instanceof DaemonHttpError) || error.status !== 404) {

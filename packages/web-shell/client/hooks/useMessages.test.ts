@@ -129,10 +129,12 @@ function backgroundAgentBlock(toolCallId: string): DaemonTranscriptBlock {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function mountStatusConsumer(options: { allTools?: boolean } = {}) {
@@ -592,7 +594,8 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
-  it('treats a session-level 404 as terminal without a grace period', async () => {
+  it('gives a session-level 404 the same grace as a missing agent', async () => {
+    vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession.mockRejectedValue(
@@ -605,13 +608,56 @@ describe('background agent task reconciliation', () => {
     const { container, render, unmount } = mountStatusConsumer();
 
     await act(async () => render());
-    await vi.waitFor(() => expect(container.textContent).toBe('failed'));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // The daemon answers this shape for transient workspace states too, so
+    // a first session-level miss keeps polling instead of failing the card.
+    expect(container.textContent).toBe('pending');
 
-    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('failed');
+    });
+
     await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('recovers a session-level 404 when the next round reaches the daemon', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', sessionId: 'session-1' },
+          'not found',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
   });
 
   it('does not fail an agent on a 404 identifying a different tool call', async () => {
+    vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
     hookState.resolveSubagentSession.mockReset();
     hookState.resolveSubagentSession.mockRejectedValue(
@@ -621,6 +667,7 @@ describe('background agent task reconciliation', () => {
         'not found',
       ),
     );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { container, render, unmount } = mountStatusConsumer();
 
     await act(async () => render());
@@ -629,7 +676,17 @@ describe('background agent task reconciliation', () => {
     );
     expect(container.textContent).toBe('pending');
 
+    // The mismatched 404 is transient; reconciliation must keep polling
+    // instead of abandoning the card at pending.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
     await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('reconciles after a terminal agent notification without toolUseId', async () => {
@@ -705,6 +762,69 @@ describe('background agent task reconciliation', () => {
     expect(container.textContent).toBe('completed,completed');
 
     await act(async () => unmount());
+  });
+
+  it('does not consume grace misses for a superseded round', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    const older = deferred<BackgroundAgentResolution>();
+    const newer = deferred<BackgroundAgentResolution>();
+    hookState.resolveSubagentSession
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise)
+      .mockResolvedValue(backgroundAgentResolution('completed'));
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
+
+    // A notification supersedes the in-flight round while it is pending.
+    hookState.blocks = [
+      ...hookState.blocks,
+      baseBlock({
+        id: 'terminal-notification',
+        kind: 'assistant',
+        text: '',
+        meta: {
+          source: 'background_notification',
+          backgroundTask: {
+            kind: 'agent',
+            taskId: 'legacy-agent',
+            status: 'completed',
+          },
+        },
+      }),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+
+    // Both rounds hit the same unregistered-daemon 404. The stale round's
+    // 404 lands first, then the live round's: only the live round's miss
+    // may count, so the stale one must not pre-increment the counter and
+    // fail the agent on the live round's first miss.
+    const miss = new DaemonHttpError(
+      404,
+      { code: 'session_not_found', toolCallId: 'agent-call' },
+      'not found',
+    );
+    await act(async () => {
+      older.reject(miss);
+      newer.reject(miss);
+    });
+    expect(container.textContent).toBe('pending');
+
+    // The live round keeps polling and reconciles on the next attempt.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
   });
 
   it('applies successful resolutions when another pending Agent fails', async () => {
@@ -925,6 +1045,81 @@ describe('background agent task reconciliation', () => {
     vi.useRealTimers();
   });
 
+  it('does not fail a healthy sibling that blips when another agent exhausts the budget', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      backgroundAgentBlock('agent-a'),
+      backgroundAgentBlock('agent-b'),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    let bCalls = 0;
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) => {
+        if (callId === 'agent-a') {
+          return Promise.reject(
+            new DaemonHttpError(
+              500,
+              { code: 'internal_error' },
+              'server error',
+            ),
+          );
+        }
+        bCalls += 1;
+        // Agent B answers running for seven rounds and has a single
+        // transient blip exactly in the round that exhausts agent A.
+        return bCalls === 8
+          ? Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            )
+          : Promise.resolve(backgroundAgentResolution('running'));
+      },
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,pending');
+    });
+
+    // B's own consecutive-error count is one, so it keeps polling on a
+    // fresh scope and still reconciles terminal.
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) =>
+        callId === 'agent-b'
+          ? Promise.resolve(backgroundAgentResolution('completed'))
+          : Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            ),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,completed');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
   it('keeps the full retry budget when the client identity changes between rounds', async () => {
     vi.useFakeTimers();
     hookState.blocks = [backgroundAgentBlock('agent-call')];
@@ -1031,6 +1226,54 @@ describe('background agent task reconciliation', () => {
     });
 
     await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('does not consume the error budget for tolerated missing-agent misses', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    // Alternate in-grace 404 misses and healthy answers for far more rounds
+    // than the error budget allows; each tolerated miss is followed by a
+    // success, so none of them may accumulate toward exhaustion.
+    for (let round = 0; round < 10; round += 1) {
+      hookState.resolveSubagentSession
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            404,
+            { code: 'session_not_found', toolCallId: 'agent-call' },
+            'not found',
+          ),
+        )
+        .mockResolvedValueOnce(backgroundAgentResolution('running'));
+    }
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('running'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Drive nineteen more rounds over the full backoff ladder; each step
+    // advances exactly one retry so the alternating miss/success rounds
+    // interleave with React's flushes.
+    for (let round = 0; round < 19; round += 1) {
+      await act(async () =>
+        vi.advanceTimersByTimeAsync(Math.min(3_000 * 2 ** round, 60_000)),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(20),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
     vi.useRealTimers();
   });
 

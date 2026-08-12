@@ -1480,13 +1480,20 @@ function backgroundAgentCompletion(
     : null;
 }
 
-function turnAwaitsBackgroundSummary(
+interface BackgroundAgentSummaryState {
+  lastNotificationIndex: number;
+  sawAgentCompletion: boolean;
+  unmatchedAgentCallIds: ReadonlySet<string>;
+}
+
+// Returns null when nothing in this turn's tail awaits a background summary:
+// no notification landed, or a terminal turn status precedes every one.
+function backgroundAgentSummaryState(
   items: DisplayItem[],
   start: number,
   end: number,
-  agentNotificationsOnly = false,
-  waitForUnmatchedAgentCompletions = true,
-): boolean {
+  agentNotificationsOnly: boolean,
+): BackgroundAgentSummaryState | null {
   let lastNotificationIndex = -1;
   let latestNotificationAgentCallId: string | undefined;
   for (let i = end; i > start; i--) {
@@ -1496,7 +1503,7 @@ function turnAwaitsBackgroundSummary(
       item.message.source === 'turn_error' ||
       item.message.source === 'prompt_cancelled'
     ) {
-      if (lastNotificationIndex < 0) return false;
+      if (lastNotificationIndex < 0) return null;
       continue;
     }
     if (item.message.source === 'background_notification') {
@@ -1508,7 +1515,7 @@ function turnAwaitsBackgroundSummary(
       }
     }
   }
-  if (lastNotificationIndex < 0) return false;
+  if (lastNotificationIndex < 0) return null;
 
   let latestAgentLaunchIndex = -1;
   if (latestNotificationAgentCallId) {
@@ -1533,6 +1540,8 @@ function turnAwaitsBackgroundSummary(
     }
   }
 
+  const unmatchedAgentCallIds = new Set<string>();
+  let sawAgentCompletion = false;
   if (latestAgentLaunchIndex >= 0) {
     let batchStart = latestAgentLaunchIndex;
     for (let i = latestAgentLaunchIndex; i >= 0; i--) {
@@ -1543,9 +1552,7 @@ function turnAwaitsBackgroundSummary(
       }
     }
 
-    const unmatchedAgentCallIds = new Set<string>();
     const anonymousCompletionCandidates: Array<ReadonlySet<string>> = [];
-    let sawAgentCompletion = false;
     for (let i = batchStart; i <= end; i++) {
       const item = items[i];
       for (const callId of backgroundAgentCallIds(item)) {
@@ -1567,23 +1574,39 @@ function turnAwaitsBackgroundSummary(
         break;
       }
     }
-    if (
-      waitForUnmatchedAgentCompletions &&
-      sawAgentCompletion &&
-      unmatchedAgentCallIds.size > 0
-    ) {
-      return true;
-    }
   }
+  return { lastNotificationIndex, sawAgentCompletion, unmatchedAgentCallIds };
+}
 
-  for (let i = lastNotificationIndex + 1; i <= end; i++) {
+function turnAwaitsBackgroundSummary(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+  agentNotificationsOnly = false,
+  waitForUnmatchedAgentCompletions = true,
+): boolean {
+  const state = backgroundAgentSummaryState(
+    items,
+    start,
+    end,
+    agentNotificationsOnly,
+  );
+  if (!state) return false;
+  // A lost completion may hold the turn only for the caller's grace window;
+  // the ordering rule below is reserved for matched notifications whose
+  // summary narration is still expected.
+  if (state.sawAgentCompletion && state.unmatchedAgentCallIds.size > 0) {
+    return waitForUnmatchedAgentCompletions;
+  }
+  for (let i = state.lastNotificationIndex + 1; i <= end; i++) {
     const item = items[i];
     if (item.type === 'message' && item.message.role === 'thinking') {
       return false;
     }
   }
-
-  return findFinalAnswerIndex(items, start, end, false) < lastNotificationIndex;
+  return (
+    findFinalAnswerIndex(items, start, end, false) < state.lastNotificationIndex
+  );
 }
 
 export function applyTurnCollapse(
@@ -2588,18 +2611,6 @@ export const MessageList = memo(
       }
       return null;
     }, [mergedMessages]);
-    // The unmatched-completion hold only tracks agent notifications, so its
-    // grace reset/timer must key on those too; a monitor or shell-task
-    // notification must not restart the bound on a lost agent completion.
-    const latestAgentNotificationId = useMemo(() => {
-      for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
-        const message = mergedMessages[i];
-        if (message && backgroundAgentCompletionForMessage(message)) {
-          return message.id;
-        }
-      }
-      return null;
-    }, [mergedMessages]);
     const [
       backgroundNotificationBaselineId,
       setBackgroundNotificationBaselineId,
@@ -2662,41 +2673,45 @@ export const MessageList = memo(
         ),
       [displayItems, gateBackgroundAgentStatus, latestTurnStartIndex],
     );
-    const latestTurnHoldsUnmatchedAgentCompletion = useMemo(
+    const latestTurnBackgroundSummaryState = useMemo(
       () =>
-        backgroundSummaryGraceActive &&
-        !latestTurnHasActiveBackgroundAgent &&
-        turnAwaitsBackgroundSummary(
+        backgroundAgentSummaryState(
           displayItems,
           latestTurnStartIndex,
           displayItems.length - 1,
           true,
-          true,
         ),
-      [
-        backgroundSummaryGraceActive,
-        displayItems,
-        latestTurnHasActiveBackgroundAgent,
-        latestTurnStartIndex,
-      ],
+      [displayItems, latestTurnStartIndex],
     );
+    // The grace reset/timer keys on the unmatched set, not the raw
+    // notification id: a notification that cannot change which agents are
+    // unmatched — an earlier-turn agent completing, or any monitor/shell-task
+    // notification — must neither restart the bound nor re-arm an expired one.
+    const latestTurnUnmatchedAgentKey = useMemo(() => {
+      const callIds = latestTurnBackgroundSummaryState?.unmatchedAgentCallIds;
+      return callIds && callIds.size > 0 ? [...callIds].sort().join('|') : '';
+    }, [latestTurnBackgroundSummaryState]);
+    const latestTurnHoldsUnmatchedAgentCompletion =
+      backgroundSummaryGraceActive &&
+      !latestTurnHasActiveBackgroundAgent &&
+      (latestTurnBackgroundSummaryState?.sawAgentCompletion ?? false) &&
+      (latestTurnBackgroundSummaryState?.unmatchedAgentCallIds.size ?? 0) > 0;
     const [
       unmatchedCompletionGraceExpired,
       setUnmatchedCompletionGraceExpired,
     ] = useState(false);
-    // Key the reset on the hold itself: an earlier benign hold in the same
-    // turn can consume the latch, and a later genuine lost-completion
-    // episode must still receive its full grace window.
+    // Re-arm the latch only when the episode changes: the unmatched set or
+    // the turn itself changed, or streaming ended and the hold can gate the
+    // footer again. A benign matched-notification hold never consumes the
+    // latch because the timer below only runs for unmatched completions.
     useEffect(() => {
       setUnmatchedCompletionGraceExpired(false);
-    }, [
-      backgroundSummaryGraceActive,
-      latestAgentNotificationId,
-      latestTurnHoldsUnmatchedAgentCompletion,
-      latestTurnStartIndex,
-    ]);
+    }, [latestTurnUnmatchedAgentKey, latestTurnStartIndex, isResponding]);
     useEffect(() => {
-      if (!latestTurnHoldsUnmatchedAgentCompletion) return;
+      // isResponding hides the turn anyway, so the grace must not be
+      // consumed while streaming; the full window starts when the hold can
+      // actually gate the final footer.
+      if (!latestTurnHoldsUnmatchedAgentCompletion || isResponding) return;
       const timer = setTimeout(
         () => setUnmatchedCompletionGraceExpired(true),
         UNMATCHED_AGENT_COMPLETION_GRACE_MS,
@@ -2704,8 +2719,9 @@ export const MessageList = memo(
       return () => clearTimeout(timer);
     }, [
       latestTurnHoldsUnmatchedAgentCompletion,
-      latestAgentNotificationId,
+      latestTurnUnmatchedAgentKey,
       latestTurnStartIndex,
+      isResponding,
     ]);
     const latestTurnAwaitsAgentSummary = useMemo(
       () =>
