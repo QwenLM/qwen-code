@@ -304,8 +304,11 @@ implement — satisfying a nit is never a reason to bloat the code.
   worth the diff growth) so the deferral is visible in the PR thread — never
   drop one silently.
 - Critical-only mode: when `feedback.md` contains a
-  `Deferred non-Critical feedback` section, the PR has already completed five
-  suggestion-capable, change-producing rounds. That section is an audit record,
+  `Deferred non-Critical feedback` section, the workflow's deterministic brake
+  has engaged — the PR has completed five suggestion-capable, change-producing
+  rounds, or its diff has grown past the counting window's net-growth budget
+  (source and test lines are budgeted separately; the section's preamble names
+  the cause). That section is an audit record,
   not work: do not modify code, resolve threads, or write comment replies for
   those items. Everything rendered in the actionable sections IS in scope —
   the deterministic filter defers the automated reviewer's non-Critical

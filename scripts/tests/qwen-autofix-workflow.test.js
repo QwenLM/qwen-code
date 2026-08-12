@@ -5222,20 +5222,29 @@ exit 1
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
     );
     const modeBlock = prepareBranchAndFeedbackStep.match(
-      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+      /(CRITICAL_ONLY='false'\n\s+CRITICAL_ONLY_ROUNDS='false'\n\s+CRITICAL_ONLY_GROWTH='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_ROUNDS='true'\n\s+fi\n\s+if \[\[ "\$\{GROWTH_SRC\}" -gt "\$\{GROWTH_BUDGET_SRC_LINES\}" \|\| "\$\{GROWTH_TEST\}" -gt "\$\{GROWTH_BUDGET_TEST_LINES\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_GROWTH='true'\n\s+fi)/,
     )?.[1];
     expect(modeBlock).toBeTruthy();
-    const modeAt = (round) =>
+    const modeAt = (round, growthSrc = 0, growthTest = 0) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\n${modeBlock}\nprintf '%s %s %s' "$CRITICAL_ONLY" "$CRITICAL_ONLY_ROUNDS" "$CRITICAL_ONLY_GROWTH"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(4)).toBe('false');
-    expect(modeAt(5)).toBe('true');
+    expect(modeAt(4)).toBe('false false false');
+    expect(modeAt(5)).toBe('true true false');
+    // The growth brake trips the SAME mode before the round threshold. AT
+    // budget is within budget (exclusive boundary), either dimension alone
+    // trips, both causes can hold at once, and a shrinking window (negative
+    // growth) never engages.
+    expect(modeAt(0, 400, 400)).toBe('false false false');
+    expect(modeAt(0, 401, 0)).toBe('true false true');
+    expect(modeAt(0, 0, 401)).toBe('true false true');
+    expect(modeAt(5, 401, 0)).toBe('true true true');
+    expect(modeAt(0, -900, -900)).toBe('false false false');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and
@@ -5959,6 +5968,173 @@ exit 1
     expect(skill).toContain('Critical-only mode');
     expect(skill).toContain('do not modify code');
     expect(skill).toContain('Deferred non-Critical feedback');
+  });
+
+  it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
+    // Budgets are repo-variable tunables with a sanitize fallback at the
+    // read site, mirroring the scan budgets.
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'",
+    );
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'",
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '[[ ! "${GROWTH_BUDGET_SRC_LINES}" =~ ^[0-9]{1,7}$ ]]',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '[[ ! "${GROWTH_BUDGET_TEST_LINES}" =~ ^[0-9]{1,7}$ ]]',
+    );
+
+    // Measurement: replay the real block against a real repo. Test lines are
+    // *.test.* / *.spec.* files, __snapshots__/, test-utils/, and
+    // integration-tests/ (by DIRECTORY, not file naming); binary files count
+    // as zero; deletions subtract.
+    const measureBlock = prepareBranchAndFeedbackStep.match(
+      /(# Binary files report[\s\S]*?NET_SRC=\$\(\( NET_TOTAL - NET_TEST \)\))/,
+    )?.[1];
+    expect(measureBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-growth-'));
+    try {
+      const git = (...args) =>
+        execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'test@test');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'src', 'app.ts'), 'a1\na2\na3\n');
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+      git('checkout', '-qb', 'pr');
+      mkdirSync(join(dir, 'src', '__snapshots__'));
+      mkdirSync(join(dir, 'src', 'test-utils'));
+      mkdirSync(join(dir, 'integration-tests'));
+      mkdirSync(join(dir, 'assets'));
+      // src: full rewrite, +7/-3 = net +4
+      writeFileSync(join(dir, 'src', 'app.ts'), 'b1\nb2\nb3\nb4\nb5\nb6\nb7\n');
+      // tests: +3 appended, +5 spec, +4 snapshot, +2 test-utils, +2
+      // integration-tests helper (a non-test filename proves the directory
+      // pathspec) = net +16
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\nt3\nt4\nt5\n');
+      writeFileSync(join(dir, 'src', 'util.spec.ts'), 's1\ns2\ns3\ns4\ns5\n');
+      writeFileSync(
+        join(dir, 'src', '__snapshots__', 'app.snap'),
+        'n1\nn2\nn3\nn4\n',
+      );
+      writeFileSync(join(dir, 'src', 'test-utils', 'helper.ts'), 'h1\nh2\n');
+      writeFileSync(join(dir, 'integration-tests', 'helper.ts'), 'i1\ni2\n');
+      writeFileSync(
+        join(dir, 'assets', 'logo.bin'),
+        Buffer.from([0x00, 0x01, 0x02, 0x00]),
+      );
+      git('add', '-A');
+      git('commit', '-qm', 'pr');
+      git('update-ref', 'refs/remotes/origin/main', 'main');
+      const measured = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(measured).toBe('20 16 4');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // Baseline parse: bot-only, window-keyed, FIRST-wins — a duplicate
+    // marker in the same window cannot move an anchored baseline, a spoofed
+    // marker from another login is ignored, negative nets round-trip, and a
+    // window with no marker yields empty (this round anchors it).
+    const baselineJq = prepareBranchAndFeedbackStep.match(
+      /GROWTH_BASELINE="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg key "\$\{LIVE_REARM_KEY\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+    )?.[1];
+    expect(baselineJq).toBeTruthy();
+    const baselineComments = [
+      {
+        user: { login: 'mallory' },
+        created_at: '2026-01-01T00:00:00Z',
+        body: '<!-- autofix-growth-base src=1 test=1 win=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T01:00:00Z',
+        body: 'report\n\n<!-- autofix-eval ts=2026-01-01T00:59:00Z acted=true round=1 win=WIN0 -->\n<!-- autofix-growth-base src=7 test=8 win=WIN0 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T02:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=50 test=-60 win=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T03:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=100 test=200 win=WIN1 -->',
+      },
+    ];
+    const baselineFor = (key) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--arg',
+          'key',
+          key,
+          baselineJq,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(baselineComments) },
+      ).trimEnd();
+    expect(baselineFor('WIN1')).toBe('50 -60');
+    expect(baselineFor('WIN2')).toBe('');
+
+    // The baseline marker is written into this window's FIRST report only
+    // (pushed and no-op branches), rides the same comment as autofix-eval so
+    // every feedback filter already excludes it, and never touches the
+    // POSITIONAL autofix-eval parsers. Exactly one more occurrence exists:
+    // the prepare-side scan() parse.
+    expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
+    expect(
+      pushAndReportStep.split(
+        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${WINDOW:-none} -->',
+      ).length - 1,
+    ).toBe(2);
+    expect(
+      pushAndReportStep.split(`if [[ "\${GROWTH_BASE_NEW}" == 'true' ]]; then`)
+        .length - 1,
+    ).toBe(2);
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'",
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_new=${GROWTH_BASE_NEW}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_src=${BASE_SRC}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_test=${BASE_TEST}',
+    );
+
+    // The deferred preamble names the actual cause — a maintainer reading
+    // "after five rounds" on a round-2 PR that tripped the growth budget
+    // would reasonably conclude the brake misfired.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Critical-only mode is active: ${CAUSE_EN}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '已进入仅处理 Critical 的模式：${CAUSE_ZH}',
+    );
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
