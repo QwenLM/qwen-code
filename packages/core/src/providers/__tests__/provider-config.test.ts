@@ -84,7 +84,9 @@ describe('buildInstallPlan', () => {
     });
     expect(models?.[1]?.generationConfig).toBeUndefined();
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
-      computeModelListVersion(models ?? []),
+      computeModelListVersion(
+        buildProviderTemplateSrc(config, 'https://api.test.com/v1'),
+      ),
     );
   });
 
@@ -951,10 +953,7 @@ describe('resolveMetadataKey dotted-id guard', () => {
   });
 });
 
-import {
-  buildInstallPlan as buildInstallPlanSrc,
-  buildProviderTemplate as buildProviderTemplateSrc,
-} from '../provider-config.js';
+import { buildProviderTemplate as buildProviderTemplateSrc } from '../provider-config.js';
 
 describe('providerState version semantics', () => {
   it('persists the template version even when the selection adds custom models', () => {
