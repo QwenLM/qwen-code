@@ -316,10 +316,6 @@ jobs:
         working-directory: 'packages/desktop-shell'
         run: 'npm run build:runtime'
 
-      - name: 'Verify bundled runtime'
-        working-directory: 'packages/desktop-shell'
-        run: 'npm run smoke:runtime'
-
       - name: 'Run desktop tests'
         working-directory: 'packages/desktop-shell'
         run: 'npm test'
@@ -360,6 +356,15 @@ jobs:
           else
             echo "::warning::Node.js runtime binary not found at $node_bin; no Node.js binary signed."
           fi
+
+      - name: 'Refresh bundled runtime checksums after signing (macOS)'
+        if: "runner.os == 'macOS' && inputs.dry_run == false"
+        working-directory: 'packages/desktop-shell'
+        run: 'node scripts/prepare-runtime.js --refresh-checksums'
+
+      - name: 'Verify bundled runtime'
+        working-directory: 'packages/desktop-shell'
+        run: 'npm run smoke:runtime'
 
       - name: 'Build desktop installers'
         working-directory: 'packages/desktop-shell'

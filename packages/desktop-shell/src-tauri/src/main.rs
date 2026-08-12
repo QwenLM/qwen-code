@@ -747,6 +747,7 @@ fn should_restore_main_window(has_visible_windows: bool, main_needs_restore: boo
 
 fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("local-control") {
+        window.center().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
@@ -760,6 +761,7 @@ fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
     .inner_size(440.0, 500.0)
     .min_inner_size(400.0, 500.0)
     .resizable(false)
+    .center()
     .build()
     .map(|_| ())
     .map_err(|error| format!("Failed to open Local Control: {error}"))

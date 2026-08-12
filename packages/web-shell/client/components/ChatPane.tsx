@@ -716,6 +716,21 @@ export function ChatPane({
     [connection.sessionId, onRightPanelOpen],
   );
 
+  const handleImagePreview = useCallback(
+    (src: string, alt?: string) => {
+      if (!connection.sessionId) return;
+      handleRightPanelOpen({
+        id: 'image',
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        turnId: connection.sessionId,
+        src,
+        ...(alt ? { alt } : {}),
+      });
+    },
+    [connection.sessionId, handleRightPanelOpen, t],
+  );
+
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
   // slash menu lists the session's daemon commands — they run server-side when
   // submitted (via sendPrompt), so e.g. `/clear` clears this pane's session, not
@@ -980,6 +995,7 @@ export function ChatPane({
                   : undefined
               }
               onTurnOutputOpen={handleRightPanelOpen}
+              onImagePreview={handleImagePreview}
               onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
@@ -1077,6 +1093,7 @@ export function ChatPane({
           onDismissFollowup={onDismissFollowup}
           onImageIngestionNotice={onImageIngestionNotice}
           sessionId={connection.sessionId}
+          onImagePreview={handleImagePreview}
           atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
           animatePlaceholder={false}

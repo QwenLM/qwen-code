@@ -865,6 +865,16 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'subagents', 'backgroundTasks'];
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
+
+// One preview tab per image, keyed by its content, so opening several images
+// keeps a tab each while re-clicking the same image just focuses its tab.
+function imageTabId(src: string): string {
+  let hash = 0;
+  for (let i = 0; i < src.length; i++) {
+    hash = (hash * 31 + src.charCodeAt(i)) | 0;
+  }
+  return `image:${hash.toString(36)}`;
+}
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -1884,6 +1894,10 @@ export function App({
     connection.sessionTransition?.phase === 'queued' ||
     connection.sessionTransition?.phase === 'preparing';
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
+  const sessionWriteBlockGenerationRef = useRef(0);
+  if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
+    sessionWriteBlockGenerationRef.current += 1;
+  }
   sessionWriteBlockedRef.current = sessionWriteBlocked;
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
@@ -3065,6 +3079,28 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openImagePanel = useCallback(
+    (src: string, alt?: string) => {
+      const tab: ArtifactPanelTab = {
+        id: imageTabId(src),
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        src,
+        ...(alt ? { alt } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [tab, ...tabs],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3228,6 +3264,10 @@ export function App({
         );
         return;
       }
+      if (request.kind === 'image') {
+        openImagePanel(request.src, request.alt);
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3283,6 +3323,7 @@ export function App({
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
+      openImagePanel,
       openSubagentPanelForSession,
     ],
   );
@@ -4906,6 +4947,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: () => void;
+        onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
@@ -4935,6 +4977,7 @@ export function App({
           previousLastSubmittedSourceVersion;
         retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
         setShowRetryHint(previousShowRetryHint);
+        opts?.onCancelledBeforeAdmission?.();
       };
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
@@ -4950,6 +4993,7 @@ export function App({
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
+        const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
         setIsPreparingPrompt(true);
         try {
           await onSubmitBeforeRef.current({
@@ -4967,6 +5011,8 @@ export function App({
           return;
         }
         if (
+          sessionWriteBlockedRef.current ||
+          sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
           connectionRef.current.sessionId !== sourceSessionId ||
           getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
           composerSourceVersionRef.current !== sourceVersion
@@ -5312,6 +5358,15 @@ export function App({
             : current,
         );
       },
+      onCancelledBeforeAdmission: () => {
+        if (!retryOwnerIsCurrent()) return;
+        if (
+          getLatestUserBlockId(store.getSnapshot().blocks) === failed.messageId
+        ) {
+          updateFailedPrompt(failed);
+        }
+        setFailedPromptRetry(null);
+      },
     })
       .catch((error: unknown) => {
         if (!retryOwnerIsCurrent()) return;
@@ -5406,6 +5461,7 @@ export function App({
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
+        const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
         onSubmitBeforeRef
           .current({
             sessionId: sourceSessionId,
@@ -5413,6 +5469,8 @@ export function App({
           })
           .then(() => {
             if (
+              sessionWriteBlockedRef.current ||
+              sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
               connectionRef.current.sessionId !== sourceSessionId ||
               getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
               composerSourceVersionRef.current !== sourceVersion
@@ -8999,6 +9057,8 @@ export function App({
       const retryText = lastSubmittedPromptRef.current;
       const retryImages = lastSubmittedImagesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
       const retryOwnerIsCurrent = () =>
         composerSourceVersionRef.current === retrySourceVersion &&
         connectionRef.current.sessionId === retrySessionId &&
@@ -9030,6 +9090,12 @@ export function App({
               ? { ...current, admitted: true }
               : current,
           );
+        },
+        onCancelledBeforeAdmission: () => {
+          if (!retryOwnerIsCurrent()) return;
+          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+          setShowRetryHint(previousShowRetryHint);
+          setFailedPromptRetry(null);
         },
       })
         .catch((error: unknown) => {
@@ -11112,6 +11178,7 @@ export function App({
                                     : undefined
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
+                                onImagePreview={openImagePanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -11404,6 +11471,7 @@ export function App({
                             handleComposerAttachmentsChange
                           }
                           onImageIngestionNotice={pushToast}
+                          onImagePreview={openImagePanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
