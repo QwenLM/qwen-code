@@ -173,6 +173,24 @@ describe('parseLayerReceipts', () => {
     ]).toEqual(['scope-propagation']);
   });
 
+  it('does not credit a marker hidden in an INLINE construct — the R4-1 residual, closed', () => {
+    // Reading the rendered prose (not source lines) drops a marker GitHub shows
+    // as nothing or as monospace/attribute text — the inline families a block-only
+    // pass leaked. Each verified against markdown-it, GitHub's own family.
+    const hidden = [
+      '`x\nLayer walked: toctou`', // multi-line inline code span
+      '<!-- Layer walked: toctou -->', // HTML comment
+      '<a title="Layer walked: toctou">t</a>', // tag attribute value
+      '[t](/u "Layer walked: toctou")', // link title
+      '[x\nLayer walked: toctou]: /url', // link-reference continuation
+    ];
+    for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
+    // A link's VISIBLE text is prose and still counts.
+    expect([
+      ...parseLayerReceipts('[Layer walked: toctou](/u) — real'),
+    ]).toEqual(['toctou']);
+  });
+
   it('requires the colon — a colon-less shape is not a receipt', () => {
     // Relaxing the mandatory colon would let colon-less parrot prose parse as a
     // receipt, and that is the credit/release direction.

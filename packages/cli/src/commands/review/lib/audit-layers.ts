@@ -199,67 +199,61 @@ const LAYER_RECEIPT_LINE_RE =
 const LAYER_HINT_RE = /layer\s+walked/i;
 
 /**
- * The one CommonMark tokenizer this module uses to LOCATE quoted regions. A
- * hand-rolled fence/blockquote scanner diverged from the spec round after round
- * — a second parser is a divergence hunt, and this skill's own lesson is that the
- * oracle must come from the authority the code is modelling, not a self-consistent
- * re-implementation. So it defers to `markdown-it`, the parser GitHub's own family
- * uses. `html: true` so a raw-HTML block registers as a quoted block too.
+ * The one CommonMark tokenizer this module uses. A hand-rolled fence/blockquote
+ * scanner diverged from the spec round after round — a second parser is a
+ * divergence hunt, and this skill's own lesson is that the oracle must come from
+ * the authority the code is modelling. So it defers to `markdown-it`, the parser
+ * GitHub's own family uses, and reads receipts from the prose it RENDERS (see
+ * `usedLines`). `html: true` so raw HTML is tokenized — and thus excluded — too.
  */
 const MD = new MarkdownIt({ html: true });
 
 /**
- * The 0-based source line indices inside a QUOTED block — fenced or indented
- * code, an HTML block, or the span of a blockquote — from the block tokens'
- * `.map` line ranges. A parser throw quotes nothing (an unreadable return still
- * has its inline spans guarded by the receipt regex's no-leading-backtick rule).
+ * The lines an auditor is USING, not quoting — the VISIBLE PROSE markdown-it
+ * renders, reconstructed from its token stream. A quoted block (a fenced or
+ * indented code block, an HTML block, or anything inside a blockquote) yields
+ * nothing; a prose block (paragraph, heading, list item) yields its text nodes
+ * and line breaks, with inline code spans, raw HTML (tags, comments, attribute
+ * values) and the title/alt attributes of links and images dropped — GitHub
+ * renders those as nothing or as monospace/attribute text, never as a receipt.
  *
- * KNOWN RESIDUAL — this masks BLOCK-level quotation only. A marker hidden in an
- * INLINE construct GitHub renders invisibly — a multi-line inline code span, an
- * HTML comment or tag attribute value, a link/image title, a link-reference
- * continuation line — sits on a line no block token covers, so it can still parse
- * as a receipt. The exposure is bounded: releasing on it needs a corroborated
- * (identity- and territory-checked) auditor to deliberately obfuscate its own
- * receipts, an adversarial input, not a normal miss, and only under that input.
- * The definitive close is to compute USED text from RENDERED visible content
- * rather than source lines (enumerating inline constructs one by one just opens
- * the next); deferred as a follow-up rather than reopened as another hand-rolled
- * hunt.
- */
-function quotedLines(text: string): Set<number> {
-  const quoted = new Set<number>();
-  let tokens: ReturnType<typeof MD.parse>;
-  try {
-    tokens = MD.parse(text, {});
-  } catch {
-    return quoted;
-  }
-  for (const t of tokens) {
-    if (
-      t.map &&
-      (t.type === 'fence' ||
-        t.type === 'code_block' ||
-        t.type === 'html_block' ||
-        t.type === 'blockquote_open')
-    ) {
-      for (let i = t.map[0]; i < t.map[1]; i++) quoted.add(i);
-    }
-  }
-  return quoted;
-}
-
-/**
- * The lines an auditor is USING, not quoting: every line outside a quoted block
- * (`quotedLines`). Shared by the receipt parser and the opt-in prose estimate so
- * neither credits a layer from quoted text — the module's "a return that QUOTES
- * the marker is not USING it" invariant, deferred to the authoritative parser.
+ * Reading the rendered prose, not the source lines, is what closes the divergence
+ * outright: a block-only pass still leaked a marker hidden in an INLINE construct
+ * — a multi-line inline code span, an HTML comment or attribute, a link title, a
+ * link-reference continuation — as a live receipt, and enumerating those one by
+ * one just opens the next. A parser throw (unconstructed in practice) falls back
+ * to the raw lines; the receipt regex's no-leading-backtick rule still guards the
+ * common inline span there.
  */
 function* usedLines(finalText: string): Generator<string> {
   const src = finalText.replace(/\r\n?/g, '\n');
-  const quoted = quotedLines(src);
-  const lines = src.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (!quoted.has(i)) yield lines[i];
+  let tokens: ReturnType<typeof MD.parse>;
+  try {
+    tokens = MD.parse(src, {});
+  } catch {
+    yield* src.split('\n');
+    return;
+  }
+  let blockquoteDepth = 0;
+  for (const t of tokens) {
+    if (t.type === 'blockquote_open') blockquoteDepth++;
+    else if (t.type === 'blockquote_close') blockquoteDepth--;
+    else if (t.type === 'inline' && blockquoteDepth === 0) {
+      // The visible prose of this inline: text and line breaks only. `code_inline`
+      // (a code span) and `html_inline` (raw tags, comments, attributes) are
+      // quoted or invisible; a link/image title and alt live in attributes, never
+      // in a text child, so they drop out for free. A link/image's VISIBLE text IS
+      // a text child and is kept — it renders as prose.
+      let prose = '';
+      for (const c of t.children ?? []) {
+        if (c.type === 'text') prose += c.content;
+        else if (c.type === 'softbreak' || c.type === 'hardbreak')
+          prose += '\n';
+      }
+      yield* prose.split('\n');
+    }
+    // fence, code_block, html_block, and any inline inside a blockquote yield
+    // nothing — they are quoted.
   }
 }
 
