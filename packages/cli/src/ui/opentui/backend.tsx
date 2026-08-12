@@ -725,13 +725,32 @@ function App({
   return (
     <box flexDirection="column" width={width} height="100%">
       {banner}
+      {/* Tips line at steady state (mirrors original Tips); status while busy */}
+      {streaming || commandProcessing ? (
+        <box paddingLeft={1} paddingRight={1} flexShrink={0}>
+          <text fg={C.dim}>
+            {streaming
+              ? `${nextSpinner()} streaming… (${PHASE_LABEL[phase]}) (Esc interrupt · Ctrl+C quit)`
+              : `${nextSpinner()} running command… (Esc cancel · Ctrl+C quit)`}
+            {toast ? `   ${toast}` : ''}
+          </text>
+        </box>
+      ) : (
+        <box paddingLeft={1} paddingRight={1} flexShrink={0}>
+          <text fg={C.dim}>
+            {
+              'Tips: Try /insight to generate personalized insights from your chat history.'
+            }
+          </text>
+        </box>
+      )}
       {/* chat viewport — replaces qwen-code VP mode */}
       <scrollbox
         flexGrow={1}
         minHeight={0}
         stickyScroll={true}
         stickyStart="bottom"
-        verticalScrollbarOptions={{ visible: true }}
+        verticalScrollbarOptions={{ visible: false }}
         marginTop={0}
       >
         <box height={1} />
@@ -804,25 +823,8 @@ function App({
         />
       )}
 
-      {/* status bar */}
-      <box paddingLeft={1} paddingRight={1}>
-        <text fg={C.dim}>
-          {streaming
-            ? `${nextSpinner()} streaming… (${PHASE_LABEL[phase]}) (Esc interrupt · Ctrl+C quit)`
-            : commandProcessing
-              ? `${nextSpinner()} running command… (Esc cancel · Ctrl+C quit)`
-              : `ready · click cards to expand · drag text to copy · wheel to scroll (Ctrl+C quit)`}
-          {toast ? `   ${toast}` : ''}
-        </text>
-      </box>
-
-      {/* prompt */}
-      <box
-        borderStyle="single"
-        borderColor={streaming ? C.yellow : C.accent}
-        marginLeft={1}
-        marginRight={1}
-      >
+      {/* prompt (original: top line + > prefix, no outer box) */}
+      <box flexDirection="column" flexShrink={0}>
         <OpenTuiInputPrompt
           onSubmit={submitText}
           userMessages={userPrompts}
@@ -840,7 +842,7 @@ function App({
             liveAbortRef.current = null;
             setStreaming(false);
           }}
-          placeholder="Ask anything… (Enter submits, Shift+Enter for newline)"
+          placeholder=""
           focus={!dialog}
         />
       </box>
