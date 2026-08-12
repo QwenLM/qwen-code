@@ -1402,74 +1402,111 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
-  it('does not apply stale context from an earlier model switch', async () => {
-    const session = createMockSession('session-a');
-    const firstContext = {
-      ...contextStatus(session.sessionId),
-      workspaceCwd: '/workspace/model-a',
-    };
-    const secondContext = {
-      ...contextStatus(session.sessionId),
-      workspaceCwd: '/workspace/model-b',
-    };
-    const first = createDeferred<typeof firstContext>();
-    const second = createDeferred<typeof secondContext>();
-    session.context
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
-    const { actions, getConnection } = createActionsHarness({ session });
+  it('keeps refresh blocked after model context times out until it settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const context = createDeferred<ReturnType<typeof contextStatus>>();
+      session.context.mockReturnValueOnce(context.promise);
+      let sourceBoundOperationCount = 0;
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          currentModel: 'model-a',
+        },
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session,
+        setSourceBoundOperationInFlight,
+      });
 
-    const selectA = actions.setModel('model-a');
-    await vi.waitFor(() => expect(session.context).toHaveBeenCalledTimes(1));
-    const selectB = actions.setModel('model-b');
-    await vi.waitFor(() => expect(session.context).toHaveBeenCalledTimes(2));
-    second.resolve(secondContext);
-    await expect(selectB).resolves.toEqual({});
-    first.resolve(firstContext);
-    await expect(selectA).resolves.toEqual({});
+      const modelUpdate = actions.setModel('model-b');
+      await vi.waitFor(() => expect(session.context).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(modelUpdate).resolves.toEqual({});
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).rejects.toMatchObject({ name: 'InvalidStateError' });
 
-    expect(getConnection()).toMatchObject({
-      currentModel: 'model-b',
-      context: secondContext,
-    });
+      context.resolve(contextStatus(session.sessionId));
+      await vi.waitFor(() => expect(sourceBoundOperationCount).toBe(0));
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('does not apply a reasoning response after the model changes away and back', async () => {
-    const session = createMockSession('session-a');
-    const response = createDeferred<{ configOptions: unknown[] }>();
-    session.setConfigOption.mockReturnValueOnce(response.promise);
-    const { actions, getConnection } = createActionsHarness({
-      connection: {
-        status: 'connected',
-        sessionId: session.sessionId,
-        currentModel: 'qwen3.8-max',
-        reasoning: {
-          enabled: true,
-          effort: 'xhigh',
-          efforts: ['low', 'medium', 'xhigh'],
+  it('keeps refresh blocked after reasoning times out until the request settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const response = createDeferred<{ configOptions: unknown[] }>();
+      session.setConfigOption.mockReturnValueOnce(response.promise);
+      let sourceBoundOperationCount = 0;
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          currentModel: 'qwen3.8-max',
         },
-      },
-      session,
-    });
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session,
+        setSourceBoundOperationInFlight,
+      });
 
-    const pending = actions.setReasoningEffort('medium');
-    await actions.setModel('qwen3-coder-plus');
-    await actions.setModel('qwen3.8-max');
-    response.resolve({
-      configOptions: [
-        {
-          id: 'reasoning_effort',
-          currentValue: 'medium',
-          options: [{ value: 'none' }, { value: 'medium' }],
-        },
-      ],
-    });
+      const reasoningUpdate = actions
+        .setReasoningEffort('medium')
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(reasoningUpdate).resolves.toMatchObject({
+        message: expect.stringContaining('Set reasoning effort timed out'),
+      });
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).rejects.toMatchObject({ name: 'InvalidStateError' });
 
-    await expect(pending).resolves.toBeUndefined();
-    expect(getConnection()).toMatchObject({
-      currentModel: 'qwen3.8-max',
-      reasoning: undefined,
-    });
+      response.resolve({ configOptions: [] });
+      await Promise.resolve();
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not apply a late approval mode to a replacement attachment', async () => {

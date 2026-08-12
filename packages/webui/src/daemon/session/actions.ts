@@ -233,6 +233,15 @@ export function createDaemonSessionActions({
     }
   }
 
+  function trackSourceBoundOperation<T>(operation: Promise<T>): Promise<T> {
+    setSourceBoundOperationInFlight(true);
+    void operation.then(
+      () => setSourceBoundOperationInFlight(false),
+      () => setSourceBoundOperationInFlight(false),
+    );
+    return operation;
+  }
+
   const isCurrentLogicalSession = (session: DaemonSessionClient) => {
     const current = sessionRef.current;
     return (
@@ -744,8 +753,12 @@ export function createDaemonSessionActions({
         'switch_model',
       );
       try {
+        const modelRequest = session.setModel(modelId);
+        const contextRequest = trackSourceBoundOperation(
+          modelRequest.then(() => session.context()),
+        );
         const result = await withActionTimeout(
-          session.setModel(modelId),
+          modelRequest,
           'Set model timed out',
         );
         const modelGeneration =
@@ -764,7 +777,7 @@ export function createDaemonSessionActions({
           });
         }
         const context = await withActionTimeout(
-          session.context(),
+          contextRequest,
           'Refresh model context timed out',
         ).catch(() => undefined);
         if (
@@ -813,7 +826,9 @@ export function createDaemonSessionActions({
       );
       try {
         const result = await withActionTimeout(
-          session.setConfigOption('reasoning_effort', value),
+          trackSourceBoundOperation(
+            session.setConfigOption('reasoning_effort', value),
+          ),
           'Set reasoning effort timed out',
         );
         const current = getConnection();
