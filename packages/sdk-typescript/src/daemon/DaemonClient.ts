@@ -4216,19 +4216,10 @@ export class DaemonClient {
     value: string,
     clientId?: string,
   ): Promise<DaemonSessionConfigOptionResult> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/config-option`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: JSON.stringify({ configId, value }),
-      },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /session/:id/config-option');
-        }
-        return (await res.json()) as DaemonSessionConfigOptionResult;
-      },
+    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+      `/session/${urlEncode(sessionId)}/config-option`,
+      'POST /session/:id/config-option',
+      { method: 'POST', body: { configId, value }, clientId },
     );
   }
 
