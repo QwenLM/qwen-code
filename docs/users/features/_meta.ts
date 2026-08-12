@@ -5,6 +5,7 @@ export default {
   'tool-use-summaries': 'Tool-Use Summaries',
   'markdown-rendering': 'Markdown Rendering',
   'sub-agents': 'SubAgents',
+  'multi-agent-coordination': 'Multi-Agent Coordination',
   arena: 'Agent Arena',
   skills: 'Skills',
   memory: 'Memory',
