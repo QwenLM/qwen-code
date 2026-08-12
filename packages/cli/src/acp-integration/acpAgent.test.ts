@@ -24,6 +24,9 @@ import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 const { mockRunExitCleanup } = vi.hoisted(() => ({
   mockRunExitCleanup: vi.fn().mockResolvedValue(undefined),
 }));
+const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
+  mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
+}));
 const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
   mockMcpPoolDrainAll: vi
     .fn()
@@ -31,6 +34,10 @@ const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
+}));
+vi.mock('../utils/housekeeping/scheduler.js', () => ({
+  startNonInteractiveOpenAILogHousekeeping:
+    mockStartNonInteractiveOpenAILogHousekeeping,
 }));
 
 // Mock the ACP SDK
@@ -118,7 +125,8 @@ vi.mock('../config/mcpApprovals.js', () => ({
   getPromptableMcpServers: vi.fn().mockReturnValue([]),
 }));
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agentclientprotocol/sdk')>()),
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
       return mockConnectionState.promise;
@@ -224,6 +232,17 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
+  applyReasoningEffort: (
+    config: {
+      setReasoningEffort(effort: string | undefined): void;
+      getReasoningEffort(): string | undefined;
+    },
+    effort: string | undefined,
+  ) => {
+    config.setReasoningEffort(effort);
+    return config.getReasoningEffort() === effort;
+  },
+  REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
   ApprovalMode: { YOLO: 'yolo' },
   isGatedMcpScope: (scope: unknown) =>
     scope === 'project' || scope === 'workspace',
@@ -1864,6 +1883,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    setSessionConfigOption: (args: Record<string, unknown>) => Promise<unknown>;
     beginManagedShutdown: () => {
       configs: Config[];
       writerShutdown: Promise<void>;
@@ -2963,6 +2983,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       );
     }
     expect(attributes['session.id']).toBe('test-session-id');
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
+      innerConfig,
+      expect.any(Object),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3328,6 +3352,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getReasoningEffort: vi.fn().mockReturnValue(undefined),
+      setReasoningEffort: vi.fn(),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
@@ -6340,6 +6366,107 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('exposes and applies the ACP reasoning effort selector', async () => {
+    const sessionId = 'reasoning-effort-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    let currentEffort: string | undefined;
+    innerConfig.getReasoningEffort = vi.fn(() => currentEffort);
+    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+      currentEffort = effort;
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{
+          id: string;
+          category?: string;
+          currentValue: string;
+          options: Array<{
+            value: string;
+            name: string;
+            description: string;
+          }>;
+        }>;
+      };
+
+      expect(
+        session.configOptions.find(
+          (option) => option.id === 'reasoning_effort',
+        ),
+      ).toMatchObject({
+        category: 'thought_level',
+        currentValue: 'default',
+        options: [
+          { value: 'default', name: 'Default' },
+          { value: 'low', name: 'Low', description: expect.any(String) },
+          { value: 'medium', name: 'Medium', description: expect.any(String) },
+          { value: 'high', name: 'High', description: expect.any(String) },
+          {
+            value: 'xhigh',
+            name: 'Extra high',
+            description: expect.any(String),
+          },
+          { value: 'max', name: 'Max', description: expect.any(String) },
+        ],
+      });
+
+      const selected = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'xhigh',
+      })) as { configOptions: typeof session.configOptions };
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith('xhigh');
+      expect(
+        selected.configOptions.find(
+          (option) => option.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('xhigh');
+
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      })) as { configOptions: typeof session.configOptions };
+      expect(innerConfig.setReasoningEffort).toHaveBeenLastCalledWith(
+        undefined,
+      );
+      expect(
+        reset.configOptions.find((option) => option.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('default');
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+        }),
+      ).rejects.toThrow(
+        'Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+      );
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
+
+      innerConfig.setReasoningEffort.mockImplementation(() => {});
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'xhigh',
+        }),
+      ).rejects.toThrow(
+        'Reasoning effort cannot be applied while thinking is disabled',
+      );
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(3);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it.each([

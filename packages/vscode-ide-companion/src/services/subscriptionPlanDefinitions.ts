@@ -4,7 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import {
+  buildProviderTemplate,
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_ENV_KEY,
+  CODING_PLAN_GLOBAL_BASE_URL,
+  computeModelListVersion,
+  findProviderByCredentials,
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
+} from '@qwen-code/qwen-code-core';
+
+export { CODING_PLAN_ENV_KEY, TOKEN_PLAN_ENV_KEY };
 
 export enum CodingPlanRegion {
   CHINA = 'china',
@@ -24,12 +36,6 @@ export interface SubscriptionPlanModelConfig {
 
 export type CodingPlanTemplate = SubscriptionPlanModelConfig[];
 
-export const CODING_PLAN_ENV_KEY = 'BAILIAN_CODING_PLAN_API_KEY';
-export const TOKEN_PLAN_ENV_KEY = 'BAILIAN_TOKEN_PLAN_API_KEY';
-const TOKEN_PLAN_CHINA_ENDPOINT =
-  'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
-const TOKEN_PLAN_GLOBAL_ENDPOINT =
-  'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
 const TOKEN_PLAN_CHINA_DOC_URL =
   'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856';
 const TOKEN_PLAN_GLOBAL_DOC_URL =
@@ -43,14 +49,6 @@ interface SubscriptionPlanRegionConfig<
   endpoint: string;
   documentationUrl?: string;
   apiKeyUrl?: string;
-  modelNamePrefix?: string;
-}
-
-interface SubscriptionPlanModelSpec {
-  id: string;
-  contextWindowSize: number;
-  enableThinking?: boolean;
-  description?: string;
 }
 
 export interface SubscriptionPlanDefinition<
@@ -62,7 +60,6 @@ export interface SubscriptionPlanDefinition<
   title: string;
   description: string;
   envKey: string;
-  modelNamePrefix: string;
   authEventType: 'coding-plan';
   metadataKey: string;
   endpoint?: string;
@@ -71,7 +68,6 @@ export interface SubscriptionPlanDefinition<
   usageDocumentationUrl?: string;
   defaultRegion?: TRegion;
   regions?: ReadonlyArray<SubscriptionPlanRegionConfig<TRegion>>;
-  models: readonly SubscriptionPlanModelSpec[];
 }
 
 export interface SubscriptionPlanConfig {
@@ -92,58 +88,12 @@ export interface SubscriptionPlanConfig {
   usageDocumentationUrl?: string;
 }
 
-// keep in sync with packages/cli/src/auth/providers/alibaba/codingPlan.ts MODELSTUDIO_MODELS
-const ALIBABA_SUBSCRIPTION_MODELS = [
-  { id: 'qwen3.5-plus', contextWindowSize: 1000000, enableThinking: true },
-  {
-    id: 'qwen3.6-plus',
-    description: 'Currently available to Pro subscribers only.',
-    contextWindowSize: 1000000,
-    enableThinking: true,
-  },
-  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
-  { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
-  { id: 'MiniMax-M2.5', contextWindowSize: 196608, enableThinking: true },
-  { id: 'qwen3-coder-plus', contextWindowSize: 1000000 },
-  { id: 'qwen3-coder-next', contextWindowSize: 262144 },
-  {
-    id: 'qwen3-max-2026-01-23',
-    contextWindowSize: 262144,
-    enableThinking: true,
-  },
-  { id: 'glm-4.7', contextWindowSize: 202752, enableThinking: true },
-] as const satisfies readonly SubscriptionPlanModelSpec[];
-
-const BAILIAN_TOKEN_PLAN_MODELS = [
-  { id: 'qwen3.7-plus', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'qwen3.6-plus', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
-  {
-    id: 'qwen3.8-max-preview',
-    contextWindowSize: 1000000,
-    enableThinking: true,
-  },
-  { id: 'qwen3.6-flash', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
-  { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
-  { id: 'deepseek-v3.2', contextWindowSize: 131072 },
-  { id: 'kimi-k2.7-code', contextWindowSize: 262144, enableThinking: true },
-  { id: 'kimi-k2.6', contextWindowSize: 262144, enableThinking: true },
-  { id: 'kimi-k2.5', contextWindowSize: 262144, enableThinking: true },
-  { id: 'glm-5.2', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
-  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
-  { id: 'MiniMax-M2.5', contextWindowSize: 196608 },
-] as const satisfies readonly SubscriptionPlanModelSpec[];
-
 const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
   id: 'coding',
   option: 'CODING_PLAN',
   title: 'Coding Plan',
   description: 'For individual developers · Weekly quota included',
   envKey: CODING_PLAN_ENV_KEY,
-  modelNamePrefix: 'ModelStudio Coding Plan',
   authEventType: 'coding-plan',
   metadataKey: 'codingPlan',
   defaultRegion: CodingPlanRegion.CHINA,
@@ -151,19 +101,17 @@ const CODING_PLAN: SubscriptionPlanDefinition<'coding'> = {
     {
       id: CodingPlanRegion.CHINA,
       title: 'China (Beijing)',
-      endpoint: 'https://coding.dashscope.aliyuncs.com/v1',
+      endpoint: CODING_PLAN_CHINA_BASE_URL,
       documentationUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan',
     },
     {
       id: CodingPlanRegion.GLOBAL,
       title: 'Singapore (International)',
-      endpoint: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      endpoint: CODING_PLAN_GLOBAL_BASE_URL,
       documentationUrl:
         'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
-      modelNamePrefix: 'ModelStudio Coding Plan for Global/Intl',
     },
   ],
-  models: ALIBABA_SUBSCRIPTION_MODELS,
 };
 
 const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
@@ -173,7 +121,6 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
   description:
     'For teams and companies · Usage-based billing with dedicated endpoint',
   envKey: TOKEN_PLAN_ENV_KEY,
-  modelNamePrefix: 'ModelStudio Token Plan',
   authEventType: 'coding-plan',
   metadataKey: 'tokenPlan',
   defaultRegion: CodingPlanRegion.CHINA,
@@ -181,21 +128,19 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
     {
       id: CodingPlanRegion.CHINA,
       title: 'China (Beijing)',
-      endpoint: TOKEN_PLAN_CHINA_ENDPOINT,
+      endpoint: TOKEN_PLAN_CHINA_BASE_URL,
       documentationUrl: TOKEN_PLAN_CHINA_DOC_URL,
       apiKeyUrl: TOKEN_PLAN_CHINA_DOC_URL,
     },
     {
       id: CodingPlanRegion.GLOBAL,
       title: 'Singapore (International)',
-      endpoint: TOKEN_PLAN_GLOBAL_ENDPOINT,
+      endpoint: TOKEN_PLAN_GLOBAL_BASE_URL,
       documentationUrl: TOKEN_PLAN_GLOBAL_DOC_URL,
       apiKeyUrl: TOKEN_PLAN_GLOBAL_DOC_URL,
-      modelNamePrefix: 'ModelStudio Token Plan for Global/Intl',
     },
   ],
   usageDocumentationUrl: TOKEN_PLAN_CHINA_DOC_URL,
-  models: BAILIAN_TOKEN_PLAN_MODELS,
 };
 
 const SUBSCRIPTION_PLANS = {
@@ -205,10 +150,6 @@ const SUBSCRIPTION_PLANS = {
 
 export const SUBSCRIPTION_PLAN_OPTIONS: SubscriptionPlanDefinition[] =
   Object.values(SUBSCRIPTION_PLANS);
-
-function computeCodingPlanVersion(template: CodingPlanTemplate): string {
-  return createHash('sha256').update(JSON.stringify(template)).digest('hex');
-}
 
 function resolveSubscriptionPlanRegion(
   plan: SubscriptionPlanDefinition,
@@ -234,36 +175,34 @@ function getSubscriptionPlanEndpoint(
   );
 }
 
-function getSubscriptionPlanModelNamePrefix(
+/**
+ * Model template and version for a plan, taken from the matching core provider
+ * preset.
+ *
+ * The CLI recomputes the version from that preset on every launch to decide
+ * whether a provider update is pending. Deriving both the template and the
+ * version here from the same preset keeps this writer from recording a version
+ * the CLI can never reproduce — which would surface as an update prompt right
+ * after signing in from the IDE — and keeps the persisted model entries from
+ * dropping fields the preset carries (modalities, for one).
+ */
+function resolvePlanTemplate(
   plan: SubscriptionPlanDefinition,
   region?: SubscriptionPlanRegion,
-): string {
-  return (
-    resolveSubscriptionPlanRegion(plan, region)?.modelNamePrefix ||
-    plan.modelNamePrefix
-  );
-}
-
-function buildSubscriptionPlanTemplate(
-  plan: SubscriptionPlanDefinition,
-  region?: SubscriptionPlanRegion,
-): CodingPlanTemplate {
+): { template: CodingPlanTemplate; version: string } {
   const endpoint = getSubscriptionPlanEndpoint(plan, region);
-  const modelNamePrefix = getSubscriptionPlanModelNamePrefix(plan, region);
-
-  return plan.models.map((model) => ({
-    id: model.id,
-    name: `[${modelNamePrefix}] ${model.id}`,
-    ...(model.description ? { description: model.description } : {}),
-    baseUrl: endpoint,
-    envKey: plan.envKey,
-    generationConfig: {
-      ...(model.enableThinking
-        ? { extra_body: { enable_thinking: true } }
-        : {}),
-      contextWindowSize: model.contextWindowSize,
-    },
-  }));
+  const provider = findProviderByCredentials(endpoint, plan.envKey);
+  if (!provider) {
+    throw new Error(
+      `No core provider preset matches plan "${plan.id}" (baseUrl ${endpoint}, envKey ${plan.envKey}). ` +
+        `The IDE and CLI model lists must come from the same preset.`,
+    );
+  }
+  const template = buildProviderTemplate(provider, endpoint);
+  return {
+    template,
+    version: computeModelListVersion(template),
+  };
 }
 
 export function getSubscriptionPlanConfig(
@@ -272,7 +211,7 @@ export function getSubscriptionPlanConfig(
 ): SubscriptionPlanConfig {
   const plan: SubscriptionPlanDefinition = SUBSCRIPTION_PLANS[planId];
   const resolvedRegion = resolveSubscriptionPlanRegion(plan, region);
-  const template = buildSubscriptionPlanTemplate(plan, resolvedRegion?.id);
+  const { template, version } = resolvePlanTemplate(plan, resolvedRegion?.id);
 
   return {
     id: plan.id,
@@ -284,7 +223,7 @@ export function getSubscriptionPlanConfig(
     envKey: plan.envKey,
     metadataKey: plan.metadataKey,
     template,
-    version: computeCodingPlanVersion(template),
+    version,
     baseUrl: getSubscriptionPlanEndpoint(plan, resolvedRegion?.id),
     ...(resolvedRegion
       ? { region: resolvedRegion.id as CodingPlanRegion }
