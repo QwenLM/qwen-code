@@ -791,20 +791,26 @@ function setupAcpTest(
     // Track which permission requests we've seen
     const planModeRequests: PermissionRequest[] = [];
 
-    const { sendRequest, cleanup, stderr, sessionUpdates, permissionRequests, agent } =
-      setupAcpTest(rig, {
-        permissionHandler: (request) => {
-          // Track all permission requests for later verification
-          // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
-          if (request.toolCall?.kind === 'switch_mode') {
-            planModeRequests.push(request);
-            // Return proceed_always to switch to auto-edit mode
-            return { optionId: 'proceed_always' };
-          }
-          // Auto-approve all other requests
-          return { optionId: 'proceed_once' };
-        },
-      });
+    const {
+      sendRequest,
+      cleanup,
+      stderr,
+      sessionUpdates,
+      permissionRequests,
+      agent,
+    } = setupAcpTest(rig, {
+      permissionHandler: (request) => {
+        // Track all permission requests for later verification
+        // Auto-approve exit plan mode requests with "proceed_always" to trigger auto-edit mode
+        if (request.toolCall?.kind === 'switch_mode') {
+          planModeRequests.push(request);
+          // Return proceed_always to switch to auto-edit mode
+          return { optionId: 'proceed_always' };
+        }
+        // Auto-approve all other requests
+        return { optionId: 'proceed_once' };
+      },
+    });
 
     try {
       // Initialize
