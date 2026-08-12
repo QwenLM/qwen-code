@@ -11,18 +11,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompletionCategoryMouseController } from './CompletionCategoryMouseController.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
-import {
-  layoutRowForEvent,
-  measureElementPosition,
-} from '../utils/measure-element-position.js';
 import { type MouseEvent } from '../utils/mouse.js';
+import { findElementAtMouseEvent } from '../utils/mouse-hit.js';
 
 vi.mock('../hooks/useMouseEvents.js', () => ({ useMouseEvents: vi.fn() }));
 vi.mock('../hooks/useTerminalSize.js', () => ({ useTerminalSize: vi.fn() }));
-vi.mock('../utils/measure-element-position.js', () => ({
-  layoutRowForEvent: vi.fn(),
-  measureElementPosition: vi.fn(),
-}));
+vi.mock('../utils/mouse-hit.js', () => ({ findElementAtMouseEvent: vi.fn() }));
 
 const ref = <T,>(current: T): MutableRefObject<T> => ({ current });
 
@@ -54,13 +48,7 @@ describe('CompletionCategoryMouseController', () => {
     vi.clearAllMocks();
     onSelectCategory = vi.fn();
     vi.mocked(useTerminalSize).mockReturnValue({ rows: 40, columns: 80 });
-    vi.mocked(layoutRowForEvent).mockImplementation(
-      (_node, terminalRow) => terminalRow - 1,
-    );
-    vi.mocked(measureElementPosition).mockImplementation((node) => {
-      const index = categoryNodes.indexOf(node);
-      return { x: 2 + index * 8, y: 4, width: 6, height: 1 };
-    });
+    vi.mocked(findElementAtMouseEvent).mockReturnValue(null);
   });
 
   function mountAndGetHandler(): (event: MouseEvent) => void {
@@ -78,6 +66,7 @@ describe('CompletionCategoryMouseController', () => {
   }
 
   it('selects the exact category under a left click', () => {
+    vi.mocked(findElementAtMouseEvent).mockReturnValue(2);
     const handler = mountAndGetHandler();
 
     handler(makeEvent({ name: 'left-press', col: 19, row: 5 }));
@@ -105,19 +94,18 @@ describe('CompletionCategoryMouseController', () => {
   });
 
   it('uses terminal height when the composited frame overflows', () => {
-    vi.mocked(layoutRowForEvent).mockImplementation(
-      (_node, terminalRow, terminalHeight) =>
-        terminalRow - 1 - Math.min(0, terminalHeight - 45),
-    );
-    vi.mocked(measureElementPosition).mockImplementation((node) => {
-      const index = categoryNodes.indexOf(node);
-      return { x: 2 + index * 8, y: 9, width: 6, height: 1 };
-    });
+    vi.mocked(findElementAtMouseEvent).mockReturnValue(2);
     const handler = mountAndGetHandler();
 
     handler(makeEvent({ name: 'left-press', col: 19, row: 5 }));
 
-    expect(layoutRowForEvent).toHaveBeenCalledWith(containerNode, 5, 40);
+    expect(findElementAtMouseEvent).toHaveBeenCalledWith(
+      containerNode,
+      categoryNodes,
+      expect.objectContaining({ col: 19, row: 5 }),
+      40,
+      'rect',
+    );
     expect(onSelectCategory).toHaveBeenCalledWith('session');
   });
 });

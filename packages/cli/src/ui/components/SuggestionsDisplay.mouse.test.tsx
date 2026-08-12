@@ -112,6 +112,7 @@ describe('SuggestionsDisplay mouse wiring', () => {
     expect(CompletionCategoryMouseController).toHaveBeenCalled();
     const props = vi.mocked(CompletionCategoryMouseController).mock.calls[0][0];
     expect(props.categories).toEqual(['all', 'file', 'session']);
+    expect(props.containerRef.current).not.toBeNull();
     expect(props.categoryRefs.current.filter(Boolean)).toHaveLength(3);
     expect(props.onSelectCategory).toBe(onSelectCategory);
   });
@@ -155,6 +156,26 @@ describe('SuggestionsDisplay mouse wiring', () => {
         mouseEnabled
         activeCategory="all"
         availableCategories={['all', 'file', 'session']}
+      />,
+    );
+
+    expect(CompletionCategoryMouseController).not.toHaveBeenCalled();
+  });
+
+  it('does not mount the category controller when the tab bar is hidden', () => {
+    render(
+      <SuggestionsDisplay
+        suggestions={suggestions}
+        activeIndex={0}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput=""
+        mode="reverse"
+        mouseEnabled
+        activeCategory="all"
+        availableCategories={['all', 'file']}
+        onSelectCategory={vi.fn()}
       />,
     );
 

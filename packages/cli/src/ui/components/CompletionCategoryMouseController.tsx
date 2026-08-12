@@ -9,12 +9,8 @@ import { type DOMElement } from 'ink';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { type MouseEvent } from '../utils/mouse.js';
-import {
-  layoutRowForEvent,
-  measureElementPosition,
-} from '../utils/measure-element-position.js';
+import { findElementAtMouseEvent } from '../utils/mouse-hit.js';
 import { type SuggestionCategory } from '../utils/suggestions.js';
-import { pointInViewport } from '../selection/selection-coords.js';
 
 type CompletionCategory = SuggestionCategory | 'all';
 
@@ -44,27 +40,17 @@ export function CompletionCategoryMouseController({
 
   const handleMouse = useCallback(
     (event: MouseEvent) => {
-      if (event.name !== 'left-press' || !containerRef.current) return;
+      if (event.name !== 'left-press') return;
 
-      const col = event.col - 1;
-      const row = layoutRowForEvent(
+      const index = findElementAtMouseEvent(
         containerRef.current,
-        event.row,
+        categoryRefs.current,
+        event,
         terminalHeight,
+        'rect',
       );
-
-      for (let i = 0; i < categories.length; i++) {
-        const node = categoryRefs.current[i];
-        if (!node) continue;
-        const rect = measureElementPosition(node);
-        if (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          pointInViewport({ x: col, y: row }, rect)
-        ) {
-          onSelectCategory(categories[i]);
-          return;
-        }
+      if (index !== null && index < categories.length) {
+        onSelectCategory(categories[index]);
       }
     },
     [containerRef, categoryRefs, categories, onSelectCategory, terminalHeight],
