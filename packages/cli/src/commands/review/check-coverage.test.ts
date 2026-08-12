@@ -997,6 +997,15 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     expect(r.idleAgents).toHaveLength(2);
     expect(r.idleAgents).toContain(`${base} on src/a.ts`);
     expect(r.idleAgents).toContain(`${base} on src/b.ts`);
+    // The Chinese twin keeps the file too: dropping it renders two
+    // identical zh clauses with no file discriminator — the exact
+    // indistinguishability this test exists to prevent, on the zh side.
+    expect(r.publicLabelsZh[`${base} on src/a.ts`]).toBe(
+      `${BRIEFS[role].publicLabelZh}（src/a.ts）`,
+    );
+    expect(r.publicLabelsZh[`${base} on src/b.ts`]).toBe(
+      `${BRIEFS[role].publicLabelZh}（src/b.ts）`,
+    );
   });
 
   it('never reads a digest or chunk suffix as a file on a rostered label', () => {
@@ -1017,9 +1026,22 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
       prompt,
     );
     transcript('tm-digest', prompt, { calls: 0 });
+    // The chunk-suffixed findings-role key shape: a key-shape heuristic in
+    // place of the roster lookup would read `chunk-1` as a file and leak
+    // the chunk id onto the public label, so it keeps the bare publicLabel.
+    const chunkKey = 'reverse-audit--chunk-1--round-1--abc123def456';
+    const chunkBrief = briefPath(p, chunkKey);
+    const chunkPrompt =
+      `You are ${chunkKey}.\n` +
+      `read_file(file_path="${chunkBrief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(chunkKey)}.txt`), chunkPrompt);
+    transcript('tm-chunk-key', chunkPrompt, { calls: 0 });
 
     const r = coverageFromTranscripts(p, ENV);
-    expect(r.idleAgents).toEqual([BRIEFS['verify'].publicLabel]);
+    expect(r.idleAgents).toHaveLength(2);
+    expect(r.idleAgents).toContain(BRIEFS['verify'].publicLabel);
+    expect(r.idleAgents).toContain(BRIEFS['reverse-audit'].publicLabel);
   });
 
   it('reports none when nobody disclosed one', () => {

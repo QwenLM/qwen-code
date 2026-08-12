@@ -356,6 +356,10 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: 「none」',
       'Budget gap: 『none』',
       'Budget gap: 《none》',
+      'Budget gap: 〈none〉',
+      'Budget gap: 〔N/A〕',
+      'Budget gap: ［none］',
+      'Budget gap: ｛N/A｝',
       // Fullwidth terminal punctuation rides OUTSIDE the wrappers the same
       // way a halfwidth period does — `（none）。` must lose the period
       // before the wrapper strip can see the pair, or the phantom leaks
@@ -363,9 +367,18 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: （none）。',
       'Budget gap: 「none」。',
       'Budget gap: 【N/A】。',
+      'Budget gap: 〈none〉。',
       'Budget gap: "none"。',
       'Budget gap: none。',
       'Budget gap: none．',
+      // Interrogative non-answers, fullwidth and its halfwidth twin:
+      // `none?` is the same non-answer, and a bare token in ANY trailing
+      // punctuation drops.
+      'Budget gap: none？',
+      'Budget gap: none?',
+      'Budget gap: (none?)',
+      'Budget gap: "none?"',
+      'Budget gap: N/A?',
       // The marker itself is bilingual: the line starts at the CJK marker.
       '预算缺口：（none）。',
       // List markers from the brief's bullet format wrap placeholders the

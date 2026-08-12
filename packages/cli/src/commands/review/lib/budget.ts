@@ -460,7 +460,7 @@ function stripWrappers(s: string): string {
 // marker-wrapped exactly the way it arrives bracket-wrapped. The
 // fullwidth terminals join for the same reason the fullwidth wrappers do:
 // `（none）。` must lose its period before the wrapper strip can see the pair.
-const TRAILING_GAP_CHAR_RE = /[-—–*_.!…,;:。．，！？；：\s]/;
+const TRAILING_GAP_CHAR_RE = /[-—–*_.!?…,;:。．，！？；：\s]/;
 
 /** Wrapping bracket/quote pairs stripped only SYMMETRICALLY. */
 const GAP_WRAPPER_CLOSES: Record<string, string> = {
@@ -479,6 +479,10 @@ const GAP_WRAPPER_CLOSES: Record<string, string> = {
   '「': '」',
   '『': '』',
   '《': '》',
+  '〈': '〉',
+  '〔': '〕',
+  '［': '］',
+  '｛': '｝',
 };
 
 /**

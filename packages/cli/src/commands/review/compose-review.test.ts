@@ -928,6 +928,52 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
   });
 
+  it("a blind rostered agent does not shadow the caller's relay of the same role", () => {
+    // The blind loop's push into `roleLabelEntries`: a readsDiff-false role
+    // prompt plus an orchestrator-inserted chunk phrase launches an agent
+    // that is blind YET rostered — named by the role's publicLabel. Its
+    // entry must not swallow a relay spelled in that register; delete the
+    // push and the relay below is silently dropped (probe-reproduced).
+    // No working chunk-1 agent: one would supersede the blind entry.
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    // The built block never names the diff file; the chunk phrase is the
+    // orchestrator's insertion at launch.
+    const builtBlock =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), builtBlock);
+    transcript('v-ra-blind', `${builtBlock}\nYou own chunk 1 of 2.`, {
+      toolCalls: 0,
+    });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        "reverse audit — chunk 1's auditor returned nothing substantive twice",
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — launched with a prompt that never ' +
+        'named the diff file, so it could not have read it.',
+    );
+    expect(r.body).toContain(
+      "Not reviewed: reverse audit — chunk 1's auditor returned nothing substantive twice.",
+    );
+  });
+
   it('a budget stop does not swallow an idle round of the same role', () => {
     // The publicLabel register is shared by every round of a role: a round-2
     // budget stop and a round-1 auditor that made zero tool calls are ONE
@@ -979,6 +1025,14 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.body).toContain(
       'Not reviewed: reverse audit — the agent made no tool call: it read nothing.',
     );
+    // The third reason the comment above promises: the floor's brief-unread
+    // gap shares the subject, and the subject+reason dedup keeps it beside
+    // the stop and the idle round.
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — it was launched with the built prompt ' +
+        'but never opened its brief, so it audited without the gaps-only ' +
+        'method and the finding format it was launched to follow.',
+    );
   });
 
   it('an unopened chunk entry still dedups a caller relay of the same chunk', () => {
@@ -1021,6 +1075,36 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     expect(r.body).not.toContain('the agent read its brief but never the diff');
   });
 
+  it('an idle chunk entry still dedups a caller relay of the same chunk', () => {
+    // The idle loop's twin of the unopened/blind chunk guards, on the
+    // nothing-built shape (#7012): a zero-call chunk agent keeps its
+    // `chunk N` subject — internal register — and the prefix dedup with it.
+    // Nothing is BUILT in this fixture: a built chunk brief the idle agent
+    // failed to open would add a same-subject unread-brief entry that
+    // dedups the relay on its own and hides the guard's chunk half. With
+    // the chunk half of the guard letting the idle entry join the
+    // exemption, the relayed `chunk 1 — …` line double-renders the subject.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 0 });
+
+    // Not base(): its planPath default runs coveredPlan() on the same
+    // path, which would relaunch a WORKING chunk-1 agent over this one.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: ['chunk 1 — the agent never started its walk'],
+    });
+    expect(r.body).toContain(
+      'Not reviewed: the diff section covering src/a.ts — the agent made ' +
+        'no tool call: it read nothing.',
+    );
+    expect(r.body).not.toContain('the agent never started its walk');
+  });
+
   it('an idle rostered agent keeps its Chinese twin in a bilingual body', () => {
     // The rename resolves rostered names through the brief's publicLabel;
     // the Chinese half must say them the way the sibling floor/budget-stop
@@ -1053,6 +1137,79 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     });
     expect(r.body).toContain(
       '未审查：反向审计——该 agent 未发起任何工具调用：它什么都没读。',
+    );
+    // The floor's brief-unread gap shares the subject; its zh half rides
+    // the same subjectZh/reasonZh plumbing and renders its own sentence.
+    expect(r.body).toContain(
+      '未审查：反向审计——它用构建的 prompt 启动，却从未打开自己的 brief，审计时缺失了只报缺口的方法和它本应遵循的发现格式。',
+    );
+  });
+
+  it('an unopened rostered agent keeps its Chinese twin in a bilingual body', () => {
+    // The unopened loop's subjectZh: every bilingual test before exercised
+    // idle, budget-gap, rewritten-launch or floor entries, never an
+    // unopened rostered agent — dropping the field there embeds the English
+    // publicLabel in the zh half beside its proper Chinese siblings.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'verify');
+    writeFileSync(brief, 'The verify brief.');
+    const launch =
+      `You are review agent \`verify\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'verify.txt'), launch);
+    transcript('v-verify', launch, { opens: [brief] });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '未审查：验证——它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff。',
+    );
+  });
+
+  it('a blind rostered agent keeps its Chinese twin in a bilingual body', () => {
+    // The blind loop's subjectZh, sibling of the unopened case above: a
+    // blind YET rostered agent names the role's publicLabelZh in the zh
+    // half, not the English label. No working chunk-1 agent: one would
+    // supersede the blind entry.
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const builtBlock =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")`;
+    writeFileSync(join(d, 'reverse-audit.txt'), builtBlock);
+    transcript('v-ra-blind', `${builtBlock}\nYou own chunk 1 of 2.`, {
+      toolCalls: 0,
+    });
+
+    // Not base(): same planPath-default hazard as the idle case above.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '未审查：反向审计——启动 prompt 从未提到 diff 文件，它不可能读过 diff。',
     );
   });
 
@@ -1252,6 +1409,48 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     });
     expect(r.body).toContain(
       '未审查：反向审计——运行在这次 run 自行编写的 prompt 上（该 chunk 从未构建过 prompt），承载方法与规则的 brief 从未到达该 agent。',
+    );
+  });
+
+  it('a rostered drifted-launch disclosure names the role in both registers', () => {
+    // The sibling `b === undefined` disclose site has a relay-shadow test
+    // and a Chinese-twin test; this site — a BUILT chunk prompt the launch
+    // drifted from — had neither. A rostered launch (built role prompt plus
+    // orchestrator chunk phrase, brief unopened) must disclose under the
+    // role's publicLabel with its zh twin, not the fallback plumbing line.
+    transcript('a2', goodPrompt(2), { toolCalls: 2, range: [100, 100] });
+    const p = plan({ step45: false, han: true });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const d = promptRecordDir(p);
+    const brief = briefPath(p, 'reverse-audit');
+    writeFileSync(brief, 'The reverse-audit brief.');
+    const rolePrompt =
+      `You are review agent \`reverse-audit\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'reverse-audit.txt'), rolePrompt);
+    transcript('v-ra-drifted', `${rolePrompt}\nYou own chunk 1 of 2.`, {
+      toolCalls: 2,
+      range: [0, 100],
+      opens: [],
+    });
+
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would lay a verbatim reverse-audit pair over this fixture.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — launched with a prompt that is not the one the CLI built.',
+    );
+    expect(r.body).toContain(
+      '未审查：反向审计——启动时使用的 prompt 不是 CLI 构建的那一份。',
     );
   });
 
@@ -1455,7 +1654,12 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // The round-cap marker still discloses and caps the verdict…
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('reverse-audit round cap of 3');
-    // …but the not-built gap and its rebuild remediation are still owed.
+    // …but the not-built gap and its rebuild remediation are still owed —
+    // the gap in the posted body, not only the FIX on stderr.
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — no auditor was launched with a prompt ' +
+        'this skill builds',
+    );
     expect(r.remediation.join(' ')).toContain('reverse audit:');
   });
 
@@ -1526,6 +1730,9 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // beside the stop — one subject, two distinct reasons, and the dedup
     // keeps both (the rewritten repair itself rides stderr, which is where
     // repairs are acted on).
+    expect(r.body).toContain(
+      'Not reviewed: reverse audit — an auditor ran and opened its brief',
+    );
     expect(r.remediation.join(' ')).toContain('reverse audit:');
     expect(r.remediation.join(' ')).toContain('EXACTLY what it prints');
   });
