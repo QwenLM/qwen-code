@@ -34,6 +34,49 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Drop malformed RECORD VALUES from an otherwise well-shaped document.
+ *
+ * The envelope check above only proves the four collections are objects.
+ * A single non-object value inside one of them (a hand edit, a bad merge,
+ * a truncated sync) would surface as raw TypeErrors from every read path
+ * (`indexSnapshot` dereferences `version.parentVersionId`,
+ * `findBindingBySha256` reads `version.sha256`, …). Those throws are
+ * caught into "miss"/empty by the read wrappers — so ONE bad value turns
+ * every recall in the project into a permanent blackout, while the
+ * corrupt-backup self-heal never fires because the envelope is valid.
+ *
+ * Pruning individually costs only the pruned records (dangling references
+ * to them already degrade gracefully — a missing version reads as an
+ * `artifact_unavailable` gap) and keeps the never-fatal contract intact.
+ * Same defense as the sibling `OmniJsonCacheFile.load()`.
+ */
+function pruneMalformedRecords(snapshot: MediaMemorySnapshot): void {
+  const dropped: string[] = [];
+  for (const collection of [
+    'files',
+    'versions',
+    'executions',
+    'entries',
+  ] as const) {
+    const records = snapshot[collection] as Record<string, unknown>;
+    for (const [key, value] of Object.entries(records)) {
+      if (!isPlainRecord(value)) {
+        delete records[key];
+        dropped.push(`${collection}/${key}`);
+      }
+    }
+  }
+  if (dropped.length > 0) {
+    // Name the records: a silent prune would leave an operator debugging
+    // "recall returns less than it should" with nothing to go on.
+    debugLogger.debug(
+      `dropped ${dropped.length} malformed memory record` +
+        `${dropped.length === 1 ? '' : 's'}: ${dropped.join(', ')}`,
+    );
+  }
+}
+
+/**
  * v1 JSON persistence for the media-memory graph: ONE document
  * (`.qwen/omni/memory.json`) holding every file/version/execution/entry
  * record. Deliberately the same discipline as omni's JSON entry caches
@@ -116,6 +159,7 @@ export class MediaMemoryStore {
         isPlainRecord(parsed.executions) &&
         isPlainRecord(parsed.entries)
       ) {
+        pruneMalformedRecords(parsed);
         return parsed;
       }
       throw new Error('unexpected shape');

@@ -108,6 +108,35 @@ describe('MediaMemoryStore', () => {
     expect(await listCorruptBackups()).toHaveLength(1);
   });
 
+  it('prunes a malformed record value instead of blacking out every read', async () => {
+    // Envelope is valid, so the corrupt-backup self-heal never fires: a
+    // single non-object value used to surface as raw TypeErrors from every
+    // read path, caught into miss/empty — a PERMANENT global recall
+    // blackout for the whole project.
+    await fs.writeFile(
+      store.filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        files: { f1: { fileId: 'f1', fileRef: '/a.mkv' }, f2: null },
+        versions: { v1: 'not-an-object' },
+        executions: {},
+        entries: {},
+      }),
+    );
+
+    const seen = await store.read(undefined, (s) => ({
+      files: Object.keys(s.files),
+      versions: Object.keys(s.versions),
+      // Dereferences values exactly like the real index/lookup paths do —
+      // a surviving bad value would throw right here.
+      refs: Object.values(s.files).map((f) => f.fileRef),
+    }));
+
+    expect(seen).toEqual({ files: ['f1'], versions: [], refs: ['/a.mkv'] });
+    // Valid records survive, so the document is NOT condemned.
+    expect(await listCorruptBackups()).toHaveLength(0);
+  });
+
   it('keeps at most two corrupt backups', async () => {
     for (let i = 0; i < 4; i++) {
       await fs.writeFile(store.filePath, `broken-${i}`);
