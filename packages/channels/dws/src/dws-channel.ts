@@ -35,6 +35,8 @@ const MAX_COMMENT_CHARS = 4_000;
 const MAX_SELECTED_TEXT_CHARS = 2_000;
 const MAX_PROCESSED_ITEMS = 5_000;
 const MAX_IM_TARGETS = 1_000;
+const MAX_SELF_SENDER_IDS = 20;
+const OUTBOUND_ECHO_TTL_MS = 30_000;
 const MAX_WIKI_DOCUMENTS_PER_POLL = 50;
 const DEFAULT_WIKI_DISCOVERY_INTERVAL_MS = 5 * 60_000;
 const EVENT_RESTART_DELAY_MS = 2_000;
@@ -74,6 +76,8 @@ interface PersistedWikiState {
 
 interface DwsCursor {
   version: 1;
+  selfProfile?: string;
+  selfSenderIds: string[];
   initializedDocuments: string[];
   initializedWikiSpaces: string[];
   documentStates: PersistedDocumentState[];
@@ -241,6 +245,14 @@ function messageKey(message: DwsImMessage): string {
   return `${message.conversationId}\0${message.messageId}`;
 }
 
+function outboundEchoKey(conversationId: string, content: string): string {
+  return createHash('sha256')
+    .update(conversationId)
+    .update('\0')
+    .update(content)
+    .digest('hex');
+}
+
 function stableUuid(value: string): string {
   const hex = createHash('sha256').update(value).digest('hex').slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
@@ -388,10 +400,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
   private readonly ownUserIds = new Set<string>();
+  private readonly pendingOutboundEchoes = new Map<
+    string,
+    { expiresAt: number }
+  >();
   private readonly processingMessages = new Map<string, Promise<void>>();
   private readonly initializedDocumentSet: Set<string>;
   private readonly documentStateById: Map<string, PersistedDocumentState>;
   private pollAbortController = new AbortController();
+  private authenticatedProfile?: string;
   private lifecycleGeneration = 0;
   private connected = false;
 
@@ -496,6 +513,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   protected createInitialCursor(): DwsCursor {
     return {
       version: 1,
+      selfSenderIds: [],
       initializedDocuments: [],
       initializedWikiSpaces: [],
       documentStates: [],
@@ -518,6 +536,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const cursor = parsed as Partial<DwsCursor>;
     if (
       cursor.version !== 1 ||
+      (cursor.selfProfile !== undefined &&
+        (typeof cursor.selfProfile !== 'string' ||
+          !cursor.selfProfile.trim())) ||
+      (cursor.selfSenderIds !== undefined &&
+        (!Array.isArray(cursor.selfSenderIds) ||
+          !cursor.selfSenderIds.every(
+            (item) => typeof item === 'string' && Boolean(item.trim()),
+          ))) ||
       !Array.isArray(cursor.initializedDocuments) ||
       !cursor.initializedDocuments.every((item) => typeof item === 'string') ||
       (cursor.initializedWikiSpaces !== undefined &&
@@ -548,6 +574,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     return {
       version: 1,
+      selfProfile: cursor.selfProfile,
+      selfSenderIds: [...new Set(cursor.selfSenderIds ?? [])].slice(
+        -MAX_SELF_SENDER_IDS,
+      ),
       initializedDocuments: [...new Set(cursor.initializedDocuments)],
       initializedWikiSpaces: [...new Set(cursor.initializedWikiSpaces ?? [])],
       documentStates: (cursor.documentStates ?? []).map((state) => ({
@@ -601,18 +631,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
     let openDingTalkId = identity.openDingTalkId;
     if (hasEchoingImSources && !openDingTalkId && identity.userId) {
-      openDingTalkId = await this.client.resolveCurrentOpenDingTalkId(
-        identity.userId,
-        this.pollAbortController.signal,
-      );
+      try {
+        openDingTalkId = await this.client.resolveCurrentOpenDingTalkId(
+          identity.userId,
+          this.pollAbortController.signal,
+        );
+      } catch {
+        if (
+          generation !== this.lifecycleGeneration ||
+          this.pollAbortController.signal.aborted
+        ) {
+          throw new Error('DWS channel connection was cancelled.');
+        }
+      }
       if (generation !== this.lifecycleGeneration) {
         throw new Error('DWS channel connection was cancelled.');
       }
-    }
-    if (hasEchoingImSources && !openDingTalkId) {
-      throw new Error(
-        'DWS authenticated identity is missing the openDingTalkId required to prevent message self loops.',
-      );
     }
     if (
       (this.documentIds.length > 0 || this.wikiSpaceIds.length > 0) &&
@@ -622,11 +656,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         'DWS authenticated identity is missing the user ID required for document mentions.',
       );
     }
-    this.ownUserIds.clear();
-    if (identity.userId) this.ownUserIds.add(identity.userId);
-    if (openDingTalkId) {
-      this.ownUserIds.add(openDingTalkId);
+    this.authenticatedProfile = identity.profile;
+    if (this.cursor.selfProfile !== identity.profile) {
+      this.cursor.selfProfile = identity.profile;
+      this.cursor.selfSenderIds = [];
     }
+    this.ownUserIds.clear();
+    for (const senderId of this.cursor.selfSenderIds) {
+      this.ownUserIds.add(senderId);
+    }
+    if (identity.userId) this.rememberSelfSender(identity.userId);
+    if (openDingTalkId) this.rememberSelfSender(openDingTalkId);
     this.connected = true;
     try {
       await Promise.all(
@@ -637,6 +677,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (generation !== this.lifecycleGeneration || !this.connected) {
         throw new Error('DWS channel connection was cancelled.');
       }
+      this.saveCursor();
       if (this.documentIds.length > 0 || this.wikiSpaceIds.length > 0) {
         this.startPollLoop();
       }
@@ -650,6 +691,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.lifecycleGeneration++;
     this.connected = false;
     this.pollAbortController.abort();
+    this.pendingOutboundEchoes.clear();
     this.stopPollLoop();
     for (const state of this.imStates) {
       if (state.retryTimer) clearTimeout(state.retryTimer);
@@ -702,7 +744,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] no DWS message target is known for the requested chat.`,
       );
     }
-    await this.client.sendImMessage(target, text, randomUUID());
+    await this.sendWithEchoTracking(chatId, text, () =>
+      this.client.sendImMessage(target, text, randomUUID()),
+    );
   }
 
   protected override async sendThreadMessage(
@@ -762,12 +806,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       await this.sendMessage(chatId, text);
       return;
     }
-    await this.client.replyToImMessage(
-      chatId,
-      messageId,
-      senderId,
-      text,
-      stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
+    await this.sendWithEchoTracking(chatId, text, () =>
+      this.client.replyToImMessage(
+        chatId,
+        messageId,
+        senderId,
+        text,
+        stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
+      ),
     );
   }
 
@@ -1050,7 +1096,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
     key: string,
   ): Promise<void> {
-    if (this.ownUserIds.has(message.senderId)) {
+    if (
+      this.consumeOutboundEcho(message) ||
+      this.ownUserIds.has(message.senderId)
+    ) {
       this.markProcessedMessage(key);
       this.saveCursor();
       return;
@@ -1089,6 +1138,88 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     await this.handleInbound(envelope);
     this.markProcessedMessage(key);
     this.saveCursor();
+  }
+
+  private async sendWithEchoTracking(
+    conversationId: string,
+    content: string,
+    send: () => Promise<void>,
+  ): Promise<void> {
+    if (!this.canReceiveOutboundEcho(conversationId)) {
+      await send();
+      return;
+    }
+    const cancel = this.trackOutboundEcho(conversationId, content);
+    try {
+      await send();
+    } catch (error) {
+      if (!(error instanceof DwsCommandError) || error.outcome === 'not_sent') {
+        cancel();
+      }
+      throw error;
+    }
+  }
+
+  private canReceiveOutboundEcho(conversationId: string): boolean {
+    const target = this.findImTarget(conversationId);
+    if (!target) return false;
+    if (
+      target.kind === 'group' &&
+      (this.config.groups[target.conversationId]?.requireMention ??
+        this.config.groups['*']?.requireMention ??
+        true)
+    ) {
+      return false;
+    }
+    return this.imStates.some(({ source }) =>
+      target.kind === 'direct'
+        ? source.kind === 'direct'
+        : source.kind === 'group-all' ||
+          (source.kind === 'group' &&
+            source.conversationId === target.conversationId),
+    );
+  }
+
+  private trackOutboundEcho(
+    conversationId: string,
+    content: string,
+  ): () => void {
+    const now = Date.now();
+    this.pruneOutboundEchoes(now);
+    const key = outboundEchoKey(conversationId, content);
+    const pending = { expiresAt: now + OUTBOUND_ECHO_TTL_MS };
+    this.pendingOutboundEchoes.set(key, pending);
+    return () => {
+      if (this.pendingOutboundEchoes.get(key) === pending) {
+        this.pendingOutboundEchoes.delete(key);
+      }
+    };
+  }
+
+  private consumeOutboundEcho(message: DwsImMessage): boolean {
+    const now = Date.now();
+    this.pruneOutboundEchoes(now);
+    const key = outboundEchoKey(message.conversationId, message.content);
+    if (!this.pendingOutboundEchoes.has(key)) return false;
+    this.pendingOutboundEchoes.delete(key);
+    this.rememberSelfSender(message.senderId);
+    return true;
+  }
+
+  private pruneOutboundEchoes(now: number): void {
+    for (const [key, pending] of this.pendingOutboundEchoes) {
+      if (pending.expiresAt <= now) this.pendingOutboundEchoes.delete(key);
+    }
+  }
+
+  private rememberSelfSender(senderId: string): void {
+    if (!this.authenticatedProfile || !senderId) return;
+    this.ownUserIds.add(senderId);
+    this.cursor.selfProfile = this.authenticatedProfile;
+    this.cursor.selfSenderIds = [
+      ...this.cursor.selfSenderIds.filter((item) => item !== senderId),
+      senderId,
+    ].slice(-MAX_SELF_SENDER_IDS);
   }
 
   private async pollDocument(
