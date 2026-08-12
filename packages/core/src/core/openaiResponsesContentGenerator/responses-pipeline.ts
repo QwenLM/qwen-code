@@ -27,9 +27,14 @@ import {
 } from '../../utils/runtimeFetchOptions.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_STREAM_MAX_LIFETIME_MS,
+  DISABLED_REQUEST_TIMEOUT_MS,
   MAX_STREAM_GUARD_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+  QWEN_STREAM_MAX_LIFETIME_MS_ENV,
+  resolveRequestTimeout,
 } from '../openaiContentGenerator/constants.js';
+import { reconcileMaxTokens } from '../tokenLimits.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
@@ -59,13 +64,70 @@ export class StreamInactivityTimeoutError extends Error {
   }
 }
 
-// Resolve the streaming inactivity timeout (ms): explicit config field wins,
-// then the env deployment knob, then the default -- mirroring the sibling Chat
-// pipeline's resolveStreamIdleTimeoutMs. `<= 0` disables the watchdog; a value
-// above the JS timer ceiling or a non-integer is rejected (setTimeout silently
-// compresses oversized delays to ~1ms, which would fire near-immediately).
-function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
-  const fromConfig = config.streamIdleTimeoutMs;
+/**
+ * Thrown when a single streaming response spends more than its total-lifetime
+ * cap of ACCUMULATED upstream-wait (the time blocked on `reader.read()`, not
+ * the consumer's drain time) without completing. Unlike the idle watchdog,
+ * this cap is NOT reset by chunk arrival, so a non-compliant proxy or degraded
+ * upstream drip-feeding one small chunk per idle window can no longer keep the
+ * turn alive forever (issue #8597). `code: 'ETIMEDOUT'` makes
+ * `classifyRetryError` treat it as a retryable transport error -- mirroring
+ * the sibling Chat pipeline's StreamLifetimeExceededError.
+ */
+export class StreamLifetimeExceededError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly maxLifetimeMs: number,
+    readonly chunksReceived: number,
+  ) {
+    super(
+      `Stream exceeded its ${maxLifetimeMs}ms upstream-wait cap after ` +
+        `${chunksReceived} chunks. Set ${QWEN_STREAM_MAX_LIFETIME_MS_ENV} ` +
+        `to increase this window (or 0 to disable it).`,
+    );
+    this.name = 'StreamLifetimeExceededError';
+  }
+}
+
+/**
+ * Thrown when the connect phase (fetch until response headers arrive) exceeds
+ * the configured request timeout. The pinned undici Agent runs with
+ * `headersTimeout: 0, bodyTimeout: 0` and the idle watchdog only wraps
+ * `reader.read()` (which starts AFTER connect resolves), so without this an
+ * endpoint that completes TCP/TLS but never sends headers (hung LB, tarpitting
+ * proxy, frozen local model) would block the turn forever. `code: 'ETIMEDOUT'`
+ * makes it a retryable transport error, so retryWithBackoff around
+ * connectStream can re-attempt.
+ */
+export class StreamConnectTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(readonly connectTimeoutMs: number) {
+    super(
+      `Responses API connect phase exceeded ${connectTimeoutMs}ms before any ` +
+        `response headers arrived. Increase the model request timeout ` +
+        `(or set it to 0 to disable this bound).`,
+    );
+    this.name = 'StreamConnectTimeoutError';
+  }
+}
+
+/**
+ * Resolve a stream-guard timeout (ms). Precedence, for both guards: explicit
+ * `ContentGeneratorConfig` field (programmatic, wins -- including `0` to
+ * disable) > the env deployment knob > the built-in default. A value above the
+ * JS timer ceiling or a non-integer is rejected (setTimeout silently
+ * compresses oversized delays to ~1ms, which would fire near-immediately) --
+ * surfaced with a `console.warn` rather than silently discarded, mirroring the
+ * sibling Chat pipeline's resolveStreamGuardMs.
+ */
+function resolveStreamGuardMs(
+  fromConfig: number | undefined,
+  configLabel: string,
+  envName: string,
+  defaultMs: number,
+): number {
   if (typeof fromConfig === 'number') {
     if (
       Number.isInteger(fromConfig) &&
@@ -73,15 +135,48 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
     ) {
       return fromConfig;
     }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring out-of-range ${configLabel}=${fromConfig} ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
+        `falling back to ${envName}/default.`,
+    );
   }
-  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV]?.trim();
-  if (raw && /^\d+$/.test(raw)) {
-    const parsed = Number(raw);
-    if (parsed <= MAX_STREAM_GUARD_TIMEOUT_MS) {
-      return parsed;
+  const raw = process.env[envName];
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed <= MAX_STREAM_GUARD_TIMEOUT_MS) {
+        return parsed;
+      }
     }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring invalid ${envName}="${raw}" ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_GUARD_TIMEOUT_MS}]); ` +
+        `using default ${defaultMs}ms.`,
+    );
   }
-  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  return defaultMs;
+}
+
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  return resolveStreamGuardMs(
+    config.streamIdleTimeoutMs,
+    'streamIdleTimeoutMs',
+    QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  );
+}
+
+function resolveStreamMaxLifetimeMs(config: ContentGeneratorConfig): number {
+  return resolveStreamGuardMs(
+    config.streamMaxLifetimeMs,
+    'streamMaxLifetimeMs',
+    QWEN_STREAM_MAX_LIFETIME_MS_ENV,
+    DEFAULT_STREAM_MAX_LIFETIME_MS,
+  );
 }
 
 export class ResponsesPipeline {
@@ -90,11 +185,21 @@ export class ResponsesPipeline {
   // Resolved once (config field > env > default) so the env read happens per
   // pipeline, not per streaming request.
   private readonly streamIdleTimeoutMs: number;
+  // Total-lifetime cap for a single streaming response (accumulated
+  // upstream-wait, never reset by chunk arrival). Companion to the idle
+  // watchdog -- see StreamLifetimeExceededError / issue #8597.
+  private readonly streamMaxLifetimeMs: number;
+  // Connect-phase timeout (ms). Honors ContentGeneratorConfig.timeout the same
+  // way the embed client does, via resolveRequestTimeout: undefined -> default,
+  // `0`/negative -> disabled.
+  private readonly connectTimeoutMs: number;
 
   constructor(config: ContentGeneratorConfig, cliConfig: Config) {
     this.config = config;
     this.cliConfig = cliConfig;
     this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(config);
+    this.streamMaxLifetimeMs = resolveStreamMaxLifetimeMs(config);
+    this.connectTimeoutMs = resolveRequestTimeout(config.timeout);
   }
 
   async *executeStream(
@@ -162,8 +267,6 @@ export class ResponsesPipeline {
       input: cleanOrphanedFunctionCalls(input),
       instructions,
       tools,
-      tool_choice: 'auto',
-      parallel_tool_calls: true,
       stream: true,
       prompt_cache_key: sanitizePromptCacheKey(userPromptId),
       // We never reference previous_response_id, so server-side storage of
@@ -173,13 +276,23 @@ export class ResponsesPipeline {
       store: false,
     };
 
-    // Map Gemini-style toolConfig.functionCallingConfig.mode to the
-    // Responses API's tool_choice, mirroring the Chat Completions and
-    // Anthropic pipelines. Without this, structured side queries that force
-    // tool use (e.g. baseLlmClient's respond_in_schema) fall back to
-    // tool_choice:auto and reasoning-heavy models may skip the tool call
-    // entirely.
+    // tool_choice / parallel_tool_calls are emitted ONLY when tools are
+    // present -- matching the sibling Chat wire, which skips tool_choice on a
+    // toolless request. Toolless requests are reachable on this wire (chat
+    // compaction via baseLlmClient.generateText with no config.tools, text-mode
+    // side queries): sending tool_choice/parallel_tool_calls with no `tools`
+    // key makes strict OpenAI-compatible endpoints reject the body with 400
+    // ("A tool_choice was set on the request but no tools were specified"),
+    // which can wedge compaction into a permanent retry loop.
     if (tools && tools.length > 0) {
+      apiRequest.tool_choice = 'auto';
+      apiRequest.parallel_tool_calls = true;
+      // Map Gemini-style toolConfig.functionCallingConfig.mode to the
+      // Responses API's tool_choice, mirroring the Chat Completions and
+      // Anthropic pipelines. Without this, structured side queries that force
+      // tool use (e.g. baseLlmClient's respond_in_schema) fall back to
+      // tool_choice:auto and reasoning-heavy models may skip the tool call
+      // entirely.
       const fcMode = request.config?.toolConfig?.functionCallingConfig?.mode;
       if (fcMode === 'ANY') {
         apiRequest.tool_choice = 'required';
@@ -205,12 +318,20 @@ export class ResponsesPipeline {
       }
     }
 
-    // The per-send output budget geminiChat window-clamps lives on
-    // request.config.maxOutputTokens (issue #5950 invariant: prompt +
-    // max_tokens <= window); it must win over the static samplingParams cap so
-    // subagent budgets and the MAX_TOKENS escalation re-clamp reach this wire.
+    // Reconcile the user's configured max_tokens ceiling with the per-send
+    // window-clamped budget (request.config.maxOutputTokens, issue #5950)
+    // through the SAME centralized "smaller wins" invariant both sibling wires
+    // call (tokenLimits.reconcileMaxTokens): a user max_tokens is a ceiling,
+    // not an escape hatch, so a large window-clamped per-send value can never
+    // silently reopen a smaller configured cap. When only one side is present,
+    // reconcile returns undefined and we fall back to config-then-request,
+    // matching the sibling.
+    const configMaxTokens = this.config.samplingParams?.max_tokens;
+    const requestMaxTokens = request.config?.maxOutputTokens;
     const maxOut =
-      request.config?.maxOutputTokens ?? this.config.samplingParams?.max_tokens;
+      reconcileMaxTokens(configMaxTokens, requestMaxTokens) ??
+      configMaxTokens ??
+      requestMaxTokens;
     if (maxOut != null) {
       apiRequest.max_output_tokens = maxOut;
     }
@@ -285,11 +406,27 @@ export class ResponsesPipeline {
     const body = JSON.stringify(apiRequest);
     debugLogger.debug(`POST ${url}`, body.substring(0, 500));
 
+    // Compose the caller's AbortSignal with a connect-timeout controller so a
+    // connect-phase timeout also aborts the in-flight fetch (freeing the
+    // socket), while a user cancellation still propagates to the transport for
+    // the whole request lifetime. The listener is registered `once` so it
+    // self-cleans after firing.
+    const connectController = new AbortController();
+    if (signal) {
+      if (signal.aborted) {
+        connectController.abort();
+      } else {
+        signal.addEventListener('abort', () => connectController.abort(), {
+          once: true,
+        });
+      }
+    }
+
     const fetchOpts: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
       headers,
       body,
-      signal,
+      signal: connectController.signal,
     };
 
     const runtimeOptions = buildRuntimeFetchOptions(
@@ -307,11 +444,49 @@ export class ResponsesPipeline {
     const fetchFn =
       (runtimeOptions as { fetch?: typeof fetch } | undefined)?.fetch ?? fetch;
 
+    // Connect-phase timeout: fetch() resolves once response headers arrive, so
+    // an endpoint that completes TCP/TLS but never sends headers would block
+    // the turn forever (the idle watchdog only wraps reader.read(), which runs
+    // after connect resolves, and the pinned undici Agent sets
+    // headersTimeout:0/bodyTimeout:0). resolveRequestTimeout maps `0`/negative
+    // to DISABLED_REQUEST_TIMEOUT_MS, so a disabled timeout skips the race.
+    const connectTimeoutMs = this.connectTimeoutMs;
+    const timeoutActive =
+      connectTimeoutMs > 0 && connectTimeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
+
     let response: Response;
-    try {
-      response = await fetchFn(url, fetchOpts as RequestInit);
-    } catch (error) {
-      throw redactProxyError(error);
+    if (timeoutActive) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          // A user cancellation wins over the connect timeout's ETIMEDOUT.
+          if (signal?.aborted) {
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          } else {
+            connectController.abort();
+            reject(new StreamConnectTimeoutError(connectTimeoutMs));
+          }
+        }, connectTimeoutMs);
+        timer.unref?.();
+      });
+      try {
+        response = await Promise.race([
+          fetchFn(url, fetchOpts as RequestInit),
+          timeout,
+        ]);
+      } catch (error) {
+        throw redactProxyError(error);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    } else {
+      try {
+        response = await fetchFn(url, fetchOpts as RequestInit);
+      } catch (error) {
+        throw redactProxyError(error);
+      }
     }
 
     if (!response.ok) {
@@ -345,11 +520,13 @@ export class ResponsesPipeline {
 
   /**
    * Body-iteration phase: lazily drain the SSE reader, parse frames, and yield
-   * Gemini responses. An idle watchdog around each `reader.read()` fails a
-   * silent mid-stream stall with a retryable ETIMEDOUT (mirroring the Chat
-   * pipeline's inactivity guard) instead of hanging forever; the timer resets
-   * on every chunk, so an actively streaming model is never interrupted, and
-   * `streamIdleTimeoutMs <= 0` disables it.
+   * Gemini responses. Two guards wrap each `reader.read()`, mirroring the Chat
+   * pipeline: an idle watchdog fails a silent mid-stream stall with a retryable
+   * ETIMEDOUT (the timer resets on every chunk, so an actively streaming model
+   * is never interrupted; `streamIdleTimeoutMs <= 0` disables it), and a
+   * total-lifetime cap on accumulated upstream-wait (NOT reset by chunk
+   * arrival) fails a drip-fed stream that keeps resetting the idle timer but
+   * never completes (issue #8597; `streamMaxLifetimeMs <= 0` disables it).
    */
   private async *iterateBody(
     reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -357,30 +534,76 @@ export class ResponsesPipeline {
     signal?: AbortSignal,
   ): AsyncGenerator<GenerateContentResponse> {
     const idleMs = this.streamIdleTimeoutMs;
+    const maxLifetimeMs = this.streamMaxLifetimeMs;
     let chunksReceived = 0;
+    // Accumulated upstream-wait (monotonic performance.now(), never Date.now()
+    // so an NTP step can't kill a healthy stream): the time this loop spends
+    // blocked in reader.read(), NOT the consumer's drain time after a yield.
+    // The lifetime cap is charged against this, so a stream that finished and
+    // buffered its bytes owes nothing however slowly the consumer drains.
+    let upstreamMs = 0;
 
     const readChunk = (): Promise<ReadableStreamReadResult<Uint8Array>> => {
-      if (idleMs <= 0) return reader.read();
+      // Both guards off: pass the read through untouched.
+      if (idleMs <= 0 && maxLifetimeMs <= 0) return reader.read();
+
+      // Remaining lifetime budget. Unlike the idle window, it is NOT reset by
+      // chunk arrival, so a drip-fed stream that keeps resetting the idle
+      // timer still terminates once this is exhausted (issue #8597).
+      const remainingLifetimeMs =
+        maxLifetimeMs > 0
+          ? maxLifetimeMs - upstreamMs
+          : Number.POSITIVE_INFINITY;
+      // Budget already spent: fail here rather than issuing another read.
+      if (remainingLifetimeMs <= 0) {
+        if (signal?.aborted) {
+          const abortErr = new Error('Aborted');
+          abortErr.name = 'AbortError';
+          return Promise.reject(abortErr);
+        }
+        return Promise.reject(
+          new StreamLifetimeExceededError(maxLifetimeMs, chunksReceived),
+        );
+      }
+
       const readPromise = reader.read();
+      const awaitedAt = performance.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          // A user cancellation wins over the watchdog's retryable ETIMEDOUT.
-          // Reject only -- do NOT cancel the reader here: cancel() resolves the
-          // pending read() as { done: true } synchronously, which would win the
-          // race over this rejection. The generator's finally cancels the
-          // reader (freeing the socket) once this error propagates out.
-          if (signal?.aborted) {
-            const abortErr = new Error('Aborted');
-            abortErr.name = 'AbortError';
-            reject(abortErr);
-          } else {
-            reject(new StreamInactivityTimeoutError(idleMs, chunksReceived));
-          }
-        }, idleMs);
+        // At least one guard is positive here, so at least one is finite.
+        const idleIn = idleMs > 0 ? idleMs : Number.POSITIVE_INFINITY;
+        const wait = Math.min(idleIn, remainingLifetimeMs);
+        timer = setTimeout(
+          () => {
+            // A user cancellation wins over the watchdog's retryable ETIMEDOUT.
+            // Reject only -- do NOT cancel the reader here: cancel() resolves
+            // the pending read() as { done: true } synchronously, which would
+            // win the race over this rejection. The generator's finally cancels
+            // the reader (freeing the socket) once this error propagates out.
+            if (signal?.aborted) {
+              const abortErr = new Error('Aborted');
+              abortErr.name = 'AbortError';
+              reject(abortErr);
+            } else if (remainingLifetimeMs <= idleIn) {
+              // The lifetime cap is the tighter bound for this wait.
+              reject(
+                new StreamLifetimeExceededError(maxLifetimeMs, chunksReceived),
+              );
+            } else {
+              reject(new StreamInactivityTimeoutError(idleMs, chunksReceived));
+            }
+          },
+          Math.max(wait, 0),
+        );
         timer.unref?.();
       });
       return Promise.race([readPromise, timeout])
+        .then((result) => {
+          // Charge only the upstream-wait this chunk actually took toward the
+          // lifetime cap.
+          upstreamMs += performance.now() - awaitedAt;
+          return result;
+        })
         .catch((err) => {
           // The orphaned read() rejects once the body is cancelled; swallow it
           // so it is not an unhandled rejection.

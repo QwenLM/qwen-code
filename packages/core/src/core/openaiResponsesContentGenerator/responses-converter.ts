@@ -167,6 +167,21 @@ export function convertResponsesEventToGemini(
       return makeChunkResponse(model, state, [{ text: data.delta }]);
     }
 
+    case 'response.refusal.delta': {
+      // A model refusal streams as refusal.delta frames rather than
+      // output_text.delta. Surface it as ordinary text (mirroring
+      // output_text.delta) so the user sees the refusal instead of geminiChat
+      // throwing InvalidStreamError('...empty response text.') and retrying
+      // the full prompt transientMaxRetries times.
+      const data = event.data as { delta: string };
+      return makeChunkResponse(model, state, [{ text: data.delta }]);
+    }
+
+    case 'response.refusal.done':
+      // The full refusal already streamed via refusal.delta frames; the done
+      // frame is terminal only, exactly as output_text.done is treated.
+      return null;
+
     case 'response.reasoning_summary_text.delta': {
       const data = event.data as { delta: string };
       return makeChunkResponse(model, state, [
@@ -223,7 +238,22 @@ export function convertResponsesEventToGemini(
         // Record-spreading consumers downstream (geminiChat, sessionService).
         // Collapse anything else to {}, matching the sibling's guard.
         if (typeof args !== 'object' || args === null || Array.isArray(args)) {
-          args = {};
+          // A delta buffer that *parsed* cleanly to a non-object (array/null/
+          // primitive) never entered the catch branch, so the done item's
+          // authoritative `arguments` string was never consulted. Try it here
+          // too — the same fallback the catch branch applies — so a complete
+          // valid payload on this same event isn't discarded, dispatching the
+          // tool with {} when correct args were available.
+          const authoritative =
+            fc.arguments && fc.arguments !== rawArgs
+              ? safeJsonParse<unknown>(fc.arguments, undefined)
+              : undefined;
+          args =
+            authoritative &&
+            typeof authoritative === 'object' &&
+            !Array.isArray(authoritative)
+              ? (authoritative as Record<string, unknown>)
+              : {};
         }
         return makeChunkResponse(model, state, [
           {
@@ -690,7 +720,12 @@ export function convertGeminiToolsToResponsesTools(
         name: func.name,
         description: func.description,
         parameters: normalizeResponsesParameters(
-          (func.parameters ?? func.parametersJsonSchema) as
+          // Prefer parametersJsonSchema (raw JSON Schema, e.g. MCP/extension
+          // tools) and fall back to parameters, matching the Chat and
+          // Anthropic sibling wires — @google/genai allows both fields at
+          // once, and preferring `parameters` here would send a different,
+          // potentially lossier schema than the siblings for identical config.
+          (func.parametersJsonSchema ?? func.parameters) as
             | Record<string, unknown>
             | undefined,
         ),

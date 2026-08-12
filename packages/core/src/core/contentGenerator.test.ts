@@ -89,7 +89,7 @@ vi.mock('./openaiResponsesContentGenerator/index.js', () => ({
       // generator instead (both mocks return `totalTokens > 0`) is caught.
       countTokens: async () => ({ totalTokens: 999 }),
       embedContent: async () => ({ embeddings: [] }),
-      useSummarizedThinking: () => false,
+      useSummarizedThinking: () => true,
     };
   },
 }));
@@ -273,6 +273,8 @@ describe('createContentGenerator', () => {
       mockConfig,
     );
 
+    expect(openaiResponsesMockState.createCount).toBe(0);
+    expect(generator.useSummarizedThinking()).toBe(true);
     const result = await generator.countTokens({
       model: 'gpt-5',
       contents: 'hello world',

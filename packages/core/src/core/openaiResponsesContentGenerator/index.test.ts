@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 
 const mockTokenizer = {
   calculateTokens: vi.fn(),
@@ -73,6 +81,10 @@ describe('OpenAIResponsesContentGenerator', () => {
       makeGeneratorConfig(),
       makeCliConfig(),
     );
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('delegates generateContent to the pipeline', async () => {
@@ -153,6 +165,44 @@ describe('OpenAIResponsesContentGenerator', () => {
     );
   });
 
+  it('normalizes a null abortSignal to undefined for the pipeline', async () => {
+    const expected = new GenerateContentResponse();
+    mockExecute.mockResolvedValue(expected);
+    await generator.generateContent(
+      {
+        model: 'gpt-5',
+        contents: [],
+        config: { abortSignal: null },
+      } as unknown as Parameters<typeof generator.generateContent>[0],
+      'prompt-1',
+    );
+    expect(mockExecute).toHaveBeenCalledWith(
+      expect.anything(),
+      'prompt-1',
+      undefined,
+    );
+  });
+
+  it('normalizes a null abortSignal to undefined for the pipeline stream', async () => {
+    async function* fakeStream() {
+      yield new GenerateContentResponse();
+    }
+    mockConnectStream.mockResolvedValue(fakeStream());
+    await generator.generateContentStream(
+      {
+        model: 'gpt-5',
+        contents: [],
+        config: { abortSignal: null },
+      } as unknown as Parameters<typeof generator.generateContentStream>[0],
+      'prompt-1',
+    );
+    expect(mockConnectStream).toHaveBeenCalledWith(
+      expect.anything(),
+      'prompt-1',
+      undefined,
+    );
+  });
+
   it('countTokens uses the request tokenizer', async () => {
     mockTokenizer.calculateTokens.mockResolvedValue({ totalTokens: 42 });
     const result = await generator.countTokens({
@@ -168,7 +218,7 @@ describe('OpenAIResponsesContentGenerator', () => {
       model: 'gpt-5',
       contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
     });
-    expect(result.totalTokens).toBeGreaterThan(0);
+    expect(result.totalTokens).toBe(11);
   });
 
   it('useSummarizedThinking returns true', () => {
@@ -326,7 +376,52 @@ describe('OpenAIResponsesContentGenerator', () => {
       });
 
       expect(mockOpenAIConstructor).toHaveBeenCalledWith(
-        expect.objectContaining({ timeout: DEFAULT_TIMEOUT }),
+        expect.objectContaining({
+          baseURL: undefined,
+          timeout: DEFAULT_TIMEOUT,
+        }),
+      );
+    });
+
+    it('uses apiKeyEnvKey when no direct API key is configured', async () => {
+      vi.stubEnv('TEST_EMBED_KEY', 'env-key');
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const generatorWithEnvKey = new OpenAIResponsesContentGenerator(
+        {
+          model: 'gpt-5',
+          apiKeyEnvKey: 'TEST_EMBED_KEY',
+        } as ContentGeneratorConfig,
+        makeCliConfig(),
+      );
+
+      await generatorWithEnvKey.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ apiKey: 'env-key' }),
+      );
+    });
+
+    it('passes configured maxRetries to the embeddings SDK client', async () => {
+      mockEmbeddingsCreate.mockResolvedValue({
+        data: [{ embedding: [0.1] }],
+      });
+      const generatorWithRetries = new OpenAIResponsesContentGenerator(
+        { ...makeGeneratorConfig(), maxRetries: 0 },
+        makeCliConfig(),
+      );
+
+      await generatorWithRetries.embedContent({
+        model: 'text-embedding-ada-002',
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      });
+
+      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+        expect.objectContaining({ maxRetries: 0 }),
       );
     });
 
@@ -357,22 +452,25 @@ describe('OpenAIResponsesContentGenerator', () => {
       );
     });
 
-    it('does not append a second /v1 when baseUrl already has one', async () => {
-      mockEmbeddingsCreate.mockResolvedValue({
-        data: [{ embedding: [0.1] }],
-      });
-      const generatorWithV1 = new OpenAIResponsesContentGenerator(
-        { ...makeGeneratorConfig(), baseUrl: 'https://api.openai.com/v1' },
-        makeCliConfig(),
-      );
-      await generatorWithV1.embedContent({
-        model: 'text-embedding-ada-002',
-        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
-      expect(mockOpenAIConstructor).toHaveBeenCalledWith(
-        expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
-      );
-    });
+    it.each(['https://api.openai.com/v1', 'https://api.openai.com/v1/'])(
+      'does not append a second /v1 to %s',
+      async (baseUrl) => {
+        mockEmbeddingsCreate.mockResolvedValue({
+          data: [{ embedding: [0.1] }],
+        });
+        const generatorWithV1 = new OpenAIResponsesContentGenerator(
+          { ...makeGeneratorConfig(), baseUrl },
+          makeCliConfig(),
+        );
+        await generatorWithV1.embedContent({
+          model: 'text-embedding-ada-002',
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        });
+        expect(mockOpenAIConstructor).toHaveBeenCalledWith(
+          expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
+        );
+      },
+    );
   });
 
   it('createOpenAIResponsesContentGenerator returns an OpenAIResponsesContentGenerator', () => {

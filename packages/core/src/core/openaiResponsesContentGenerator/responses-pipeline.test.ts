@@ -19,6 +19,8 @@ import {
   ResponsesPipeline,
   mergeStreamResponses,
   StreamInactivityTimeoutError,
+  StreamLifetimeExceededError,
+  StreamConnectTimeoutError,
 } from './responses-pipeline.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
@@ -76,8 +78,36 @@ function sseStreamChunked(
   });
 }
 
-function makeCliConfig(): Config {
-  return { getProxy: () => undefined } as unknown as Config;
+// A byte ReadableStream whose reads block until a chunk is pushed (or it is
+// ended), so a test can drip-feed frames on fake-timer boundaries and exercise
+// the idle watchdog / lifetime cap without ever hanging: an unpushed read stays
+// pending, and enqueue/close resolve it. Each pushed line gets its own trailing
+// newline so it parses as a complete data-only SSE frame.
+function gatedByteStream(): {
+  stream: ReadableStream<Uint8Array>;
+  push: (dataLine: string) => void;
+  end: () => void;
+} {
+  const encoder = new TextEncoder();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  return {
+    stream,
+    push(dataLine: string) {
+      controller.enqueue(encoder.encode(dataLine + '\n'));
+    },
+    end() {
+      controller.close();
+    },
+  };
+}
+
+function makeCliConfig(proxy?: string): Config {
+  return { getProxy: () => proxy } as unknown as Config;
 }
 
 function makeGeneratorConfig(
@@ -147,6 +177,10 @@ describe('ResponsesPipeline', () => {
     expect(url).toBe('https://api.openai.com/v1/responses');
     expect(init.headers['Authorization']).toBe('Bearer test-key');
     expect(init.headers['Accept']).toBe('text/event-stream');
+    // Pin the explicit Content-Type: undici defaults a string body to
+    // text/plain;charset=UTF-8 when it is absent, which strict
+    // OpenAI-compatible gateways reject with 415/400.
+    expect(init.headers['Content-Type']).toBe('application/json');
     const body = JSON.parse(init.body) as ResponsesApiRequest;
     expect(body.model).toBe('gpt-5');
     expect(body.stream).toBe(true);
@@ -154,6 +188,11 @@ describe('ResponsesPipeline', () => {
     // server-side storage; the spec pairs this with reasoning.encrypted_content
     // as the intended stateless-replay recipe.
     expect(body.store).toBe(false);
+    // A toolless request must NOT carry tool_choice or parallel_tool_calls --
+    // strict endpoints 400 a tool_choice with no `tools` key (compaction and
+    // text-mode side queries take this path).
+    expect(body.tool_choice).toBeUndefined();
+    expect(body.parallel_tool_calls).toBeUndefined();
     expect(body.input).toEqual([
       { type: 'message', role: 'user', content: 'hello' },
     ]);
@@ -369,6 +408,9 @@ describe('ResponsesPipeline', () => {
         fetchMock.mock.calls[0]![1].body,
       ) as ResponsesApiRequest;
       expect(body.tool_choice).toBe('auto');
+      // parallel_tool_calls is stamped only alongside tools; pin it here so a
+      // regression dropping it (degrading fan-out to sequential calls) fails.
+      expect(body.parallel_tool_calls).toBe(true);
     });
 
     it('maps ANY to required, forcing a tool call', async () => {
@@ -411,7 +453,7 @@ describe('ResponsesPipeline', () => {
       expect(body.tool_choice).toBe('none');
     });
 
-    it('ignores functionCallingConfig.mode when there are no tools', async () => {
+    it('omits tool_choice and parallel_tool_calls entirely when there are no tools, even with functionCallingConfig.mode set', async () => {
       mockResponse(
         sseEvent('response.completed', { response: { status: 'completed' } }),
       );
@@ -434,7 +476,10 @@ describe('ResponsesPipeline', () => {
       const body = JSON.parse(
         fetchMock.mock.calls[0]![1].body,
       ) as ResponsesApiRequest;
-      expect(body.tool_choice).toBe('auto');
+      // No tools -> neither field is sent (a mode with no tools must not
+      // resurrect them); strict endpoints reject tool_choice without `tools`.
+      expect(body.tool_choice).toBeUndefined();
+      expect(body.parallel_tool_calls).toBeUndefined();
     });
   });
 
@@ -464,7 +509,7 @@ describe('ResponsesPipeline', () => {
     expect(body.input).toEqual([]);
   });
 
-  it('throws a descriptive error on a non-ok HTTP response', async () => {
+  it('throws a descriptive error carrying the body excerpt and stamps .status on a non-ok HTTP response', async () => {
     fetchMock.mockResolvedValue({
       ok: false,
       status: 400,
@@ -474,11 +519,22 @@ describe('ResponsesPipeline', () => {
       makeGeneratorConfig(),
       makeCliConfig(),
     );
-    await expect(async () => {
+    let caught: unknown;
+    try {
       for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
         // drain
       }
-    }).rejects.toThrow(/Responses API error 400/);
+    } catch (err) {
+      caught = err;
+    }
+    // The body excerpt is the only carrier of the API's reason (invalid schema,
+    // quota, model-not-found); a refactor dropping it must fail here.
+    expect((caught as Error).message).toMatch(
+      /Responses API error 400: .*bad request/,
+    );
+    // The .status stamp is what geminiChat's shouldRetryOnError -> getErrorStatus
+    // reads to fail-fast/retry connection-time errors; a plain Error carries none.
+    expect((caught as { status?: number }).status).toBe(400);
   });
 
   it('execute() merges all streamed chunks into a single response', async () => {
@@ -702,6 +758,33 @@ describe('ResponsesPipeline', () => {
     expect(body.max_output_tokens).toBe(512);
   });
 
+  it('keeps the configured samplingParams.max_tokens ceiling when the per-send maxOutputTokens is larger (smaller wins)', async () => {
+    // C5 regression: the per-send window-clamped value must NOT reopen a
+    // smaller user-configured max_tokens ceiling. reconcileMaxTokens (the
+    // shared "smaller wins" invariant both sibling wires call) picks the
+    // minimum, so config 1000 caps a per-send 8000. A plain `?? ` precedence
+    // (request first) would leak 8000.
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig({ samplingParams: { max_tokens: 1000 } }),
+      makeCliConfig(),
+    );
+    const request: GenerateContentParameters = {
+      model: 'gpt-5',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      config: { maxOutputTokens: 8000 },
+    };
+    for await (const _ of pipeline.executeStream(request, 'p1')) {
+      // drain
+    }
+    const body = JSON.parse(
+      fetchMock.mock.calls[0]![1].body,
+    ) as ResponsesApiRequest;
+    expect(body.max_output_tokens).toBe(1000);
+  });
+
   // --- Critical (b): mid-stream idle-timeout watchdog ---
 
   it('fails a silent mid-stream stall with a retryable ETIMEDOUT after the idle timeout', async () => {
@@ -747,8 +830,17 @@ describe('ResponsesPipeline', () => {
       const assertion = expect(pending).rejects.toBeInstanceOf(
         StreamInactivityTimeoutError,
       );
+      // Pin the code field too: getTransportCode reads `.code` off the error
+      // chain to classify the stall as a retryable transport error; a mutant
+      // dropping/renaming it passes the instanceof check but silently makes
+      // the stall non-retryable for every downstream consumer.
+      // eslint-disable-next-line vitest/valid-expect -- same deferred-await pattern as above
+      const codeAssertion = expect(pending).rejects.toMatchObject({
+        code: 'ETIMEDOUT',
+      });
       await vi.advanceTimersByTimeAsync(1000);
       await assertion;
+      await codeAssertion;
     } finally {
       vi.useRealTimers();
     }
@@ -775,6 +867,153 @@ describe('ResponsesPipeline', () => {
       [],
     ]);
   });
+
+  it('resets the idle timer on each chunk and completes a slow-but-active stream', async () => {
+    // The watchdog arms a fresh timer inside every readChunk(), so a stream
+    // that keeps delivering deltas is never interrupted even when its total
+    // duration far exceeds the idle window. A mutant arming a single timer
+    // once at stream start would fail this (it fires at t=1000 mid-stream).
+    vi.useFakeTimers();
+    try {
+      const gated = gatedByteStream();
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: gated.stream,
+        text: async () => '',
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ streamIdleTimeoutMs: 1000 }),
+        makeCliConfig(),
+      );
+      const chunks: unknown[] = [];
+      let error: unknown;
+      const consume = (async () => {
+        for await (const chunk of pipeline.executeStream(
+          textRequest('hi'),
+          'p1',
+        )) {
+          chunks.push(chunk);
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // A chunk every 800ms (< 1000ms idle) across 2400ms total: each drip
+      // resets the idle timer, so it must never fire.
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'a' })}`,
+      );
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'b' })}`,
+      );
+      await vi.advanceTimersByTimeAsync(800);
+      gated.push(
+        `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
+      );
+      gated.end();
+      await consume;
+      expect(error).toBeUndefined();
+      expect(chunks.length).toBeGreaterThanOrEqual(2);
+      // A late advance after completion must not produce a delayed throw.
+      await vi.advanceTimersByTimeAsync(5000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // --- Critical: total-lifetime cap (issue #8597) ---
+
+  it('caps the total stream lifetime even when chunks keep resetting the idle watchdog (issue #8597)', async () => {
+    vi.useFakeTimers();
+    try {
+      const gated = gatedByteStream(); // drip-fed, never ends
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: gated.stream,
+        text: async () => '',
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          streamIdleTimeoutMs: 1000,
+          streamMaxLifetimeMs: 3000,
+        }),
+        makeCliConfig(),
+      );
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+          /* drain */
+        }
+      })().catch((e: unknown) => {
+        error = e;
+      });
+      // A chunk every 500ms: every drip resets the 1s idle watchdog, so it can
+      // never fire (the CI-hang shape). The 3s lifetime cap does NOT reset.
+      for (let i = 0; i < 5; i++) {
+        gated.push(
+          `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'x' })}`,
+        );
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await vi.advanceTimersByTimeAsync(1000); // push past the cap
+      await consume;
+      expect(error).toBeInstanceOf(StreamLifetimeExceededError);
+      expect(error).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((error as StreamLifetimeExceededError).maxLifetimeMs).toBe(3000);
+      expect((error as Error).message).toContain('QWEN_STREAM_MAX_LIFETIME_MS');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15000);
+
+  it('does not interrupt a drip-fed stream that completes within the lifetime cap', async () => {
+    vi.useFakeTimers();
+    try {
+      const gated = gatedByteStream();
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: gated.stream,
+        text: async () => '',
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          streamIdleTimeoutMs: 1000,
+          streamMaxLifetimeMs: 3000,
+        }),
+        makeCliConfig(),
+      );
+      let done = false;
+      let error: unknown;
+      const consume = (async () => {
+        for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+          /* drain */
+        }
+      })().then(
+        () => (done = true),
+        (e: unknown) => (error = e),
+      );
+      gated.push(
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'a' })}`,
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      gated.push(
+        `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
+      );
+      gated.end(); // completes at t=500, well under the 3s cap
+      await consume;
+      expect(error).toBeUndefined();
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15000);
 
   // --- Critical (c): eager connect so retryWithBackoff sees connect errors ---
 
@@ -809,11 +1048,50 @@ describe('ResponsesPipeline', () => {
       makeGeneratorConfig(),
       makeCliConfig(),
     );
-    await expect(
-      pipeline.connectStream(textRequest('hi'), 'p1'),
-    ).rejects.toThrow(/Responses API error 500/);
+    const err = await pipeline
+      .connectStream(textRequest('hi'), 'p1')
+      .then(() => undefined)
+      .catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/Responses API error 500: .*server/);
+    // .status must be stamped so a connection-time 5xx is retryable on this
+    // wire (getErrorStatus reads it); without it retry never triggers.
+    expect((err as { status?: number }).status).toBe(500);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('rejects the connect phase with a retryable ETIMEDOUT when headers never arrive within the timeout', async () => {
+    // C3 regression: fetch resolves only when response headers arrive, so a
+    // hung LB / tarpitting proxy that completes TCP/TLS but never sends headers
+    // would block the turn forever (the idle watchdog only wraps reader.read(),
+    // which runs after connect resolves). The connect-phase timeout (driven by
+    // ContentGeneratorConfig.timeout) must reject instead.
+    vi.useFakeTimers();
+    try {
+      let fetchSignal: AbortSignal | undefined;
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+        fetchSignal = init.signal ?? undefined;
+        // Never resolves on its own: only the connect timeout can end this.
+        return new Promise<never>(() => {});
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ timeout: 1000 }),
+        makeCliConfig(),
+      );
+      const pending = pipeline
+        .connectStream(textRequest('hi'), 'p1')
+        .then(() => undefined)
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await pending;
+      expect(err).toBeInstanceOf(StreamConnectTimeoutError);
+      expect(err).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((err as StreamConnectTimeoutError).connectTimeoutMs).toBe(1000);
+      // The timeout also aborts the in-flight fetch so the socket is freed.
+      expect(fetchSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15000);
 
   // --- Suggestions: previously untested added behavior ---
 
@@ -927,7 +1205,11 @@ describe('ResponsesPipeline', () => {
     expect(fetchMock.mock.calls[0]![1].headers['X-Proxy-Auth']).toBe('token');
   });
 
-  it('forwards the exact AbortSignal to fetch', async () => {
+  it('forwards user aborts to fetch via a composed connect signal', async () => {
+    // The connect phase composes the caller's signal with a connect-timeout
+    // controller (so a timeout can also abort the fetch), so fetch no longer
+    // receives the exact user signal object -- it receives one that aborts when
+    // the user signal aborts. Pin the propagation, not the identity.
     const controller = new AbortController();
     mockResponse(
       sseEvent('response.completed', { response: { status: 'completed' } }),
@@ -943,7 +1225,11 @@ describe('ResponsesPipeline', () => {
     )) {
       // drain
     }
-    expect(fetchMock.mock.calls[0]![1].signal).toBe(controller.signal);
+    const passed = fetchMock.mock.calls[0]![1].signal as AbortSignal;
+    expect(passed).toBeInstanceOf(AbortSignal);
+    expect(passed.aborted).toBe(false);
+    controller.abort();
+    expect(passed.aborted).toBe(true);
   });
 
   it('aborts the read loop when the AbortSignal fires mid-stream', async () => {
@@ -1059,6 +1345,121 @@ describe('ResponsesPipeline', () => {
       [{ text: 'a' }],
       [{ text: 'b' }],
     ]);
+  });
+
+  it('rejects a 200 SSE response that carries no body', async () => {
+    // The no-body guard is the one connect-phase validation with no test; a
+    // gateway returning 200 + empty body would otherwise crash the turn with a
+    // bare TypeError (reading getReader) instead of this classifiable error.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'text/event-stream' },
+      body: undefined,
+      text: async () => '',
+    });
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig(),
+    );
+    await expect(async () => {
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+    }).rejects.toThrow(/returned no body/);
+  });
+
+  it('passes the configured proxy through to buildRuntimeFetchOptions', async () => {
+    // The explicit-proxy hand-off is ungated by any assertion; a refactor
+    // dropping the getProxy() argument would silently send Responses requests
+    // direct in proxy-required environments. Pin the exact call.
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig(),
+      makeCliConfig('http://proxy.example:8080'),
+    );
+    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+      // drain
+    }
+    expect(buildRuntimeFetchOptionsMock).toHaveBeenCalledWith(
+      'openai',
+      'http://proxy.example:8080',
+    );
+  });
+
+  it('builds the Authorization header from apiKeyEnvKey when apiKey is unset', async () => {
+    // The request-time env fallback is exercised by zero fixtures (all hardcode
+    // apiKey). Unlike the embed client, this pipeline builds the header by raw
+    // fetch, so there is no SDK self-heal: a config with only apiKeyEnvKey must
+    // still authenticate.
+    const prev = process.env['RESP_TEST_KEY'];
+    process.env['RESP_TEST_KEY'] = 'env-secret';
+    try {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          apiKey: undefined,
+          apiKeyEnvKey: 'RESP_TEST_KEY',
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      expect(fetchMock.mock.calls[0]![1].headers['Authorization']).toBe(
+        'Bearer env-secret',
+      );
+    } finally {
+      if (prev === undefined) delete process.env['RESP_TEST_KEY'];
+      else process.env['RESP_TEST_KEY'] = prev;
+    }
+  });
+
+  it('sends no Authorization header when neither apiKey nor apiKeyEnvKey resolves', async () => {
+    const prev = process.env['RESP_TEST_KEY_MISSING'];
+    delete process.env['RESP_TEST_KEY_MISSING'];
+    try {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({
+          apiKey: undefined,
+          apiKeyEnvKey: 'RESP_TEST_KEY_MISSING',
+        }),
+        makeCliConfig(),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+        // drain
+      }
+      expect(
+        fetchMock.mock.calls[0]![1].headers['Authorization'],
+      ).toBeUndefined();
+    } finally {
+      if (prev !== undefined) process.env['RESP_TEST_KEY_MISSING'] = prev;
+    }
+  });
+
+  it('treats an empty-string baseUrl as unset and falls back to the default origin', async () => {
+    // The round-1 empty-string baseUrl shape: `'' || default` must resolve to
+    // api.openai.com rather than producing `/v1/responses` against no origin.
+    mockResponse(
+      sseEvent('response.completed', { response: { status: 'completed' } }),
+    );
+    const pipeline = new ResponsesPipeline(
+      makeGeneratorConfig({ baseUrl: '' }),
+      makeCliConfig(),
+    );
+    for await (const _ of pipeline.executeStream(textRequest('hi'), 'p1')) {
+      // drain
+    }
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      'https://api.openai.com/v1/responses',
+    );
   });
 
   it('mergeStreamResponses([]) returns an empty candidates array, not undefined', () => {
