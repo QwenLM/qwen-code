@@ -213,6 +213,18 @@ const MD = new MarkdownIt({ html: true });
  * code, an HTML block, or the span of a blockquote — from the block tokens'
  * `.map` line ranges. A parser throw quotes nothing (an unreadable return still
  * has its inline spans guarded by the receipt regex's no-leading-backtick rule).
+ *
+ * KNOWN RESIDUAL — this masks BLOCK-level quotation only. A marker hidden in an
+ * INLINE construct GitHub renders invisibly — a multi-line inline code span, an
+ * HTML comment or tag attribute value, a link/image title, a link-reference
+ * continuation line — sits on a line no block token covers, so it can still parse
+ * as a receipt. The exposure is bounded: releasing on it needs a corroborated
+ * (identity- and territory-checked) auditor to deliberately obfuscate its own
+ * receipts, an adversarial input, not a normal miss, and only under that input.
+ * The definitive close is to compute USED text from RENDERED visible content
+ * rather than source lines (enumerating inline constructs one by one just opens
+ * the next); deferred as a follow-up rather than reopened as another hand-rolled
+ * hunt.
  */
 function quotedLines(text: string): Set<number> {
   const quoted = new Set<number>();

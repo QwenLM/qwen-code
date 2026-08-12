@@ -57,7 +57,10 @@
 import { statSync, readFileSync } from 'node:fs';
 import { readTranscripts } from './transcripts.js';
 import { bakedRanges, openedTheTerritory } from './retirement.js';
-import { repositoryContextOf } from './repository-context.js';
+import {
+  repositoryContextOf,
+  type RepositoryContext,
+} from './repository-context.js';
 import { MODELED_SYSTEM_DOMAIN, owedLayerDimensions } from './audit-layers.js';
 
 /**
@@ -141,7 +144,11 @@ export function layerAuditGate(
     return { unreviewed: [] };
   }
 
-  let context;
+  // Typed, not inferred: a future reshape of `repositoryContextOf` that renamed
+  // or dropped `domains` would otherwise silently disable the gate on every
+  // modeled-system diff, caught only at runtime. The annotation makes it a
+  // compile error.
+  let context: RepositoryContext | null;
   try {
     context = repositoryContextOf(plan as { repositoryContext?: unknown });
   } catch {
@@ -153,6 +160,13 @@ export function layerAuditGate(
     return { unreviewed: [] };
   }
 
+  // Corroboration needs the diff path: `readTranscripts` populates
+  // `diffToolCalls`/`diffReads` only when given it, so a plan WITHOUT
+  // `diffPathAbsolute` fails every auditor's corroboration and owes all six
+  // layers. That is fail-safe (over-caps, never releases), and the gate arms only
+  // on a manifest read from a pr-worktree base where the path is present — but the
+  // dependency is real, not incidental: a plan shape that dropped it would defeat
+  // corroboration silently, so it is stated here.
   const diffPathValue = (plan as { diffPathAbsolute?: unknown })
     ?.diffPathAbsolute;
   const diffPath =
