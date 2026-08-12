@@ -107,11 +107,30 @@ re-checked immediately before the mutation, mirroring every existing lever.
 - **Auto-release keyed on the notice timestamp**, not label age: labels carry
   no timestamps, and the notice is written by the same identity-verified path
   that applies the label. Resume evidence newer than the notice vetoes the
-  release — the bot's re-arm/engage markers, a trusted human's
-  `/takeover` or `/retry` command comment (the ack rides a queued job, so
-  counting only the ack would let a tick release a PR minutes after a human
-  re-armed it), and a fresh `labeled` event (a UI re-apply whose ack rides
-  the same queue, or the scan's idle-backoff pickup when the event is lost).
+  release — the bot's re-arm/engage markers, a re-arm command comment, or a
+  fresh `labeled` event. Command comments count only while FRESH
+  (`RESUME_COMMAND_GRACE_SEC`, 2h) and UNSUPERSEDED by a refusal ack
+  (`fork-refused` / `base-refused` / `skip-blocked`): an accepted command is
+  acked within minutes; an ignored one (no route permission) simply expires;
+  and no permission check is mirrored into the shepherd — the route's
+  collaborator check is the authorization gate, and a mirrored copy would
+  only drift.
+- **The release lever's population comes from the needs-human enumeration**
+  (needs-human ∩ takeover), not the takeover display window, so window
+  saturation can never make a paused PR unreleasable. Both enumerations cap
+  at 100 with loud saturation warnings, and an enumeration failure degrades
+  to an error row — the dashboard write (which carries the liveness
+  watermark) always runs.
+- **The summary posts before the label removal**, dedup'd by its own marker,
+  so a failed comment leaves both labels in place and the whole release
+  retries next tick; a failed removal finds the marker and retries only the
+  DELETE.
+- **Stale-label heal:** a fork PR released by hand gets no release ack (the
+  route suppresses fork `unlabeled` events), so nothing else clears its
+  `needs-human`. The shepherd watches the awaiting-human pool for a
+  human-actor `unlabeled` event on the takeover label and clears the stale
+  label (bounded per tick, skip-vetoed, and never triggered by the bot's own
+  auto-release).
 - **Shepherd timing:** 15-minute tick with a per-tick release cap — a backlog
   of expired PRs drains over a few ticks rather than one burst.
 
