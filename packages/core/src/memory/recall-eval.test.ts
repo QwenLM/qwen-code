@@ -186,7 +186,7 @@ function loadFixture(): EvalFixture {
   if (!isRecord(parsed)) {
     throw new Error('recall evaluation fixture must be an object');
   }
-  const { docs, cases } = parsed as EvalFixture;
+  const { docs, cases } = parsed as unknown as EvalFixture;
   if (!Array.isArray(docs) || !Array.isArray(cases)) {
     throw new Error('recall evaluation fixture must define docs and cases');
   }

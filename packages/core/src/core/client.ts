@@ -82,6 +82,7 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -308,6 +309,16 @@ type MemoryPrefetchHandle = {
   terminalLogged: boolean;
   firedAt: number;
   controller: AbortController;
+  /**
+   * Deterministic result published by recall before it blocks on the model
+   * selector. A box rather than a plain field because recall can invoke the
+   * callback before this handle object exists.
+   */
+  fastResultRef: { current: RelevantAutoMemoryPromptResult | null };
+  /** True after the fast result was injected — prevents double-inject and double-log. */
+  fastDelivered: boolean;
+  /** Paths injected by the fast phase, excluded from the later refined delivery. */
+  fastDeliveredPaths: Set<string>;
 };
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
@@ -860,30 +871,77 @@ export class GeminiClient {
       });
     }
 
-    if (
-      this.pendingMemoryPrefetch !== handle ||
-      handle.settledAt === null ||
-      handle.consumed
-    ) {
+    if (this.pendingMemoryPrefetch !== handle || handle.consumed) {
       return null;
     }
+
+    // Budget expired with the selector still in flight. Inject the
+    // deterministic result now rather than gambling on a later tool call:
+    // a turn that makes none has no safe delivery point at all. The handle
+    // stays pending so the model-selected result can still land later.
+    if (handle.settledAt === null) {
+      if (deliveryPoint !== 'initial' || handle.fastDelivered) {
+        return null;
+      }
+      const fast = handle.fastResultRef.current;
+      if (!fast?.prompt) {
+        return null;
+      }
+      handle.fastDelivered = true;
+      for (const doc of fast.selectedDocs) {
+        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        handle.fastDeliveredPaths.add(doc.filePath);
+      }
+      logMemoryRecallDelivery(
+        this.config,
+        new MemoryRecallDeliveryEvent({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: fast.strategy,
+          docs_selected: fast.selectedDocs.length,
+          latency_ms: Date.now() - handle.firedAt,
+        }),
+      );
+      return fast;
+    }
+
     handle.consumed = true;
     this.pendingMemoryPrefetch = undefined;
     const result = await handle.promise; // already settled, returns immediately
-    if (result.prompt) {
-      for (const doc of result.selectedDocs) {
+    // Drop anything the fast phase already put in front of the model. Both
+    // results come from the same scan, so the selector never saw the fast
+    // documents as excluded and can legitimately re-select them.
+    const remainingDocs = result.selectedDocs.filter(
+      (doc) => !handle.fastDeliveredPaths.has(doc.filePath),
+    );
+    const deduped =
+      remainingDocs.length === result.selectedDocs.length
+        ? result
+        : {
+            ...result,
+            selectedDocs: remainingDocs,
+            prompt:
+              remainingDocs.length > 0
+                ? buildRelevantAutoMemoryPrompt(remainingDocs)
+                : '',
+          };
+
+    if (deduped.prompt) {
+      for (const doc of deduped.selectedDocs) {
         this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
       }
-      this.logMemoryPrefetchDelivery(handle, deliveryPoint, result);
+      this.logMemoryPrefetchDelivery(handle, deliveryPoint, deduped);
     } else {
       this.logMemoryPrefetchDelivery(
         handle,
         'discarded',
-        result,
-        'no_relevant_results',
+        deduped,
+        result.selectedDocs.length > 0
+          ? 'already_delivered'
+          : 'no_relevant_results',
       );
     }
-    return result;
+    return deduped;
   }
 
   async resetChat(): Promise<void> {
@@ -2615,6 +2673,9 @@ export class GeminiClient {
           } else {
             signal.addEventListener('abort', onParentAbort, { once: true });
           }
+          const fastResultRef: {
+            current: RelevantAutoMemoryPromptResult | null;
+          } = { current: null };
           const promise = this.config
             .getMemoryManager()
             .recall(
@@ -2625,6 +2686,9 @@ export class GeminiClient {
                 excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
                 recentTools: [...this.recentCompletedToolNames],
                 abortSignal: controller.signal,
+                onFastResult: (result) => {
+                  fastResultRef.current = result;
+                },
               },
             )
             .catch((error: unknown) => {
@@ -2655,6 +2719,9 @@ export class GeminiClient {
             terminalLogged: false,
             firedAt: Date.now(),
             controller,
+            fastResultRef,
+            fastDelivered: false,
+            fastDeliveredPaths: new Set<string>(),
           };
           void promise.then((result) => {
             handle.result = result;

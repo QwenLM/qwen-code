@@ -4842,6 +4842,343 @@ hello
       expect(requestText).not.toContain('</system-reminder\uFE0F>');
     });
 
+    // Delivery-stage coverage for the deterministic fast path. The model
+    // selector is a network side query, so on a turn that makes no tool call
+    // the refined result has no safe delivery point at all. These cases pin
+    // the fast path that closes that gap, plus the dedupe, cancellation, and
+    // exactly-once guarantees it must not break.
+    const fastDoc = (filePath: string, body: string) => ({
+      type: 'user' as const,
+      filePath,
+      relativePath: filePath.split('/').at(-1)!,
+      filename: filePath.split('/').at(-1)!,
+      title: 'User Memory',
+      description: 'User preferences',
+      body,
+      mtimeMs: 1,
+    });
+
+    const toolCallStream = () =>
+      (async function* () {
+        yield { type: 'content', value: 'Hello' };
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'call-1',
+            name: 'foo',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-fast',
+          },
+        };
+      })();
+
+    it('delivers the deterministic fast result on a tool-free turn when the selector is still in flight', async () => {
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+          strategy: 'heuristic',
+        });
+        // Selector never settles — stands in for a slow round trip.
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-tool-free',
+        ),
+      );
+
+      // Held for the budget, then the fast result goes out instead of nothing.
+      await vi.advanceTimersByTimeAsync(99);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('still delivers the model-selected result at ToolResult after a fast initial delivery', async () => {
+      vi.useFakeTimers();
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: ReturnType<typeof fastDoc>[];
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(toolCallStream());
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const userDone = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-then-refined',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await userDone;
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+
+      // Selector lands between turns with a different document.
+      settleRecall!({
+        prompt: '## Relevant memory\n\nRefined model result.',
+        selectedDocs: [fastDoc('/m/refined.md', '- refined')],
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-fast-then-refined-tool',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Refined model result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('does not re-deliver a document the fast phase already injected', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: ReturnType<typeof fastDoc>[];
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nOverlapping memory body.',
+          selectedDocs: [overlapping],
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(toolCallStream());
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const userDone = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await userDone;
+
+      // The selector re-selects the fast document alongside a genuinely new
+      // one — it never saw the fast delivery, so overlap is expected.
+      // Markers live only in the selector's own prompt string. Dedupe must
+      // rebuild the prompt from the remaining documents, dropping them; if the
+      // result were passed through untouched the markers would survive.
+      settleRecall!({
+        prompt: '## Relevant memory\n\nOVERLAP_MARKER\n\nNEW_MARKER',
+        selectedDocs: [overlapping, fastDoc('/m/new.md', '- brand new')],
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe-tool',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      const toolRequest = mockTurnRunFn.mock.calls.at(-1)?.[1] as unknown[];
+      const toolText = JSON.stringify(toolRequest);
+      // The genuinely new document still reaches the model, rendered from its
+      // own body by the rebuilt prompt.
+      expect(toolText).toContain('brand new');
+      // The overlapping document was already in front of the model from the
+      // fast delivery; sending it again would duplicate context. Passing the
+      // selector result through unchanged would leave both markers intact.
+      expect(toolText).not.toContain('OVERLAP_MARKER');
+      expect(toolText).not.toContain('- overlapping');
+    });
+
+    it('delivers no fast result when the turn is cancelled inside the initial window', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+          strategy: 'heuristic',
+        });
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          controller.signal,
+          'prompt-id-fast-cancelled',
+        ),
+      ).catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(50);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(100);
+      await done;
+
+      expect(mockTurnRunFn).not.toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('does not leak a fast result across query boundaries', async () => {
+      vi.useFakeTimers();
+      let call = 0;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        call += 1;
+        if (call === 1) {
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFirst turn fast result.',
+            selectedDocs: [fastDoc('/m/first.md', '- first')],
+            strategy: 'heuristic',
+          });
+        }
+        // Neither recall settles; the second turn must not inherit the first
+        // turn's fast result.
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const first = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'First question' }],
+          new AbortController().signal,
+          'prompt-id-fast-leak-1',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await first;
+
+      mockTurnRunFn.mockClear();
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello again' };
+        })(),
+      );
+
+      const second = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Second question' }],
+          new AbortController().signal,
+          'prompt-id-fast-leak-2',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await second;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('First turn fast result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
     it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
       mockMemoryManager.recall.mockResolvedValue({
         prompt: '## Relevant memory\n\nUser prefers terse responses.',
@@ -5425,6 +5762,9 @@ hello
         result: null,
         consumed: false,
         terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
         firedAt: Date.now(),
         controller,
       };
@@ -5471,6 +5811,9 @@ hello
         result: null,
         consumed: false,
         terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };
@@ -5556,6 +5899,9 @@ hello
         result: null,
         consumed: false,
         terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };
@@ -6175,6 +6521,9 @@ hello
         result,
         consumed: false,
         terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };

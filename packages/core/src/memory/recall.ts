@@ -17,6 +17,13 @@ import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js
 import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 
 const MAX_RELEVANT_DOCS = 5;
+/**
+ * Upper bound on the deterministic fast result. Deliberately far below
+ * MAX_RELEVANT_DOCS: this path has no model judgement behind it, so it takes
+ * only the highest-scoring documents and leaves the remaining prompt budget
+ * to the model-selected result that follows.
+ */
+export const MAX_FAST_RECALL_DOCS = 2;
 const MAX_DOC_BODY_CHARS = 1_200;
 const MAX_HEURISTIC_QUERY_TOKENS = 64;
 const MAX_MODEL_CANDIDATE_DOCS = 200;
@@ -306,6 +313,21 @@ export interface ResolveRelevantAutoMemoryPromptOptions {
   recentTools?: readonly string[];
   /** When provided and aborted, suppresses logMemoryRecall telemetry for discarded results. */
   abortSignal?: AbortSignal;
+  /**
+   * Invoked with a deterministic, model-free result as soon as the shared
+   * scan has produced candidates — before the model selector is called.
+   *
+   * The model selector is a network side query, so the full result settles in
+   * round-trip time. A caller with a short initial-turn budget (see
+   * `INITIAL_MEMORY_RECALL_WAIT_MS`) would otherwise have nothing to inject
+   * on a turn that makes no tool call, because there is no later safe
+   * delivery point on such a turn. This callback reuses the candidates the
+   * selector was going to score anyway, so it costs no extra scan or I/O.
+   *
+   * Fires at most once, never after `abortSignal` aborts, and never when the
+   * deterministic pass found nothing.
+   */
+  onFastResult?: (result: RelevantAutoMemoryPromptResult) => void;
 }
 
 export interface RelevantAutoMemoryPromptResult {
@@ -387,6 +409,19 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         limit,
       );
       fallbackDocs = candidates.fallbackDocs;
+      // Publish the deterministic candidates before blocking on the selector
+      // round trip. `fallbackDocs` is already lexically ranked and already has
+      // active-tool noise filtered out by selectModelCandidateDocuments.
+      if (options.onFastResult && !options.abortSignal?.aborted) {
+        const fastDocs = fallbackDocs.slice(0, MAX_FAST_RECALL_DOCS);
+        if (fastDocs.length > 0) {
+          options.onFastResult({
+            prompt: buildRelevantAutoMemoryPrompt(fastDocs),
+            selectedDocs: fastDocs,
+            strategy: 'heuristic',
+          });
+        }
+      }
       const selectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
         options.config,
         query,
