@@ -510,6 +510,16 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const throwApiError = (error: unknown): never => {
+      const errorText = parseAndFormatApiError(
+        error,
+        config.getContentGeneratorConfig()?.authType,
+      );
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${errorText}\n`);
+      }
+      throw new AlreadyReportedError(errorText);
+    };
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
@@ -2223,7 +2233,9 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          // Use adapter for all event processing
+          if (event.type === GeminiEventType.Error) {
+            throwApiError(event.value.error);
+          }
           adapter.processEvent(event);
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
@@ -2247,19 +2259,6 @@ export async function runNonInteractive(
               );
             }
             loopDetected = true;
-          }
-          if (event.type === GeminiEventType.Error) {
-            const errorText = parseAndFormatApiError(
-              event.value.error,
-              config.getContentGeneratorConfig()?.authType,
-            );
-            if (outputFormat === OutputFormat.TEXT) {
-              process.stderr.write(`${errorText}\n`);
-            }
-            // The adapter has already received the formatted API error. Mark
-            // the throw so handleError does not format it a second time; JSON
-            // adapters still emit their terminal error result in the catch.
-            throw new AlreadyReportedError(errorText);
           }
         }
 
@@ -2540,6 +2539,9 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
+                if (event.type === GeminiEventType.Error) {
+                  throwApiError(event.value.error);
+                }
                 adapter.processEvent(event);
                 if (event.type === GeminiEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
@@ -2552,18 +2554,6 @@ export async function runNonInteractive(
                     );
                   }
                   loopDetected = true;
-                }
-                if (event.type === GeminiEventType.Error) {
-                  const errorText = parseAndFormatApiError(
-                    event.value.error,
-                    config.getContentGeneratorConfig()?.authType,
-                  );
-                  if (outputFormat === OutputFormat.TEXT) {
-                    process.stderr.write(`${errorText}\n`);
-                  }
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError does not reformat it.
-                  throw new AlreadyReportedError(errorText);
                 }
               }
 
@@ -2960,6 +2950,9 @@ export async function runNonInteractive(
       }
       if (recoverableCancellation) {
         return 130;
+      }
+      if (!ownsAdapter && outputFormat === OutputFormat.STREAM_JSON) {
+        throw error;
       }
       await handleError(error, config);
     } finally {

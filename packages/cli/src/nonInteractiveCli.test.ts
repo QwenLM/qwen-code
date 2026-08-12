@@ -62,7 +62,10 @@ import type { ControlService } from './nonInteractive/control/ControlService.js'
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
-import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
+import {
+  _resetCleanupFunctionsForTest,
+  registerCleanup,
+} from './utils/cleanup.js';
 import {
   AlreadyReportedError,
   _resetExitLatchForTest,
@@ -4212,6 +4215,7 @@ describe('runNonInteractive', () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(
       OutputFormat.STREAM_JSON,
     );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(true);
     setupMetricsMock();
 
     const apiErrorEvent: ServerGeminiStreamEvent = {
@@ -4250,6 +4254,12 @@ describe('runNonInteractive', () => {
     }>;
     const results = messages.filter((message) => message.type === 'result');
 
+    expect(
+      messages.filter((message) => message.type === 'assistant'),
+    ).toHaveLength(0);
+    expect(
+      messages.filter((message) => message.type === 'stream_event'),
+    ).toHaveLength(0);
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({
       subtype: 'error_during_execution',
@@ -4257,6 +4267,42 @@ describe('runNonInteractive', () => {
       error: { message: expect.stringContaining('401') },
     });
     expect(results[0].error?.message).toContain('Incorrect API key provided');
+  });
+
+  it('does not run process-exit cleanup for API errors with a session-owned adapter', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const cleanup = vi.fn();
+    registerCleanup(cleanup);
+    const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Error,
+          value: {
+            error: {
+              message: '401 Incorrect API key provided',
+              status: 401,
+            },
+          },
+        },
+      ]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-session-api-error',
+        { adapter },
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    expect(cleanup).not.toHaveBeenCalled();
   });
 
   it('emits an error result for API error events while draining stream-json notifications', async () => {
