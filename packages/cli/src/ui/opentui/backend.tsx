@@ -35,7 +35,9 @@ import {
   resolveMetadataKey,
   tildeifyPath,
   shortenPath,
+  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
+import { fmtTokens } from '../components/stats-helpers.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { readFileSync } from 'node:fs';
@@ -951,10 +953,22 @@ function App({
     typeof fm === 'string'
       ? fm
       : ((fm as { id?: string } | undefined)?.id ?? '');
+  const promptTokenCount = uiTelemetryService.getLastPromptTokenCount();
+  const contextWindowSize = (
+    config as {
+      getContentGeneratorConfig?: () => { contextWindowSize?: number };
+    }
+  )?.getContentGeneratorConfig?.()?.contextWindowSize;
+  const contextPct =
+    contextWindowSize && promptTokenCount > 0
+      ? ((promptTokenCount / contextWindowSize) * 100).toFixed(1)
+      : null;
   const footerLine1 =
     `→ ${footerProject}` +
     (footerBranch ? ` · git:(${footerBranch})` : '') +
-    (footerModel ? ` · ${footerModel}` : '');
+    (footerModel ? ` · ${footerModel}` : '') +
+    (contextWindowSize ? ` · ${fmtTokens(contextWindowSize)} Context` : '') +
+    (contextPct ? ` ${contextPct}% used` : '');
   const modeName = approvalModeLabel(String(approvalMode ?? ''));
   const modeColor =
     modeName === 'YOLO'
@@ -1113,6 +1127,9 @@ function App({
             <text fg={modeColor}>{`${modeName} mode`}</text>
             <text fg={C.dim}>{' (shift + tab to cycle)'}</text>
           </box>
+          {contextPct != null && (
+            <text fg={C.dim}>{`${contextPct}% used`}</text>
+          )}
         </box>
       </scrollbox>
 
