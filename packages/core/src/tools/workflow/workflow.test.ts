@@ -258,6 +258,32 @@ describe('WorkflowTool', () => {
     await expect(run(false)).resolves.toEqual(await run(undefined));
   });
 
+  // A headless run (`qwen --prompt`, CI, a cron job) has no TUI, no approval
+  // bridge, and a closed stdin. `getDefaultPermission()` is 'ask', which the
+  // scheduler resolves against the run's approval mode — but nothing INSIDE
+  // the tool or the runner may reach for interactivity, or the foreground
+  // call would hang forever on a prompt no one can answer. This is the
+  // regression test for that contract; the background half is already
+  // refused explicitly (see the interactive-TUI guard above).
+  it('foreground execute() completes with no interactive session or completion channel', async () => {
+    const registry = new WorkflowRunRegistry();
+    const config = {
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    expect(registry.hasCompletionCallback()).toBe(false);
+
+    const result = await new WorkflowTool(config, {
+      dispatch: async (prompt) => `answered:${prompt}`,
+    })
+      .build({ script: `return await agent('what is it');` })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result.llmContent)).toContain('answered:what is it');
+  });
+
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {
     const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-'));
     try {

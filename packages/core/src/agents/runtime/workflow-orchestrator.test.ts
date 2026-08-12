@@ -15,6 +15,12 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   resolveMaxAgentsPerRun,
   resolveConcurrencyLimit,
+  resolveSubagentMaxTurns,
+  resolveSubagentMaxTimeMinutes,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+  HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING,
+  HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
@@ -123,6 +129,36 @@ vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
     }),
   };
 });
+
+// `workingDir` resolution (shared with AgentTool's `working_dir`) is unit
+// tested in `agents/worktree-pin.test.ts` against a mocked GitWorktreeService.
+// Here it is a seam: these tests assert what the ORCHESTRATOR does with the
+// resolver's verdict — routes off the fast path, rebinds the runtime context,
+// surfaces the refusal — not whether git considers a directory registered.
+const pinStub = vi.hoisted(() => ({
+  resolve: {
+    value: undefined as ((workingDir: string) => Promise<unknown>) | undefined,
+  },
+  seenLabels: [] as string[],
+}));
+
+vi.mock('../worktree-pin.js', () => ({
+  resolveExternalWorktreeDir: async (
+    _config: unknown,
+    workingDir: string,
+    label = 'working_dir',
+  ) => {
+    pinStub.seenLabels.push(label);
+    return (
+      (await pinStub.resolve.value?.(workingDir)) ?? {
+        path: `/fake/repo/${workingDir}`,
+        branch: 'pr-7',
+        slug: workingDir,
+        repoRoot: '/fake/repo',
+      }
+    );
+  },
+}));
 
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
@@ -1828,6 +1864,51 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(9999);
     });
 
+    // A build-and-test agent, or an analysis of a 2 000-line file, exceeds
+    // 50 turns / 10 minutes routinely — and under GOAL-terminal semantics
+    // being cut off shows up as a `null` element, i.e. an agent that
+    // silently went missing. Both bounds are operator-tunable, on the same
+    // contract as the agent cap.
+    it('per-subagent bounds default, honor an override, and clamp', () => {
+      expect(resolveSubagentMaxTurns({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+      );
+      expect(resolveSubagentMaxTimeMinutes({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      );
+      expect(
+        resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '120' }),
+      ).toBe(120);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '45',
+        }),
+      ).toBe(45);
+      expect(
+        resolveSubagentMaxTurns({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '999999',
+        }),
+      ).toBe(HARD_WORKFLOW_SUBAGENT_MAX_TURNS_CEILING);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '999999',
+        }),
+      ).toBe(HARD_WORKFLOW_SUBAGENT_MAX_MINUTES_CEILING);
+    });
+
+    it('per-subagent bounds reject non-decimal-integer overrides', () => {
+      for (const raw of ['0', 'abc', '2.5', '0x10', '1e3']) {
+        expect(
+          resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: raw }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS);
+        expect(
+          resolveSubagentMaxTimeMinutes({
+            QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: raw,
+          }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES);
+      }
+    });
+
     it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
@@ -1895,6 +1976,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
     );
+    pinStub.resolve.value = undefined;
+    pinStub.seenLabels.length = 0;
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -1906,6 +1989,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
+    /** What the subagent's Config answers for "where am I?". */
+    runtimeTargetDir?: string;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
@@ -1977,6 +2062,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
+            runtimeTargetDir: runtimeContext.getTargetDir(),
             options: { runConfigOverrides: options?.runConfigOverrides },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
@@ -2678,6 +2764,76 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       dispatch('extract', { schema: { type: 'object' } }),
     ).rejects.toThrow(/simulated subagent failure/);
     expect(helper.disposed).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── workingDir: pin to a caller-owned worktree ─────────────────
+
+  // The fast path hands `config` to AgentHeadless untouched and has no way
+  // to rebind a directory, so a `workingDir` that reached it would be
+  // silently dropped and the agent would run in the parent working tree —
+  // the exact failure the option exists to prevent.
+  it('workingDir forces the override path even with no agentType/model/schema', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    created.length = 0;
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+      }),
+    ).resolves.toBe('pinned');
+
+    // Went through SubagentManager, not the fast path's AgentHeadless.create.
+    expect(helper.calls).toHaveLength(1);
+    expect(created).toHaveLength(0);
+  });
+
+  it('workingDir rebinds the subagent runtime context to the pinned directory', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    // The subagent's Config answers with the pinned directory, not the
+    // parent's '/fake/repo' — that rebind is what makes its file, shell and
+    // search tools resolve inside the worktree.
+    expect(helper.calls[0]!.runtimeTargetDir).toBe(
+      '/fake/repo/.qwen/tmp/review-pr-7',
+    );
+    expect(helper.calls[0]!.runtimeContextSame).toBe(false);
+  });
+
+  // A refused pin must abort the dispatch, not fall through to an agent
+  // running in the parent tree — the failure mode the pin exists to prevent.
+  it('workingDir surfaces the resolver refusal and dispatches nothing', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'workingDir "x" is not a registered linked worktree.',
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      }),
+    ).rejects.toThrow(
+      /agent\(\{workingDir: "not-a-worktree"\}\).*not a registered linked worktree/,
+    );
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The resolver names the offending parameter in its errors; a workflow
+  // script never wrote `working_dir`, so it must be told the opt's own name.
+  it('names the workflow opt, not the tool parameter, when resolving', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', { workingDir: 'wt' });
+    expect(pinStub.seenLabels).toEqual(['workingDir']);
   });
 
   // ─── isolation:'worktree' provision error branches ──────────────

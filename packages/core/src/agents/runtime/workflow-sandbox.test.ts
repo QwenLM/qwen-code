@@ -1366,6 +1366,50 @@ describe('createWorkflowSandbox security', () => {
     );
   });
 
+  it('agent({workingDir}) is passed through to dispatch', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { workingDir: ".qwen/tmp/review-pr-7" });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { workingDir?: unknown }).workingDir).toBe(
+      '.qwen/tmp/review-pr-7',
+    );
+  });
+
+  it('agent({workingDir}) rejects a non-string', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: 7 });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+  });
+
+  // The two options make opposite claims about who owns the directory's
+  // lifetime, so the contradiction is named rather than resolved by
+  // precedence — a script that got a silent winner would believe it was
+  // isolated when it was pinned, or vice versa.
+  it('agent({workingDir, isolation}) rejects the combination', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(
+        `return agent("x", { workingDir: "wt", isolation: "worktree" });`,
+      ),
+    ).rejects.toThrow(/incompatible options/);
+  });
+
   it('agent({isolation:"remote"}) is passed through to dispatch in P3', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({
