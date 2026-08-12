@@ -4089,8 +4089,19 @@ jobs:
           # merge base: the three-dot diff exits 128. Fail OPEN to zero like
           # the merge-tree conflict probe above — an unmeasurable PR skips
           # the brake rather than dying red at measurement every round.
-          NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TOTAL=0
-          NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TEST=0
+          # A managed fork PR whose head branch is literally named 'main'
+          # makes prepare's fork update-ref re-point refs/remotes/origin/main
+          # at the fork head — the measurement would compare the branch
+          # against itself (0/0 forever). Unmeasurable: skip the brake
+          # (fail open), like the no-merge-base case.
+          if [[ "${BRANCH}" == 'main' ]]; then
+            echo "📏 growth measurement skipped: fork head branch is named 'main' (origin/main was re-pointed at checkout)"
+            NET_TOTAL=0
+            NET_TEST=0
+          else
+            NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TOTAL=0
+            NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TEST=0
+          fi
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           # The marker's window field is spelled `key=`, NOT `win=`, on
           # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
