@@ -33,6 +33,12 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       kind: 'secret',
       required: true,
     },
+    {
+      key: 'interactiveCards',
+      label: 'Interactive Cards',
+      kind: 'object',
+      properties: [{ key: 'enabled', label: 'Enabled', kind: 'boolean' }],
+    },
   ],
 };
 
@@ -78,6 +84,20 @@ const GITHUB_LOCAL_GH: DaemonChannelTypeDescriptor = {
       key: 'useLocalGh',
       label: 'Use Local GitHub CLI Authentication',
       kind: 'boolean',
+    },
+  ],
+};
+
+const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
+  type: 'example',
+  displayName: 'Example',
+  manageable: true,
+  fields: [
+    {
+      key: 'timeoutMs',
+      label: 'Timeout (ms)',
+      kind: 'number',
+      exclusiveMinimum: 0,
     },
   ],
 };
@@ -164,6 +184,12 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it('does not render object metadata as a text field', async () => {
+    await renderDialog();
+
+    expect(inputByLabel('Interactive Cards')).toBeNull();
+  });
+
   it('preserves a stored secret until Replace is explicitly selected', async () => {
     await renderDialog({ instance: INSTANCE });
 
@@ -338,6 +364,60 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).toContain('Pairing approvals');
     expect(document.body.textContent).not.toContain('Configured allowlist');
+  });
+
+  it('re-sends the stored object config when editing an existing instance', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: {
+        ...INSTANCE.config,
+        interactiveCards: { enabled: true, statusCard: { enabled: true } },
+      },
+    };
+    await renderDialog({ instance, onSave });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith('release-bot', {
+      expectedRevision: 'revision-1',
+      config: {
+        type: 'dingtalk',
+        clientId: 'stored-id',
+        senderPolicy: 'open',
+        interactiveCards: { enabled: true, statusCard: { enabled: true } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+  });
+
+  it('shows the out-of-range message for a number at the exclusive minimum', async () => {
+    await renderDialog({ descriptor: EXCLUSIVE_MINIMUM });
+
+    const name = inputByLabel('Instance name');
+    const timeoutMs = inputByLabel('Timeout (ms)');
+    expect(name).not.toBeNull();
+    expect(timeoutMs).not.toBeNull();
+    await act(async () => {
+      setInputValue(name!, 'example-bot');
+      setInputValue(timeoutMs!, '0');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 0.',
+    );
   });
 
   it('shows pairing affordance from a descriptor-driven groupPolicy draft', async () => {

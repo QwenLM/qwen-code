@@ -42,13 +42,19 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
-  expectedRoundSeconds,
+  clearBudgetStop,
+  expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
+  roundCapStopEntry,
   stampRound,
+  verifyBudgetExhausted,
+  verifyBudgetMessage,
   writeBudgetStop,
+  writeRoundCapStop,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -61,7 +67,6 @@ import {
   writeFindingsFile,
 } from './lib/prompt-record.js';
 import {
-  REVERSE_AUDIT_MAX_ROUNDS,
   scheduleReverseAuditRound,
   type RoundSchedule,
 } from './lib/retirement.js';
@@ -127,14 +132,20 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   repositoryContext?: unknown;
+  budget?: { agentToolBudget?: unknown };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
 interface HeavyFile {
   path: string;
   heavy?: boolean;
+  kind?: string;
   addedRanges?: Array<{ start: number; end: number }>;
   diffRange?: { startLine: number; endLine: number };
+  addedLines?: number;
+  removedLines?: number;
+  /** Post-change file length — `FileMetric.fileLines`, in every plan. */
+  fileLines?: number;
 }
 
 /**
@@ -277,6 +288,157 @@ function chunkFrom(
 }
 
 /**
+ * The cumulative findings list a reverse auditor is ordered to read in
+ * full, in pages: measured at 65-82 KB on real runs. An estimate on
+ * purpose — the list grows round over round and the brief is built before
+ * the round runs; the ceiling is soft, so the error costs a disclosure.
+ */
+const FINDINGS_LIST_READS = 3;
+
+/**
+ * Lines a single `read_file` page holds, for estimating an invariant
+ * agent's paging through its post-change file: the read cap's worth of
+ * characters at a measured ~50 characters per source line.
+ */
+const LINES_PER_FILE_READ = 500;
+
+/**
+ * The reads a whole-diff assignment actually takes: each chunk costs its
+ * PAGES, not a flat one — an oversized chunk's `read_file` comes back
+ * `isTruncated` and the extra pages were being paid out of the analysis
+ * allowance.
+ */
+function wholeDiffReadPages(report: PlanReport): number {
+  return (Array.isArray(report.chunks) ? report.chunks : []).reduce(
+    (n: number, c) => {
+      const chars = (c as { chars?: number })?.chars;
+      return (
+        n +
+        Math.max(
+          1,
+          Math.ceil(
+            (typeof chars === 'number' && Number.isFinite(chars) ? chars : 0) /
+              READ_FILE_CHAR_CAP,
+          ),
+        )
+      );
+    },
+    0,
+  );
+}
+
+/**
+ * A chunk's territory in the same source-weighted units the plan-level
+ * budget is derived from. `reviewBudget` reads `effective = max(src,
+ * total/8)` because prose and generated lines carry less a reviewer can
+ * get wrong — a scoped allowance scaling off RAW chunk lines inverted
+ * that: a 600-line lockfile chunk out-earned a 200-line source chunk. The
+ * chunk's own file spans are weighted by `report.files[].kind` (a path the
+ * plan does not classify counts as source — erring toward more headroom),
+ * and the weight scales `chunk.lines` so the unit stays the chunk's own.
+ */
+function weightedTerritoryLines(
+  report: PlanReport,
+  chunk: { lines?: number; files?: unknown },
+): number {
+  const lines =
+    typeof chunk.lines === 'number' && Number.isFinite(chunk.lines)
+      ? Math.max(0, Math.floor(chunk.lines))
+      : 0;
+  if (lines === 0) return 0;
+  const kinds = new Map(
+    (Array.isArray(report.files) ? (report.files as HeavyFile[]) : [])
+      .filter((f) => !!f && typeof f.path === 'string')
+      .map((f) => [f.path, f.kind]),
+  );
+  let src = 0;
+  let other = 0;
+  for (const f of Array.isArray(chunk.files) ? chunk.files : []) {
+    const e = f as { path?: string; newStart?: number; newEnd?: number };
+    const span =
+      typeof e?.newStart === 'number' && typeof e?.newEnd === 'number'
+        ? e.newEnd - e.newStart + 1
+        : 0;
+    if (!(span > 0)) continue;
+    const kind = typeof e.path === 'string' ? kinds.get(e.path) : undefined;
+    if (kind === undefined || kind === 'source') src += span;
+    else other += span;
+  }
+  const total = src + other;
+  if (total === 0) return lines;
+  return Math.max(1, Math.round((lines * (src + other / 8)) / total));
+}
+
+/**
+ * The soft tool-call ceiling for finder/auditor briefs (see lib/budget.ts,
+ * `agentToolBudget` and `launchToolBudget`). Empty when the plan predates
+ * the budget field — an old plan fails toward more coverage, exactly like
+ * the pre-budget fallback the skill documents — and empty for the roles
+ * whose brief declares `budgetExempt` (the reason lives at each role's
+ * entry in agent-briefs).
+ *
+ * The ceiling is per LAUNCH, not per plan: a scoped agent's allowance is
+ * derived from its own territory (its chunk, its heavy file) but never
+ * exceeds the plan's recorded allowance, and every launch's mandatory
+ * reads ride on top of the allowance — a whole-diff role on a huge diff
+ * is assigned more chunk reads than a flat cap holds. The reads estimate
+ * counts the launch's whole reading list — the brief file itself, the
+ * diff pages, and any files the role's method mandates — and it is an
+ * estimate: the ceiling is soft, so roughness costs a disclosure, never a
+ * truncation.
+ *
+ * The wording is deliberate on three points. "Stop exploring" is aimed at
+ * the measured pathology — the slowest agent of a wave is reliably one
+ * that kept walking the tree past any recall gain (two runs of the same
+ * 14-agent wave: 11.7 vs 41 minutes). The recall restatement is inline
+ * and self-contained (a chunk brief has no RECALL section to cite)
+ * because a budget that reads as a reporting cap would suppress exactly
+ * the low-confidence candidates the pipeline's later stages exist to
+ * judge. And the disclosure format is FIXED (`Budget gap: <the check>`,
+ * one per line) because check-coverage parses those lines out of the
+ * transcript and reports them — a gap the orchestrator must then rule on,
+ * exactly as it rules on whiffs.
+ */
+function toolBudgetBlock(
+  report: PlanReport,
+  launch: { territoryLines?: number | null; mandatoryReads: number },
+): string[] {
+  const base = report.budget?.agentToolBudget;
+  if (typeof base !== 'number' || !Number.isFinite(base) || base <= 0) {
+    return [];
+  }
+  // The plan is parsed off disk with an unchecked cast, so a garbled chunk
+  // entry can hand this NaN — which must degrade to the floor, not render
+  // `About **NaN tool calls**` into a brief.
+  const reads = Number.isFinite(launch.mandatoryReads)
+    ? Math.max(0, Math.floor(launch.mandatoryReads))
+    : 0;
+  const territory =
+    typeof launch.territoryLines === 'number' &&
+    Number.isFinite(launch.territoryLines)
+      ? launch.territoryLines
+      : launch.territoryLines === null || launch.territoryLines === undefined
+        ? null
+        : 0;
+  const total = launchToolBudget(base, territory, reads);
+  return [
+    '',
+    '## Tool budget',
+    '',
+    `About **${total} tool calls** for this whole review — reads, greps, shell, ` +
+      `everything — and the ~${reads} reads your launch is assigned (your ` +
+      'brief, the diff pages, any files your method mandates) are already ' +
+      'counted in. It is a soft ceiling. At the ceiling: stop exploring, write ' +
+      'your findings from the evidence already in hand, and disclose each ' +
+      'unfinished check on its own line, exactly as `Budget gap: <the check>` — ' +
+      'the coverage tool reads those lines, so the format is load-bearing. The ' +
+      'budget never suppresses a finding: a candidate you can already name goes ' +
+      'in your return regardless (at `Confidence: low` if the budget stopped ' +
+      'you before verifying it).',
+  ];
+}
+
+/**
  * The launch prompt for the agent that owns `chunk`.
  *
  * Exported for the tests, which assert the properties that were missing from
@@ -383,6 +545,31 @@ export function buildChunkAgentPrompt(
   const repositoryContext = repositoryContextOf(report);
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
+  }
+
+  // NOT for an unreachable chunk: its instruction is to return the exact
+  // `Uncoverable:` line and stop, and a budget block telling it to "write your
+  // findings from the evidence in hand" beside that is the same two-masters
+  // contradiction the receipt guard below documents — an agent that follows
+  // the budget's disclosure format instead of the exact receipt line turns a
+  // disclosed uncoverable gap into a hard coverage failure.
+  if (!unreachable) {
+    parts.push(
+      ...toolBudgetBlock(report, {
+        territoryLines: weightedTerritoryLines(report, chunk),
+        // The launch's whole reading list: the brief file, plus the diff pages
+        // this chunk takes.
+        mandatoryReads:
+          1 +
+          Math.max(
+            1,
+            Math.ceil(
+              (Number.isFinite(chunk.chars) ? chunk.chars : 0) /
+                READ_FILE_CHAR_CAP,
+            ),
+          ),
+      }),
+    );
   }
 
   // Deliberately NOT included: a sentence for the agent to recite when it finds
@@ -507,6 +694,19 @@ export function buildWholeDiffBlock(
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
   }
+  // An Agent 8 specialist is a whole-diff finder like any other: without
+  // this block it was the one launch class that could still spend 40-100
+  // calls wandering — recreating exactly the slowest-agent tail the budget
+  // exists to cut. This block is built for Agent 8 ALONE — every rostered
+  // role's launch comes out of `--roster`/`--role` with its reading block
+  // and (unless its brief declares `budgetExempt`) its own budget already
+  // inside, so prepending this to a role brief would double-budget it and
+  // hand the exempt roles the ceiling their exemption exists to withhold.
+  // Its domain brief is appended inline by the orchestrator, not read from
+  // disk, so the reading list is the diff pages alone.
+  parts.push(
+    ...toolBudgetBlock(report, { mandatoryReads: wholeDiffReadPages(report) }),
+  );
   parts.push(...tail(rules));
   return parts.join('\n');
 }
@@ -830,6 +1030,87 @@ export function buildRoleBrief(
   }
 
   parts.push('## Your dimension', '', brief.brief);
+  // The exemptions are declared on the briefs (`budgetExempt`), each with
+  // its reason at the role's entry — a hardcoded name list here is how a
+  // later role whose work does not scale with the diff would silently
+  // receive a diff-derived ceiling.
+  if (!brief.budgetExempt) {
+    const chunks = (
+      Array.isArray(report.chunks) ? report.chunks : []
+    ) as Array<{ id?: number; lines?: number; chars?: number }>;
+    if (typeof opts.chunk === 'number') {
+      // A chunk-scoped launch (a 3B reverse-audit chunk agent): its own
+      // territory, not the whole diff's.
+      const c = chunks.find((x) => x?.id === opts.chunk);
+      parts.push(
+        ...toolBudgetBlock(report, {
+          territoryLines: weightedTerritoryLines(report, c ?? {}),
+          // Its reading list: the brief file, the chunk's diff pages, and
+          // the cumulative findings list its brief orders read in full —
+          // measured at 65-82 KB on real runs, several pages of it.
+          mandatoryReads:
+            1 +
+            Math.max(
+              1,
+              Math.ceil(
+                (typeof c?.chars === 'number' && Number.isFinite(c.chars)
+                  ? c.chars
+                  : 0) / READ_FILE_CHAR_CAP,
+              ),
+            ) +
+            FINDINGS_LIST_READS,
+        }),
+      );
+    } else if (role.startsWith('invariant-') && opts.file) {
+      // One heavy file: budget on its changed lines, with a rough page
+      // allowance for the post-change read plus its own diff slice — the
+      // ceiling is soft, so the roughness costs a disclosure, never a
+      // truncation.
+      const files = (
+        Array.isArray(report.files) ? report.files : []
+      ) as HeavyFile[];
+      const f = files.find((x) => x?.path === opts.file);
+      const added = typeof f?.addedLines === 'number' ? f.addedLines : 0;
+      const fileLines =
+        typeof f?.fileLines === 'number' && Number.isFinite(f.fileLines)
+          ? f.fileLines
+          : 0;
+      const changed =
+        added + (typeof f?.removedLines === 'number' ? f.removedLines : 0);
+      parts.push(
+        ...toolBudgetBlock(report, {
+          territoryLines: changed,
+          // Its reading list: the brief, its own diff slice, and the whole
+          // post-change file paged to the end. The pages come from
+          // `fileLines` — the post-change length the plan records for
+          // every file — with `addedLines` as the fallback lower bound
+          // for an older plan without it: a file can go heavy by VOLUME
+          // in a large file it barely rewrote, and estimating its paging
+          // from added lines alone told exactly that agent its mandatory
+          // reading was already overspending. Floors at the old flat 4 so
+          // no launch gets less than before.
+          mandatoryReads: Math.max(
+            4,
+            2 + Math.ceil(Math.max(added, fileLines) / LINES_PER_FILE_READ),
+          ),
+        }),
+      );
+    } else {
+      // A whole-diff role is assigned every chunk's PAGES, plus its brief —
+      // plus, for a findings-bearing role (the chunkless Step 3A reverse
+      // auditor), the cumulative findings list its brief orders read in
+      // full, exactly as the chunk-scoped branch counts it. Keyed on the
+      // brief's own `acceptsFindings` declaration, not the role name.
+      parts.push(
+        ...toolBudgetBlock(report, {
+          mandatoryReads:
+            1 +
+            wholeDiffReadPages(report) +
+            (brief.acceptsFindings ? FINDINGS_LIST_READS : 0),
+        }),
+      );
+    }
+  }
   const repositoryContext = repositoryContextOf(report);
   if (role === '7') {
     if (repositoryContext) {
@@ -1581,15 +1862,50 @@ function requireAuditableChunks(report: PlanReport): DiffChunk[] {
  * round was refused: the caller builds nothing. The admission STAMP is not
  * written here — it lands after the build succeeds, in each build path: the
  * stamp is what the next round's gate measures cost from, and a build that
- * throws must not leave one behind.
+ * throws must not leave one behind. `fanOutWidth` is the auditors this
+ * round fans out (1 for a whole-diff round): when the previous round is
+ * still in flight — the convergence pair's second member — the price
+ * covers both members' wall in waves of the tool-concurrency pool, not
+ * just this round's (deadline.ts `expectedAdmissionSeconds`).
  */
 function admitReverseAuditRound(
   planPath: string,
   round: number | undefined,
+  cap: number,
+  fanOutWidth: number,
 ): boolean {
+  // The plan's round cap first: deterministic, and cheaper than the
+  // deadline arithmetic. The full cap normally; a reduced cap for a huge
+  // diff, where a single reverse-audit round is ~90 minutes and the full
+  // loop cannot finish (measured: the 6-hour CI reviews that posted nothing
+  // were 4,000-5,300-line PRs). A round past the cap writes a marker so
+  // `compose-review` caps the verdict whether or not the orchestrator
+  // relays the entry — the round cap runs its full allotted rounds, so a
+  // non-converged stop here is real unaudited scope, exactly as the budget
+  // stop is.
+  if (typeof round === 'number' && round > cap) {
+    writeRoundCapStop(planPath, cap, round);
+    writeStderrLine(
+      `ROUND CAP: the plan's reverse-audit round cap is ${cap}, and round ` +
+        `${round} is past it. This is a termination rule, not an error — do ` +
+        `not rebuild or retry. A marker has been recorded and compose-review ` +
+        `will cap the verdict; still add \`${roundCapStopEntry(cap)}\` to ` +
+        `unreviewedDimensions so the terminal report agrees. If the cap ` +
+        `round reported findings whose verdicts have not landed, verify them ` +
+        `ONLY through \`agent-prompt --role verify\` (never a hand-rolled ` +
+        `agent) — it is gated on the compose floor and will refuse once too ` +
+        `little time remains; when the deadline is within that floor, stop ` +
+        `waiting on any verifier batch still out and compose with the tags ` +
+        `in hand. Do NOT re-verify findings already confirmed in earlier ` +
+        `rounds, and do NOT invent a fresh re-verification pass. Then ` +
+        `proceed to Step 6.`,
+    );
+    process.exitCode = 4;
+    return false;
+  }
   const spent = reverseAuditBudgetExhausted(
     process.env,
-    expectedRoundSeconds(planPath, round),
+    expectedAdmissionSeconds(planPath, round, fanOutWidth, process.env),
   );
   if (spent !== null) {
     writeBudgetStop(planPath, spent, round);
@@ -1605,13 +1921,27 @@ function admitReverseAuditRound(
  * twice over, so another round would audit nothing the history has not
  * already answered. Not an error and not a gap — no record, no stamp, no
  * disclosure owed; a round that builds nothing was never admitted.
+ *
+ * Clears any same-run stop marker first: a converged exit can follow an
+ * over-cap round the gate already refused (round 4 refused under cap 3,
+ * then round 5's schedule is converged — the convergence check runs before
+ * the cap gate), and that stale round-cap marker would otherwise cap a
+ * verdict the audit legitimately converged. The message also recalls the
+ * relay channel: the earlier refusal told the orchestrator to add its stop
+ * entry to unreviewedDimensions, and once the marker is gone the
+ * compose-review splice that dedups it no longer runs — only this
+ * instruction removes it.
  */
-function refuseConverged(): void {
+function refuseConverged(planPath: string): void {
+  clearBudgetStop(planPath);
   writeStderrLine(
     'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
-      'unreviewedDimensions entry is owed.',
+      'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
+      'budget refusal told you to add its stop entry to ' +
+      'unreviewedDimensions, remove it now — this convergence supersedes ' +
+      'it.',
   );
   process.exitCode = 5;
 }
@@ -1636,7 +1966,14 @@ function runAllChunks(
   // three yielded in most: the loop earns its keep in the hot territories,
   // and the cold ones were a third of its bill.
   let schedule: RoundSchedule | null = null;
-  if (role === 'reverse-audit' && round !== undefined && round >= 3) {
+  // Retirement needs two consecutive dry audits, so nothing retires before
+  // round 3 (the scheduler's own guard says the same).
+  const retirementReadsFrom = 3;
+  if (
+    role === 'reverse-audit' &&
+    round !== undefined &&
+    round >= retirementReadsFrom
+  ) {
     try {
       schedule = scheduleReverseAuditRound(
         planPath,
@@ -1657,7 +1994,7 @@ function runAllChunks(
   }
 
   if (schedule !== null && schedule.converged) {
-    refuseConverged();
+    refuseConverged(planPath);
     return;
   }
 
@@ -1671,7 +2008,15 @@ function runAllChunks(
   // that builds is an admission and stamps like any other; the converged
   // round above built nothing and stamps nothing; a build that throws
   // leaves no stamp for the next round's gate to misprice.
-  if (role === 'reverse-audit' && !admitReverseAuditRound(planPath, round)) {
+  if (
+    role === 'reverse-audit' &&
+    !admitReverseAuditRound(
+      planPath,
+      round,
+      reverseAuditRoundCap(report.budget),
+      chunks.length,
+    )
+  ) {
     return;
   }
 
@@ -1720,6 +2065,7 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
+  const planRoundCap = reverseAuditRoundCap(report.budget);
   const retirementNote =
     skipped.length === 0
       ? []
@@ -1732,10 +2078,10 @@ function runAllChunks(
               .map(
                 (s) =>
                   `chunk ${s.chunkId} — retired: dry in rounds ` +
-                  `${s.dryRounds[0]} and ${s.dryRounds[1]}, ` +
-                  (s.nextColdCheck > REVERSE_AUDIT_MAX_ROUNDS
+                  `${s.dryRounds.join(' and ')}, ` +
+                  (s.nextColdCheck > planRoundCap
                     ? `certificate final — the ` +
-                      `${REVERSE_AUDIT_MAX_ROUNDS}-round hard cap leaves ` +
+                      `${planRoundCap}-round cap leaves ` +
                       `the loop no round for a cold check`
                     : `next cold check round ${s.nextColdCheck}`),
               )
@@ -2063,7 +2409,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // admits on the reserve alone hands the terminal round a start right at
   // the boundary, which is the killed-mid-verification failure one round
   // wide. The round's cost is the previous round's, measured admission to
-  // admission. The admission is stamped AFTER the build succeeds (below),
+  // admission — except when this round launches with the previous one still
+  // in flight (the convergence pair), where it covers both. The admission is
+  // stamped AFTER the build succeeds (below),
   // never here: the stamp is what the next round's gate measures cost from,
   // and a build that throws must not leave one behind — priced from a
   // failed build, the next round would be floored to the 600s minimum,
@@ -2077,9 +2425,34 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     args.role === 'reverse-audit' &&
     !hasChunk &&
     !args.allChunks &&
-    !admitReverseAuditRound(args.plan, args.round)
+    !admitReverseAuditRound(
+      args.plan,
+      args.round,
+      reverseAuditRoundCap(report.budget),
+      1,
+    )
   ) {
     return;
+  }
+
+  // The verify gate: the deterministic backstop that keeps the terminal
+  // round's verification from consuming the time compose-review and
+  // submission need. It fires only once the reverse-audit reserve has been
+  // spent down into the compose floor — a healthy run never reaches it,
+  // because the reverse-audit gate keeps the whole reserve (compose floor
+  // included) ahead of the last round. When it fires, no verify shard is
+  // built, the findings keep their `— [unverified]` tag, and the
+  // orchestrator composes on that (compose-review caps the verdict on the
+  // tag). Measured: PR #8687 stopped the audit correctly with ~110 minutes
+  // left, then spent all of it on a re-verification battery and was killed
+  // before compose ran — ~20 confirmed Critical bypasses never posted.
+  if (args.role === 'verify') {
+    const spent = verifyBudgetExhausted(process.env);
+    if (spent !== null) {
+      writeStderrLine(verifyBudgetMessage(spent));
+      process.exitCode = 4;
+      return;
+    }
   }
 
   // The reverse-audit gate for a --chunk build, placed after the plan read
@@ -2107,14 +2480,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     hasChunk &&
     !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
   ) {
+    const planChunkIds = (
+      Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : []
+    )
+      .map((c) => c?.id)
+      .filter((id): id is number => typeof id === 'number');
     if (args.round !== undefined) {
       let schedule: RoundSchedule | null = null;
       try {
         schedule = scheduleReverseAuditRound(
           args.plan,
-          (Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : [])
-            .map((c) => c?.id)
-            .filter((id): id is number => typeof id === 'number'),
+          planChunkIds,
           args.round,
           process.env,
           typeof report.diffPathAbsolute === 'string'
@@ -2127,11 +2503,19 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         schedule = null;
       }
       if (schedule !== null && schedule.converged) {
-        refuseConverged();
+        refuseConverged(args.plan);
         return;
       }
     }
-    if (!admitReverseAuditRound(args.plan, args.round)) return;
+    if (
+      !admitReverseAuditRound(
+        args.plan,
+        args.round,
+        reverseAuditRoundCap(report.budget),
+        planChunkIds.length,
+      )
+    )
+      return;
   }
 
   if (args.allChunks && args.role && findingsContent !== undefined) {
@@ -2226,9 +2610,12 @@ export const agentPromptCommand: CommandModule = {
   describe:
     "Build a review agent's launch prompt from the plan (the diff path, its line " +
     "ranges and the agent's own brief are welded in, not left to the caller to " +
-    'remember). Exit codes: 0 built; 4 the review time budget refused another ' +
-    'reverse-audit round (a termination rule, not an error — see the BUDGET line ' +
-    'on stderr); 5 the reverse audit CONVERGED — every chunk holds two ' +
+    'remember). Exit codes: 0 built; 4 a build was refused — the review time ' +
+    'budget refused another reverse-audit round (BUDGET line on stderr), the ' +
+    "plan's round cap refused one (ROUND CAP line), or the compose floor " +
+    'refused a verifier so compose/submit still fit (VERIFY BUDGET line) — ' +
+    'all termination rules, not errors: stop and compose, do not retry; 5 ' +
+    'the reverse audit CONVERGED — every chunk holds two ' +
     'consecutive substantive dry audits and none is due a cold check, so stop ' +
     'the loop and proceed to Step 6 (also a termination rule, and a clean one: ' +
     'no disclosure is owed); anything else is a bad call or a broken plan.',

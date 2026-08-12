@@ -42,6 +42,7 @@ try {
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
+  testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
@@ -111,9 +112,60 @@ function testDesktopReleaseSigningWorkflow() {
     ),
     'Unsigned Windows installers are only allowed when no signing config exists',
   );
+  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
+  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
   assert.ok(
-    workflow.includes('--entitlements src-tauri/Entitlements.plist {} +'),
+    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
+    'the vendor signing step must keep its ripgrep/Node section markers',
+  );
+  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
+  assert.doesNotMatch(
+    ripgrepSigningBlock,
+    /--entitlements/,
+    'ripgrep must not inherit the app entitlements',
+  );
+  assert.match(
+    workflow,
+    /--options runtime --timestamp \\\n\s+\{\} \+/,
     'ripgrep codesign failures must fail the signing step',
+  );
+  assert.ok(
+    workflow.includes(
+      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+    ),
+    'Node.js must use its minimal helper entitlements',
+  );
+  const nodeEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
+    'utf8',
+  );
+  const appEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Entitlements.plist'),
+    'utf8',
+  );
+  assert.match(
+    appEntitlements,
+    /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/,
+    'the app bundle must keep microphone access for voice dictation',
+  );
+  const infoPlist = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Info.plist'),
+    'utf8',
+  );
+  assert.match(
+    infoPlist,
+    /NSMicrophoneUsageDescription<\/key>\s*<string>.+<\/string>/,
+    'the app bundle must declare a non-empty microphone usage description',
+  );
+  assert.match(
+    nodeEntitlements,
+    /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/,
+    'the bundled Node.js runtime must keep its JIT entitlement',
+  );
+  assert.doesNotMatch(
+    nodeEntitlements,
+    /com\.apple\.security\.device\.audio-input/,
+    'Node.js must not receive microphone access',
   );
   assert.match(
     workflow,
@@ -125,6 +177,16 @@ function testDesktopReleaseSigningWorkflow() {
     /Node\.js runtime binary not found at \$node_bin/,
     'missing Node.js runtime binary must be visible in release logs',
   );
+  assert.match(
+    workflow,
+    /Print :com\.apple\.security\.device\.audio-input/,
+    'the macOS signature check must keep verifying the audio-input entitlement',
+  );
+  assert.match(
+    workflow,
+    /Print :NSMicrophoneUsageDescription/,
+    'the packaged smoke must keep verifying the microphone usage description',
+  );
   assert.ok(
     workflow.indexOf("name: 'Prepare bundled runtime'") <
       workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
@@ -135,6 +197,26 @@ function testDesktopReleaseSigningWorkflow() {
       workflow.indexOf("name: 'Build desktop installers'"),
     'vendor binaries must be signed before Tauri builds installers',
   );
+}
+
+function testUpdaterMirrorConfiguration() {
+  assert.deepEqual(tauriConfig.plugins?.updater?.endpoints, [
+    'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/desktop/latest/desktop-latest.json',
+    'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest/desktop-latest.json',
+  ]);
+  const main = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
+    'utf8',
+  );
+  assert.match(
+    main,
+    /const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs\(3\);/,
+  );
+  assert.match(
+    main,
+    /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
+  );
+  assert.equal((main.match(/check_for_update\(&app\)/g) ?? []).length, 2);
 }
 
 function testBootstrapBridgeConfiguration() {
@@ -154,7 +236,7 @@ function testBootstrapBridgeConfiguration() {
       'utf8',
     ),
   );
-  assert.deepEqual(capability.windows, ['main']);
+  assert.deepEqual(capability.windows, ['main', 'local-control']);
   assert.equal(
     capability.remote,
     undefined,
@@ -322,6 +404,34 @@ function testUpdateManifest(directory) {
     assert.equal(
       manifest.platforms[platform].url,
       `https://github.com/QwenLM/qwen-code/releases/download/desktop-v0.1.0/${encodeURIComponent(artifact)}`,
+    );
+  }
+
+  execFileSync(process.execPath, [
+    manifestScript,
+    '--assets',
+    assets,
+    '--repository',
+    'QwenLM/qwen-code',
+    '--tag',
+    'desktop-v0.1.0',
+    '--version',
+    '0.1.0',
+    '--base-url',
+    'https://mirror.example/desktop/v0.1.0/',
+    '--output',
+    output,
+  ]);
+  const mirrorManifest = JSON.parse(fs.readFileSync(output, 'utf8'));
+  for (const [platform, artifact] of [
+    ['darwin-aarch64', artifacts[0]],
+    ['darwin-x86_64', artifacts[1]],
+    ['windows-x86_64', artifacts[2]],
+    ['linux-x86_64', artifacts[3]],
+  ]) {
+    assert.equal(
+      mirrorManifest.platforms[platform].url,
+      `https://mirror.example/desktop/v0.1.0/${encodeURIComponent(artifact)}`,
     );
   }
 
