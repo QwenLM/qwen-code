@@ -298,7 +298,6 @@ describe('SubAgentTracker', () => {
             },
           ],
           _meta: expect.objectContaining({
-            parentToolCallId: 'parent-call-123',
             subagentType: 'test-subagent',
             subagentProgress: true,
             provenance: 'subagent',
@@ -585,7 +584,6 @@ describe('SubAgentTracker', () => {
             },
           ],
           _meta: expect.objectContaining({
-            parentToolCallId: 'parent-call-123',
             subagentType: 'test-subagent',
             subagentProgress: true,
             provenance: 'subagent',

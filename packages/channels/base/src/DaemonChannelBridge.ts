@@ -727,10 +727,11 @@ export class DaemonChannelBridge
         const kind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (
-          !kind &&
-          toolCallId &&
-          getString(update['status']) === 'in_progress' &&
-          meta?.['shellProgress'] !== undefined
+          (!kind &&
+            toolCallId &&
+            getString(update['status']) === 'in_progress' &&
+            meta?.['shellProgress'] !== undefined) ||
+          meta?.['subagentProgress'] === true
         ) {
           // Silent-shell liveness heartbeat: a kind-less in_progress frame
           // carrying only the id, status, and _meta.shellProgress stats.

@@ -255,7 +255,10 @@ export class ToolCallEmitter extends BaseEmitter {
     parentToolCallId: string,
     subagentType: string,
     message: string,
+    toolName?: string,
   ): Promise<void> {
+    if (toolName && this.isTodoWriteTool(toolName)) return;
+
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
       toolCallId: parentToolCallId,
@@ -270,7 +273,6 @@ export class ToolCallEmitter extends BaseEmitter {
         },
       ],
       _meta: {
-        parentToolCallId,
         subagentType,
         provenance: 'subagent',
         subagentProgress: true,

@@ -826,7 +826,6 @@ describe('ToolCallEmitter', () => {
           },
         ],
         _meta: {
-          parentToolCallId: 'parent-call-1',
           subagentType: 'Explore',
           provenance: 'subagent',
           subagentProgress: true,
@@ -849,6 +848,7 @@ describe('ToolCallEmitter', () => {
 
       expect(progressText).toContain('Running command');
       expect(progressText).toContain('red text');
+      expect(progressText).not.toContain('\x1b');
     });
   });
 

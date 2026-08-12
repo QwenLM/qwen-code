@@ -15,12 +15,13 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
+
 import {
   AgentEventType,
   ToolConfirmationOutcome,
-  ToolNames,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
@@ -66,6 +67,7 @@ export class SubAgentTracker {
       args?: Record<string, unknown>;
     }
   >();
+  private readonly approvalNotified = new Set<string>();
 
   constructor(
     private readonly ctx: SessionContext,
@@ -151,33 +153,23 @@ export class SubAgentTracker {
       });
 
       // Emit progress update to parent to make subagent execution visible in ACP clients
-      // Skip for TodoWriteTool as it doesn't emit tool_call updates either
-      if (event.name !== ToolNames.TODO_WRITE) {
-        let progressMessage = `Running tool: ${event.name}`;
-        if (tool && invocation) {
-          try {
-            const desc = invocation.getDescription();
-            if (desc) {
-              progressMessage = `${event.name}: ${desc}`;
-            }
-          } catch {
-            // ignore
-          }
-        }
+      const progressMessage = event.description
+        ? `${tool?.displayName ?? event.name}: ${event.description}`
+        : `Running tool: ${tool?.displayName ?? event.name}`;
 
-        void this.toolCallEmitter
-          .emitProgressUpdate(
-            this.subagentMeta.parentToolCallId,
-            this.subagentMeta.subagentType,
-            progressMessage,
-          )
-          .catch((error) => {
-            debugLogger.debug(
-              'Failed to emit subagent progress update for tool call:',
-              error,
-            );
-          });
-      }
+      void this.toolCallEmitter
+        .emitProgressUpdate(
+          this.subagentMeta.parentToolCallId,
+          this.subagentMeta.subagentType,
+          progressMessage,
+          event.name,
+        )
+        .catch((error) => {
+          debugLogger.debug(
+            'Failed to emit subagent progress update for tool call:',
+            error,
+          );
+        });
 
       // Use unified emitter - handles TodoWriteTool skipping internally
       void this.toolCallEmitter
@@ -244,18 +236,22 @@ export class SubAgentTracker {
       const state = this.toolStates.get(event.callId);
 
       // Update parent progress to indicate permission is needed
-      void this.toolCallEmitter
-        .emitProgressUpdate(
-          this.subagentMeta.parentToolCallId,
-          this.subagentMeta.subagentType,
-          `Waiting for permission: ${event.name}`,
-        )
-        .catch((error) => {
-          debugLogger.debug(
-            'Failed to emit subagent progress update for approval:',
-            error,
-          );
-        });
+      if (!this.approvalNotified.has(event.callId) && !abortSignal.aborted) {
+        this.approvalNotified.add(event.callId);
+        void this.toolCallEmitter
+          .emitProgressUpdate(
+            this.subagentMeta.parentToolCallId,
+            this.subagentMeta.subagentType,
+            `Waiting for permission: ${event.name}`,
+            event.name,
+          )
+          .catch((error) => {
+            debugLogger.debug(
+              'Failed to emit subagent progress update for approval:',
+              error,
+            );
+          });
+      }
 
       // Build permission request
       const fullConfirmationDetails = {
