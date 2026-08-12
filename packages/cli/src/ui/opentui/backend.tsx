@@ -38,6 +38,7 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { fmtTokens } from '../components/stats-helpers.js';
+import type { ScrollBoxRenderable } from '@opentui/core';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { readFileSync } from 'node:fs';
@@ -574,6 +575,10 @@ function App({
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const queueRef = useRef<OpenTuiStreamEvent[]>([]);
   const liveAbortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const startLiveTurnRef = useRef<
+    ((content: PartListUnion, opts?: object) => void) | null
+  >(null);
 
   // Streaming phase for the status bar / spinner / border (F1.1).
 
@@ -732,6 +737,42 @@ function App({
       setItems([]);
       return;
     }
+    if (key.name === 'y' && key.ctrl) {
+      // retry last user prompt (mirrors original Ctrl+Y)
+      const lastUser = [...items].reverse().find((i) => i.kind === 'user');
+      if (lastUser && lastUser.kind === 'user')
+        startLiveTurnRef.current?.(lastUser.text);
+      return;
+    }
+    {
+      const sb = scrollRef.current;
+      if (sb) {
+        if (key.name === 'up' && key.shift) {
+          sb.scrollBy(-1);
+          return;
+        }
+        if (key.name === 'down' && key.shift) {
+          sb.scrollBy(1);
+          return;
+        }
+        if (key.name === 'pageup') {
+          sb.scrollBy(-10);
+          return;
+        }
+        if (key.name === 'pagedown') {
+          sb.scrollBy(10);
+          return;
+        }
+        if (key.name === 'home' && key.ctrl) {
+          sb.scrollTop = 0;
+          return;
+        }
+        if (key.name === 'end' && key.ctrl) {
+          sb.scrollBy(100000);
+          return;
+        }
+      }
+    }
     if (key.name === 'o' && key.ctrl) {
       // toggle the most recent expandable item (thinking/tool/task)
       for (let i = items.length - 1; i >= 0; i--) {
@@ -832,6 +873,7 @@ function App({
     },
     [config, applyEvent],
   );
+  startLiveTurnRef.current = startLiveTurn;
 
   const applySlashAction = useCallback(
     (action: BackendAction) => {
@@ -984,6 +1026,7 @@ function App({
       {/* flow layout: banner/Tips/messages/input/footer scroll together,
           top-aligned when empty (banner scrolls away on long sessions) */}
       <scrollbox
+        ref={scrollRef}
         flexGrow={1}
         minHeight={0}
         stickyScroll={true}
