@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { useRef } from 'react';
+import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -53,22 +54,27 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimModeState();
+  const { columns: terminalWidth } = useTerminalSize();
+  const isNarrow = isNarrowWidth(terminalWidth);
+  const statusLineRef = useRef<DOMElement>(null);
+  const { width: statusLineWidth, hasMeasured: hasMeasuredStatusLine } =
+    useBoxMetrics(statusLineRef);
   const { pasteProgress } = useKeypressContext();
   const {
     lines: statusLineLines,
     useThemeColors,
     respectUserColors,
     hideContextIndicator,
-  } = useStatusLine();
+  } = useStatusLine(
+    isNarrow,
+    hasMeasuredStatusLine ? statusLineWidth : undefined,
+  );
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
-
-  const { columns: terminalWidth } = useTerminalSize();
-  const isNarrow = isNarrowWidth(terminalWidth);
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
@@ -211,6 +217,7 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box
+        ref={statusLineRef}
         flexDirection="column"
         flexGrow={1}
         flexShrink={isNarrow ? 0 : 1}
@@ -270,12 +277,21 @@ export const Footer: React.FC = () => {
             </Text>
           )}
         <Box flexDirection="row" flexShrink={1}>
+          {/* Every child of this shrinkable row must keep wrap="truncate", or
+              the footer grows mid-turn once the row overflows (#8667/#8666). */}
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {uiState.messageQueue.length > 0 && (
+            <Text color={theme.text.secondary} wrap="truncate">
+              {` ⏳ ${t('{{count}} queued', {
+                count: String(uiState.messageQueue.length),
+              })}`}
+            </Text>
+          )}
           {!uiState.isSkillReviewDialogOpen &&
             (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
-              <Text color={theme.status.warning}>
+              <Text color={theme.status.warning} wrap="truncate">
                 {` ⚠ ${t('{{count}} skill(s) pending review', {
                   count: String(uiState.skillReviewPending!.skills.length),
                 })}`}

@@ -26,13 +26,20 @@ export interface ThrottledOnceOptions {
   name: string;
 }
 
+export type ThrottledOnceResult =
+  | { status: 'completed' }
+  | { status: 'fresh'; retryAfterMs: number }
+  | { status: 'locked' }
+  | { status: 'incomplete' };
+
 // Run task at most once per minIntervalMs per machine across concurrent
 // processes. Cooperative: no waiting, no retries — losers return immediately.
-// Returns true if task ran, false if skipped (recently done or lock held).
+// Returns why the task completed or skipped so persistent schedulers can
+// retry at the right cadence without guessing from one boolean.
 export async function runThrottledOnce(
   opts: ThrottledOnceOptions,
-  task: () => Promise<void>,
-): Promise<boolean> {
+  task: () => Promise<void | false>,
+): Promise<ThrottledOnceResult> {
   const minIntervalMs = opts.minIntervalMs ?? ONE_DAY_MS;
   const staleLockMs = opts.staleLockMs ?? STALE_LOCK_MS;
 
@@ -44,8 +51,13 @@ export async function runThrottledOnce(
     () => {},
   );
 
-  if (await markerIsFresh(opts.markerPath, minIntervalMs, opts.name)) {
-    return false;
+  const firstFreshForMs = await markerFreshForMs(
+    opts.markerPath,
+    minIntervalMs,
+    opts.name,
+  );
+  if (firstFreshForMs !== undefined) {
+    return { status: 'fresh', retryAfterMs: firstFreshForMs };
   }
 
   let acquired = await tryAcquire(opts.lockPath);
@@ -66,7 +78,7 @@ export async function runThrottledOnce(
     }
     if (!acquired) {
       debugLogger.debug(`${opts.name}: skipping, lock held`);
-      return false;
+      return { status: 'locked' };
     }
   }
 
@@ -74,14 +86,18 @@ export async function runThrottledOnce(
     // Re-check marker AFTER acquiring the lock. Closes the TOCTOU window
     // where another process completed the work between our initial mtime
     // check and our lock acquisition. One extra `stat` per run; cheap.
-    if (await markerIsFresh(opts.markerPath, minIntervalMs, opts.name)) {
-      return false;
+    const secondFreshForMs = await markerFreshForMs(
+      opts.markerPath,
+      minIntervalMs,
+      opts.name,
+    );
+    if (secondFreshForMs !== undefined) {
+      return { status: 'fresh', retryAfterMs: secondFreshForMs };
     }
 
     let taskCompleted = false;
     try {
-      await task();
-      taskCompleted = true;
+      taskCompleted = (await task()) !== false;
     } finally {
       // Persist the marker only after successful task completion. Marker
       // write failure is treated as benign: cleanup already ran, and the
@@ -99,7 +115,7 @@ export async function runThrottledOnce(
         }
       }
     }
-    return taskCompleted;
+    return { status: taskCompleted ? 'completed' : 'incomplete' };
   } finally {
     await unlink(opts.lockPath).catch(() => {
       debugLogger.debug(`${opts.name}: lock unlink failed (harmless)`);
@@ -107,22 +123,22 @@ export async function runThrottledOnce(
   }
 }
 
-async function markerIsFresh(
+async function markerFreshForMs(
   markerPath: string,
   minIntervalMs: number,
   name: string,
-): Promise<boolean> {
+): Promise<number | undefined> {
   try {
     const s = await stat(markerPath);
     const age = Date.now() - s.mtimeMs;
     if (age < minIntervalMs) {
       debugLogger.debug(`${name}: skipping, ran ${age}ms ago`);
-      return true;
+      return minIntervalMs - age;
     }
   } catch {
     // marker missing — treat as not fresh.
   }
-  return false;
+  return undefined;
 }
 
 async function tryAcquire(lockPath: string): Promise<boolean> {

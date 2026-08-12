@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stat } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { render } from 'ink';
 import React from 'react';
@@ -14,6 +15,7 @@ import {
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
+import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
 import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
@@ -33,6 +35,7 @@ import {
   pushKittyProtocolFlags,
 } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
+import { installTerminalResizeReflow } from './utils/terminal-resize-reflow.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
 import {
   isInteractiveTerminal,
@@ -44,8 +47,9 @@ import {
 } from './components/shared/ErrorBoundary.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
+import { t } from '../i18n/index.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
@@ -161,6 +165,15 @@ export async function startInteractiveUI(
     isInteractiveTerminal(),
   );
 
+  // On width shrink the terminal reflows the printed frame into more physical
+  // rows than Ink's stale erase count (issue #8557); amplify the clear to the
+  // reflowed height. Installed before render() so the resize listener runs
+  // ahead of Ink's resized().
+  const resizeReflow =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
+      : { restore: () => {}, repaint: () => {} };
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -192,6 +205,7 @@ export async function startInteractiveUI(
                         initializationResult={initializationResult}
                         initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
+                        repaintViewport={resizeReflow.repaint}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -310,6 +324,10 @@ export async function startInteractiveUI(
     if (useVP) {
       process.stdout.setMaxListeners(stdoutMaxListeners);
     }
+    // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
+    // installed last / outermost); the identity-guarded restores silently
+    // no-op and leak wrappers otherwise.
+    resizeReflow.restore();
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
     // If the ErrorBoundary caught a rendering error, echo it to stderr
@@ -323,6 +341,39 @@ export async function startInteractiveUI(
       writeStderrLine(
         `\nRendering error${loggedHint}: ${sanitizeTerminalText(renderError.message)}`,
       );
+    }
+    // Same reasoning as the render-error echo above: the quit screen (with
+    // its resume hint) is drawn on the alternate screen in VP mode and is
+    // discarded on teardown, so echo the resume command here where it
+    // survives exit and can be copied from the terminal scrollback.
+    // --resume lookup is cwd-scoped, so the hint assumes it is pasted in
+    // the session's working directory. Sessions keyed elsewhere share this
+    // limitation with the in-TUI hint — notably --worktree startup, which
+    // chdirs into the worktree while the user's shell stays at the launch
+    // directory.
+    try {
+      if (process.stdout.isTTY && config.getChatRecordingService()) {
+        const sessionId = config.getSessionId();
+        const sessionFile = config.getTranscriptPath();
+        // The echoed ID is paste-into-shell text, and resume reads session
+        // IDs from transcript contents any user-level process can write.
+        // Gate to the canonical shape `--resume` itself accepts
+        // (isValidSessionId): a single token with no newlines, escapes, or
+        // leading dash, which also keeps the echoed command from falling
+        // through to title matching on paste. Require a non-empty
+        // transcript too: the recorder creates the file before the first
+        // record lands, and `--resume` refuses to load an empty one.
+        // Non-emptiness here relies on config.shutdown() flushing the
+        // recorder first — it is registered earlier in the cleanup chain
+        // in gemini.tsx; keep that registration order.
+        if (isValidSessionId(sessionId) && (await stat(sessionFile)).size > 0) {
+          writeStdoutLine(
+            `\n${t('To continue this session, run')}\nqwen --resume ${sessionId}`,
+          );
+        }
+      }
+    } catch {
+      // Best-effort: a hint must never block or break exit.
     }
   });
 }

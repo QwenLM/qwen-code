@@ -2255,6 +2255,21 @@ describe('SessionService', () => {
     });
   });
 
+  describe('findSessionIdIgnoringCase', () => {
+    it('finds a legacy mixed-case transcript', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy.mockReturnValue([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (sessionId) =>
+          sessionId === legacySessionId ? 'active' : undefined,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
@@ -2423,6 +2438,7 @@ describe('SessionService', () => {
         info: {
           originalTokenCount: 1000,
           newTokenCount: 300,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
         },
         compressedHistory: [],
@@ -2444,7 +2460,11 @@ describe('SessionService', () => {
       ).toBe(450);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
+      ).toEqual({
+        promptTokenCount: 450,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -2462,7 +2482,11 @@ describe('SessionService', () => {
       ).toBe(200);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
+      ).toEqual({
+        promptTokenCount: 200,
+        outputTokenCount: 250,
+        isEstimated: false,
+      });
     });
 
     it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
@@ -2479,7 +2503,11 @@ describe('SessionService', () => {
       };
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
+      ).toEqual({
+        promptTokenCount: 200,
+        outputTokenCount: 100,
+        isEstimated: false,
+      });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -2497,7 +2525,58 @@ describe('SessionService', () => {
       ).toBe(300);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: true,
+      });
+    });
+
+    it('conservatively treats legacy compression checkpoints as estimated', () => {
+      const legacyCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(makeConversation([legacyCompressionRecord])),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: true,
+      });
+    });
+
+    it('restores an explicit authoritative compression-checkpoint provenance', () => {
+      const authoritativeCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            newTokenCountIsEstimated: false,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(
+          makeConversation([authoritativeCompressionRecord]),
+        ),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
     });
   });
 

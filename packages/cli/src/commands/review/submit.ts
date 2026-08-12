@@ -48,7 +48,12 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
-import { ghWithInput, setGhHost } from './lib/gh.js';
+import {
+  ghWithInput,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
@@ -170,12 +175,8 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
     repo: args.repo,
     // The EFFECTIVE host, not merely the flag: with --host absent the gh
     // child inherits an operator-exported GH_HOST, so that is where this
-    // write would route — and what the gate must bind. Same resolution as
-    // publish-assets.
-    // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
-    // `??`, being non-nullish) must read as "no host", not as a host named
-    // "" that fails every comparison.
-    host: args.host ?? (process.env['GH_HOST']?.trim() || undefined),
+    // write would route — and what the gate must bind.
+    host: resolveGhHost(args.host),
   });
 }
 
@@ -372,28 +373,12 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-/**
- * `owner/repo` — and neither half may be a dot segment.
- *
- * The character class alone admits `../repo`, `owner/..` and `./repo`: `.` and
- * `..` are made of legal characters and mean something else entirely once they
- * reach a URL path.
- */
-const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
-function isRepo(repo: string): boolean {
-  const parts = repo.split('/');
-  return (
-    parts.length === 2 &&
-    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
-  );
-}
-
 export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
-  if (!isRepo(args.repo)) {
+  if (!isOwnerRepo(args.repo)) {
     throw new Error(
       `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
     );
@@ -515,6 +500,21 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     '--input',
     '-',
   );
+  // GitHub's answer, read best-effort: `id` feeds the bypass-audit receipt
+  // below; `html_url` is the deep link to the review just created, surfaced in
+  // both output channels so the summary the user reads can carry it — without
+  // it, "view what was posted" means hand-assembling a PR URL.
+  let reviewId: number | undefined;
+  let reviewUrl: string | undefined;
+  try {
+    const parsed = JSON.parse(response) as { id?: number; html_url?: string };
+    if (typeof parsed.id === 'number') reviewId = parsed.id;
+    if (typeof parsed.html_url === 'string' && parsed.html_url.trim() !== '') {
+      reviewUrl = parsed.html_url;
+    }
+  } catch {
+    /* response metadata only — the post itself succeeded */
+  }
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
@@ -529,7 +529,6 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   // add this one, dedupe, write back. Best-effort: a receipt failure must
   // never fail a review that DID post.
   try {
-    const reviewId = (JSON.parse(response) as { id?: number }).id;
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath);
@@ -546,7 +545,8 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
-      '.',
+      '.' +
+      (reviewUrl ? ` ${reviewUrl}` : ''),
   );
   writeStdoutLine(
     JSON.stringify(
@@ -555,6 +555,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,
       2,

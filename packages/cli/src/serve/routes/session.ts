@@ -13,14 +13,13 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
-  SessionService,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptPageTooLargeError,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
-  Storage,
   addDaemonRequestAttribute,
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
@@ -39,7 +38,7 @@ import {
 } from '../live/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { loadSettingsCached } from '../../config/settings-cache.js';
+import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
@@ -67,6 +66,7 @@ import {
 import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -126,6 +126,12 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+import {
+  createRequestedSessionIdAdmission,
+  RequestedSessionIdAdmissionError,
+  type RequestedSessionIdAdmission,
+  type RequestedSessionIdReservation,
+} from '../session-id-admission.js';
 
 // `HEAD` is the most prominent ref name git rejects as a branch name.
 // The surrounding predicate covers the remaining reserved forms (`@`, `-`,
@@ -144,25 +150,12 @@ const GIT_RESERVED_BRANCH = 'HEAD';
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
-// A strict SUBSET of config.ts's isValidSessionId: same v4 version/variant
-// nibbles, minus the `-agent-{suffix}` form (SessionService.SESSION_FILE_PATTERN
-// only matches 32-36 hex/hyphen chars, so a suffixed id would write a transcript
-// the session list can never see).
-//
-// Keeping it a subset in BOTH directions matters: every id the daemon accepts
-// must also be a valid `--session-id` and `/resume <id>` argument, otherwise a
-// session created over HTTP is unreachable from the CLI (resumeCommand.ts gates
-// on isValidSessionId and falls through to title matching when it fails). That
-// rules out UUIDv7, the nil UUID, and non-RFC-4122 variants even though they are
-// harmless as filenames.
-const HTTP_SESSION_ID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
+  requestedSessionIdAdmission?: RequestedSessionIdAdmission;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
@@ -175,7 +168,15 @@ interface RegisterSessionRoutesDeps {
   isLiveSessionActive?: (sessionId: string) => boolean;
 }
 
-const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+// Chosen cap for one serialized transcript response, kept proportional to
+// the core expanded-page ceiling so the two cannot drift arbitrarily. This
+// is not a derived guarantee: a single aggregated record can exceed any
+// page budget (the reader always takes at least one record so pagination
+// cannot dead-end), and replayed SessionUpdate objects are not a fixed
+// multiple of their source records. A page this route cannot serialize
+// returns transcript_page_too_large for that anchor.
+const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
+  2 * SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
@@ -399,23 +400,6 @@ function shouldPreserveTranscriptResolutionError(err: unknown): boolean {
   );
 }
 
-/**
- * Whether a session with this id is currently live on the daemon.
- * `getSessionSummary` is a `byId` lookup that signals absence by throwing
- * `SessionNotFoundError`. Anything else is treated as "assume live" rather
- * than "not live" — for a uniqueness guard, failing closed on an unreadable
- * bridge is the safe direction, and it matches how
- * `SessionService.sessionExistsInAnyState` handles its own read errors.
- */
-function isSessionLive(bridge: AcpSessionBridge, sessionId: string): boolean {
-  try {
-    bridge.getSessionSummary(sessionId);
-    return true;
-  } catch (err) {
-    return !(err instanceof SessionNotFoundError);
-  }
-}
-
 function parseOptionalApprovalMode(
   body: Record<string, unknown>,
   res: Response,
@@ -454,6 +438,56 @@ export function registerSessionRoutes(
     sessionShellCommandEnabled,
     virtualSubagentSessions,
   } = deps;
+  const invalidateSessionLists = (
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+  ): void => {
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      workspaceCwd: runtime.workspaceCwd,
+      archiveStates,
+    });
+  };
+  const runWithSessionListInvalidation = async <T>(
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+    mutation: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await mutation();
+    } finally {
+      invalidateSessionLists(runtime, archiveStates);
+    }
+  };
+  const requestedSessionIdAdmission =
+    deps.requestedSessionIdAdmission ??
+    createRequestedSessionIdAdmission({
+      archiveCoordinator,
+      getBridges: () =>
+        workspaceRegistry.listManaged().map((runtime) => runtime.bridge),
+      getPersistenceTargets: () =>
+        workspaceRegistry.listManaged().map((runtime) => ({
+          workspaceCwd: runtime.workspaceCwd,
+          runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+        })),
+      getBridgeWorkspaceId: (bridge) =>
+        workspaceRegistry
+          .listEntries()
+          .find((entry) => entry.current?.runtime.bridge === bridge)
+          ?.workspaceId,
+    });
+  const captureRuntimeGenerationAssertion = (
+    runtime: WorkspaceRuntime,
+  ): (() => void) | undefined => {
+    const registeredGeneration = workspaceRegistry.getEntryByWorkspaceId(
+      runtime.workspaceId,
+    )?.current;
+    const guard =
+      registeredGeneration?.runtime === runtime
+        ? registeredGeneration.guard
+        : runtime.generationGuard;
+    return guard ? () => guard.assertOpen() : undefined;
+  };
   const LANGUAGE_CODES = deps.languageCodes;
   const transcriptCursorMasterKey = crypto.randomBytes(32);
   const transcriptCursorCodecs = new Map<
@@ -474,10 +508,6 @@ export function registerSessionRoutes(
   // after spawn). Closes the TOCTOU where two concurrent requests both pass
   // the guard before either populates `activeBranchSessions`.
   const inFlightBranchWorkspaces = new Set<string>();
-  // Caller-supplied session ids with a creation currently in flight. Closes
-  // the TOCTOU where two concurrent requests with the same sessionId both
-  // pass sessionExistsInAnyState before either session is created.
-  const inFlightSessionIds = new Set<string>();
 
   /** Remove the branch-session tracking entry when a session ends. */
   const clearBranchSessionEntry = (sessionId: string): void => {
@@ -566,6 +596,29 @@ export function registerSessionRoutes(
       route,
       resolutionKind,
       ...details,
+    });
+  };
+
+  const sendRequestedSessionIdAdmissionError = (
+    res: Response,
+    error: RequestedSessionIdAdmissionError,
+    route: string,
+  ): void => {
+    const resolutionKind =
+      error.code === 'session_workspace_conflict'
+        ? 'workspace_conflict'
+        : error.code;
+    logSessionRoutingFailure(route, resolutionKind, {
+      sessionId: error.sessionId,
+      ...error.details,
+    });
+    const status =
+      error.code === 'session_id_admission_unavailable' ? 503 : 409;
+    res.status(status).json({
+      error: error.message,
+      code: error.code,
+      sessionId: error.sessionId,
+      ...error.details,
     });
   };
 
@@ -910,11 +963,6 @@ export function registerSessionRoutes(
     sendUntrustedSessionOwner(res, route, sessionId, runtime);
     return false;
   };
-  const inFlightRestoreOwners = new Map<
-    string,
-    { workspaceId: string; workspaceCwd: string; count: number }
-  >();
-
   const sendSessionWorkspaceConflict = (
     res: Response,
     route: string,
@@ -938,40 +986,6 @@ export function registerSessionRoutes(
       liveWorkspaceCwd: liveRuntime.workspaceCwd,
       liveWorkspaceId: liveRuntime.workspaceId,
     });
-  };
-
-  const enterRestoreOwner = (
-    res: Response,
-    route: string,
-    sessionId: string,
-    runtime: WorkspaceRuntime,
-  ): (() => void) | undefined => {
-    const existing = inFlightRestoreOwners.get(sessionId);
-    if (existing && existing.workspaceCwd !== runtime.workspaceCwd) {
-      sendSessionWorkspaceConflict(res, route, sessionId, runtime, existing);
-      return undefined;
-    }
-
-    if (existing) {
-      existing.count += 1;
-    } else {
-      inFlightRestoreOwners.set(sessionId, {
-        workspaceId: runtime.workspaceId,
-        workspaceCwd: runtime.workspaceCwd,
-        count: 1,
-      });
-    }
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const current = inFlightRestoreOwners.get(sessionId);
-      if (!current || current.workspaceCwd !== runtime.workspaceCwd) return;
-      current.count -= 1;
-      if (current.count <= 0) {
-        inFlightRestoreOwners.delete(sessionId);
-      }
-    };
   };
 
   const resolveRuntimeForSessionRestore = (
@@ -1319,6 +1333,8 @@ export function registerSessionRoutes(
       });
       return;
     }
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -1358,78 +1374,35 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
-    // Optional caller-supplied session id. Validated at the route boundary
-    // so a 400 surfaces before touching the bridge. The core Config
-    // constructor uses it verbatim (falling back to randomUUID when absent).
-    const rawSessionId = body['sessionId'];
-    let requestedSessionId: string | undefined;
-    if (rawSessionId !== undefined && rawSessionId !== null) {
-      if (
-        typeof rawSessionId !== 'string' ||
-        !HTTP_SESSION_ID_REGEX.test(rawSessionId)
-      ) {
-        res.status(400).json({
-          error:
-            '`sessionId` must be a UUID (e.g. "550e8400-e29b-41d4-a716-446655440000")',
-          code: 'invalid_session_id',
-        });
-        return;
+    const parsedSessionId = parseCallerSuppliedSessionId(body['sessionId']);
+    if (parsedSessionId.kind === 'invalid') {
+      res.status(400).json({
+        error:
+          '`sessionId` must be an RFC UUID v1-v5 (e.g. "550e8400-e29b-41d4-a716-446655440000")',
+        code: 'invalid_session_id',
+      });
+      return;
+    }
+    const requestedSessionId =
+      parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    let sessionIdReservation: RequestedSessionIdReservation | undefined;
+    if (requestedSessionId !== undefined) {
+      try {
+        sessionIdReservation = await requestedSessionIdAdmission.reserveCreate(
+          requestedSessionId,
+          {
+            bridge: runtime.bridge,
+            workspaceCwd,
+            workspaceId: runtime.workspaceId,
+          },
+        );
+      } catch (error) {
+        if (error instanceof RequestedSessionIdAdmissionError) {
+          sendRequestedSessionIdAdmissionError(res, error, 'POST /session');
+          return;
+        }
+        throw error;
       }
-      requestedSessionId = rawSessionId.toLowerCase();
-      const sessionIdToCheck = requestedSessionId;
-      // Reject an id that is already LIVE on this workspace's bridge.
-      // The disk check below cannot see these: the transcript JSONL is
-      // only written on a session's first message, so a session that was
-      // created and never prompted leaves no file behind — for its whole
-      // lifetime, not just a brief window. Without this, a sequential retry
-      // with the same id falls through to the agent's own
-      // `Session <id> is already active.` guard, which is a bare Error and
-      // surfaces as an opaque `500 / -32603` instead of the 409 this route
-      // documents. `inFlightSessionIds` below only covers requests that
-      // overlap in time; this covers a first request that already returned.
-      //
-      // Per-workspace scope: checks only the current workspace's bridge.
-      // The daemon-wide `inFlightSessionIds` guard covers concurrent
-      // cross-workspace reuse; sequential cross-workspace reuse of the same
-      // id can still produce two live sessions sharing an id (routing then
-      // fails as `ambiguous_session_owner`).
-      if (isSessionLive(runtime.bridge, sessionIdToCheck)) {
-        res.status(409).json({
-          error: `Session "${requestedSessionId}" already exists`,
-          code: 'session_id_conflict',
-        });
-        return;
-      }
-      // Reject an id that already exists on disk (active or archived) at the
-      // route boundary: loadCliConfig calls process.exit(1) on a duplicate,
-      // which would terminate the shared ACP child and every session on its
-      // channel.
-      const runtimeOutputDir =
-        loadSettingsCached(workspaceCwd).merged.advanced?.runtimeOutputDir;
-      if (
-        await Storage.runWithRuntimeBaseDir(
-          runtimeOutputDir,
-          workspaceCwd,
-          () =>
-            new SessionService(workspaceCwd).sessionExistsInAnyState(
-              sessionIdToCheck,
-            ),
-        )
-      ) {
-        res.status(409).json({
-          error: `Session "${requestedSessionId}" already exists`,
-          code: 'session_id_conflict',
-        });
-        return;
-      }
-      if (inFlightSessionIds.has(requestedSessionId)) {
-        res.status(409).json({
-          error: `Session "${requestedSessionId}" creation already in progress`,
-          code: 'session_id_conflict',
-        });
-        return;
-      }
-      inFlightSessionIds.add(requestedSessionId);
     }
 
     let branchMeta: { name: string; baseBranch: string } | undefined;
@@ -1443,6 +1416,10 @@ export function registerSessionRoutes(
       // When `branch` is present, create and checkout a new git branch
       // before spawning. The session runs in the same working directory
       // but on the new branch. Mutually exclusive with `worktree`.
+      // Caller-supplied IDs perform an asynchronous persistence scan before
+      // this block. Re-check the captured runtime before any branch, worktree,
+      // or bridge side effect in case its generation changed during the scan.
+      assertRuntimeGenerationOpen?.();
       const rawBranch = body['branch'];
       if (rawBranch !== undefined && rawBranch !== null) {
         if (body['worktree'] !== undefined && body['worktree'] !== null) {
@@ -1606,6 +1583,7 @@ export function registerSessionRoutes(
           });
           return;
         }
+        assertRuntimeGenerationOpen?.();
         inFlightBranchWorkspaces.add(workspaceCwd);
         try {
           await createBranch(workspaceCwd, branchName);
@@ -1698,6 +1676,7 @@ export function registerSessionRoutes(
         const baseBranch = await wtService
           .getCurrentBranch()
           .catch(() => undefined);
+        assertRuntimeGenerationOpen?.();
         const wtResult = await wtService.createUserWorktree(slug, baseBranch);
         if (!wtResult.success || !wtResult.worktree) {
           res.status(500).json({
@@ -1721,6 +1700,7 @@ export function registerSessionRoutes(
         sessionScope = 'thread';
       }
 
+      assertRuntimeGenerationOpen?.();
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
         modelServiceId,
@@ -1739,8 +1719,7 @@ export function registerSessionRoutes(
       });
       // Defensive: the bridge/agent must honor a caller-supplied id. If it was
       // dropped anywhere in the chain (older agent binary, coalesced attach),
-      // never return a surprise id — fail the request instead. Same silent-drop
-      // class as #7831, one layer down.
+      // never return a surprise id — fail the request instead.
       if (
         requestedSessionId !== undefined &&
         session.sessionId !== requestedSessionId
@@ -1760,6 +1739,10 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
             }),
           ).catch(() => false);
+        } else {
+          await runtime.bridge
+            .detachClient(session.sessionId, session.clientId)
+            .catch(() => {});
         }
         // This early return runs inside the outer try, but a return skips
         // that try's catch — so replicate the catch's resource cleanup here.
@@ -1785,7 +1768,7 @@ export function registerSessionRoutes(
         return;
       }
       try {
-        runtime.generationGuard?.assertOpen();
+        assertRuntimeGenerationOpen?.();
       } catch (error) {
         if (!session.attached) {
           try {
@@ -2034,9 +2017,7 @@ export function registerSessionRoutes(
       }
       sendBridgeError(res, err, { route: 'POST /session' });
     } finally {
-      if (requestedSessionId !== undefined) {
-        inFlightSessionIds.delete(requestedSessionId);
-      }
+      sessionIdReservation?.release();
     }
   });
 
@@ -2111,28 +2092,31 @@ export function registerSessionRoutes(
       }
       if (resolvedRuntime === undefined) return;
       const { runtime, workspaceCwd } = resolvedRuntime;
-      const releaseRestoreOwner = enterRestoreOwner(
-        res,
-        route,
-        sessionId,
-        runtime,
-      );
-      if (!releaseRestoreOwner) return;
+      const assertRuntimeGenerationOpen =
+        captureRuntimeGenerationAssertion(runtime);
       const approvalMode = parseOptionalApprovalMode(body, res);
-      if (approvalMode === null) {
-        releaseRestoreOwner();
-        return;
-      }
+      if (approvalMode === null) return;
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
-      if (historyPageSize === null) {
-        releaseRestoreOwner();
-        return;
-      }
+      if (historyPageSize === null) return;
       const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) {
-        releaseRestoreOwner();
-        return;
+      if (clientId === null) return;
+      let sessionIdReservation: RequestedSessionIdReservation;
+      try {
+        sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
+          sessionId,
+          {
+            bridge: runtime.bridge,
+            workspaceCwd,
+            workspaceId: runtime.workspaceId,
+          },
+        );
+      } catch (error) {
+        if (error instanceof RequestedSessionIdAdmissionError) {
+          sendRequestedSessionIdAdmissionError(res, error, route);
+          return;
+        }
+        throw error;
       }
       try {
         const session = await archiveCoordinator.runSharedMany(
@@ -2167,7 +2151,7 @@ export function registerSessionRoutes(
               }
               liveConversationCwd = await materialize(sessionId);
             }
-            runtime.generationGuard?.assertOpen();
+            assertRuntimeGenerationOpen?.();
             const restored =
               action === 'load'
                 ? await runtime.bridge.loadSession({
@@ -2249,7 +2233,7 @@ export function registerSessionRoutes(
           },
         );
         try {
-          runtime.generationGuard?.assertOpen();
+          assertRuntimeGenerationOpen?.();
         } catch (error) {
           if (!session.attached) {
             await runtime.bridge
@@ -2401,7 +2385,7 @@ export function registerSessionRoutes(
           sessionId,
         });
       } finally {
-        releaseRestoreOwner();
+        sessionIdReservation.release();
       }
     };
 
@@ -3267,12 +3251,18 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
-        res.status(200).json(
-          await runtime.bridge.continueSession(sessionId, {
-            ...(clientId !== undefined ? { clientId } : {}),
+        const result = await runtime.bridge.continueSession(sessionId, {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId,
+        });
+        if (daemonLog && result.accepted) {
+          daemonLog.info('continuation enqueued', {
+            sessionId,
             promptId,
-          }),
-        );
+            clientId,
+          });
+        }
+        res.status(200).json(result);
       },
     ),
   );
@@ -3688,10 +3678,12 @@ export function registerSessionRoutes(
     try {
       // ACP session/close can fall back to a shared gate because it has
       // connection-local promptAbort state; REST close does not.
-      await archiveCoordinator.runExclusiveMany([sessionId], async () =>
-        runtime.bridge.closeSession(
-          sessionId,
-          clientId !== undefined ? { clientId } : undefined,
+      await runWithSessionListInvalidation(runtime, ['active'], () =>
+        archiveCoordinator.runExclusiveMany([sessionId], async () =>
+          runtime.bridge.closeSession(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          ),
         ),
       );
       clearBranchSessionEntry(sessionId);
@@ -3713,18 +3705,23 @@ export function registerSessionRoutes(
     try {
       const runtime = workspaceRegistry.primary;
       const service = createWorkspaceRuntimeSessionService(runtime);
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        deleteDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          bridge,
-          coordinator: archiveCoordinator,
-          onError: ({ phase, sessionId, error }) => {
-            writeStderrLine(
-              `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
-            );
-          },
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            deleteDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              bridge,
+              coordinator: archiveCoordinator,
+              onError: ({ phase, sessionId, error }) => {
+                writeStderrLine(
+                  `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+                );
+              },
+            }),
+          ),
       );
       for (const removedId of result.removed) {
         clearBranchSessionEntry(removedId);
@@ -3746,13 +3743,18 @@ export function registerSessionRoutes(
     });
 
     try {
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        archiveDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          bridge,
-          coordinator: archiveCoordinator,
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            archiveDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              bridge,
+              coordinator: archiveCoordinator,
+            }),
+          ),
       );
       res.status(200).json({
         archived: result.archived,
@@ -3775,12 +3777,17 @@ export function registerSessionRoutes(
     });
 
     try {
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        unarchiveDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          coordinator: archiveCoordinator,
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            unarchiveDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              coordinator: archiveCoordinator,
+            }),
+          ),
       );
       res.status(200).json({
         unarchived: result.unarchived,
@@ -3807,18 +3814,23 @@ export function registerSessionRoutes(
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const service = createWorkspaceRuntimeSessionService(runtime);
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          deleteDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            bridge: runtime.bridge,
-            coordinator: archiveCoordinator,
-            onError: ({ phase, sessionId, error }) => {
-              writeStderrLine(
-                `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
-              );
-            },
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              deleteDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                bridge: runtime.bridge,
+                coordinator: archiveCoordinator,
+                onError: ({ phase, sessionId, error }) => {
+                  writeStderrLine(
+                    `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+                  );
+                },
+              }),
+            ),
         );
         for (const removedId of result.removed) {
           clearBranchSessionEntry(removedId);
@@ -3844,13 +3856,18 @@ export function registerSessionRoutes(
         onWarning: logSessionArchiveWarning,
       });
       try {
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          archiveDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            bridge: runtime.bridge,
-            coordinator: archiveCoordinator,
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              archiveDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                bridge: runtime.bridge,
+                coordinator: archiveCoordinator,
+              }),
+            ),
         );
         res.status(200).json({
           archived: result.archived,
@@ -3877,12 +3894,17 @@ export function registerSessionRoutes(
         onWarning: logSessionArchiveWarning,
       });
       try {
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          unarchiveDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            coordinator: archiveCoordinator,
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              unarchiveDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                coordinator: archiveCoordinator,
+              }),
+            ),
         );
         res.status(200).json({
           unarchived: result.unarchived,
@@ -3921,11 +3943,16 @@ export function registerSessionRoutes(
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
             : undefined;
-        const effective = runtime.bridge.updateSessionMetadata(
-          sessionId,
-          { displayName },
-          clientId !== undefined ? { clientId } : undefined,
-        );
+        let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
+        try {
+          effective = runtime.bridge.updateSessionMetadata(
+            sessionId,
+            { displayName },
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        } finally {
+          invalidateSessionLists(runtime, ['active']);
+        }
         res.status(200).json({ sessionId, ...effective });
       },
     ),
@@ -4379,6 +4406,7 @@ export function registerSessionRoutes(
           ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
               listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
                 mergeLive: !readOnlySecondary,
+                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
               }),
             )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
@@ -4580,16 +4608,14 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId? }`: `false` when the session is idle (or the
-  // per-session queue is full), so the browser keeps the message in its own
-  // queue and sends it as a normal next-turn prompt. Synchronous — the bridge
-  // only pushes onto an in-memory queue.
+  // Returns `{ accepted, messageId? }`. Accepted requests are owned by the
+  // daemon; rejected requests were not admitted. Synchronous — the bridge only
+  // mutates its in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
-  // only the global 10 MB body limit applies. Not a UX limit — a rejected
-  // message stays in the browser's own queue and is sent as the (uncapped)
-  // next-turn prompt — it only bounds how much a single mid-turn push can pin in
-  // the in-memory queue (the queue DEPTH is bounded in `enqueueMidTurnMessage`).
+  // only the global 10 MB body limit applies. It bounds how much a single
+  // mid-turn push can pin in memory; queue depth is bounded separately in
+  // `enqueueMidTurnMessage`.
   const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
   app.post(
     '/session/:id/mid-turn-message',
@@ -4599,6 +4625,7 @@ export function registerSessionRoutes(
       (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const message = body['message'];
+        const messageId = body['messageId'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
         // stores the trimmed string, so checking the raw length would reject input
         // whose real content fits but is padded with whitespace.
@@ -4615,6 +4642,18 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          messageId !== undefined &&
+          (typeof messageId !== 'string' ||
+            messageId.length === 0 ||
+            messageId.length > 128)
+        ) {
+          res.status(400).json({
+            error:
+              '`messageId` must be a non-empty string of at most 128 characters',
+          });
+          return;
+        }
         // Forward the client id so the bridge authorizes it against the session
         // (like `/prompt` and `/btw`) — a token-holding client bound to another
         // session must not push into this one — and records it as the message's
@@ -4625,6 +4664,7 @@ export function registerSessionRoutes(
           sessionId,
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
+          typeof messageId === 'string' ? messageId : undefined,
         );
         res.status(200).json(result);
       },
@@ -4655,6 +4695,29 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Session-owned mid-turn snapshot: messages still waiting plus bounded
+  // terminal id rings. Query-capable clients project it after refresh,
+  // session switches, or missed events. Older daemons lack this route and
+  // retain the legacy client-side fallback.
+  app.get('/session/:id/mid-turn-messages', (req, res) => {
+    const route = 'GET /session/:id/mid-turn-messages';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+    if (!runtime) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const snapshot = runtime.bridge.getMidTurnMessages(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(snapshot);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
 
   // Pending prompt queue: list and remove.
   app.get('/session/:id/pending-prompts', (req, res) => {

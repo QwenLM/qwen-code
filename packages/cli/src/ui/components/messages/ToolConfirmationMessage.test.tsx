@@ -81,6 +81,146 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  it('preserves urls when the prompt is rendered as plain text', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt: 'Review the literal target',
+      urls: ['https://example.com/target'],
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Review the literal target');
+    expect(lastFrame()).toContain('URLs to fetch:');
+    expect(lastFrame()).toContain('- https://example.com/target');
+  });
+
+  it('renders plain-text info prompts without interpreting Markdown or links', () => {
+    const prompt =
+      'Save "[visible](https://hidden.example/target) **bold** `code` <u>under</u>"';
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={160}
+      />,
+    );
+
+    expect(lastFrame()).toContain(prompt);
+    expect(lastFrame()).not.toContain('\u001b]8;;');
+  });
+
+  it('renders every line of a short multiline plain-text info prompt', () => {
+    const prompt =
+      'Save this exact content to the bound Mem0 repository memory?\n"LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>"';
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      hideAlwaysAllow: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={10}
+        contentWidth={98}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Save this exact content to the bound Mem0 repository memory?',
+    );
+    expect(lastFrame()).toContain(
+      '"LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE',
+    );
+    expect(lastFrame()).toContain('`code-value` UNDER <u>under-value</u>"');
+  });
+
+  it('marks overflow in constrained plain-text info prompts', () => {
+    const prompt = `Confirm exact content:\n${JSON.stringify(
+      [
+        'PROMPT_TOP',
+        ...Array.from({ length: 80 }, (_, index) => `line-${index}`),
+        'PROMPT_TAIL',
+      ].join('\n'),
+    )}`;
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('PROMPT_TOP');
+    expect(frame).toMatch(/last \d+ lines hidden/);
+    expect(frame).not.toContain('PROMPT_TAIL');
+  });
+
+  it('renders the complete plain-text info prompt when unconstrained', () => {
+    const prompt = `Confirm exact content:\n${JSON.stringify(
+      [
+        'PROMPT_TOP',
+        ...Array.from({ length: 80 }, (_, index) => `line-${index}`),
+        'PROMPT_TAIL',
+      ].join('\n'),
+    )}`;
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: 'Hook confirmation',
+      prompt,
+      renderPromptAsPlainText: true,
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('PROMPT_TOP');
+    expect(frame).toContain('PROMPT_TAIL');
+    expect(frame).not.toContain('lines hidden');
+  });
+
   // Regression coverage for issue #4093: exec confirmations carry a
   // user-facing warning for command substitution. Previously such
   // commands were hard-denied at L4 with an opaque "denied by

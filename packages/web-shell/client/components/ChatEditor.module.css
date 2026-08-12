@@ -39,6 +39,15 @@
   padding: 12px;
 }
 
+.container[data-image-drag-active] .content {
+  border-color: var(--primary);
+  background: color-mix(
+    in srgb,
+    var(--primary) 6%,
+    var(--chat-editor-bg-primary)
+  );
+}
+
 .specularEffect {
   position: absolute;
   inset: -20px;
@@ -1399,6 +1408,34 @@
   flex-shrink: 0;
 }
 
+.contextUsageBtn {
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+
+.contextRingTrack {
+  stroke: var(--border);
+}
+
+.contextRingValue {
+  stroke: var(--agent-blue-500);
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+.contextRingValueWarning {
+  stroke: var(--warning-color);
+}
+
+.contextRingValueError {
+  stroke: var(--error-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .contextRingValue {
+    transition: none;
+  }
+}
+
 .widthModeBtn .toolBtnIcon svg {
   width: 18px;
   height: 18px;
@@ -1774,23 +1811,41 @@
 
 .imageRemove {
   position: absolute;
-  top: 0;
-  right: 0;
+  top: 2px;
+  right: 2px;
   width: 16px;
   height: 16px;
-  font-size: 12px;
-  line-height: 16px;
-  text-align: center;
-  background: rgba(0, 0, 0, 0.7);
-  color: var(--error-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
   border: none;
   cursor: pointer;
-  border-radius: 0 0 0 4px;
+  border-radius: 50%;
+  padding: 0;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease;
 }
 
-.imageRemove:hover {
-  background: var(--error-color);
-  color: var(--chat-editor-text-primary);
+.imageRemove svg {
+  display: block;
+}
+
+.imageThumb:hover .imageRemove:not(:disabled),
+.imageRemove:focus-visible {
+  opacity: 1;
+}
+
+.imageRemove:not(:disabled):hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.imageRemove:disabled {
+  cursor: default;
+  opacity: 0;
 }
 
 .searchPanel {

@@ -55,6 +55,18 @@ describe('ExtensionStore', () => {
     );
   };
 
+  it('derives a stable contained Agent Plugin data directory', () => {
+    const store = makeStore();
+    const extensionId = 'a'.repeat(64);
+
+    expect(store.agentPluginDataRoot(extensionId)).toBe(
+      path.join(storeDir, 'plugin-data', 'agent-plugins', extensionId),
+    );
+    expect(() => store.agentPluginDataRoot('../escape')).toThrow(
+      'Invalid extension id',
+    );
+  });
+
   it('imports V1 rules without materializing workspace overrides', async () => {
     await fsp.writeFile(
       enablementPath,

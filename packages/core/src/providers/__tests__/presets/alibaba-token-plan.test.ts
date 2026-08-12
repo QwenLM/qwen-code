@@ -41,7 +41,7 @@ describe('token plan provider', () => {
       'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
-      'deepseek-v4-flash',
+      'deepseek-v4-flash-0731',
       'deepseek-v3.2',
       'kimi-k2.7-code',
       'kimi-k2.6',

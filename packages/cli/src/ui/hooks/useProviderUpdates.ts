@@ -28,6 +28,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { getErrorMessage } from '../../utils/errors.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -60,7 +61,14 @@ interface ProviderMetadata {
   version?: string;
   baseUrl?: string;
   ignoredVersion?: string;
+  postponedVersion?: string;
+  postponedAt?: number;
 }
+
+// "Later" suppresses re-prompting for the same version for this long, so a
+// user who defers is not nagged on every launch. A new model-list version
+// still re-prompts immediately (postponedVersion no longer matches).
+const LATER_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h
 
 function getProviderMetadata(
   settings: LoadedSettings,
@@ -196,11 +204,25 @@ function findAllPendingUpdates(
     if (!metadata.version) continue;
 
     const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentTemplate = buildProviderTemplate(provider, baseUrl);
-    const currentVersion = computeModelListVersion(currentTemplate);
+    const currentVersion = computeModelListVersion(
+      buildProviderTemplate(provider, baseUrl),
+    );
 
     if (metadata.version === currentVersion) continue;
     if (metadata.ignoredVersion === currentVersion) continue;
+
+    // A "later" choice suppresses re-prompting for the same version while the
+    // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
+    // Negative elapsed time (a backward clock jump) is treated as expired so
+    // the prompt is not suppressed until the wall clock catches up.
+    if (
+      metadata.postponedVersion === currentVersion &&
+      typeof metadata.postponedAt === 'number' &&
+      Date.now() - metadata.postponedAt >= 0 &&
+      Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
+    ) {
+      continue;
+    }
 
     const existingModelIds = getInstalledOwnedModelIds(settings, provider);
     const newModelIds = provider.models!.map((s) => s.id);
@@ -233,9 +255,10 @@ export function useProviderUpdates(
   const migrated = useRef(false);
 
   const executeUpdate = useCallback(
-    async (providerCfg: ProviderConfig, baseUrl?: string) => {
+    async (pending: PendingUpdate) => {
       try {
-        const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        const providerCfg = pending.provider;
+        const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
@@ -249,7 +272,12 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
+        installPlan.providerState![
+          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+        ]!['version'] = pending.currentVersion;
         delete installPlan.env;
+        // Template updates never change the selected model.
+        delete installPlan.modelSelection;
         const installedById = new Map(
           installedModels.map((model) => [model.id, model]),
         );
@@ -277,13 +305,6 @@ export function useProviderUpdates(
           });
         }
         const previousModel = config.getModel();
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const previousModelStillAvailable = newConfigs.some(
-          (cfg) => cfg.id === previousModel,
-        );
-        if (previousModelStillAvailable) {
-          delete installPlan.modelSelection;
-        }
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
@@ -292,9 +313,18 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
+        const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
-          settings: createLoadedSettingsAdapter(settings),
+          settings: {
+            ...settingsAdapter,
+            setValue: (key, value) => {
+              // Template updates never change the selected auth method.
+              if (key !== 'security.auth.selectedType') {
+                settingsAdapter.setValue(key, value);
+              }
+            },
+          },
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
             config
@@ -308,7 +338,7 @@ export function useProviderUpdates(
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
 
-        if (previousModelStillAvailable && activeModel === previousModel) {
+        if (activeModel === previousModel) {
           addItem(
             {
               type: 'info',
@@ -344,13 +374,11 @@ export function useProviderUpdates(
 
         return true;
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
         addItem(
           {
             type: 'error',
             text: t('Failed to update provider configuration: {{message}}', {
-              message: errorMessage,
+              message: getErrorMessage(error),
             }),
           },
           Date.now(),
@@ -383,7 +411,7 @@ export function useProviderUpdates(
         setUpdateRequest(undefined);
         if (choice === 'update') {
           for (const p of pendingList) {
-            await executeUpdate(p.provider, p.baseUrl);
+            await executeUpdate(p);
           }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);
@@ -394,10 +422,42 @@ export function useProviderUpdates(
               p.currentVersion,
             );
           }
+        } else if (choice === 'later') {
+          // Persist a cooldown so "later" does not re-prompt on every launch.
+          // One batched write keeps the version/timestamp pair atomic, so a
+          // partial persist cannot invalidate the cooldown guard on next launch.
+          const persistScope = getPersistScopeForModelSelection(settings);
+          const postponedAt = Date.now();
+          try {
+            settings.setValues(
+              pendingList.flatMap((p) => [
+                {
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedVersion`,
+                  value: p.currentVersion,
+                },
+                {
+                  scope: persistScope,
+                  key: `${PROVIDER_METADATA_NS}.${p.metadataKey}.postponedAt`,
+                  value: postponedAt,
+                },
+              ]),
+            );
+          } catch (error) {
+            addItem(
+              {
+                type: 'error',
+                text: t('Failed to save update postponement: {{message}}', {
+                  message: getErrorMessage(error),
+                }),
+              },
+              Date.now(),
+            );
+          }
         }
       },
     });
-  }, [settings, config, executeUpdate]);
+  }, [settings, config, executeUpdate, addItem]);
 
   useEffect(() => {
     checkForUpdates();
