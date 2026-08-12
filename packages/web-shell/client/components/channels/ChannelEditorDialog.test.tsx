@@ -299,6 +299,58 @@ describe('ChannelEditorDialog', () => {
     expect(onWorkspaceChange).toHaveBeenCalledWith('/workspace/secondary');
   });
 
+  it('clears validation errors when switching workspaces', async () => {
+    await renderDialog({ existingNames: ['duplicate'] });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'duplicate');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+    expect(document.body.textContent).toContain(
+      'A Channel with this name already exists.',
+    );
+    expect(inputByLabel('Instance name')?.getAttribute('aria-invalid')).toBe(
+      'true',
+    );
+
+    await renderDialog({
+      existingNames: [],
+      workspaceCwd: '/workspace/secondary',
+    });
+
+    expect(document.body.textContent).not.toContain(
+      'A Channel with this name already exists.',
+    );
+    expect(inputByLabel('Instance name')?.getAttribute('aria-invalid')).toBe(
+      'false',
+    );
+  });
+
+  it('clears submit errors when switching workspaces', async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error('Revision conflict.'));
+    await renderDialog({ onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'release-bot');
+      setInputValue(inputByLabel('Client ID')!, 'ding-client-id');
+      setInputValue(inputByLabel('Client Secret')!, 'ding-client-secret');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => save?.click());
+    expect(document.body.textContent).toContain('Revision conflict.');
+    expect(document.body.textContent).toContain('Reload latest');
+
+    await renderDialog({ workspaceCwd: '/workspace/secondary' });
+
+    expect(document.body.textContent).not.toContain('Revision conflict.');
+    expect(document.body.textContent).not.toContain('Reload latest');
+  });
+
   it('does not render object metadata as a text field', async () => {
     await renderDialog();
 

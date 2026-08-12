@@ -449,7 +449,11 @@ export function ChannelsManagerPage({
                 <Select
                   value={selectedManagementWorkspace?.cwd ?? ''}
                   disabled={
-                    Boolean(editor) || loading || busy !== null || deleting
+                    !supportsManagement ||
+                    Boolean(editor) ||
+                    loading ||
+                    busy !== null ||
+                    deleting
                   }
                   onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
                 >

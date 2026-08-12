@@ -642,8 +642,14 @@ describe('ChannelsManagerPage', () => {
     });
     const primary = Array.from(
       document.querySelectorAll<HTMLElement>('[role="option"]'),
-    ).find((item) => item.textContent?.trim() === 'Main repo');
+    ).find((item) => item.textContent?.includes('Main repo'));
+    expect(primary).toBeDefined();
     await act(async () => primary?.click());
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/main',
+    });
     const primaryStart = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Start',
     );
@@ -751,5 +757,9 @@ describe('ChannelsManagerPage', () => {
       enabled: false,
       workspaceCwd: '/workspace/demo',
     });
+    expect(
+      document.querySelector<HTMLButtonElement>('[aria-label="Workspace"]')
+        ?.disabled,
+    ).toBe(true);
   });
 });

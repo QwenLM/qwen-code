@@ -251,6 +251,11 @@ export function ChannelEditorDialog({
     setSubmitError(undefined);
   }, [descriptor, instance, open]);
 
+  useEffect(() => {
+    setErrors({});
+    setSubmitError(undefined);
+  }, [workspaceCwd]);
+
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
     const key =
       FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
