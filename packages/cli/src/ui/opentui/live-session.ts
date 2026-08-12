@@ -31,7 +31,7 @@ import {
 } from './event-adapter.js';
 
 interface LooseCompletedCall {
-  request: { callId: string };
+  request: { callId: string; name?: string; args?: unknown };
   status: string;
   response?: {
     responseParts?: Part[];
@@ -132,7 +132,15 @@ export async function* livePromptEvents(
     const responseParts: Part[] = [];
     for (const call of completed) {
       const resp = call.response;
-      const display = renderResultDisplay(resp?.resultDisplay);
+      // For write_file show the written content (highlighted by <code>) like
+      // the original, not the raw unified diff.
+      const argsObj = (call.request.args ?? {}) as Record<string, unknown>;
+      const fileContent =
+        call.request.name === 'write_file' &&
+        typeof argsObj['content'] === 'string'
+          ? (argsObj['content'] as string)
+          : null;
+      const display = fileContent ?? renderResultDisplay(resp?.resultDisplay);
       if (display)
         yield { type: 'tool-result', id: call.request.callId, display };
       const failed = call.status === 'error' || call.status === 'cancelled';

@@ -104,6 +104,36 @@ function toolDescription(name: string, args: string): string {
   }
 }
 
+const EXT_TO_LANG: Record<string, string> = {
+  html: 'html',
+  htm: 'html',
+  js: 'javascript',
+  jsx: 'javascript',
+  ts: 'typescript',
+  tsx: 'typescript',
+  css: 'css',
+  json: 'json',
+  md: 'markdown',
+  py: 'python',
+  sh: 'bash',
+};
+
+function filetypeFromArgs(title: string, args?: string): string {
+  if (title === 'write_file' || title === 'read_file') {
+    try {
+      const a = JSON.parse(args ?? '{}') as Record<string, unknown>;
+      const p = (a['file_path'] ?? a['path']) as string | undefined;
+      if (p) {
+        const ext = p.split('.').pop()?.toLowerCase() ?? '';
+        if (EXT_TO_LANG[ext]) return EXT_TO_LANG[ext];
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return 'txt';
+}
+
 // ---------------------------------------------------------------------------
 // components
 // ---------------------------------------------------------------------------
@@ -164,18 +194,18 @@ function ToolCard(props: {
           {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
         </box>
       </box>
-      {expanded && item.args && (
+      {expanded && item.args && item.title !== 'write_file' && (
         <box paddingLeft={3}>
           <text fg={C.dim}>{argsPreview(item.args)}</text>
         </box>
       )}
-      {expanded && item.output.length > 0 && (
+      {(expanded || item.title === 'write_file') && item.output.length > 0 && (
         <box paddingLeft={3} marginTop={0}>
           <code
             content={item.output}
-            filetype="txt"
+            filetype={filetypeFromArgs(item.title, item.args)}
             syntaxStyle={SYNTAX}
-            fg={C.dim}
+            fg={C.text}
           />
         </box>
       )}
