@@ -213,6 +213,26 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     ]);
   });
 
+  it('omits an oversized result so the snapshot stays readable', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_0badc0de';
+    await writeWorkflowSnapshot(
+      config,
+      task({
+        runId,
+        result: 'x'.repeat(MAX_WORKFLOW_ARTIFACT_BYTES + 1),
+      }),
+    );
+
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(runId);
+    expect((await fs.stat(snapshotPath)).size).toBeLessThanOrEqual(
+      MAX_WORKFLOW_ARTIFACT_BYTES,
+    );
+    await expect(listWorkflowSnapshots(config)).resolves.toMatchObject([
+      { runId, result: expect.stringMatching(/result omitted/i) },
+    ]);
+  });
+
   it('freezes the snapshot projection before the first fs await', async () => {
     // R11-27: in-flight dispatches keep mutating the live entry across
     // the fs yields — a projection captured after the first await would
@@ -457,6 +477,29 @@ describe('durable workflow manifests', () => {
       ),
     ).toEqual([]);
     await expect(readWorkflowManifest(config, 'wf_a1b2')).resolves.toEqual(
+      manifest,
+    );
+  });
+
+  it('omits an oversized result so the manifest stays readable', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_0badc0de';
+
+    const manifest = await writeWorkflowManifest(
+      config,
+      task({
+        runId,
+        status: 'paused',
+        result: 'x'.repeat(MAX_WORKFLOW_ARTIFACT_BYTES + 1),
+      }),
+      { args: null, journal: EMPTY_JOURNAL },
+    );
+    const manifestPath = config.storage.getWorkflowRunManifestPath(runId);
+    expect((await fs.stat(manifestPath)).size).toBeLessThanOrEqual(
+      MAX_WORKFLOW_ARTIFACT_BYTES,
+    );
+    expect(manifest?.result).toMatch(/result omitted/i);
+    await expect(readWorkflowManifest(config, runId)).resolves.toEqual(
       manifest,
     );
   });

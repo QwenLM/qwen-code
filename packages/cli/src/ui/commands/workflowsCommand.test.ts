@@ -751,7 +751,7 @@ describe('workflowsCommand', () => {
       expect(result.content).toContain('Workflow runs (1 total · 0 active)');
       expect(result.content).toContain('wf_deadbeef');
       expect(result.content).toContain('interrupted');
-      expect(result.content).toContain('recoverable');
+      expect(result.content).toContain('· recoverable');
     });
 
     it('shows a durable recovery failure reason in detail', async () => {

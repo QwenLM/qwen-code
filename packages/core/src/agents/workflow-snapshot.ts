@@ -64,6 +64,34 @@ export const MAX_WORKFLOW_ARGS_BYTES = 64 * 1024;
  */
 export const MAX_WORKFLOW_ARTIFACT_BYTES = 32 * 1024 * 1024;
 
+function serializeWorkflowArtifact<T extends { result?: unknown }>(
+  artifact: T,
+): string {
+  let serialized = JSON.stringify(artifact, null, 2);
+  let byteLength = Buffer.byteLength(serialized, 'utf8');
+  if (byteLength <= MAX_WORKFLOW_ARTIFACT_BYTES) return serialized;
+
+  if (artifact.result !== undefined) {
+    serialized = JSON.stringify(
+      {
+        ...artifact,
+        result:
+          `(workflow result omitted: artifact exceeded the ` +
+          `${MAX_WORKFLOW_ARTIFACT_BYTES} byte limit)`,
+      },
+      null,
+      2,
+    );
+    byteLength = Buffer.byteLength(serialized, 'utf8');
+    if (byteLength <= MAX_WORKFLOW_ARTIFACT_BYTES) return serialized;
+  }
+
+  throw new Error(
+    `Workflow artifact is too large to persist (${byteLength} bytes, ` +
+      `limit ${MAX_WORKFLOW_ARTIFACT_BYTES}).`,
+  );
+}
+
 type JsonValue =
   | null
   | boolean
@@ -636,7 +664,7 @@ export async function writeWorkflowManifest(
     ...(generation === undefined ? {} : { generation }),
     ...(ownership ? { owner: ownership.owner } : {}),
   };
-  const serialized = JSON.stringify(manifest, null, 2);
+  const serialized = serializeWorkflowArtifact(manifest);
   const frozenManifest = JSON.parse(serialized) as WorkflowManifestV2;
   await atomicWriteFile(manifestPath, serialized, {
     noFollow: true,
@@ -808,7 +836,7 @@ export async function writeWorkflowSnapshot(
     // entry across the fs awaits below — a post-await projection
     // froze the snapshot at an fs-timing-dependent point mid-drain.
     const snapshot = toSnapshot(task);
-    const serialized = JSON.stringify(snapshot, null, 2);
+    const serialized = serializeWorkflowArtifact(snapshot);
     const dir = storage.getWorkflowRunsDir();
     const guard = await resolveSafeRunsRoot(storage, true);
     const snapshotPath = storage.getWorkflowRunSnapshotPath(task.runId);
