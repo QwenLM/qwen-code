@@ -45,6 +45,10 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
+const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
+  vi.fn(async () => {}),
+);
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const lspConfigWatcherMock = vi.hoisted(() => ({
@@ -150,6 +154,7 @@ vi.mock('./utils/sandbox.js', () => ({
 
 vi.mock('./utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: vi.fn(),
   writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
 }));
@@ -191,6 +196,18 @@ vi.mock('./utils/installationInfo.js', () => ({
 vi.mock('./acp-integration/acpAgent.js', () => ({
   runAcpAgent: (...args: unknown[]) => mockRunAcpAgent(...args),
 }));
+
+vi.mock('./utils/housekeeping/scheduler.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./utils/housekeeping/scheduler.js')>();
+  return {
+    ...actual,
+    startNonInteractiveOpenAILogHousekeeping: (...args: unknown[]) =>
+      mockStartNonInteractiveOpenAILogHousekeeping(...args),
+    stopNonInteractiveOpenAILogHousekeeping: () =>
+      mockStopNonInteractiveOpenAILogHousekeeping(),
+  };
+});
 
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
@@ -260,6 +277,8 @@ describe('gemini.tsx main function', () => {
     [];
 
   beforeEach(() => {
+    mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
+    mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     lspConfigWatcherMock.instances.length = 0;
     mockUpdateBeforeRelaunch.mockResolvedValue(true);
     mockGetInstallationInfo.mockReturnValue({
@@ -307,12 +326,10 @@ describe('gemini.tsx main function', () => {
     }
 
     const currentListeners = process.listeners('unhandledRejection');
-    const addedListener = currentListeners.find(
-      (listener) => !initialUnhandledRejectionListeners.includes(listener),
-    );
-
-    if (addedListener) {
-      process.removeListener('unhandledRejection', addedListener);
+    for (const listener of currentListeners) {
+      if (!initialUnhandledRejectionListeners.includes(listener)) {
+        process.removeListener('unhandledRejection', listener);
+      }
     }
     vi.restoreAllMocks();
   });
@@ -533,6 +550,176 @@ describe('gemini.tsx main function', () => {
       }
     },
   );
+
+  // Regression for #8653: every daemon-hosted session runs in an ACP child,
+  // so the scrub at that boundary must not silently disappear. The positive
+  // case fails if the call is deleted; the negative cases pin the gate —
+  // only daemon-stamped children (QWEN_CODE_SERVE) scrub, direct editor ACP
+  // integrations and non-ACP launches keep their own loader vars.
+  it.each([
+    ['scrubs for a daemon-spawned child', { acp: true } as CliArgs, '1', true],
+    [
+      'keeps for a direct (editor) ACP child',
+      { acp: true } as CliArgs,
+      '',
+      false,
+    ],
+    [
+      'keeps when the daemon marker is zero',
+      { acp: true } as CliArgs,
+      '0',
+      false,
+    ],
+    [
+      'keeps when the daemon marker is false',
+      { acp: true } as CliArgs,
+      'false',
+      false,
+    ],
+    ['keeps for a non-ACP launch', {} as CliArgs, '', false],
+  ])(
+    'inherited loader env vars past the ACP handoff (%s)',
+    async (_mode, argv, daemonMarker, expectScrubbed) => {
+      vi.stubEnv(
+        'NODE_OPTIONS',
+        '--import file:///other-checkout/register.mjs',
+      );
+      vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
+      if (daemonMarker !== undefined) {
+        vi.stubEnv('QWEN_CODE_SERVE', daemonMarker);
+      }
+
+      const { parseArguments, loadCliConfig } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue(argv);
+      vi.mocked(loadSettings).mockReturnValue({
+        errors: [],
+        merged: {
+          advanced: {},
+          security: { auth: {} },
+          ui: {},
+        },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getUserHooks: () => undefined,
+        getProjectHooks: () => undefined,
+      } as never);
+      // loadCliConfig is the first expensive call past the relaunch/sandbox
+      // handoff — the scrub must have run by here.
+      vi.mocked(loadCliConfig).mockImplementation(async () => {
+        if (expectScrubbed) {
+          expect(process.env['NODE_OPTIONS']).toBeUndefined();
+          expect(process.env['NODE_PATH']).toBeUndefined();
+        } else {
+          expect(process.env['NODE_OPTIONS']).toBe(
+            '--import file:///other-checkout/register.mjs',
+          );
+        }
+        throw new Error('stop after loader env scrub check');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow(
+          'stop after loader env scrub check',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  // Regression for #8653 (placement): relaunchAppInChildProcess spawns with
+  // {...process.env} captured at call time, so scrubbing BEFORE the handoff
+  // would strip the loader the respawned child still needs to boot. The
+  // scrubbed child re-runs the scrub itself after its own handoff.
+  it('keeps inherited loader env vars present at the relaunch handoff', async () => {
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(relaunchAppInChildProcess).mockImplementation(async () => {
+      expect(process.env['NODE_OPTIONS']).toBe(
+        '--import file:///other-checkout/register.mjs',
+      );
+      expect(process.env['NODE_PATH']).toBe('/other-checkout/node_modules');
+      throw new Error('stop after loader env handoff check');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow(
+        'stop after loader env handoff check',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  // Regression for #8653 (sandbox hop): getSandboxPassthroughEnvArgs
+  // forwards the QWEN_CODE_SERVE stamp into the container, so the sandboxed
+  // stage of a daemon-spawned ACP child must still scrub.
+  it('scrubs inherited loader env vars in the sandboxed ACP stage', async () => {
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv('NODE_PATH', '/other-checkout/node_modules');
+    vi.stubEnv('SANDBOX', 'sandbox-exec');
+    vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+
+    const { parseArguments, loadCliConfig } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    vi.mocked(parseArguments).mockResolvedValue({ acp: true } as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockImplementation(async () => {
+      expect(process.env['NODE_OPTIONS']).toBeUndefined();
+      expect(process.env['NODE_PATH']).toBeUndefined();
+      throw new Error('stop after sandboxed loader env scrub check');
+    });
+
+    try {
+      await expect(main()).rejects.toThrow(
+        'stop after sandboxed loader env scrub check',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 
   it('keeps the external Guard token available to command parsing and scrubs it before settings load', async () => {
     vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
@@ -859,7 +1046,10 @@ describe('gemini.tsx main function', () => {
     );
 
     mockWriteStderrLine.mockClear();
-    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
+      .mock.calls.length;
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
       authError: null,
       themeError: null,
@@ -871,7 +1061,9 @@ describe('gemini.tsx main function', () => {
       userStartupWarningsModule,
       'getUserStartupWarnings',
     ).mockResolvedValue([]);
-    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
 
     let initialized = false;
     const configStub = {
@@ -949,6 +1141,48 @@ describe('gemini.tsx main function', () => {
       configStub,
       expect.any(Object),
       { deferIdeConnection: false },
+    );
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
+      configStub,
+      expect.any(Object),
+    );
+    const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
+      .calls[cleanupRegistrationStart]?.[0];
+    expect(housekeepingCleanup).toBeTypeOf('function');
+    await housekeepingCleanup?.();
+    expect(mockStopNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledOnce();
+
+    const runFailure = new Error('headless run failed');
+    runNonInteractiveSpy.mockRejectedValueOnce(runFailure);
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    const secondProcessExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    try {
+      await expect(main()).rejects.toBe(runFailure);
+    } finally {
+      secondProcessExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(2);
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledTimes(
+      2,
     );
   });
 
@@ -1172,7 +1406,7 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
-  it('invokes runNonInteractiveStreamJson and performs cleanup in stream-json mode', async () => {
+  it('starts housekeeping and cleans up stream-json success and failure', async () => {
     const originalIsTTY = Object.getOwnPropertyDescriptor(
       process.stdin,
       'isTTY',
@@ -1211,6 +1445,8 @@ describe('gemini.tsx main function', () => {
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
     vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
+    const cleanupRegistrationStart = vi.mocked(cleanupModule.registerCleanup)
+      .mock.calls.length;
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
@@ -1323,7 +1559,53 @@ describe('gemini.tsx main function', () => {
       expect.any(Object),
       { deferIdeConnection: false },
     );
-    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
+      validatedConfig,
+      settingsArg,
+    );
+    const housekeepingCleanup = vi.mocked(cleanupModule.registerCleanup).mock
+      .calls[cleanupRegistrationStart]?.[0];
+    expect(housekeepingCleanup).toBeTypeOf('function');
+    await housekeepingCleanup?.();
+    expect(mockStopNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledOnce();
+
+    const streamFailure = new Error('stream failed');
+    runStreamJsonSpy.mockRejectedValueOnce(streamFailure);
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    Object.defineProperty(process.stdin, 'isRaw', {
+      value: false,
+      configurable: true,
+    });
+    const secondProcessExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    process.env['SANDBOX'] = '1';
+    try {
+      await expect(main()).rejects.toBe(streamFailure);
+    } finally {
+      secondProcessExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalIsRaw) {
+        Object.defineProperty(process.stdin, 'isRaw', originalIsRaw);
+      } else {
+        delete (process.stdin as { isRaw?: unknown }).isRaw;
+      }
+      delete process.env['SANDBOX'];
+    }
+
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(2);
+    expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledTimes(
+      2,
+    );
   });
 });
 
@@ -1761,6 +2043,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       './config/config.js'
     );
     const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
     const initializerModule = await import('./core/initializer.js');
     const initializeAppSpy = vi
       .spyOn(initializerModule, 'initializeApp')
@@ -1888,6 +2171,19 @@ describe('gemini.tsx main function kitty protocol', () => {
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),
     );
+
+    const acpFailure = new Error('ACP failed');
+    mockRunAcpAgent.mockRejectedValueOnce(acpFailure);
+    process.exit = ((code?: string | number | null | undefined) => {
+      throw new MockProcessExitError(code);
+    }) as unknown as typeof process.exit;
+    try {
+      await expect(main()).rejects.toBe(acpFailure);
+    } finally {
+      process.exit = originalExit;
+    }
+
+    expect(cleanupModule.runExitCleanup).toHaveBeenCalledTimes(2);
   });
 
   // Shared config/settings mocks for the interactive signal-handler tests.

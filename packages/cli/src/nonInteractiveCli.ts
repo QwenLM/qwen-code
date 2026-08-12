@@ -179,6 +179,8 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the turn reached the per-turn tool-call limit',
   [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
     'the model repeatedly sent invalid tool parameters without correcting them',
+  [LoopType.REPEATED_TOOL_EXECUTION_FAILURE]:
+    'the same tool execution failure continued after a corrective reminder',
 };
 
 function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
@@ -192,7 +194,8 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
     loopType === LoopType.SHELL_COMMAND_STAGNATION ||
     loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
-    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
+    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION ||
+    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
   const hint =
     loopType === LoopType.TURN_TOOL_CALL_CAP
       ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
@@ -1087,18 +1090,35 @@ export async function runNonInteractive(
               break;
             case 'goal_control': {
               const { snapshot } = slashCommandResult.response;
-              observeGoalRuntime(await config.getGoalRuntimeReady());
+              const shouldRunGoalWorker =
+                snapshot.goal?.status === 'active' &&
+                (slashCommandResult.operation.kind === 'set' ||
+                  slashCommandResult.operation.kind === 'edit' ||
+                  slashCommandResult.operation.kind === 'resume');
+              try {
+                observeGoalRuntime(await config.getGoalRuntimeReady());
+              } catch (error) {
+                // `goalCommand` already degrades a persistence-unavailable
+                // `status`/`clear` into a successful empty snapshot; asking
+                // for the very runtime that just failed must not turn that
+                // answer back into an exit-1 crash. Only a snapshot that
+                // still needs a worker genuinely requires the runtime.
+                if (
+                  shouldRunGoalWorker ||
+                  !(error instanceof GoalPersistenceUnavailableError)
+                ) {
+                  throw error;
+                }
+                debugLogger.debug(
+                  '[runNonInteractive] canonical Goal runtime unavailable; answering goal_control from the degraded snapshot',
+                );
+              }
               emitGoalSnapshot(snapshot);
 
               const message = formatGoalState(
                 snapshot,
                 slashCommandResult.operation.kind,
               );
-              const shouldRunGoalWorker =
-                snapshot.goal?.status === 'active' &&
-                (slashCommandResult.operation.kind === 'set' ||
-                  slashCommandResult.operation.kind === 'edit' ||
-                  slashCommandResult.operation.kind === 'resume');
               if (!shouldRunGoalWorker) {
                 await emitNonInteractiveFinalMessage({
                   message,

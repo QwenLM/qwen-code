@@ -1,0 +1,32 @@
+{
+  "$comment": "Label-driven issue assignment map; areas are keyed on the existing issue label taxonomy. Assignment is a pure function of an issue's labels — no model output is involved. Owners need push access but do NOT need a CODEOWNERS entry; every candidate is re-checked against the collaborator API at write time, so adding a login here cannot grant access to someone who lacks it. Areas match in file order, first match wins. See docs/design/2026-08-07-issue-auto-assignment.md.",
+  "requireLabels": ["need-discussion"],
+  "skipLabels": [
+    "welcome-pr",
+    "feature/need-help",
+    "good first issue",
+    "help wanted",
+    "autofix/approved",
+    "autofix/in-progress"
+  ],
+  "areas": [
+    {
+      "name": "core",
+      "labels": ["category/core", "scope/core"],
+      "owners": [
+        "wenshao",
+        "tanzhenxin",
+        "yiliang114",
+        "LaZzyMan",
+        "doudouOUC",
+        "pomelo-nwu",
+        "DennisYu07",
+        "jifeng",
+        "chiga0",
+        "qqqys",
+        "ytahdn",
+        "BenGuanRan"
+      ]
+    }
+  ]
+}
