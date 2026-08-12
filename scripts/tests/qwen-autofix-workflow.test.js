@@ -5989,7 +5989,8 @@ exit 1
     // Measurement: replay the real block against a real repo. Test lines are
     // *.test.* / *.spec.* files, __snapshots__/, test-utils/, and
     // integration-tests/ (by DIRECTORY, not file naming); binary files count
-    // as zero; deletions subtract.
+    // as zero; deletions subtract; mechanical churn (root and nested
+    // lockfiles, the regenerated settings schema) never burns the budget.
     const measureBlock = prepareBranchAndFeedbackStep.match(
       /(# Binary files report[\s\S]*?NET_SRC=\$\(\( NET_TOTAL - NET_TEST \)\))/,
     )?.[1];
@@ -6028,6 +6029,27 @@ exit 1
         join(dir, 'assets', 'logo.bin'),
         Buffer.from([0x00, 0x01, 0x02, 0x00]),
       );
+      // Mechanical churn: a ROOT lockfile (proves '**/' glob-magic matches
+      // at depth zero), a nested one, and the exact generated-schema path —
+      // all excluded, so none of them shift the expected nets below.
+      writeFileSync(join(dir, 'package-lock.json'), 'l1\nl2\nl3\nl4\nl5\n');
+      mkdirSync(join(dir, 'packages', 'vscode-ide-companion', 'schemas'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(dir, 'packages', 'vscode-ide-companion', 'package-lock.json'),
+        'm1\nm2\nm3\n',
+      );
+      writeFileSync(
+        join(
+          dir,
+          'packages',
+          'vscode-ide-companion',
+          'schemas',
+          'settings.schema.json',
+        ),
+        'g1\ng2\ng3\ng4\n',
+      );
       git('add', '-A');
       git('commit', '-qm', 'pr');
       git('update-ref', 'refs/remotes/origin/main', 'main');
@@ -6040,6 +6062,9 @@ exit 1
         { encoding: 'utf8', cwd: dir },
       );
       expect(measured).toBe('20 16 4');
+      expect(measureBlock).toContain(
+        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

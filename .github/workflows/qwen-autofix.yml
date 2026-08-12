@@ -157,7 +157,9 @@ env:
   # and cannot be tightened on tests without also strangling source fixes.
   # Test lines are *.test.*/*.spec.* files, __snapshots__/, test-utils/, and
   # integration-tests/ (the pathspec lives in the prepare step); source is
-  # everything else. Either budget tripping engages the brake.
+  # everything else, minus mechanical churn (lockfiles and the regenerated
+  # settings schema) that is skimmed rather than reviewed. Either budget
+  # tripping engages the brake.
   # TUNABLE WITHOUT A CODE CHANGE like the scan budgets above; a malformed
   # value falls back to its default at the read site.
   GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
@@ -4061,7 +4063,15 @@ jobs:
           # Binary files report "-" in numstat; count them as 0 lines.
           sum_numstat() { awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }'; }
           TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
-          NET_TOTAL="$(git diff --numstat origin/main...HEAD | sum_numstat)"
+          # Mechanical churn must not burn the budget: one dependency bump
+          # rewrites hundreds of package-lock.json lines and one
+          # `generate:settings-schema` run regenerates the committed schema —
+          # skimmed, not reviewed, so they measure no review burden. Keep the
+          # list tight and name generated artifacts EXACTLY; a broad glob
+          # would silently exempt hand-written files from the budget. None of
+          # these can match TEST_PATHSPEC, so NET_SRC stays a clean subtraction.
+          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
+          NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" | sum_numstat)"
           NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" | sum_numstat)"
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
