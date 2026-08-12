@@ -722,6 +722,16 @@ describe('package asset scripts', () => {
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
+
+    const corePackageJson = JSON.parse(
+      readFileSync(
+        path.join(rootDir, 'packages', 'core', 'package.json'),
+        'utf8',
+      ),
+    );
+    expect(distPackageJson.optionalDependencies.sharp).toBe(
+      corePackageJson.dependencies.sharp.replace(/^\^/, ''),
+    );
     expect(
       existsSync(
         path.join(
@@ -1081,6 +1091,22 @@ describe('package asset scripts', () => {
       'packages/cli/src/i18n/locales/en.json',
       '{"hello":"world"}\n',
     );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.35.0',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
     writeFile(
       rootDir,
       'packages/audio-capture/package.json',
