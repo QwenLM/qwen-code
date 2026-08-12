@@ -100,6 +100,47 @@ describe('parseLayerReceipts', () => {
     ).toBe(0);
   });
 
+  it('tracks fences the CommonMark way — a quoted marker survives no divergence', () => {
+    // Probe cases from the round-2 review. A naive symmetric toggle released each
+    // of these quoted markers as a live receipt (the credit/release direction).
+    // (1) a mismatched fence line must not close the block:
+    expect(
+      parseLayerReceipts(
+        ['```', '~~~', 'Layer walked: toctou — quoted', '~~~', '```'].join(
+          '\n',
+        ),
+      ).size,
+    ).toBe(0);
+    // (2) a list-item fence must open (GitHub renders the marker as quoted code):
+    expect(
+      parseLayerReceipts(
+        ['The form:', '- ```', '  Layer walked: toctou — quoted', '  ```'].join(
+          '\n',
+        ),
+      ).size,
+    ).toBe(0);
+    // (3) a fence line with trailing content must not close the block:
+    expect(
+      parseLayerReceipts(
+        [
+          '```',
+          'Layer walked: toctou — quoted',
+          '``` end of quote',
+          'Layer walked: inheritance — quoted',
+          '```',
+        ].join('\n'),
+      ).size,
+    ).toBe(0);
+    // A genuine fenced block still closes and a real receipt after it counts.
+    expect([
+      ...parseLayerReceipts(
+        ['```', 'quoted', '```', 'Layer walked: scope-propagation — real'].join(
+          '\n',
+        ),
+      ),
+    ]).toEqual(['scope-propagation']);
+  });
+
   it('requires the colon — a colon-less shape is not a receipt', () => {
     // Relaxing the mandatory colon would let colon-less parrot prose parse as a
     // receipt, and that is the credit/release direction.
@@ -121,9 +162,10 @@ describe('parseLayerReceipts', () => {
 });
 
 describe('layerCoverage', () => {
-  it('marks a layer covered by a finding OR a receipt, and lists the rest as owed', () => {
+  it('marks a layer covered by its receipt (finding or clean), and lists the rest as owed', () => {
     const returns = [
-      // A token-layer receipt carrying a finding — the marker plus what it found.
+      // A receipt whose note records a finding — coverage is the marker, not the
+      // finding; a marker-less finding would not count the layer.
       'Layer walked: lexing — a trailing `# comment` swallows the mutating git command.',
       // A dry receipt that names one deep layer, marker on its own line.
       [
@@ -192,6 +234,18 @@ describe('inferLayersFromProse', () => {
         'Reviewed the changed files and the diff thoroughly.',
       ).size,
     ).toBe(0);
+  });
+
+  it('does not infer a layer from a signal that lives in quoted text', () => {
+    // The `--infer` estimate skips fenced code and blockquotes exactly as the
+    // structured parser does — a signal quoted, not used, credits nothing.
+    const quoted = [
+      '```',
+      'a command substitution $(…) inherits set -a',
+      '```',
+      '> export -f is imported by a child shell',
+    ].join('\n');
+    expect(inferLayersFromProse(quoted).size).toBe(0);
   });
 });
 

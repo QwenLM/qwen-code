@@ -67,7 +67,7 @@ import { MODELED_SYSTEM_DOMAIN, owedLayerDimensions } from './audit-layers.js';
  * transcript to a recorded prompt; this gate has no such second stage, so the
  * selector itself must be the identity line.
  */
-const REVERSE_AUDIT_IDENTITY = 'You are review agent `reverse-audit`';
+export const REVERSE_AUDIT_IDENTITY = 'You are review agent `reverse-audit`';
 
 /**
  * The reverse-audit auditors' final returns for this run — identity-anchored and

@@ -16,11 +16,12 @@
 // with a whole class untouched. "No new gaps" needs to become "which layers has
 // nothing been filed against."
 //
-// A layer counts as COVERED when either an auditor filed a finding in it OR an
-// auditor RECEIPTED it as walked-and-clear. The receipt is a structured line —
-// `Layer walked: <id> — <note>` — the exact shape and discipline of the
-// `Budget gap:` marker (budget.ts): a line the parser reads, not a phrase it
-// guesses at. Keyword inference exists too, but only as an OPT-IN estimate for
+// A layer counts as COVERED when an auditor RECEIPTED it — a structured line,
+// `Layer walked: <id> — <note>`, whose note may record a finding or a clean
+// walk. Coverage is the RECEIPT, not the finding: a marker-less finding does not
+// count its layer, so an auditor must name every layer it walked. The marker has
+// the exact shape and discipline of the `Budget gap:` line (budget.ts): a line
+// the parser reads, not a phrase it guesses at. Keyword inference exists too, but only as an OPT-IN estimate for
 // measuring transcripts recorded before the auditor brief asked for the marker
 // (the A/B baseline); the marker is the authority, because an agent parrots what
 // it is handed and a coverage claim guessed from prose is the same self-consistent
@@ -200,6 +201,58 @@ const LAYER_HINT_RE = /layer\s+walked/i;
  * blockquotes are skipped exactly as `budgetGapDisclosures` skips them — this
  * skill reviews its own PRs, and a return that QUOTES the marker is not USING it.
  */
+/**
+ * CommonMark-correct fenced-code tracking, biased toward SKIPPING. A QUOTED
+ * `Layer walked:` marker must never read as a live receipt — that is the
+ * credit/release direction — so openers are recognised GENEROUSLY (0-3 spaces of
+ * indent, an optional list-item prefix, then three or more backticks or tildes;
+ * whatever follows is ignored) and closers STRICTLY (the same fence character,
+ * at least the opening run length, at most 3 spaces of indent, and only
+ * whitespace after). A naive symmetric toggle diverged from CommonMark three
+ * probe-verified ways, each releasing a quoted marker: a mismatched fence line
+ * (`~~~` inside a ``` block, or a shorter run) closed early, a list-item fence
+ * (`- ` then the run) never opened, and a fence line with trailing content
+ * closed a block GitHub keeps open.
+ */
+function opensFence(line: string): { char: string; len: number } | null {
+  const m = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)]) +)?(`{3,}|~{3,})/.exec(line);
+  return m ? { char: m[1][0], len: m[1].length } : null;
+}
+
+function closesFence(
+  line: string,
+  fence: { char: string; len: number },
+): boolean {
+  const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return m !== null && m[1][0] === fence.char && m[1].length >= fence.len;
+}
+
+/**
+ * The lines an auditor is USING, not quoting: fenced code (above), blockquotes,
+ * and indented code blocks removed. Shared by the receipt parser and the opt-in
+ * prose estimate so neither credits a layer from quoted text — the module's
+ * "a return that QUOTES the marker is not USING it" invariant, in one place.
+ */
+function* usedLines(finalText: string): Generator<string> {
+  let fence: { char: string; len: number } | null = null;
+  for (const line of finalText.split(/\r?\n/)) {
+    if (fence) {
+      if (closesFence(line, fence)) fence = null;
+      continue;
+    }
+    const opened = opensFence(line);
+    if (opened) {
+      fence = opened;
+      continue;
+    }
+    // A blockquote is a quotation by definition; an indented code block (four or
+    // more leading spaces, or a leading tab) is quoted code.
+    if (/^[ \t]*>/.test(line)) continue;
+    if (/^(?: {4,}|\t)/.test(line)) continue;
+    yield line;
+  }
+}
+
 export function parseLayerReceipts(
   finalText: string,
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
@@ -207,22 +260,7 @@ export function parseLayerReceipts(
   const ids = new Set<string>();
   if (!LAYER_HINT_RE.test(finalText)) return ids;
   const known = new Set(taxonomy.map((l) => l.id));
-  let inFence = false;
-  for (const line of finalText.split(/\r?\n/)) {
-    if (/^[ \t]*(?:```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    if (/^[ \t]*>/.test(line)) continue;
-    // A markdown code block — four or more leading spaces, or a leading tab — is
-    // quoting the marker, not using it, the same "quoted is not used" invariant
-    // the fences and blockquotes above enforce. Without this an indented
-    // `Layer walked:` line (and, with the leading-backtick tolerance removed from
-    // the pattern, an inline `` `Layer walked: …` `` code span) parsed as a live
-    // receipt, so an auditor enumerating the owed layers in the brief's own
-    // backtick-wrapped form could mark them all covered and release the cap.
-    if (/^(?: {4,}|\t)/.test(line)) continue;
+  for (const line of usedLines(finalText)) {
     const m = LAYER_RECEIPT_LINE_RE.exec(line);
     if (!m) continue;
     const id = m[1].toLowerCase();
@@ -241,7 +279,10 @@ export function inferLayersFromProse(
   finalText: string,
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
 ): Set<string> {
-  const lower = finalText.toLowerCase();
+  // Over the USED lines only — the estimate must not credit a layer from a
+  // signal that lives in quoted code or a blockquote, the same invariant the
+  // structured parser enforces.
+  const lower = [...usedLines(finalText)].join('\n').toLowerCase();
   const ids = new Set<string>();
   for (const layer of taxonomy) {
     if (layer.signals.some((s) => lower.includes(s))) ids.add(layer.id);

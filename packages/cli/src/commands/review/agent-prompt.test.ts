@@ -59,6 +59,7 @@ import {
 } from './agent-prompt.js';
 import { BRIEFS } from './lib/agent-briefs.js';
 import { SHELL_MODEL_LAYERS } from './lib/audit-layers.js';
+import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
 import {
   readRecordedPrompts,
   briefPath,
@@ -1850,6 +1851,20 @@ describe('buildWholeDiffBlock — the agents that walk the whole diff', () => {
     expect(p).toContain('offset=4024, limit=176');
     // and NOT chunk 13's or chunk 15's range.
     expect(p).not.toContain('offset=3807');
+  });
+
+  it('a real reverse-audit launch prompt carries the identity the layer gate anchors on', () => {
+    // The gate selects an auditor by REVERSE_AUDIT_IDENTITY against the launch
+    // prompt. Pin the constant against the ACTUAL header this builder emits, not
+    // a test-local copy — an engineer rewording the header (dropping the
+    // backticks, localising it) would silently make the gate select nothing and
+    // stop capping, with every gate/compose test still green.
+    const p = buildRoleLaunchPrompt(PLAN, 'reverse-audit', '/t/ra.brief.md');
+    expect(p).toContain(REVERSE_AUDIT_IDENTITY);
+    // And a sibling role's prompt must NOT carry it, or the anchor is no anchor.
+    expect(
+      buildRoleLaunchPrompt(PLAN, 'verify', '/t/v.brief.md'),
+    ).not.toContain(REVERSE_AUDIT_IDENTITY);
   });
 
   it('rejects --role reverse-audit --chunk N when the plan has no such chunk', () => {
