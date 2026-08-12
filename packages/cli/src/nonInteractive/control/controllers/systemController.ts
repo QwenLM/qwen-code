@@ -28,6 +28,7 @@ import {
   createDebugLogger,
   MCPServerConfig,
   AuthProviderType,
+  applyReasoningEffort,
   normalizeReasoningEffort,
   loadUsageDashboard,
   type MCPOAuthConfig,
@@ -176,15 +177,13 @@ export class SystemController extends BaseController {
       const normalized = normalizeReasoningEffort(payload.effort);
       if (normalized) {
         try {
-          this.context.config.setReasoningEffort(normalized);
-
-          if (this.context.config.getReasoningEffort() !== normalized) {
-            debugLogger.warn(
-              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
-            );
-          } else {
+          if (applyReasoningEffort(this.context.config, normalized)) {
             debugLogger.info(
               `[SystemController] Set reasoning effort to: ${normalized}`,
+            );
+          } else {
+            debugLogger.warn(
+              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
             );
           }
         } catch (error) {
@@ -533,9 +532,7 @@ export class SystemController extends BaseController {
     }
 
     try {
-      this.context.config.setReasoningEffort(normalized);
-
-      const applied = this.context.config.getReasoningEffort() === normalized;
+      const applied = applyReasoningEffort(this.context.config, normalized);
 
       debugLogger.info(
         `[SystemController] Reasoning effort set to: ${normalized} (applied: ${applied})`,
