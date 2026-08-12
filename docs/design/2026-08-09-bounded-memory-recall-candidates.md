@@ -40,9 +40,13 @@ or unreadable files keep the existing skip behavior. Empty candidate manifests
 return no model selection rather than sending an unbounded request.
 
 There is no public setting, persistent index, new dependency, provider API, or
-Fast/Refined state machine. Each recall enumerates, reads, and parses the full
-project and user memory trees, then performs O(n) local ranking and active-tool
-filtering over the parsed documents. The model candidate count and manifest are
+second selection pathway. Each recall enumerates, reads, and parses the full
+project and user memory trees once, then performs O(n) local ranking and
+active-tool filtering over the parsed documents. The deterministic fast path
+described in `2026-08-08-native-memory-recall-reliability.md` reuses the
+candidates produced by that single pass, so it adds no scan, no ranking work,
+and no state machine — only an earlier delivery point for results already
+computed. The model candidate count and manifest are
 bounded, but the local I/O and filtering work grow with the memory tree; a
 persistent catalog requires separate measurement and evidence.
 

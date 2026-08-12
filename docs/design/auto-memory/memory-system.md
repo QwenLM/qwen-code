@@ -396,6 +396,37 @@ flowchart TD
 - 超出截断时追加提示："NOTE: Relevant memory truncated for prompt budget."
 - 包含文档的新鲜度信息（基于文件 mtime）
 
+### 投递时机（Delivery）
+
+"选中了 Memory" 不等于 "主模型看到了 Memory"。Recall 在 UserQuery 到达时异步启动，
+投递发生在两个时机：
+
+```mermaid
+flowchart TD
+    A[UserQuery 到达\n启动 Recall Prefetch] --> B{100 ms 内\nRecall 是否完成?\nINITIAL_MEMORY_RECALL_WAIT_MS}
+    B -- 是 --> C[注入首轮 Prompt\nphase: refined]
+    B -- 否 --> D{是否有确定性\nFast 结果?}
+    D -- 是 --> E[注入首轮 Prompt\nphase: fast\n最多 2 篇 MAX_FAST_RECALL_DOCS]
+    D -- 否 --> F[首轮不注入]
+    E --> G[Recall 继续运行]
+    F --> G
+    G --> H{本轮是否有\nToolResult?}
+    H -- 是 --> I[排除 Fast 已投递文档\n按剩余文档重建 Prompt]
+    I --> J{还有剩余文档?}
+    J -- 是 --> K[注入 ToolResult\nphase: refined]
+    J -- 否 --> L[丢弃\nalready_delivered]
+    H -- 否 --> M[丢弃\nno_safe_delivery_point]
+```
+
+**为什么需要 Fast 阶段**：当存在 Config 时 Recall 会等待 Model Selector，
+而它是一次网络 Side Query（中止上限 30 秒），因此 100 ms 预算通常会超时。
+若没有 Fast 阶段，**没有工具调用的轮次将完全拿不到 Memory**——而这正是
+用户级 Memory 最重要的场景。Fast 结果复用 `selectModelCandidateDocuments`
+为 Model Manifest 已经算好的候选，不产生额外扫描或 I/O。
+
+**去重**：两个阶段来自同一次扫描，Model Selector 并未把 Fast 文档视为已排除，
+因此 ToolResult 投递前必须过滤掉 Fast 已投递的 `filePath` 并重建 Prompt。
+
 ---
 
 ## Forget — 遗忘
@@ -490,6 +521,25 @@ flowchart TD
 | `docs_selected` | number                                 | 最终注入的文档数 |
 | `strategy`      | `'none'` \| `'heuristic'` \| `'model'` | 选择策略         |
 | `duration_ms`   | number                                 | 总耗时（毫秒）   |
+
+### Recall Delivery 遥测
+
+记录选中的 Memory 是否真的送达主模型（Selection 事件无法回答这个问题）。
+
+| 字段             | 类型                                                                                                                                      | 说明         |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `phase`          | `'fast'` \| `'refined'`                                                                                                                   | **投递阶段** |
+| `delivery_point` | `'initial'` \| `'tool_result'` \| `'discarded'`                                                                                           | 投递位置     |
+| `discard_reason` | `'no_safe_delivery_point'` \| `'new_query'` \| `'reset'` \| `'abort'` \| `'shutdown'` \| `'no_relevant_results'` \| `'already_delivered'` | 丢弃原因     |
+| `strategy`       | `'none'` \| `'heuristic'` \| `'model'`                                                                                                    | **选择方式** |
+| `docs_selected`  | number                                                                                                                                    | 投递文档数   |
+| `latency_ms`     | number                                                                                                                                    | 自发起的耗时 |
+
+> **`phase` 与 `strategy` 正交，互不替代。** `phase` 描述**何时**送达：`fast` 是预算
+> 超时后注入的确定性结果，`refined` 是 Model Selector 选出的结果。`strategy` 描述
+> **如何**选出。`fast` 投递必然是 `heuristic`；`refined` 投递常规为 `model`，
+> 在 Selector 失败走 Fallback 时为 `heuristic`。仅凭 `strategy` 判断阶段，
+> 会把"确定性结果先到"与"Selector 故障"混为一谈。
 
 ---
 
