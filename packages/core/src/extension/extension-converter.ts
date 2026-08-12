@@ -25,6 +25,11 @@ import type {
   ExtensionOriginSource,
 } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  AGENT_PLUGIN_SCHEMA,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
 
 const debugLogger = createDebugLogger('Extension:converter');
 
@@ -98,6 +103,20 @@ export async function convertCompatibleExtension(
   externalContent: boolean;
 }> {
   signal?.throwIfAborted();
+  const agentPluginStatus = pluginName
+    ? 'unrelated'
+    : getAgentPluginSchemaStatus(extensionDir);
+  if (agentPluginStatus === 'unsupported') {
+    throw new Error(
+      `Unsupported Agent Plugins schema. Supported schema: "${AGENT_PLUGIN_SCHEMA}".`,
+    );
+  } else if (agentPluginStatus === 'supported') {
+    return {
+      extensionDir,
+      originSource: 'AgentPlugins',
+      externalContent: false,
+    };
+  }
   const configFilePath = path.join(
     extensionDir,
     SUPPORTED_EXTENSION_MANIFESTS[0],
@@ -122,6 +141,11 @@ export async function convertCompatibleExtension(
         networkPolicy,
         signal,
       );
+      if (getAgentPluginSchemaStatus(converted.convertedDir) !== 'unrelated') {
+        fs.rmSync(path.join(converted.convertedDir, AGENT_PLUGIN_MANIFEST), {
+          force: true,
+        });
+      }
       return {
         extensionDir: converted.convertedDir,
         originSource: 'Claude',

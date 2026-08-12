@@ -561,6 +561,22 @@ const EN: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'askUser.shortcuts.previous': '← previous',
+  'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
+  'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
+  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.multiNext':
+    '↑↓ move · Space select/deselect · Enter select & next',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ move · Enter edit',
+  'askUser.shortcuts.inputEmpty': 'Type an answer · Esc stop editing',
+  'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
+  'askUser.shortcuts.inputNext': 'Enter next · Esc stop editing',
+  'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
     'No matching inline LaTeX expression found in the last AI output.',
@@ -1136,6 +1152,7 @@ const EN: Messages = {
     "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
+  'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
   // Key keeps its historical `review` name; the label moved to "Changes" when
   // the code-review result view (`codeReview.*`) took over the word.
@@ -3380,6 +3397,22 @@ const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
+  'askUser.shortcuts.previous': '← 上一步',
+  'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
+  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.multiNext':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并下一步',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ 移动 · Enter 编辑',
+  'askUser.shortcuts.inputEmpty': '输入答案 · Esc 退出编辑',
+  'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
+  'askUser.shortcuts.inputNext': 'Enter 下一步 · Esc 退出编辑',
+  'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
   'copy.latexMissing': '最后一条 AI 输出中没有匹配的 LaTeX 块。',
@@ -3916,6 +3949,7 @@ const ZH: Messages = {
     '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
   // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
   // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
