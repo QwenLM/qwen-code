@@ -87,6 +87,53 @@ describe('lineSpanAt', () => {
       ex: 5,
       ey: 0,
     });
-    expect(lineSpanAt(frame, 7, 0)).toBeNull();
+    expect(lineSpanAt(frame, 7, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 5,
+      ey: 0,
+    });
+    expect(lineSpanAt(frame, 9, 0)).toEqual({
+      sx: 10,
+      sy: 0,
+      ex: 12,
+      ey: 0,
+    });
+  });
+
+  it('snaps non-selectable history padding and gutters to visible content', () => {
+    const padded = frameFromLines(['history   ']);
+    for (let x = 7; x < padded.cells[0].length; x++) {
+      (padded.cells[0][x] as FrameCell).selectable = false;
+    }
+    expect(lineSpanAt(padded, 9, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 6,
+      ey: 0,
+    });
+
+    const gutter = frameFromLines(['  1 code']);
+    for (let x = 0; x < 4; x++) {
+      (gutter.cells[0][x] as FrameCell).selectable = false;
+    }
+    expect(lineSpanAt(gutter, 1, 0)).toEqual({
+      sx: 4,
+      sy: 0,
+      ex: 7,
+      ey: 0,
+    });
+  });
+
+  it('snaps a non-selectable wide-character spacer to its glyph', () => {
+    const frame = frameFromLines(['中']);
+    (frame.cells[0][1] as FrameCell).selectable = false;
+
+    expect(lineSpanAt(frame, 1, 0)).toEqual({
+      sx: 0,
+      sy: 0,
+      ex: 0,
+      ey: 0,
+    });
   });
 });

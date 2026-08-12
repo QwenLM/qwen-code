@@ -423,6 +423,85 @@ describe('TextSelectionController', () => {
     expect(copyToClipboard).toHaveBeenLastCalledWith('x');
   });
 
+  it('triple-clicks history text from non-selectable trailing padding', () => {
+    const content = makeFrame('history').cells[0];
+    const padding = Array.from({ length: 3 }, () => ({
+      type: 'char' as const,
+      value: ' ',
+      fullWidth: false,
+      styles: [],
+      selectable: false,
+      flowId: null,
+    }));
+    frame = {
+      width: 10,
+      height: 1,
+      cells: [[...content, ...padding]],
+      boundaries: [Array.from({ length: 10 }, () => null)],
+    };
+    viewportRect = { x: 0, y: 0, width: 10, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+
+    for (let click = 0; click < 3; click++) {
+      handler(makeEvent('left-press', 10));
+      handler(makeEvent('left-release', 10));
+    }
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 6,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('history');
+  });
+
+  it('keeps a line drag aligned when it moves into trailing padding', () => {
+    const first = makeFrame('hello').cells[0];
+    const second = makeFrame('world').cells[0];
+    const padding = Array.from({ length: 3 }, () => ({
+      type: 'char' as const,
+      value: ' ',
+      fullWidth: false,
+      styles: [],
+      selectable: false,
+      flowId: null,
+    }));
+    frame = {
+      width: 8,
+      height: 2,
+      cells: [
+        [...first, ...padding],
+        [...second, ...padding],
+      ],
+      boundaries: [
+        Array.from({ length: 8 }, () => null),
+        Array.from({ length: 8 }, () => null),
+      ],
+    };
+    viewportRect = { x: 0, y: 0, width: 8, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('move', 8, 2));
+    handler(makeEvent('left-release', 8, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 4,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld');
+  });
+
   it('extends a word drag to the release cell when no move event is emitted', () => {
     frame = makeFrame('foo bar baz');
     viewportRect = { x: 0, y: 0, width: 11, height: 1 };

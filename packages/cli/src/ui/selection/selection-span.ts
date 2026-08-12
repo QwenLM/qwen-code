@@ -65,16 +65,11 @@ export function wordSpanAt(
   return { sx, sy: y, ex, ey: y };
 }
 
-/** Contiguous selectable line span around a click, or null if blank. */
-export function lineSpanAt(
-  frame: ReadonlyFrame | null,
+function selectableLineSpan(
+  row: ReadonlyFrame['cells'][number],
   x: number,
   y: number,
-): NormalizedSelection | null {
-  const row = frame?.cells[y];
-  if (!row?.[x]?.selectable) {
-    return null;
-  }
+): NormalizedSelection {
   let start = x;
   while (start > 0 && row[start - 1].selectable) {
     start--;
@@ -84,10 +79,38 @@ export function lineSpanAt(
     runEnd++;
   }
   const contentEnd = lastContentColumn(row, start, runEnd);
-  if (contentEnd < start) {
+  return { sx: start, sy: y, ex: contentEnd, ey: y };
+}
+
+function isSelectableContent(
+  cell: ReadonlyFrame['cells'][number][number],
+): boolean {
+  return cell.selectable && cell.value !== '' && cell.value !== ' ';
+}
+
+/** Nearest contiguous selectable line span around a click, or null if blank. */
+export function lineSpanAt(
+  frame: ReadonlyFrame | null,
+  x: number,
+  y: number,
+): NormalizedSelection | null {
+  const row = frame?.cells[y];
+  if (!row || row.length === 0) {
     return null;
   }
-  return { sx: start, sy: y, ex: contentEnd, ey: y };
+
+  const origin = Math.max(0, Math.min(x, row.length - 1));
+  for (let distance = 0; distance < row.length; distance++) {
+    const left = origin - distance;
+    if (left >= 0 && isSelectableContent(row[left])) {
+      return selectableLineSpan(row, left, y);
+    }
+    const right = origin + distance;
+    if (distance > 0 && right < row.length && isSelectableContent(row[right])) {
+      return selectableLineSpan(row, right, y);
+    }
+  }
+  return null;
 }
 
 /** Resolve the span at a point for a word/line selection mode. */
