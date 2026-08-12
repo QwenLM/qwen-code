@@ -2020,3 +2020,149 @@ describe('ArtifactPanel shell tab', () => {
     expect(container.textContent).toContain('Command failed');
   });
 });
+
+describe('ArtifactPanel fullscreen toggle', () => {
+  function renderPanel(props: {
+    fullscreen?: boolean;
+    onToggleFullscreen?: () => void;
+  }) {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'monitor:monitor-1',
+                kind: 'monitor',
+                title: task.description,
+                task,
+              },
+            ]}
+            activeTabId="monitor:monitor-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            fullscreen={props.fullscreen}
+            onToggleFullscreen={props.onToggleFullscreen}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  it('shows a fullscreen toggle and reports clicks', () => {
+    const onToggleFullscreen = vi.fn();
+    const container = renderPanel({ onToggleFullscreen });
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('false');
+    act(() => {
+      toggle?.click();
+    });
+    expect(onToggleFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the panel full-bleed and flips the toggle when fullscreen', () => {
+    const container = renderPanel({
+      fullscreen: true,
+      onToggleFullscreen: () => {},
+    });
+    const aside = container.querySelector('aside');
+    expect(aside?.className).toContain('panelFullscreen');
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('omits the toggle when fullscreen is unsupported', () => {
+    const container = renderPanel({});
+    expect(
+      container.querySelector('button[aria-label="Fullscreen"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Exit fullscreen"]'),
+    ).toBeNull();
+  });
+});
+
+describe('ArtifactPanel image preview tabs', () => {
+  it('renders one preview tab per image and shows the active image', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'image:a',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,aWFh',
+                alt: 'Uploaded image 1',
+              },
+              {
+                id: 'image:b',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,iWJi',
+              },
+            ]}
+            activeTabId="image:a"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    const preview = container.querySelector(
+      'img[class*="imagePreview"]',
+    ) as HTMLImageElement;
+    expect(preview).not.toBeNull();
+    expect(preview.getAttribute('src')).toBe('data:image/png;base64,aWFh');
+    expect(preview.getAttribute('alt')).toBe('Uploaded image 1');
+
+    const download = container.querySelector(
+      'a[class*="imageDownloadButton"]',
+    ) as HTMLAnchorElement;
+    expect(download).not.toBeNull();
+    expect(download.getAttribute('href')).toBe('data:image/png;base64,aWFh');
+    expect(download.getAttribute('download')).toBe('image.png');
+  });
+});
