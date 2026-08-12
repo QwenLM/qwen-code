@@ -16,7 +16,7 @@ Restore identity includes the normalized session and workspace, the effective re
 
 A same-session request waits for the source runner to be ready and free of local, restored, or observed work before it starts. This wait does not consume the restore budget. The budget starts with the raw RPC, and signal, lifecycle, navigation, resync, or environment changes can still cancel the intent. Resync remains authoritative and continues through its existing destructive recovery path for this change.
 
-Source-bound branch, create, attach, and legacy restore operations exclude ordinary restores. The exclusion follows the raw operation rather than an outer action timeout: a timed-out create keeps restores blocked until its raw request settles, and a late successful create is detached once. A blocked controlled target is still routed through the coordinator so it publishes a terminal failed transition and does not leave the host waiting indefinitely.
+Source-bound branch, create, attach, and legacy restore operations exclude ordinary restores. The exclusion follows the raw operation rather than an outer action timeout: a timed-out create keeps restores blocked until its raw request settles, and a late successful create is detached once. A controlled target discovered during a source-bound operation remains pending and is retried once the final source-bound operation settles, so a transient interlock cannot permanently drop the host's desired target.
 
 ## Cursor capture and integrity
 
@@ -39,6 +39,12 @@ Same-session notices and settled-prompt bookkeeping are preserved. Candidate rep
 Raw `clientId` props are desired input rather than committed owner state. A modern explicit client-ID change performs transactional resume. A change while another target is preparing updates that target rather than rebinding the source. Legacy daemons use a full destructive load so the transcript is not replaced by an empty resume replay.
 
 The commit CAS includes the source object's current client ID. If SDK prompt-admission self-heal updates that ID in place, the prepared candidate is discarded and the healed source remains active. Failures publish one recoverable transition failure while leaving source connection, transcript, prompt, metadata, and controls usable; they never rewrite the source as missing or disconnected.
+
+The committed client ID is also the recovery identity. Once a modern rebind commits, later renders cannot restore the initial prop into the committed client ref; subsequent ring or epoch recovery therefore requests the attachment that actually owns the current runner. Legacy daemons still mirror the prop because they do not support transactional client ownership.
+
+All terminal intent paths retire a prepared candidate and release its source-tail capture. A raw restore timeout may retain the capture only until that raw request settles, allowing an exact-shape retry to adopt its result without leaving event capture enabled after the intent has otherwise failed.
+
+Bounded load responses carry the same event epoch as full load responses. The bridge snapshots the replay watermark and epoch together and returns them only if both remain unchanged through the persisted-page read, preserving the provider's same-epoch commit check.
 
 ## Verification and risks
 
