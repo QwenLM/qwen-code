@@ -1442,6 +1442,52 @@ describe('runFixedPolicies', () => {
       config = makeConfig({ omni_transcribe_stub: TRANSCRIPT_DESCRIPTOR });
     });
 
+    it('reuses a TEXT product on the second run without re-running the tool', async () => {
+      // Text products carry no derived version node, so their object path
+      // must be reconstructed from the content hash. A real-run probe caught
+      // this: audio/keyframe reuse hit while the transcript re-ran the entire
+      // ASR pass — the single most expensive thing #8189 exists to avoid.
+      const { MediaMemoryService } = await import(
+        '../../services/media-memory/index.js'
+      );
+      const service = new MediaMemoryService(store.getOmniRootDir());
+      const sha256 = createHash('sha256')
+        .update(await fs.readFile(sourcePath))
+        .digest('hex');
+      const sourceBinding = await service.recordFileRecognized({
+        fileRef: sourcePath,
+        sha256,
+        mediaType: 'image',
+        metadata: recognizedImage().metadata,
+        sizeBytes: recognizedImage().sizeBytes,
+        mimeType: 'image/png',
+        origin: 'user',
+        source: { protocol: 'local', locator: 'photo.png' },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: 'omni-sniff-ffprobe/1',
+          probeStatus: 'complete',
+        },
+      });
+      const options = {
+        store,
+        policies: [transcriptPolicy()],
+        memory: { service, sourceBinding },
+      };
+
+      mockFileArtifact();
+      const first = await runFixedPolicies(config, source, options);
+      expect(first.fileDeliveries[0]?.text).toBe(TRANSCRIPT_TEXT);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+
+      const second = await runFixedPolicies(config, source, options);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      // Full text comes back from the promoted object, not from the
+      // entry's truncated inlineText copy.
+      expect(second.fileDeliveries[0]?.text).toBe(TRANSCRIPT_TEXT);
+      expect(second.fileDeliveries[0]?.disclosure).toBe(TRANSCRIPT_DISCLOSURE);
+    });
+
     it('validates and promotes the transcript into fileDeliveries with text + disclosure', async () => {
       mockFileArtifact();
       const { deliveries, fileDeliveries, records } = await runFixedPolicies(

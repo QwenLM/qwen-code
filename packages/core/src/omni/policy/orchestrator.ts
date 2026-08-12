@@ -736,7 +736,7 @@ async function executePolicy(
       fingerprint,
     );
     const rebuilt = reusable
-      ? await rebuildReusedOutputs(reusable, descriptor, signal)
+      ? await rebuildReusedOutputs(reusable, descriptor, store, signal)
       : undefined;
     if (rebuilt) {
       debugLogger.debug(
@@ -1098,6 +1098,7 @@ async function executePolicy(
 async function rebuildReusedOutputs(
   reusable: ReusableExecutionOutputs,
   descriptor: MediaPolicyToolDescriptor,
+  store: OmniObjectStore,
   signal: AbortSignal | undefined,
 ): Promise<
   | {
@@ -1112,8 +1113,15 @@ async function rebuildReusedOutputs(
   const derivedFiles: PolicyExecution['derivedFiles'] = [];
   try {
     for (const record of reusable.outputs) {
-      const objectPath = record.objectPath;
-      if (!objectPath) return undefined;
+      // A media output carries its object path (its derived version's file
+      // record). A TEXT output has no version node, so its location is
+      // reconstructed from the content hash — the object store is
+      // content-addressed, which is what makes that sound. Without this,
+      // text products (transcripts — the most expensive thing to re-derive
+      // and the whole point of #8189) could never be reused.
+      const objectPath =
+        record.objectPath ??
+        store.objectPathFor(record.sha256, extensionForMime(record.mimeType));
       const stat = await fs.lstat(objectPath).catch(() => undefined);
       if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
       if ((await hashFileSha256(objectPath, signal)) !== record.sha256) {
