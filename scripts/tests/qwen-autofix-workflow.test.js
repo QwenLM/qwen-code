@@ -12295,7 +12295,7 @@ describe('run-agent idle watchdog', () => {
     expect(r.agentLog.length).toBe(2_097_152);
   });
 
-  it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
+  it('ignores a non-positive QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
     // Number('-1') is truthy, so a bare `|| default` guard would arm a
     // negative window: Date.now() - lastOutputAt >= -1 is instantly true
     // and every agent dies at the first idle tick. `0` (an operator's
@@ -12312,6 +12312,11 @@ describe('run-agent idle watchdog', () => {
     // runs halve it, and retry: 2 in this config rides residual spikes.
     // The assertion carries the script's own verdict so a flake names its
     // cause.
+    expect(
+      readFileSync(autofixRunnerScriptPath, 'utf8'),
+    ).toContain(
+      'Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0',
+    );
     for (const idleMs of [-1, 0]) {
       const r = runAgent({
         stub: [

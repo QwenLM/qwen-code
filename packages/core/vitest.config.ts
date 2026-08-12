@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import os from 'node:os';
-
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
@@ -42,14 +40,8 @@ export default defineConfig({
     },
     poolOptions: {
       threads: {
-        // Size the pool to the machine instead of a fixed 8-16: test:ci runs
-        // every workspace in parallel, so a fixed 16-thread pool per package
-        // oversubscribes the shared self-hosted hosts (several runner
-        // registrations per host) — the contention that blows the timeouts
-        // above. ~2 threads per core keeps a package fast in isolation while
-        // leaving headroom for its siblings and neighboring jobs.
-        minThreads: Math.min(8, Math.max(2, Math.floor(os.cpus().length / 2))),
-        maxThreads: Math.min(16, Math.max(4, os.cpus().length * 2)),
+        minThreads: 8,
+        maxThreads: 16,
       },
     },
   },

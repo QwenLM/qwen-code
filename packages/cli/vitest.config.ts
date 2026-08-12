@@ -5,7 +5,6 @@
  */
 
 /// <reference types="vitest" />
-import os from 'node:os';
 
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
@@ -176,12 +175,8 @@ export default defineConfig({
     },
     poolOptions: {
       threads: {
-        // Sized to the machine, capped at the old fixed value: see
-        // packages/core/vitest.config.ts. test:ci runs every workspace in
-        // parallel, so a fixed 16-thread pool per package oversubscribes a
-        // 4-core hosted runner 8x over before a single neighbor job exists.
-        minThreads: Math.min(8, Math.max(2, Math.floor(os.cpus().length / 2))),
-        maxThreads: Math.min(16, Math.max(4, os.cpus().length * 2)),
+        minThreads: 8,
+        maxThreads: 16,
       },
     },
     server: {
