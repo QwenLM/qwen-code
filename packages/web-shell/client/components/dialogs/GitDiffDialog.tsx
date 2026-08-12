@@ -525,16 +525,6 @@ export function GitDiffContent({
   const [sourceNonce, setSourceNonce] = useState(0);
 
   useEffect(() => {
-    setMode('uncommitted');
-    setCommitRef('');
-    setBranchRef('');
-    setCommits(null);
-    setCommitsHasMore(false);
-    setBranches(null);
-    setSourceError(null);
-  }, [workspaceCwd, gitCwd]);
-
-  useEffect(() => {
     // Refresh (not reset): the cached lists are dropped so the fetch effects
     // below re-run against the post-mutation repository state, but the
     // selected source stays — the resolve handlers keep it when it survives
@@ -651,14 +641,19 @@ export function GitDiffContent({
   );
 
   useEffect(() => {
-    if (options === null) {
-      setDiff(null);
-      const sourceReady =
-        mode === 'commit' ? commits !== null : branches !== null;
-      setLoading(!sourceReady && sourceError !== mode);
-      setError(sourceError === mode);
-      return;
-    }
+    if (options !== null) return;
+    setDiff(null);
+    const sourceReady =
+      mode === 'commit' ? commits !== null : branches !== null;
+    setLoading(!sourceReady && sourceError !== mode);
+    setError(sourceError === mode);
+  }, [options, mode, commits, branches, sourceError]);
+
+  // Depends only on fetch inputs: the revision refresh nulls and refills the
+  // cached lists, and including them here would cancel-and-reissue the diff
+  // request on every list transition (three identical requests per bump).
+  useEffect(() => {
+    if (options === null) return;
     let cancelled = false;
     setDiff(null);
     setLoading(true);
@@ -680,17 +675,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [
-    client,
-    workspaceCwd,
-    gitCwd,
-    mode,
-    options,
-    commits,
-    branches,
-    sourceError,
-    revision,
-  ]);
+  }, [client, workspaceCwd, gitCwd, options, revision]);
 
   const subtitle =
     diff && diff.available

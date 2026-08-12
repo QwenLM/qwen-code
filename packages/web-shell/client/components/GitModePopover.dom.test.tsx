@@ -662,4 +662,58 @@ describe('GitModePopover existing branches', () => {
     expect(document.body.textContent).not.toContain('boom');
     expect(optionButtons()).toHaveLength(3);
   });
+
+  it('surfaces a checkout failure that lands while the popover is closed', async () => {
+    // Closing the popover does not cancel the checkout; its failure must be
+    // visible on reopen instead of being cleared before the first render.
+    let rejectCheckout!: (error: Error) => void;
+    workspaceGitCheckout.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCheckout = reject;
+        }),
+    );
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    clickButton('topic'); // checkout starts and stays in flight across closing
+    act(() => popoverHarness.onOpenChange?.(false));
+    await act(async () => {
+      rejectCheckout(new Error('Commit or stash first'));
+    });
+    await flush();
+
+    openChip();
+    expect(document.body.textContent).toContain('Commit or stash first');
+  });
+
+  it('renders branch labels with bidi overrides escaped', async () => {
+    // git refnames legally carry U+202E (for-each-ref lists them, which is
+    // how the picker is populated); a hostile remote could plant one to
+    // visually reorder a label — the trojan-source class.
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'release\u202egpj', isHead: false },
+      ],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    expect(document.body.textContent).not.toContain('\u202e');
+    expect(document.body.textContent).toContain('release\\u202egpj');
+    expect(optionButtons()).toHaveLength(1);
+  });
 });

@@ -228,17 +228,25 @@ export function GitDialog({
 
   // Returning to the diff tab used to unmount/remount GitDiffContent, which
   // incidentally refetched; now that it stays mounted (to preserve the
-  // selected source), refetch explicitly on the hidden→visible transition.
-  // The first activation is skipped: the mount-time fetch already covers it.
+  // selected source), refetch explicitly on the hidden→visible transition —
+  // but only when the content STAYED MOUNTED while hidden. A dialog that has
+  // never shown the diff view can unmount the content while hidden; the next
+  // "first visit" is then a fresh mount, and a bump would duplicate its
+  // mount-time fetch.
+  const diffMounted = diffVisited || diffActive;
   const prevDiffActiveRef = useRef(diffActive);
-  const diffShownOnceRef = useRef(diffActive);
+  const prevDiffMountedRef = useRef(diffMounted);
   useEffect(() => {
-    if (diffActive && !prevDiffActiveRef.current && diffShownOnceRef.current) {
+    if (
+      diffActive &&
+      !prevDiffActiveRef.current &&
+      prevDiffMountedRef.current
+    ) {
       setDiffRevision((current) => current + 1);
     }
     prevDiffActiveRef.current = diffActive;
-    if (diffActive) diffShownOnceRef.current = true;
-  }, [diffActive]);
+    prevDiffMountedRef.current = diffMounted;
+  }, [diffActive, diffMounted]);
 
   const selectView = useCallback((next: GitDialogView) => {
     setSubtitle(undefined);

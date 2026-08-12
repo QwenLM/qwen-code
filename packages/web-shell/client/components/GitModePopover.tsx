@@ -117,6 +117,9 @@ export function GitModePopover({
   );
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
+  // A checkout failure can arrive after dismissal (the request keeps
+  // running); kept apart from the list error so a reopen can surface it.
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [existingRetryNonce, setExistingRetryNonce] = useState(0);
   const [checkoutRef, setCheckoutRef] = useState<string | null>(null);
 
@@ -131,13 +134,15 @@ export function GitModePopover({
     (v: boolean) => {
       setOpen(v);
       if (v) {
-        setSelectedMode(intent.mode);
+        // An unread checkout failure must stay visible on reopen — the
+        // existing-branch box is the only surface that renders it; the fetch
+        // and checkout paths clear errors when real work starts.
+        setSelectedMode(checkoutError ? 'existing' : intent.mode);
         setBranchName(intent.mode === 'branch' ? intent.name : '');
         setExistingSearch('');
-        setExistingError(null);
       }
     },
-    [intent],
+    [intent, checkoutError],
   );
 
   const handleSelectCurrent = useCallback(() => {
@@ -229,13 +234,14 @@ export function GitModePopover({
       if (checkoutRef) return;
       setCheckoutRef(ref);
       setExistingError(null);
+      setCheckoutError(null);
       try {
         await client.workspaceByCwd(workspaceCwd).workspaceGitCheckout(ref);
         onIntentChange({ mode: 'current' });
         onBranchChanged?.();
         setOpen(false);
       } catch (error) {
-        setExistingError(describeGitDaemonError(error));
+        setCheckoutError(describeGitDaemonError(error));
       } finally {
         setCheckoutRef(null);
       }
@@ -388,14 +394,15 @@ export function GitModePopover({
                 aria-label={t('gitMode.existing')}
                 onWheelCapture={(event) => event.stopPropagation()}
               >
-                {existingError && (
+                {(existingError ?? checkoutError) && (
                   <div className={styles.existingError}>
-                    {existingError}
+                    {existingError ?? checkoutError}
                     <button
                       type="button"
                       className={styles.existingRetry}
                       onClick={() => {
                         setExistingError(null);
+                        setCheckoutError(null);
                         setExistingRetryNonce((nonce) => nonce + 1);
                       }}
                     >
@@ -408,7 +415,9 @@ export function GitModePopover({
                     <Loader2Icon className={styles.spin} size={14} />
                     {t('gitMode.existingLoading')}
                   </div>
-                ) : existingGroups.size === 0 && !existingError ? (
+                ) : existingGroups.size === 0 &&
+                  !existingError &&
+                  !checkoutError ? (
                   <div className={styles.existingStatus}>
                     {t('gitMode.existingEmpty')}
                   </div>

@@ -15,7 +15,7 @@ type MessageValue =
 
 type Messages = Record<string, MessageValue>;
 
-const EN: Messages = {
+export const EN: Messages = {
   'git.currentBranch': (v) => `Current Git branch: ${v?.branch ?? ''}`,
   'git.detached': 'Detached HEAD',
   'git.clean': 'Working tree clean',
@@ -2814,7 +2814,7 @@ const EN: Messages = {
   'welcome.tipLabel': 'Tips:',
 };
 
-const ZH: Messages = {
+export const ZH: Messages = {
   ...EN,
   'git.currentBranch': (v) => `当前 Git 分支：${v?.branch ?? ''}`,
   'git.detached': '游离 HEAD',

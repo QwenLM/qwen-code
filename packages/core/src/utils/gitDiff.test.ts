@@ -497,6 +497,30 @@ describe('fetchGitDiff', () => {
     ).toBeNull();
   });
 
+  it('keeps commit mode independent of untracked worktree collisions', async () => {
+    // Commit comparisons read immutable objects only: an untracked worktree
+    // file at a path the selected commit deletes must NOT re-account the
+    // deletion row the way worktree-targeting branch mode does.
+    await fs.writeFile(path.join(repo, 'foo.txt'), 'old content\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'add foo');
+    await git(repo, 'rm', '-q', 'foo.txt');
+    await git(repo, 'commit', '-q', '-m', 'delete foo');
+    const deleteSha = (
+      await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })
+    ).stdout.trim();
+    await fs.writeFile(path.join(repo, 'foo.txt'), 'old content\n');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'commit',
+      ref: deleteSha,
+    });
+    expect(result?.perFileStats.get('foo.txt')).toMatchObject({
+      removed: 1,
+      isDeleted: true,
+    });
+  });
+
   it('compares a selected branch tip with the current working tree', async () => {
     await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
     await git(repo, 'add', '.');
@@ -519,6 +543,30 @@ describe('fetchGitDiff', () => {
     expect(
       await fetchGitDiff(repo, { mode: 'branch', ref: '--not-a-ref' }),
     ).toBeNull();
+  });
+
+  it('resolves a branch-mode ref to the branch tip, not a same-named tag', async () => {
+    // Bare-name resolution prefers refs/tags/ over refs/heads/: the branch
+    // must win for branch mode (bare AND qualified refs), or the whole
+    // comparison silently runs against the tag's tree.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'tag', 'release'); // tag on the base commit
+    await git(repo, 'switch', '-q', '-c', 'release');
+    await fs.writeFile(path.join(repo, 'branch-only.txt'), 'branch\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'branch tip');
+    await git(repo, 'switch', '-q', 'main');
+
+    for (const ref of ['release', 'refs/heads/release']) {
+      const result = await fetchGitDiff(repo, { mode: 'branch', ref });
+      // The branch tip tracks branch-only.txt, which the worktree lacks;
+      // against the tag (the base commit) the comparison would be empty.
+      expect(result?.perFileStats.get('branch-only.txt')).toMatchObject({
+        isDeleted: true,
+      });
+    }
   });
 
   it('shows a worktree file colliding with a baseline path as modified, not deleted', async () => {
@@ -735,6 +783,36 @@ describe('fetchGitDiff', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps a collision row when a baseline symlink became a regular file',
+    async () => {
+      // The symlink -> regular-file type change must stay visible even when
+      // the file's bytes equal the symlink target: mode 120000 never matches
+      // a regular worktree file, so identical content must not drop the row.
+      await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', 'base');
+      await git(repo, 'switch', '-q', '-c', 'baseline');
+      await fs.symlink('target.txt', path.join(repo, 'link'));
+      await git(repo, 'add', 'link');
+      await git(repo, 'commit', '-q', '-m', 'baseline symlink');
+      await git(repo, 'switch', '-q', 'main');
+      await fs.writeFile(path.join(repo, 'link'), 'target.txt');
+
+      const result = await fetchGitDiff(repo, {
+        mode: 'branch',
+        ref: 'baseline',
+      });
+      expect(result?.perFileStats.get('link')).toEqual({
+        added: 0,
+        removed: 0,
+        isBinary: false,
+        truncated: false,
+      });
+      expect(result?.stats.filesCount).toBe(1);
+    },
+  );
+
   it('re-accounts a tracked-then-ignored collision instead of a phantom deletion', async () => {
     // The baseline tracks artifact.txt; the current branch untracked it
     // (`git rm --cached`) and added it to .gitignore. The file stays on disk
@@ -848,6 +926,39 @@ describe('fetchGitDiff', () => {
     await fs.writeFile(
       path.join(repo, 'data.txt'),
       Buffer.concat([Buffer.from('x\n'), Buffer.from([0xff])]),
+    );
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+    expect(result?.stats.filesCount).toBe(1);
+    expect(result?.perFileStats.get('data.txt')).toEqual({
+      added: 0,
+      removed: 0,
+      isBinary: true,
+    });
+  });
+
+  it('keeps a collision row when the baseline side is invalid UTF-8', async () => {
+    // Mirror of the worktree-side guard: the baseline blob ends with a bare
+    // 0xFF, the untracked worktree copy ends with U+FFFD (EF BF BD). A lossy
+    // base decode would map both sides to U+FFFD, the identical-content drop
+    // would fire, and a byte-distinct file would disappear.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'switch', '-q', '-c', 'baseline');
+    await fs.writeFile(
+      path.join(repo, 'data.txt'),
+      Buffer.concat([Buffer.from('x\n'), Buffer.from([0xff])]),
+    );
+    await git(repo, 'add', 'data.txt');
+    await git(repo, 'commit', '-q', '-m', 'baseline file');
+    await git(repo, 'switch', '-q', 'main');
+    await fs.writeFile(
+      path.join(repo, 'data.txt'),
+      Buffer.concat([Buffer.from('x\n'), Buffer.from([0xef, 0xbf, 0xbd])]),
     );
 
     const result = await fetchGitDiff(repo, {

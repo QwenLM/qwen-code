@@ -425,6 +425,91 @@ describe('GitDiffDialog', () => {
     expect(document.body.textContent).not.toContain('Loading changes');
   });
 
+  it('closes the picker on select, clears its search, and shows a no-matches state', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitLog.mockResolvedValue({
+      available: true,
+      entries: [
+        {
+          sha: 'abcdef1234567890',
+          shortSha: 'abcdef1',
+          subject: 'head commit',
+        },
+        {
+          sha: '1234567890abcdef',
+          shortSha: '1234567',
+          subject: 'search target',
+        },
+      ],
+      hasMore: false,
+    });
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'commit';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    const openPicker = async () => {
+      await act(async () => {
+        (
+          document.body.querySelector(
+            'button[aria-label="Select commit"]',
+          ) as HTMLButtonElement
+        ).click();
+      });
+      await flush();
+    };
+    await openPicker();
+
+    // A query matching nothing renders the empty state, not a blank list.
+    const search = document.body.querySelector(
+      'input[aria-label="Search commits…"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      typeInput(search, 'zzz');
+    });
+    await flush();
+    expect(document.body.textContent).toContain('No matches');
+    expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(0);
+
+    await act(async () => {
+      typeInput(search, 'target');
+    });
+    await flush();
+    const option = document.body.querySelector(
+      '[role="option"]',
+    ) as HTMLButtonElement;
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option.click();
+    });
+    await flush();
+
+    // Selecting closes the picker; reopening starts with an empty query.
+    expect(
+      (
+        document.body.querySelector(
+          'button[aria-label="Select commit"]',
+        ) as HTMLButtonElement
+      ).getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(document.body.querySelectorAll('[role="option"]')).toHaveLength(0);
+    await openPicker();
+    expect(
+      (
+        document.body.querySelector(
+          'input[aria-label="Search commits…"]',
+        ) as HTMLInputElement
+      ).value,
+    ).toBe('');
+  });
+
   it('shows an error with retry when the commit list fails to load', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     workspaceGitLog.mockRejectedValueOnce(new Error('daemon 500'));
@@ -565,6 +650,95 @@ describe('GitDiffDialog', () => {
     expect(workspaceGitDiff).toHaveBeenCalledTimes(1);
   });
 
+  it('routes an available=false branch list to the error state', async () => {
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitBranches.mockResolvedValue({
+      available: false,
+      local: [],
+      remote: [],
+      tags: [],
+    });
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Failed to load changes');
+    expect(workspaceGitDiff).toHaveBeenCalledTimes(1);
+    expect(
+      Array.from(document.body.querySelectorAll('button')).some((b) =>
+        b.textContent?.includes('Retry'),
+      ),
+    ).toBe(true);
+  });
+
+  it('shows the comparison-unavailable message for an unavailable selected source', async () => {
+    workspaceGitDiff.mockResolvedValue(
+      diffPayload({ available: false, files: [] }),
+    );
+    workspaceGitLog.mockResolvedValue({
+      available: true,
+      entries: [
+        { sha: 'abcdef1234567890', shortSha: 'abcdef1', subject: 'head' },
+      ],
+      hasMore: false,
+    });
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'commit';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    // Selected-source unavailability is distinct from the uncommitted-mode
+    // "Git is not available" placeholder.
+    expect(document.body.textContent).toContain(
+      'This comparison is not available',
+    );
+    expect(document.body.textContent).not.toContain('Git is not available');
+  });
+
+  it('defaults the branch source to the first remote when only HEAD is local', async () => {
+    // Fresh-clone shape: one local HEAD branch plus remote-tracking branches
+    // only — the default selection must fall back to the first remote.
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitBranches.mockResolvedValue({
+      available: true,
+      head: 'main',
+      local: [{ name: 'main', isHead: true }],
+      remote: [{ name: 'origin/main', isHead: false }],
+      tags: [],
+    });
+    mount();
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'branch',
+      ref: 'refs/remotes/origin/main',
+    });
+  });
+
   it('refetches the diff and source lists when the revision bumps', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     container = document.createElement('div');
@@ -659,9 +833,12 @@ describe('GitDiffDialog', () => {
     await flush();
 
     // The cached commit list is dropped and refetched; the mode AND the
-    // explicit selection both survive the refresh.
+    // explicit selection both survive the refresh. The bump reissues the
+    // diff request exactly once — the list transitions must not each
+    // cancel-and-reissue it.
     expect(source.value).toBe('commit');
     expect(workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(workspaceGitDiff).toHaveBeenCalledTimes(4);
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'commit',
       ref: '1234567890abcdef',
@@ -737,6 +914,7 @@ describe('GitDiffDialog', () => {
 
     expect(source.value).toBe('branch');
     expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    expect(workspaceGitDiff).toHaveBeenCalledTimes(4);
     expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
       mode: 'branch',
       ref: 'refs/heads/bugfix/x',
@@ -824,42 +1002,6 @@ describe('GitDiffDialog', () => {
       mode: 'branch',
       ref: 'refs/heads/main',
     });
-  });
-
-  it('resets the selected source when the workspace changes', async () => {
-    workspaceGitDiff.mockResolvedValue(diffPayload());
-    container = document.createElement('div');
-    document.body.appendChild(container);
-    root = createRoot(container);
-    act(() => {
-      root.render(
-        <I18nProvider language="en">
-          <GitDiffContent workspaceCwd="/repo-a" />
-        </I18nProvider>,
-      );
-    });
-    await flush();
-
-    const source = document.body.querySelector(
-      '#git-diff-source',
-    ) as HTMLSelectElement;
-    await act(async () => {
-      source.value = 'staged';
-      source.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    await flush();
-
-    act(() => {
-      root.render(
-        <I18nProvider language="en">
-          <GitDiffContent workspaceCwd="/repo-b" />
-        </I18nProvider>,
-      );
-    });
-    await flush();
-
-    expect(source.value).toBe('uncommitted');
-    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined);
   });
 
   it('renders the changed file list with stats', async () => {

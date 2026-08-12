@@ -225,6 +225,15 @@ export async function fetchGitDiff(
       ? runGit(['--no-optional-locks', 'ls-files', '-z', '--others'], gitRoot)
       : Promise.resolve(null),
   ]);
+  // A failed listing must not fold into an empty path list: collision
+  // classification would skip its re-accounting and leave phantom deletions,
+  // the opposite of the fail-closed trackedAtBase probe below.
+  if (
+    comparison.untrackedBaseRef &&
+    (untrackedOut === null || ignoredUntrackedOut === null)
+  ) {
+    return null;
+  }
   const rawUntrackedPaths = comparison.includeUntracked
     ? splitNulDelimited(untrackedOut)
     : [];
@@ -563,9 +572,9 @@ async function resolveGitDiffComparison(
   }
   if (!options?.ref) return null;
 
-  const target = await resolveCommitRef(gitRoot, options.ref);
-  if (!target) return null;
   if (mode === 'branch') {
+    const target = await resolveCommitRef(gitRoot, options.ref, true);
+    if (!target) return null;
     return {
       args: [target],
       includeUntracked: true,
@@ -578,6 +587,8 @@ async function resolveGitDiffComparison(
   // ref would fall through into the commit comparison below.
   if (mode !== 'commit') return null;
 
+  const target = await resolveCommitRef(gitRoot, options.ref);
+  if (!target) return null;
   const parent = await resolveCommitRef(gitRoot, `${target}^1`);
   if (parent)
     return {
@@ -608,7 +619,15 @@ async function resolveGitDiffComparison(
 async function resolveCommitRef(
   gitRoot: string,
   ref: string,
+  preferBranches = false,
 ): Promise<string | null> {
+  // Git's bare-name disambiguation prefers refs/tags/ over refs/heads/, but
+  // a branch-mode ref names a branch: resolve an unqualified ref through
+  // refs/heads/ first so a same-named tag cannot steal the comparison.
+  if (preferBranches && !ref.startsWith('refs/')) {
+    const viaHeads = await resolveCommitRef(gitRoot, `refs/heads/${ref}`);
+    if (viaHeads) return viaHeads;
+  }
   const resolved = (
     await runGit(
       ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
@@ -1041,29 +1060,19 @@ async function applyBaselineCollisions(
   perFileStats: Map<string, PerFileStats>,
 ): Promise<void> {
   const collisionSet = new Set(collisionPaths);
-  // A collision path entangled with a rename is the rename's OLD path — the
-  // source was renamed away and recreated as an untracked file. That copy is
-  // a separate change on a separate path, so it is re-accounted below beside
-  // the rename row instead of being suppressed (suppressing it dropped the
-  // file from the list AND the totals). A rename's NEW path can never be a
-  // collision (rename targets are index entries, never untracked); guard it
-  // anyway so an unexpected row shape cannot count one path twice.
-  const renameEntangled = new Set<string>();
+  // Rename rows are keyed by the NEW path — an index entry, never an
+  // untracked collision — so they cannot carry one; when a rename's OLD path
+  // was recreated as an untracked file it is a separate change, re-accounted
+  // by the loop below beside the rename row.
   const phantom = new Map<string, { added: number; removed: number }>();
   forEachNumstatEntry(numstatOut, (entry) => {
-    if (entry.oldPath) {
-      if (collisionSet.has(entry.path)) {
-        renameEntangled.add(entry.path);
-      }
-      return;
-    }
+    if (entry.oldPath) return;
     if (collisionSet.has(entry.path)) {
       phantom.set(entry.path, { added: entry.added, removed: entry.removed });
     }
   });
 
   for (const relPath of collisionPaths) {
-    if (renameEntangled.has(relPath)) continue;
     const stale = phantom.get(relPath);
     if (stale) {
       stats.filesCount -= 1;

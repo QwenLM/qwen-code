@@ -952,6 +952,110 @@ describe('gitCheckout fully qualified refs (R6-19)', () => {
   });
 });
 
+describe('gitCheckout hook-masked failures and colliding landings (R8)', () => {
+  function installFailingHook(dir: string, body: string): void {
+    fs.writeFileSync(
+      path.join(dir, '.git', 'hooks', 'post-checkout'),
+      `#!/bin/sh\nrm -f "$0"\n${body}\nexit 1\n`,
+    );
+    fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+  }
+
+  it.each(['git checkout -q elsewhere', 'git checkout -q --detach HEAD~1'])(
+    'rolls back when a failing hook moved HEAD away via `%s`',
+    async (hookCheckout) => {
+      // The hook's own checkout leaves ITS reflog entry newest, masking the
+      // step's entry from a newest-only scan; the rollback must still fire
+      // on the step's entry among the post-snapshot entries.
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'second');
+      git(dir, 'branch', 'target');
+      git(dir, 'branch', 'elsewhere');
+      installFailingHook(dir, hookCheckout);
+
+      await expect(gitCheckout(dir, 'target')).rejects.toThrow();
+      expect(currentBranch(dir)).toBe('master');
+    },
+  );
+
+  it('absorbs a hook failure that detached HEAD onto a colliding branch tip', async () => {
+    // Branch `release` and tag `release` differ. The hook detaches HEAD onto
+    // the BRANCH tip after the switch landed; the landing check must resolve
+    // the target through refs/heads/ (a bare rev-parse prefers the tag) and
+    // absorb the detached landing instead of rolling back a correct switch.
+    const dir = makeRepo();
+    git(dir, 'tag', 'release');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+    git(dir, 'branch', 'release');
+    const branchTip = headSha(dir);
+    installFailingHook(dir, 'git checkout -q --detach refs/heads/release');
+
+    const result = await gitCheckout(dir, 'release');
+
+    expect(result.detached).toBe(true);
+    expect(headSha(dir)).toBe(branchTip);
+  });
+
+  it('rejects a checkout that git fatally refuses on an unborn HEAD', async () => {
+    // Zero-commit repo: `git checkout main` fails with `invalid reference`,
+    // but symbolic-ref still reports `main` — the branch-equality absorption
+    // must not turn the fatal refusal into a success.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
+    tmpRoots.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+
+    await expect(gitCheckout(dir, 'main')).rejects.toThrow();
+    expect(git(dir, 'symbolic-ref', 'HEAD').trim()).toBe('refs/heads/main');
+  });
+
+  it('rejects a refs/heads/ checkout whose branch no longer exists', async () => {
+    // Without the existence check the bare fall-through DWIMs onto the
+    // same-named tag and silently detaches HEAD.
+    const dir = makeRepo();
+    git(dir, 'tag', 'gone');
+
+    await expect(gitCheckout(dir, 'refs/heads/gone')).rejects.toThrow(
+      'branch not found: gone',
+    );
+    expect(currentBranch(dir)).toBe('master');
+  });
+});
+
+describe('gitCreateBranch rollback under colliding refs (R8)', () => {
+  it('rolls back a half-created branch that collides with a tag', async () => {
+    // HEAD's branch name comes from the full symbolic ref: with a same-named
+    // tag, `symbolic-ref --short` reports the ambiguous `heads/topic` form
+    // and the stranded-HEAD comparison never matches, skipping the rollback.
+    const dir = makeRepo();
+    git(dir, 'tag', 'topic');
+    const before = currentBranch(dir);
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      { mode: 0o755 },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
+
+    expect(currentBranch(dir)).toBe(before);
+    let branchStillExists = true;
+    try {
+      git(dir, 'show-ref', '--verify', '--quiet', 'refs/heads/topic');
+    } catch {
+      branchStillExists = false;
+    }
+    expect(branchStillExists).toBe(false);
+    // The colliding tag survives the rollback.
+    expect(git(dir, 'tag', '--list', 'topic').trim()).toBe('topic');
+  });
+});
+
 describe('getDefaultBranch (R10 #3)', () => {
   it('returns the fully-qualified remote ref so log ranges stay correct', async () => {
     const dir = makeRepo();
