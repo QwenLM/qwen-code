@@ -8794,6 +8794,7 @@ describe('createAcpSessionBridge', () => {
     const replayAttach = bridge.loadSession({
       sessionId: first.sessionId,
       workspaceCwd: WS_A,
+      historyReplay: 'response',
       historyPageSize: 10,
       clientId: 'rejected-load-client',
     });
