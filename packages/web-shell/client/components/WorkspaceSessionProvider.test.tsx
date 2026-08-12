@@ -154,6 +154,34 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     expect(onSessionIdChange).toHaveBeenCalledWith('session-b', 'b', '/work/b');
   });
 
+  it('keeps one modern provider and updates the write gate during rapid props', async () => {
+    const onSessionIdChange = await renderTarget('session-a', '/work/a');
+
+    await renderTarget('session-b', '/work/b', onSessionIdChange);
+    expect(mocks.appProps.at(-1)).toMatchObject({
+      desiredSessionTargetPending: true,
+    });
+
+    await renderTarget('session-a', '/work/a', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    expect(mocks.appProps.at(-1)).toMatchObject({
+      desiredSessionTargetPending: false,
+      initialSelectedWorkspaceCwd: '/work/a',
+    });
+
+    await renderTarget('session-b', '/work/b', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.appProps.at(-1)).toMatchObject({
+      desiredSessionTargetPending: true,
+    });
+  });
+
   it('does not feed stale host props back after an action-driven commit', async () => {
     const onSessionIdChange = await renderTarget('session-a', '/work/a');
 

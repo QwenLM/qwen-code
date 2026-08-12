@@ -35,6 +35,7 @@ describe('effortCommand', () => {
         config: {
           getReasoningEffort,
           setReasoningEffort,
+          getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
         settings: {
           setValue,
@@ -91,6 +92,51 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ messageType: 'info' });
     expect((res as { content: string }).content).toContain(
       'thinking is currently disabled',
+    );
+  });
+
+  it('reports a static override while thinking is disabled', async () => {
+    setReasoningEffort.mockImplementation(() => {});
+    getReasoningEffort.mockReturnValue(undefined);
+    const getReasoningEffortOverride = vi.fn().mockReturnValue({
+      source: 'extra_body',
+      field: 'thinking_budget',
+    });
+    (context.services.config as unknown as Record<string, unknown>)[
+      'getReasoningEffortOverride'
+    ] = getReasoningEffortOverride;
+
+    const res = await effortCommand.action!(context, 'high');
+
+    expect((res as { content: string }).content).toContain(
+      'thinking is currently disabled',
+    );
+    expect((res as { content: string }).content).toContain(
+      'will still have higher priority',
+    );
+  });
+
+  it('reports a higher-priority static thinking knob', async () => {
+    const getReasoningEffortOverride = vi.fn().mockReturnValue({
+      source: 'extra_body',
+      field: 'thinking_budget',
+    });
+    (context.services.config as unknown as Record<string, unknown>)[
+      'getReasoningEffortOverride'
+    ] = getReasoningEffortOverride;
+
+    const res = await effortCommand.action!(context, 'max');
+
+    expect(setReasoningEffort).toHaveBeenCalledWith('max');
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'max',
+    );
+    expect(res).toMatchObject({ messageType: 'info' });
+    expect((res as { content: string }).content).toContain('higher priority');
+    expect((res as { content: string }).content).toContain(
+      'will remain effective',
     );
   });
 
