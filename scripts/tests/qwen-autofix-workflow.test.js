@@ -6005,6 +6005,9 @@ exit 1
     // …and so do zero-padded values: bash [[ -gt ]] would read '0400' as
     // octal 256 and raise on '0900', silently disabling the brake.
     expect(sanitized('0400', '0900')).toBe('400 400');
+    // The 7-digit cap is load-bearing: past it bash integer literals wrap
+    // at 64 bits and comparisons go silently wrong.
+    expect(sanitized('9999999', '10000000')).toBe('9999999 400');
 
     // Measurement: replay the real block against a real repo. Test lines are
     // *.test.* / *.spec.* files, __snapshots__/, __tests__/, test-utils/, and
@@ -6082,6 +6085,14 @@ exit 1
       );
       git('add', '-A');
       git('commit', '-qm', 'pr');
+      // Advance main PAST the divergence before measuring: with main
+      // unmoved a two-dot regression produces identical numbers, so only a
+      // moved main pins the merge-base (three-dot) semantics.
+      git('checkout', '-q', 'main');
+      writeFileSync(join(dir, 'mainline.ts'), 'm1\nm2\nm3\nm4\nm5\n');
+      git('add', '-A');
+      git('commit', '-qm', 'main-moves');
+      git('checkout', '-q', 'pr');
       git('update-ref', 'refs/remotes/origin/main', 'main');
       const measured = execFileSync(
         'bash',
@@ -6118,7 +6129,7 @@ exit 1
     // marker from another login is ignored, negative nets round-trip, and a
     // window with no marker yields empty (this round anchors it).
     const baselineJq = prepareBranchAndFeedbackStep.match(
-      /GROWTH_BASELINE="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg key "\$\{LIVE_REARM_KEY\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+      /GROWTH_BASELINE="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg key "\$\{LIVE_REARM_KEY\}" --arg baseupd "\$\{BASE_UPD_AT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
     )?.[1];
     expect(baselineJq).toBeTruthy();
     const baselineComments = [
@@ -6143,7 +6154,7 @@ exit 1
         body: 'report\n\n<!-- autofix-growth-base src=100 test=200 key=WIN1 -->',
       },
     ];
-    const baselineFor = (key) =>
+    const baselineFor = (key, baseupd = '') =>
       execFileSync(
         'jq',
         [
@@ -6154,12 +6165,19 @@ exit 1
           '--arg',
           'key',
           key,
+          '--arg',
+          'baseupd',
+          baseupd,
           baselineJq,
         ],
         { encoding: 'utf8', input: JSON.stringify(baselineComments) },
       ).trimEnd();
     expect(baselineFor('WIN1')).toBe('50 -60');
     expect(baselineFor('WIN2')).toBe('');
+    // A base update newer than an anchor invalidates it (the merge base it
+    // was measured against moved); a later anchor survives first-wins.
+    expect(baselineFor('WIN1', '2026-01-01T02:30:00Z')).toBe('100 200');
+    expect(baselineFor('WIN1', '2026-01-01T04:00:00Z')).toBe('');
 
     // The baseline marker is written into this window's FIRST report only
     // (pushed and no-op branches), rides the same comment as autofix-eval so
@@ -6321,6 +6339,9 @@ exit 1
         '--arg',
         'key',
         'WINX',
+        '--arg',
+        'baseupd',
+        '',
         baselineJq,
       ],
       {

@@ -4100,11 +4100,23 @@ jobs:
           # autofix-eval marker (a supersede-exempt conflict round reporting
           # after a re-arm). Any token embedding "win=" would double-attribute
           # that comment to both windows.
-          GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
+          # A stale-base auto-update merges current main into the branch,
+          # moving the merge base the nets are measured against: overlap
+          # resolutions then shift the measurement with no agent push. An
+          # anchor recorded before the latest base update is not comparable
+          # any more — ignore it, so the next round re-anchors at the
+          # post-update size. (A conflict round's own merge of main is the
+          # narrower residual; its delta is bounded by the overlap.)
+          BASE_UPD_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- autofix-base-updated"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
               | {src: (.[0] | tonumber), test: (.[1] | tonumber), win: .[2], at: ($c.created_at // "")} ]
-            | map(select(.win == $key)) | sort_by(.at)
+            | map(select(.win == $key))
+            | map(select($baseupd == "" or (.at > $baseupd))) | sort_by(.at)
             | .[0] // empty | "\(.src) \(.test)"' "${WORKDIR}/ic.json")"
           GROWTH_BASE_NEW='false'
           if [[ "${GROWTH_BASELINE}" =~ ^(-?[0-9]+)\ (-?[0-9]+)$ ]]; then
