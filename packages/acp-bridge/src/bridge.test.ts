@@ -8432,6 +8432,10 @@ describe('createAcpSessionBridge', () => {
     const replayAttach = bridge.loadSession({
       sessionId: first.sessionId,
       workspaceCwd: WS_A,
+      // historyPageSize only takes effect under response replay (#8933 kept
+      // the restore request shapes distinct); without this the transcript
+      // fetch never happens and the wait below spins on an empty call list.
+      historyReplay: 'response',
       historyPageSize: 10,
       clientId: 'rejected-load-client',
     });
