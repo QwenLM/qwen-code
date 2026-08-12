@@ -38,6 +38,7 @@ import {
 } from './utils/kittyProtocolDetector.js';
 import { setTerminalTeardown } from './utils/terminal-teardown.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
+import { installTerminalResizeReflow } from './utils/terminal-resize-reflow.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
 import {
   isInteractiveTerminal,
@@ -166,6 +167,10 @@ export async function startInteractiveUI(
           process.stdout.setMaxListeners(stdoutMaxListeners);
         }
       },
+      // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
+      // installed last / outermost); the identity-guarded restores silently
+      // no-op and leak wrappers otherwise.
+      () => resizeReflow.restore(),
       restoreSynchronizedOutput,
       restoreTerminalRedrawOptimizer,
     ];
@@ -237,6 +242,15 @@ export async function startInteractiveUI(
   // always reads from the same stable prop rather than the (now empty) module buffer.
   const initialCapturedInput = stopAndGetCapturedInput();
 
+  // On width shrink the terminal reflows the printed frame into more physical
+  // rows than Ink's stale erase count (issue #8557); amplify the clear to the
+  // reflowed height. Installed before render() so the resize listener runs
+  // ahead of Ink's resized().
+  const resizeReflow =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
+      : { restore: () => {}, repaint: () => {} };
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -268,6 +282,7 @@ export async function startInteractiveUI(
                         initializationResult={initializationResult}
                         initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
+                        repaintViewport={resizeReflow.repaint}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
