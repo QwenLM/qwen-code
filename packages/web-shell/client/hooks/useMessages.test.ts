@@ -792,4 +792,211 @@ describe('background agent task reconciliation', () => {
     await act(async () => unmount());
     hookState.connection.sessionId = 'session-1';
   });
+
+  it('keeps retry tolerance for the completion query of a long-running agent', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockResolvedValue(
+      backgroundAgentResolution('running'),
+    );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    // Drive the agent through the full backoff ladder while it answers
+    // running; healthy rounds must not consume the failure budget.
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // The completion notification triggers the final query; a single transient
+    // 500 there must recover rather than permanently fail the completed agent.
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('completed'));
+    hookState.blocks = [
+      ...hookState.blocks,
+      baseBlock({
+        id: 'terminal-notification',
+        kind: 'assistant',
+        text: '',
+        meta: {
+          source: 'background_notification',
+          backgroundTask: {
+            kind: 'agent',
+            taskId: 'legacy-agent',
+            status: 'completed',
+          },
+        },
+      }),
+    ];
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(9),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(10);
+      expect(container.textContent).toBe('completed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('fails only the erroring agent when the budget exhausts with several pending agents', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [
+      backgroundAgentBlock('agent-a'),
+      backgroundAgentBlock('agent-b'),
+    ];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) =>
+        callId === 'agent-a'
+          ? Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            )
+          : Promise.resolve(backgroundAgentResolution('running')),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer({
+      allTools: true,
+    });
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending,pending');
+
+    // Agent A errors every round while agent B answers running; once the
+    // budget exhausts only the erroring agent is marked failed.
+    for (const delay of [
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,pending');
+    });
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('re-arms the missing-agent grace after a successful response', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      )
+      .mockResolvedValueOnce(backgroundAgentResolution('running'))
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      )
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          404,
+          { code: 'session_not_found', toolCallId: 'agent-call' },
+          'not found',
+        ),
+      );
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Round 2 answers running, resetting the miss counter.
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Round 3 misses again, but the earlier success re-armed the grace, so a
+    // single fresh miss stays pending instead of failing.
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(3),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // Round 4 is the second miss of the fresh window and fails the agent.
+    await act(async () => vi.advanceTimersByTimeAsync(12_000));
+    await vi.waitFor(() => {
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(4);
+      expect(container.textContent).toBe('failed');
+    });
+
+    await act(async () => unmount());
+    vi.useRealTimers();
+  });
+
+  it('starts a fresh retry budget after a reconnect', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container, render, unmount } = mountStatusConsumer();
+
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+    );
+    // Six retries take the budget to one transient error short of exhaustion.
+    for (const delay of [3_000, 6_000, 12_000, 24_000, 48_000, 60_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(7),
+    );
+    expect(container.textContent).toBe('pending');
+
+    // A reconnect resets the budget, so the next error opens a fresh ladder
+    // instead of exhausting the pre-disconnect budget.
+    hookState.connection.status = 'disconnected';
+    await act(async () => render());
+    hookState.connection.status = 'connected';
+    await act(async () => render());
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8),
+    );
+    expect(container.textContent).toBe('pending');
+
+    await act(async () => unmount());
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
 });

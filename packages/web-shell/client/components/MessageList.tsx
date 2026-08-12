@@ -523,6 +523,12 @@ export interface ApplyTurnCollapseOptions {
   isResponding: boolean;
   activeTurnStartedAt?: number;
   backgroundSummaryGraceActive?: boolean;
+  /**
+   * Whether the final turn's collapse should keep waiting for unmatched
+   * background-agent completions. Pass false once the bounded grace expires
+   * so a lost notification cannot pin the turn expanded forever.
+   */
+  waitForUnmatchedAgentCompletions?: boolean;
   automaticallyExpandedAgentKeys?: ReadonlySet<string>;
   /**
    * Tool-call id of a pending approval, if any. The turn containing it is
@@ -1587,6 +1593,7 @@ export function applyTurnCollapse(
     isResponding,
     activeTurnStartedAt,
     backgroundSummaryGraceActive = true,
+    waitForUnmatchedAgentCompletions = true,
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
     includeSubagentToolUsageInMetrics = true,
@@ -1627,7 +1634,13 @@ export function applyTurnCollapse(
     const awaitsBackgroundSummary =
       isLastTurn &&
       backgroundSummaryGraceActive &&
-      turnAwaitsBackgroundSummary(items, start, end);
+      turnAwaitsBackgroundSummary(
+        items,
+        start,
+        end,
+        false,
+        waitForUnmatchedAgentCompletions,
+      );
     const hasPendingApproval = turnOwnsCallId(
       items,
       start,
@@ -2987,6 +3000,9 @@ export const MessageList = memo(
         isResponding,
         activeTurnStartedAt,
         backgroundSummaryGraceActive,
+        waitForUnmatchedAgentCompletions:
+          latestTurnHasActiveBackgroundAgent ||
+          !unmatchedCompletionGraceExpired,
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
@@ -3038,6 +3054,8 @@ export const MessageList = memo(
       isResponding,
       activeTurnStartedAt,
       backgroundSummaryGraceActive,
+      latestTurnHasActiveBackgroundAgent,
+      unmatchedCompletionGraceExpired,
       pendingApproval?.toolCallId,
       collapseEnabled,
       hideFirstUserMessage,

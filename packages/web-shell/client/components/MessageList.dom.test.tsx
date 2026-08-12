@@ -680,6 +680,18 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 
+  it('keeps final actions for a pending foreground agent in a completed turn', () => {
+    const foregroundAgent = agentMsg('agent-1');
+    foregroundAgent.tools[0]!.status = 'pending';
+    foregroundAgent.tools[0]!.args = {
+      subagent_type: 'explore',
+      run_in_background: false,
+    };
+    const c = mount([userMsg('u1'), foregroundAgent, asstMsg('a1')]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
   it('keeps turn-2 final actions while a turn-1 agent stays pending', () => {
     const pendingAgent = agentMsg('agent-1');
     pendingAgent.tools[0]!.status = 'pending';

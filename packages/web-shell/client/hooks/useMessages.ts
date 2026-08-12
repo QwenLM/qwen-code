@@ -24,11 +24,11 @@ type Translator = (
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
-// Upper bound on scheduled retries for one pending-agent set. After this many
-// retries the timer chain stops so a persistently erroring daemon route
-// cannot be polled indefinitely; agents still erroring at that point are
-// marked failed so the UI unblocks, while agents answering non-terminal stay
-// pending and rely on their completion notification for the final query.
+// Cap on transient-error rounds for one pending-agent set. After this many
+// erroring rounds the timer chain stops and agents still erroring are marked
+// failed so the UI unblocks. Healthy non-terminal responses back off on the
+// same delay ladder but do not consume this budget, so a long-running agent's
+// completion query keeps its retry tolerance.
 const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // The daemon registers a launched background task shortly after the tool
 // call appears in the transcript, so a first `session_not_found` can race
@@ -219,21 +219,30 @@ export function useMessagesFromBlocks(
   >(undefined);
   // Keyed by session + pending-agent set (not the notification key) so other
   // agents' notifications cannot reset the backoff and keep the retry delay
-  // pinned at its base.
-  const retryBackoffRef = useRef<{ key: string; attempts: number }>({
+  // pinned at its base. `attempts` drives the backoff delay; `errorAttempts`
+  // counts only transient-error rounds toward the exhaustion budget.
+  const retryBackoffRef = useRef<{
+    key: string;
+    attempts: number;
+    errorAttempts: number;
+  }>({
     key: '',
     attempts: 0,
+    errorAttempts: 0,
   });
   const missingAgentMissesRef = useRef(new Map<string, number>());
   const lastConnectionKeyRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    // Miss counts may not span connection transitions: a post-reconnect 404
-    // is a fresh race with registration, not a continuation of an old miss.
+    // Miss counts and the retry budget may not span connection transitions:
+    // a post-reconnect 404 is a fresh race with registration, and a restarted
+    // daemon deserves a fresh retry ladder rather than the pre-disconnect
+    // attempt count.
     const connectionKey = `${connection.sessionId}:${connection.status}`;
     if (lastConnectionKeyRef.current !== connectionKey) {
       lastConnectionKeyRef.current = connectionKey;
       missingAgentMissesRef.current.clear();
+      retryBackoffRef.current = { key: '', attempts: 0, errorAttempts: 0 };
     }
     const sessionId = connection.sessionId;
     if (
@@ -324,26 +333,39 @@ export function useMessagesFromBlocks(
         let scheduleRetry = false;
         let retryDelayMs = BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS;
         if (unresolved) {
-          const attempts =
-            (retryBackoffRef.current.key === retryScopeKey
-              ? retryBackoffRef.current.attempts
-              : 0) + 1;
-          if (attempts < BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
-            retryBackoffRef.current = { key: retryScopeKey, attempts };
-            retryDelayMs = Math.min(
-              BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS *
-                2 ** (attempts - 1),
-              BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS,
-            );
+          const previous =
+            retryBackoffRef.current.key === retryScopeKey
+              ? retryBackoffRef.current
+              : { key: retryScopeKey, attempts: 0, errorAttempts: 0 };
+          const attempts = previous.attempts + 1;
+          // Healthy non-terminal responses back off but do not consume the
+          // failure budget; only transient errors do.
+          const errorAttempts =
+            previous.errorAttempts + (errors.length > 0 ? 1 : 0);
+          retryDelayMs = Math.min(
+            BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS * 2 ** (attempts - 1),
+            BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS,
+          );
+          if (errorAttempts < BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
+            retryBackoffRef.current = {
+              key: retryScopeKey,
+              attempts,
+              errorAttempts,
+            };
             scheduleRetry = true;
           } else {
             retryBackoffRef.current = {
               key: retryScopeKey,
-              attempts: BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS,
+              attempts,
+              errorAttempts: BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS,
             };
           }
         } else {
-          retryBackoffRef.current = { key: retryScopeKey, attempts: 0 };
+          retryBackoffRef.current = {
+            key: retryScopeKey,
+            attempts: 0,
+            errorAttempts: 0,
+          };
         }
         const exhaustedFailures =
           unresolved && !scheduleRetry
