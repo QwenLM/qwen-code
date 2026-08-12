@@ -4687,6 +4687,23 @@ export class Config {
       this.globalReasoningEffortPreference = sourceRuntimeReasoningEffort;
     }
 
+    const switchTargetIsRuntimeSnapshot = Boolean(
+      this.getActiveRuntimeModelSnapshot(),
+    );
+    const switchTargetHasReasoningControls =
+      !switchTargetIsRuntimeSnapshot &&
+      Boolean(getModelReasoningControls(this.modelsConfig.getModel()));
+    if (
+      context.sourceWasRuntimeSnapshot &&
+      !switchTargetIsRuntimeSnapshot &&
+      !switchTargetHasReasoningControls
+    ) {
+      delete this.modelsConfig.getGenerationConfig().reasoning;
+      delete this.modelsConfig.getGenerationConfigSources()['reasoning'];
+      delete this.contentGeneratorConfig.reasoning;
+      delete this.contentGeneratorConfigSources['reasoning'];
+    }
+
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
     // reasoning_content to be preserved across turns.

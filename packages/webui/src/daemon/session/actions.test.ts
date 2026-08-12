@@ -883,6 +883,33 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it.each([
+    ['the active session changes', 'session-b', 'client-b'],
+    ['the attachment changes', 'session-a', 'client-b'],
+  ])(
+    'suppresses a config-option failure after %s',
+    async (_label, targetSessionId, targetClientId) => {
+      const source = createMockSession('session-a', 'client-a');
+      const deferred = createDeferred<{ configOptions: unknown[] }>();
+      source.setConfigOption.mockReturnValueOnce(deferred.promise);
+      const addNotice = vi.fn((notice) => notice);
+      const { actions, sessionRef } = createActionsHarness({
+        addNotice,
+        session: source,
+      });
+
+      const update = actions.setConfigOption('thinking', 'off');
+      sessionRef.current = createMockSession(
+        targetSessionId,
+        targetClientId,
+      ) as unknown as DaemonSessionClient;
+      deferred.reject(new Error('late failure'));
+
+      await expect(update).rejects.toThrow('late failure');
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
+
   it('clears the previous model reasoning state after a model switch', async () => {
     const session = createMockSession('session-a');
     session.setModel.mockResolvedValueOnce({ modelId: 'next-model' });

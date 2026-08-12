@@ -4815,6 +4815,16 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getContentGeneratorConfig().reasoning).toBe(false);
 
+      await modelsConfig.setModel('coder-model');
+
+      expect(config.getActiveRuntimeModelSnapshot()).toBeUndefined();
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+      expect(
+        modelsConfig.getGenerationConfigSources()['reasoning'],
+      ).toBeUndefined();
+
       const configuredSnapshotId = '$runtime|qwen-oauth|snapshot-model';
       runtimeModelSnapshots.set(configuredSnapshotId, {
         id: configuredSnapshotId,
@@ -4851,6 +4861,59 @@ describe('Server Config (config.ts)', () => {
           }
         ).globalReasoningEffortPreference,
       ).toBe('high');
+    });
+
+    it('does not carry runtime snapshot thinking-off into a raw full-refresh target', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const config = new Config({
+        ...baseParams,
+        authType,
+        model: 'runtime-source',
+        generationConfig: {
+          model: 'runtime-source',
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+          reasoning: false,
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'runtime' },
+          apiKey: { kind: 'programmatic', detail: 'runtime' },
+          baseUrl: { kind: 'programmatic', detail: 'runtime' },
+          reasoning: { kind: 'settings', detail: 'runtime preference' },
+        },
+      });
+      config.getModelsConfig().detectAndCaptureRuntimeModel();
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType,
+          model: 'runtime-source',
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+          reasoning: false,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          authType,
+          model: 'raw-target',
+          apiKey: 'sk-runtime',
+          baseUrl: 'https://runtime.example/v1',
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.setModel('raw-target');
+
+      expect(config.getActiveRuntimeModelSnapshot()).toBeUndefined();
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfigSources()['reasoning'],
+      ).toBeUndefined();
     });
 
     it('keeps a runtime snapshot effort on a full-refresh switch', async () => {

@@ -778,7 +778,7 @@ export function createDaemonSessionActions({
         setConnection((current) => ({ ...current, reasoning }));
       } catch (error) {
         throw dispatchActionError(
-          addNotice,
+          noticeForSession(session),
           'Update session option failed',
           error,
           'switch_model',
