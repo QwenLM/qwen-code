@@ -4,7 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ContentListUnion } from '@google/genai';
+import type { ContentListUnion, PartUnion } from '@google/genai';
+
+/**
+ * The one definition of how a `Part`'s text is shaped. Both branches below
+ * route through it, so the array-input and single-input paths cannot drift
+ * apart -- which the pre-extraction code had already let happen once.
+ */
+const textOfParts = (parts: PartUnion[]): string =>
+  parts
+    .map((part) =>
+      typeof part === 'string'
+        ? part
+        : 'text' in part
+          ? (part as { text?: string }).text || ''
+          : '',
+    )
+    .join(' ');
 
 /**
  * Extract the concatenated text of every text part across a `@google/genai`
@@ -21,15 +37,7 @@ export function extractTextFromContents(contents: ContentListUnion): string {
       .map((content) => {
         if (typeof content === 'string') return content;
         if ('parts' in content && content.parts) {
-          return content.parts
-            .map((part) =>
-              typeof part === 'string'
-                ? part
-                : 'text' in part
-                  ? (part as { text?: string }).text || ''
-                  : '',
-            )
-            .join(' ');
+          return textOfParts(content.parts);
         }
         return '';
       })
@@ -38,15 +46,7 @@ export function extractTextFromContents(contents: ContentListUnion): string {
     if (typeof contents === 'string') {
       text = contents;
     } else if ('parts' in contents && contents.parts) {
-      text = contents.parts
-        .map((part) =>
-          typeof part === 'string'
-            ? part
-            : 'text' in part
-              ? (part as { text?: string }).text || ''
-              : '',
-        )
-        .join(' ');
+      text = textOfParts(contents.parts);
     }
   }
   return text;
