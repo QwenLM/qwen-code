@@ -87,6 +87,10 @@ const pushAndReportStep =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
+const prepareStep =
+  workflow.match(
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
+  )?.[0] ?? '';
 const reportDryRunFailureSteps =
   workflow.match(
     /- name: 'Report dry-run \/ failure'[\s\S]*?(?=\n[ ]{6}- name: '|$)/g,
@@ -2405,7 +2409,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("HEAD_REPO: '${{ matrix.target.head_repo }}'");
     expect(reviewScanJob).toContain('head_repo: $hr');
     expect(workflow).toContain(
-      'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
+      'git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
@@ -6959,6 +6963,8 @@ exit 1
         '\tpath = /tmp/no-such-include',
         '[includeIf "gitdir:/tmp/"]',
         '\tpath = /tmp/evil.inc',
+        '[protocol]',
+        '\tallow = always',
         '[protocol "ext"]',
         '\tallow = always',
         '[submodule "s.t"]',
@@ -7026,17 +7032,53 @@ exit 1
       // verify the digest the staging step parked in GITHUB_OUTPUT
       // (expression context, unreachable from a disk write), and it must
       // do so BEFORE executing the script.
-      const shaCheck = step.indexOf('sha256sum -c');
-      expect(shaCheck).toBeGreaterThan(-1);
-      expect(shaCheck).toBeLessThan(step.indexOf(resanitizeCall));
+      // Pin the WHOLE verify line, not just its presence: `|| true` or a
+      // swapped digest target would turn the tamper gate into a decorative
+      // no-op while presence/order assertions stayed green (both mutants
+      // executed in the round-3 review).
+      const verifyLine =
+        'echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null';
+      expect(step).toContain(verifyLine);
+      expect(step.indexOf(verifyLine)).toBeLessThan(
+        step.indexOf(resanitizeCall),
+      );
+      expect(step).not.toMatch(/sha256sum -c[^\n]*\|\| true/);
       expect(step).toContain(
         "RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'",
       );
-      // GITHUB_ENV-injected GIT_CONFIG_KEY/VALUE entries apply at
-      // command-line precedence — above every file any scrub can reach —
-      // so the PAT steps zero them out before their first git.
+      // Full env-channel closure, not just GIT_CONFIG_COUNT: GITHUB_ENV can
+      // inject any git env knob, and several outrank file config — the step
+      // strips them and redirects the file scopes to a throwaway (as the
+      // gates do), so a concurrent job's ~/.gitconfig rewrite and an
+      // env-planted GIT_SSL_NO_VERIFY/GIT_EXEC_PATH/GIT_DIR all miss.
       expect(step).toContain('export GIT_CONFIG_COUNT=0');
+      expect(step).toContain(
+        'export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-pat-gitconfig"',
+      );
+      expect(step).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      for (const v of [
+        'GIT_SSL_NO_VERIFY',
+        'GIT_EXEC_PATH',
+        'GIT_DIR',
+        'GIT_WORK_TREE',
+        'GIT_CONFIG_PARAMETERS',
+        'GIT_SSH_COMMAND',
+        'GIT_ASKPASS',
+      ]) {
+        expect(step).toMatch(new RegExp(`unset[\\s\\S]*\\b${v}\\b`));
+      }
     }
+    // The two PAT hermetic preambles are byte-identical (only their comment
+    // twin-names differ, stripped here): a hardening applied to one push
+    // site but not the other re-opens the class on the stale side.
+    const patBlockOf = (step) =>
+      step
+        .match(
+          /unset GIT_CONFIG_PARAMETERS[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(patBlockOf(publishPrStep)).toBeTruthy();
+    expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
     // Both staging steps stage the script and record its digest.
     expect(
       workflow.match(
@@ -7061,6 +7103,24 @@ exit 1
       ) ?? [];
     expect(helperSites).toHaveLength(3);
     expect(resetSites).toHaveLength(helperSites.length);
+    // The fork fetch is PAT-bearing too (its step env carries the PAT) and
+    // is anonymous — a public repo's fork heads are public — so it leads
+    // with the helper-list reset + transport pin and never adds the PAT
+    // helper: a planted global extraheader must not 401 into a planted
+    // helper handing over the PAT. The bare fetch was the one network site
+    // the round-2 rollout skipped.
+    expect(prepareStep).toMatch(
+      /git -c http\.sslVerify=true -c credential\.helper= fetch "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+    );
+    expect(prepareStep).not.toMatch(
+      /\n\s*if ! git fetch "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+    );
+    // The push-race salvage merge is signing-proof: a global
+    // commit.gpgsign=true with no key on the runner would exit 128 and be
+    // misread as a content conflict, discarding a verified round.
+    expect(pushAndReportStep).toMatch(
+      /git -c commit\.gpgsign=false[\s\S]*?merge --no-edit FETCH_HEAD/,
+    );
     // Functional: run the staged script against a fixture repo with exec
     // keys planted in LOCAL and WORKTREE config (what branch code can do
     // between the job-start sanitize and the push) plus a polluted global
@@ -7071,6 +7131,16 @@ exit 1
     writeFileSync(
       join(home, '.gitconfig'),
       '[diff]\n\texternal = global-driver\n',
+    );
+    // A LIVE XDG global file too: git reads it for keys ~/.gitconfig does
+    // not define, and it is the file the incident host actually carries.
+    // Without it the script's second loop iteration runs against a
+    // nonexistent path and the XDG leg has no behavioural coverage
+    // (mutation: dropping the XDG file from the loop then stays green).
+    mkdirSync(join(home, '.config', 'git'), { recursive: true });
+    writeFileSync(
+      join(home, '.config', 'git', 'config'),
+      '[core]\n\thooksPath = /tmp/xdg-evil\n',
     );
     const repo = join(dir, 'repo');
     mkdirSync(repo);
@@ -7121,6 +7191,13 @@ exit 1
         encoding: 'utf8',
       }).status,
     ).not.toBe(0);
+    // The XDG-planted exec key is gone too — pins the script's two-file loop.
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'core.hooksPath'], {
+        env,
+        encoding: 'utf8',
+      }).stdout,
+    ).not.toContain('xdg-evil');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -7149,11 +7226,28 @@ exit 1
       );
       // Before the deterministic checks, so they all see the redirect.
       expect(globalRedirect).toBeLessThan(gate.indexOf('npm run build'));
-      // GITHUB_ENV-injected GIT_CONFIG_KEY/VALUE entries apply at
-      // command-line precedence — they outrank BOTH redirects — so each
-      // gate zeroes the env channel too.
+      // GITHUB_ENV-injected git env knobs outrank BOTH redirects — each
+      // gate zeroes GIT_CONFIG_COUNT and strips the transport/exec channels.
       expect(gate).toContain('export GIT_CONFIG_COUNT=0');
+      for (const v of ['GIT_SSL_NO_VERIFY', 'GIT_EXEC_PATH', 'GIT_DIR']) {
+        expect(gate).toMatch(new RegExp(`unset[\\s\\S]*\\b${v}\\b`));
+      }
     }
+    // The two gate env+redirect blocks are one hardening surface — pin them
+    // equal (whitespace-normalized; the shell copy and the YAML copy differ
+    // only in indentation) so a channel added to one but not the other
+    // cannot ship green, exactly as the three job-start scrub copies are
+    // pinned byte-identical.
+    const gateBlockOf = (body) =>
+      body
+        .match(
+          /unset GIT_CONFIG_PARAMETERS[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(gateBlockOf(reviewVerificationRunner)).toBeTruthy();
+    expect(gateBlockOf(verificationGateSteps[0] ?? '')).toBe(
+      gateBlockOf(reviewVerificationRunner),
+    );
     // Before the FIRST git command in each gate, not merely before the
     // checks: the committed-ref probe and dirty-tree asserts must live in
     // the same config universe as everything after them.
@@ -7173,7 +7267,7 @@ exit 1
     // the throwaway file — the block can no longer be reverted or hollowed
     // out while a string-presence test stays green.
     const redirectBlock = reviewVerificationRunner.match(
-      /export GIT_CONFIG_SYSTEM=\/dev\/null[\s\S]*?safe\.directory "\$\(pwd\)"/,
+      /unset GIT_CONFIG_PARAMETERS[\s\S]*?safe\.directory "\$\(pwd\)"/,
     )?.[0];
     expect(redirectBlock).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'autofix-gate-redirect-'));
@@ -8087,7 +8181,7 @@ exit 1
     // date") and must NOT tell the reviewer to re-check commits that
     // never existed.
     expect(pushAndReportStep).toMatch(
-      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n\s+if ! git -c user\.name=/,
+      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n[\s\S]{0,600}if ! git -c commit\.gpgsign=false \\\n\s+-c user\.name=/,
     );
     expect(pushAndReportStep).toMatch(
       /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
@@ -8199,10 +8293,10 @@ exit 1
     // hence the wider windows — the assertions are about order, and one
     // hooksPath site genuinely covers both arms of the if.
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,900}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,1400}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2600}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,3000}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     // The agent step re-points hooks to .husky BEFORE invoking the runner.
     // Assert the ordering directly (not a fixed-width window) so adding a

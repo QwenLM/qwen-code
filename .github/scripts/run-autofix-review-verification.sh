@@ -23,13 +23,21 @@ set -eo pipefail
 # with the run. Enforcement is inherited-env only — branch code writing
 # the real file directly bypasses it, which is why the PAT-bearing steps
 # re-run resanitize-git-config.sh afterwards.
+# Environment-carried config outranks BOTH file redirects and defeats
+# every file-level guard: GIT_CONFIG_COUNT/_PARAMETERS carry config at
+# command-line precedence, GIT_SSL_* / GIT_PROXY_COMMAND steer transport,
+# GIT_EXEC_PATH swaps the transport-helper binary, GIT_DIR/GIT_WORK_TREE
+# repoint git, GIT_ASKPASS/GIT_SSH* hijack auth/exec — branch code in an
+# earlier step can inject any of them through $GITHUB_ENV. Strip them, then
+# redirect the file scopes. Keep this env+redirect block equal to the
+# issue-fix gate's copy (the contract test pins them).
+unset GIT_CONFIG_PARAMETERS GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
+  GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+  GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+export GIT_CONFIG_COUNT=0
+export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
-# Environment-carried config outranks BOTH redirects: GIT_CONFIG_KEY_n /
-# GIT_CONFIG_VALUE_n entries apply at command-line precedence, and branch
-# code in an earlier step can inject them into this one through
-# $GITHUB_ENV. Count 0 makes git read zero of them.
-export GIT_CONFIG_COUNT=0
 : > "${GIT_CONFIG_GLOBAL}"
 git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
 if [ -s /etc/gitconfig ]; then

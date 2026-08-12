@@ -76,6 +76,9 @@ describe('fixture git-config isolation', () => {
     );
     expect(git('config', '--global', 'qwen.isolation')).toBe('sentinel');
     expect(process.env['GIT_CONFIG_NOSYSTEM']).toBe('1');
+    expect(process.env['GIT_CONFIG_GLOBAL']).toBe(
+      join(gitIsolation.home, '.gitconfig'),
+    );
   });
 });
 

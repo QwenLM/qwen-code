@@ -803,7 +803,7 @@ jobs:
           # file, for reads and writes alike.
           for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
             { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
-              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
               | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
           done
           # `.git` is a directory in a normal checkout but a gitlink file in
@@ -1459,11 +1459,16 @@ jobs:
           # rationale and shape as run-autofix-review-verification.sh (a
           # leaked global exec knob on the persistent pool must not fail
           # branch tests, a branch-authored `git config --global` must not
-          # outlive the run, and GITHUB_ENV-injected GIT_CONFIG_* entries
-          # outrank every file layer) — edit the two copies together.
+          # outlive the run, and GITHUB_ENV-injected git env channels outrank
+          # every file layer) — the contract test pins this env+redirect
+          # block equal to the review gate's copy.
+          unset GIT_CONFIG_PARAMETERS GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
+            GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+          export GIT_CONFIG_COUNT=0
+          export GIT_TERMINAL_PROMPT=0
           export GIT_CONFIG_SYSTEM=/dev/null
           export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
-          export GIT_CONFIG_COUNT=0
           : > "${GIT_CONFIG_GLOBAL}"
           git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
           if [ -s /etc/gitconfig ]; then
@@ -1613,21 +1618,39 @@ jobs:
             exit 1
           fi
           BRANCH="autofix/issue-${ISSUE}"
-          # Environment-carried git config outranks every file this step
-          # or the re-sanitize below can scrub: branch code in an earlier
-          # step can inject GIT_CONFIG_KEY_n/VALUE_n through $GITHUB_ENV,
-          # and they apply at command-line precedence. Count 0 makes git
-          # read zero of them.
+          # Take this PAT-bearing step off every mutable host git surface —
+          # both the shared config FILES and git's ENV channels — keep this
+          # block byte-identical to its twin in 'Push and report' (the
+          # contract test pins them equal). File scopes: the pool shares one
+          # HOME across ~27 runner registrations and review-address fans out
+          # max-parallel, so a concurrent job can rewrite ~/.gitconfig inside
+          # this step's sweep->push window (a URL-scoped sslVerify=false there
+          # overrides the -c pin below over real TLS); redirect global/system
+          # to a per-run throwaway (as the gates do) so the push reads neither.
+          # Env channels: branch code in an earlier step of THIS job can inject
+          # git's env knobs through $GITHUB_ENV, and they OUTRANK file config —
+          # strip GIT_CONFIG_COUNT/_PARAMETERS (command-line-precedence config),
+          # GIT_SSL_NO_VERIFY/GIT_SSL_CAINFO (override the sslVerify pin over
+          # real TLS), GIT_PROXY_COMMAND, GIT_EXEC_PATH (hijacks the
+          # transport-helper binary), GIT_DIR/GIT_WORK_TREE (point git at
+          # another repo), GIT_ASKPASS/GIT_SSH/GIT_SSH_COMMAND (credential/exec
+          # hijack). All probe-verified in the #8961 review.
+          unset GIT_CONFIG_PARAMETERS GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
+            GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
           export GIT_CONFIG_COUNT=0
-          # The agent and the verification gate ran branch code on the host
-          # since the job-start sanitize; re-scrub the local and global git
-          # config surfaces this PAT-bearing step is about to read. The
-          # staged copy's provenance holds at cp time only (RUNNER_TEMP is
-          # writable by that same branch code), so verify the digest the
-          # staging step recorded in GITHUB_OUTPUT — which a disk write
-          # cannot tamper with — before executing it. The working tree
-          # holds the agent-authored branch at this point; never run the
-          # script from there.
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-pat-gitconfig"
+          : > "${GIT_CONFIG_GLOBAL}"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+          # Host hygiene + LOCAL .git/config scrub (the throwaway global above
+          # covers only the global scope, not the highest-precedence local
+          # file the branch/agent can plant). The staged copy's trusted-base
+          # provenance holds at cp time only — RUNNER_TEMP is writable by that
+          # same branch code — so verify the digest the staging step recorded
+          # in GITHUB_OUTPUT (unreachable from a disk write) before executing.
+          # Never run the script from the working tree; it holds the branch.
           echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
           bash "${RUNNER_TEMP}/resanitize-git-config.sh"
           git config --local --unset-all http.https://github.com/.extraheader || true
@@ -3306,7 +3329,7 @@ jobs:
           # file, for reads and writes alike.
           for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
             { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
-              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
               | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
           done
           # `.git` is a directory in a normal checkout but a gitlink file in
@@ -3642,7 +3665,7 @@ jobs:
           # file, for reads and writes alike.
           for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
             { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
-              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
               | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
           done
           # `.git` is a directory in a normal checkout but a gitlink file in
@@ -4000,8 +4023,14 @@ jobs:
           git config core.hooksPath /dev/null
           if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
             # Maintainer-fork target: the branch does not exist on origin —
-            # fetch it (data only; hooks are severed) from the fork.
-            if ! git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"; then
+            # fetch it (data only; hooks are severed) from the fork. A public
+            # repo's fork heads are always public, so this fetch is anonymous:
+            # `-c credential.helper=` resets the inherited helper list (a
+            # planted global extraheader could 401 and hand a planted helper
+            # this step's PAT — the same class the push sites reset against)
+            # and `http.sslVerify=true` pins the transport. Fail closed on a
+            # 401 rather than authenticate.
+            if ! git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"; then
               echo "🫥 fork fetch failed for ${HEAD_REPO} (${BRANCH}) — discarding without action or marker"
               {
                 echo "stale=true"
@@ -4944,21 +4973,39 @@ jobs:
             exit 1
           fi
 
-          # Environment-carried git config outranks every file this step
-          # or the re-sanitize below can scrub: branch code in an earlier
-          # step can inject GIT_CONFIG_KEY_n/VALUE_n through $GITHUB_ENV,
-          # and they apply at command-line precedence. Count 0 makes git
-          # read zero of them.
+          # Take this PAT-bearing step off every mutable host git surface —
+          # both the shared config FILES and git's ENV channels — keep this
+          # block byte-identical to its twin in 'Publish PR' (the contract
+          # test pins them equal). File scopes: the pool shares one HOME
+          # across ~27 runner registrations and review-address fans out
+          # max-parallel, so a concurrent job can rewrite ~/.gitconfig inside
+          # this step's sweep->push window (a URL-scoped sslVerify=false there
+          # overrides the -c pin below over real TLS); redirect global/system
+          # to a per-run throwaway (as the gates do) so the push reads neither.
+          # Env channels: branch code in an earlier step of THIS job can inject
+          # git's env knobs through $GITHUB_ENV, and they OUTRANK file config —
+          # strip GIT_CONFIG_COUNT/_PARAMETERS (command-line-precedence config),
+          # GIT_SSL_NO_VERIFY/GIT_SSL_CAINFO (override the sslVerify pin over
+          # real TLS), GIT_PROXY_COMMAND, GIT_EXEC_PATH (hijacks the
+          # transport-helper binary), GIT_DIR/GIT_WORK_TREE (point git at
+          # another repo), GIT_ASKPASS/GIT_SSH/GIT_SSH_COMMAND (credential/exec
+          # hijack). All probe-verified in the #8961 review.
+          unset GIT_CONFIG_PARAMETERS GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
+            GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
           export GIT_CONFIG_COUNT=0
-          # The gates ran branch test code on the host (and the sandboxed
-          # agent had the workspace mounted) since the job-start sanitize;
-          # re-scrub the local and global git config surfaces this
-          # PAT-bearing step is about to read. The staged copy's provenance
-          # holds at cp time only (RUNNER_TEMP is writable by that same
-          # branch code), so verify the digest the staging step recorded in
-          # GITHUB_OUTPUT — which a disk write cannot tamper with — before
-          # executing it. The working tree holds the PR branch at this
-          # point; never run the script from there.
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_SYSTEM=/dev/null
+          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-pat-gitconfig"
+          : > "${GIT_CONFIG_GLOBAL}"
+          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+          # Host hygiene + LOCAL .git/config scrub (the throwaway global above
+          # covers only the global scope, not the highest-precedence local
+          # file the branch/agent can plant). The staged copy's trusted-base
+          # provenance holds at cp time only — RUNNER_TEMP is writable by that
+          # same branch code — so verify the digest the staging step recorded
+          # in GITHUB_OUTPUT (unreachable from a disk write) before executing.
+          # Never run the script from the working tree; it holds the branch.
           echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
           bash "${RUNNER_TEMP}/resanitize-git-config.sh"
 
@@ -5021,7 +5068,14 @@ jobs:
               # flagging that would tell the reviewer to re-check mid-run
               # commits that never existed.
               PRE_MERGE_HEAD="$(git rev-parse HEAD)"
-              if ! git -c user.name="${AUTOFIX_BOT}" \
+              # commit.gpgsign=false: this real merge commit would otherwise
+              # read the signing knob from config and, with no key on the
+              # runner, exit 128 ("gpg: signing failed") — misread below as a
+              # content conflict, discarding a verified round. The throwaway
+              # global above already hides a polluted ~/.gitconfig; this makes
+              # the merge independent of it regardless.
+              if ! git -c commit.gpgsign=false \
+                -c user.name="${AUTOFIX_BOT}" \
                 -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
                 merge --no-edit FETCH_HEAD; then
                 git merge --abort || true
