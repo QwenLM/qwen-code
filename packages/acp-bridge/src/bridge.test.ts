@@ -4085,6 +4085,183 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('skips empty persisted pages when refreshing an attached load', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({}),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        if (params['cursor'] === undefined) {
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            nextCursor: 'older-page',
+            hasMore: true,
+          };
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'visible prompt' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-empty-latest-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: loaded.sessionId,
+          direction: 'backward',
+          limit: 100,
+        },
+      },
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: loaded.sessionId,
+          cursor: 'older-page',
+          limit: 100,
+        },
+      },
+    ]);
+    expect(JSON.stringify(refreshed.compactedReplay)).toContain(
+      'visible prompt',
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('falls back to live replay when an empty-page cursor repeats', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'live prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          nextCursor: 'stuck-cursor',
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-stuck-cursor',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.extMethodCalls).toHaveLength(2);
+    expect(JSON.stringify(refreshed.compactedReplay)).toContain('live prompt');
+
+    await bridge.shutdown();
+  });
+
+  it('bounds empty persisted pages with unique cursors', async () => {
+    let cursor = 0;
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'live prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          nextCursor: `cursor-${cursor++}`,
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-unique-empty-cursors',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.extMethodCalls).toHaveLength(20);
+    expect(JSON.stringify(refreshed.compactedReplay)).toContain('live prompt');
+
+    await bridge.shutdown();
+  });
+
   it('propagates partial and replayError from a bounded refresh', async () => {
     const handle = makeChannel({
       loadSessionImpl: () => ({
@@ -4308,7 +4485,9 @@ describe('createAcpSessionBridge', () => {
       hasMore: false,
     });
 
-    await expect(refresh).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(refresh).rejects.toMatchObject({
+      code: 'session_closing',
+    });
     closeResult.resolve({});
     await close;
     await bridge.shutdown();
@@ -5114,6 +5293,204 @@ describe('createAcpSessionBridge', () => {
     // Coalesced waiter sees the same state, not `{}`.
     expect(r2.state).toEqual({ _meta: { tag: 'restored-baz' } });
 
+    await bridge.shutdown();
+  });
+
+  it('coalesces response restores with the same history page', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    load.resolve({ _meta: { tag: 'same-page' } });
+    const [owner, waiter] = await Promise.all([first, second]);
+
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    expect(handle.agent.loadSessionCalls[0]?._meta).toMatchObject({
+      'qwen.session.loadReplayMode': 'bulk',
+      'qwen.session.loadReplayPageSize': 100,
+    });
+    expect(owner).toMatchObject({
+      attached: false,
+      state: { _meta: { tag: 'same-page' } },
+    });
+    expect(waiter).toMatchObject({
+      attached: true,
+      state: { _meta: { tag: 'same-page' } },
+    });
+    expect(waiter.clientId).not.toBe(owner.clientId);
+
+    await bridge.shutdown();
+  });
+
+  it.each([0, 501, 1.5])(
+    'rejects invalid response history page %s before restore',
+    async (historyPageSize) => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'invalid-page',
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+          historyPageSize,
+        }),
+      ).rejects.toThrow('Invalid historyPageSize');
+      expect(handle.agent.loadSessionCalls).toHaveLength(0);
+      await bridge.shutdown();
+    },
+  );
+
+  it.each([
+    ['a different explicit page', 500],
+    ['an omitted page', undefined],
+  ] as const)(
+    'rejects response restore coalescing with %s',
+    async (_label, historyPageSize) => {
+      const load = deferred<LoadSessionResponse>();
+      const handle = makeChannel({ loadSessionImpl: () => load.promise });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const first = bridge.loadSession({
+        sessionId: 'mismatched-page',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+      for (
+        let i = 0;
+        i < 50 && handle.agent.loadSessionCalls.length !== 1;
+        i++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'mismatched-page',
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+          ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+        }),
+      ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+      load.resolve({});
+      const restored = await first;
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      await bridge.killSession(restored.sessionId, {
+        requireZeroAttaches: true,
+      });
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    },
+  );
+
+  it('ignores history pages when coalescing streamed loads', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'stream-pages-ignored',
+      workspaceCwd: WS_A,
+      historyReplay: 'stream',
+      historyPageSize: 100,
+    });
+    for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = bridge.loadSession({
+      sessionId: 'stream-pages-ignored',
+      workspaceCwd: WS_A,
+      historyReplay: 'stream',
+      historyPageSize: 500,
+    });
+
+    load.resolve({});
+    await Promise.all([first, second]);
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    expect(handle.agent.loadSessionCalls[0]?._meta).not.toHaveProperty(
+      'qwen.session.loadReplayPageSize',
+    );
+    await bridge.shutdown();
+  });
+
+  it('ignores history pages when coalescing resumes', async () => {
+    const resume = deferred<ResumeSessionResponse>();
+    const handle = makeChannel({
+      resumeSessionImpl: () => resume.promise,
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.resumeSession({
+      sessionId: 'resume-pages-ignored',
+      workspaceCwd: WS_A,
+      historyPageSize: 100,
+    });
+    for (
+      let i = 0;
+      i < 50 && handle.agent.resumeSessionCalls.length !== 1;
+      i++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = bridge.resumeSession({
+      sessionId: 'resume-pages-ignored',
+      workspaceCwd: WS_A,
+      historyPageSize: 500,
+    });
+
+    resume.resolve({});
+    await Promise.all([first, second]);
+    expect(handle.agent.resumeSessionCalls).toHaveLength(1);
+    await bridge.shutdown();
+  });
+
+  it('rejects restore coalescing with different inherited-history policies', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-inherited-policy',
+      workspaceCwd: WS_A,
+      hideInheritedHistory: true,
+    });
+    for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'coalesce-inherited-policy',
+        workspaceCwd: WS_A,
+        hideInheritedHistory: false,
+      }),
+    ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+    load.resolve({});
+    await first;
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
     await bridge.shutdown();
   });
 
@@ -20807,6 +21184,44 @@ describe('session idle reaper', () => {
     expect(closedEv).toBeDefined();
     expect((closedEv!.data as { reason: string }).reason).toBe('client_close');
 
+    await bridge.shutdown();
+  });
+
+  it('does not cancel a session the agent already closed', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.closeSession(session.sessionId);
+
+    expect(handle.agent.cancelCalls).toEqual([]);
+    await bridge.shutdown();
+  });
+
+  it('cancels a session the agent did not close', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: false }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.closeSession(session.sessionId);
+
+    expect(handle.agent.cancelCalls).toEqual([
+      { sessionId: session.sessionId },
+    ]);
     await bridge.shutdown();
   });
 

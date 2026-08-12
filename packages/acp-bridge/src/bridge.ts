@@ -29,6 +29,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -1424,6 +1425,7 @@ const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
+const MAX_EMPTY_TRANSCRIPT_PAGES = 20;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // Per-session cap on undrained mid-turn messages: a busy turn with no drain
@@ -2588,6 +2590,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   interface InFlightRestore {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
+    historyPageSize?: number;
     hideInheritedHistory: boolean;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
@@ -4206,7 +4209,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       requireFlush?: boolean;
       timeoutMs?: number;
     },
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     if (!ci || ci.channel !== entry.channel) {
       if (opts?.throwOnFailure === true) {
         writeStderrLine(
@@ -4217,7 +4220,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `ACP session close channel unavailable for ${entry.sessionId}`,
         );
       }
-      return;
+      return false;
     }
     try {
       const closeRequest = entry.connection.extMethod(
@@ -4231,7 +4234,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const observedCloseRequest = opts?.timeoutMs
         ? withTimeout(closeRequest, opts.timeoutMs, label)
         : closeRequest;
-      await Promise.race([
+      const response = await Promise.race([
         opts?.throwOnFailure === true
           ? observedCloseRequest
           : withTimeout(
@@ -4241,6 +4244,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
         getTransportClosedReject(entry),
       ]);
+      return response['closed'] === true;
     } catch (err) {
       writeStderrLine(
         `qwen serve: ${label} ACP session close notification failed ` +
@@ -4251,6 +4255,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (opts?.throwOnFailure === true) {
         throw err;
       }
+      return false;
     }
   };
 
@@ -4917,11 +4922,40 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
-        const page = await requestSessionTranscriptPage({
-          sessionId: entry.sessionId,
-          direction: 'backward',
-          limit: historyPageSize,
-        });
+        const seenCursors = new Set<string>();
+        let emptyPageCount = 0;
+        let cursor: string | undefined;
+        let page: BridgeSessionTranscriptPage;
+        do {
+          page = await requestSessionTranscriptPage({
+            sessionId: entry.sessionId,
+            ...(cursor ? { cursor } : { direction: 'backward' }),
+            limit: historyPageSize,
+          });
+          const nextCursor = page.nextCursor;
+          if (
+            page.events.length === 0 &&
+            page.hasMore &&
+            (nextCursor === undefined || seenCursors.has(nextCursor))
+          ) {
+            throw new Error('Transcript cursor did not advance');
+          }
+          if (
+            page.events.length === 0 &&
+            page.hasMore &&
+            ++emptyPageCount >= MAX_EMPTY_TRANSCRIPT_PAGES
+          ) {
+            throw new Error('Transcript empty-page limit exceeded');
+          }
+          cursor = nextCursor;
+          if (cursor !== undefined) seenCursors.add(cursor);
+        } while (
+          page.events.length === 0 &&
+          page.hasMore &&
+          cursor !== undefined &&
+          page.partial !== true &&
+          page.replayError === undefined
+        );
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
@@ -5057,6 +5091,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     const historyReplay =
       action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
+    const historyPageSize =
+      action === 'load' && historyReplay === 'response'
+        ? req.historyPageSize
+        : undefined;
+    if (
+      historyPageSize !== undefined &&
+      (!Number.isSafeInteger(historyPageSize) ||
+        historyPageSize < 1 ||
+        historyPageSize > SESSION_TRANSCRIPT_MAX_LIMIT)
+    ) {
+      throw new Error(
+        `Invalid historyPageSize; expected 1..${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      );
+    }
     const hideInheritedHistory =
       action === 'load' && req.hideInheritedHistory === true;
 
@@ -5070,11 +5118,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new SessionNotFoundError(
           req.sessionId,
           'The session is closing; retry after close completes',
+          'session_closing',
         );
       }
       const replayFields =
-        action === 'load' && req.historyPageSize !== undefined
-          ? await refreshedReplayFieldsFor(existing, req.historyPageSize)
+        historyPageSize !== undefined
+          ? await refreshedReplayFieldsFor(existing, historyPageSize)
           : replayFieldsFor(existing, action);
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
@@ -5084,11 +5133,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (
-        byId.get(req.sessionId) !== existing ||
-        isClosingOrAuthorizingClose(existing)
-      ) {
+      if (byId.get(req.sessionId) !== existing) {
         throw new SessionNotFoundError(req.sessionId);
+      }
+      if (isClosingOrAuthorizingClose(existing)) {
+        throw new SessionNotFoundError(
+          req.sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
+        );
       }
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
@@ -5126,16 +5179,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
-      // Cross-action races BOTH ways must reject. A `resume` arriving
-      // while a `load` is in flight cannot quietly coalesce: load
-      // returns compacted replay + watermark while resume returns only
-      // a watermark — mixing the two on a shared EventBus would give
-      // the resume client unexpected replay data or the load client a
-      // missing snapshot. Same-action coalescing is unaffected.
+      // Cold restores only coalesce when their effective request shapes
+      // match. Sharing across actions, replay transports, response pages, or
+      // inherited-history policies can return replay selected for another
+      // caller. Same-shape coalescing is unaffected.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
+        historyPageSize !== inFlight.historyPageSize ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
@@ -5452,10 +5504,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ...(historyReplay === 'response'
                     ? {
                         [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
-                        ...(req.historyPageSize !== undefined
+                        ...(historyPageSize !== undefined
                           ? {
-                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]:
-                                req.historyPageSize,
+                              [LOAD_REPLAY_PAGE_SIZE_META_KEY]: historyPageSize,
                             }
                           : {}),
                       }
@@ -5587,6 +5638,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new SessionNotFoundError(
             req.sessionId,
             'The session is closing; retry after close completes',
+            'session_closing',
           );
         }
         // Self + any coalescers we accumulated while the restore was
@@ -5683,7 +5735,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             restoredArtifactSnapshot === undefined || artifactRestoreFailed,
         });
         if (
-          req.historyPageSize !== undefined &&
+          historyPageSize !== undefined &&
           entry.events
             .snapshotReplay()
             ?.compactedTurns.some((event) => event.type === 'history_truncated')
@@ -5799,6 +5851,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     inFlightRestores.set(req.sessionId, {
       action,
       historyReplay,
+      ...(historyPageSize !== undefined ? { historyPageSize } : {}),
       hideInheritedHistory,
       publicPromise: promise,
       settlementPromise,
@@ -5825,6 +5878,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new SessionNotFoundError(
         sessionId,
         'The session is already closing',
+        'session_closing',
       );
     }
     let originatorClientId: string | undefined;
@@ -5863,19 +5917,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           `for session ${JSON.stringify(sessionId)} — channel cleanup skipped (entry's channel already torn down)`,
       );
     }
+    let agentSessionClosed = false;
     try {
       // Resolve permission waits before asking the agent to drain active turns;
       // otherwise a turn blocked in requestPermission can deadlock close.
       permissionMediator.forgetSession(sessionId);
       entry.pendingPermissionIds.clear();
       entry.pendingInteractions.clear();
-      await notifyAgentSessionClose(entry, ci, 'closeSession', {
-        throwOnFailure: true,
-        requireFlush: closeOpts?.requireAgentClose === true,
-        ...(closeOpts?.agentCloseTimeoutMs !== undefined
-          ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
-          : {}),
-      });
+      agentSessionClosed = await notifyAgentSessionClose(
+        entry,
+        ci,
+        'closeSession',
+        {
+          throwOnFailure: true,
+          requireFlush: closeOpts?.requireAgentClose === true,
+          ...(closeOpts?.agentCloseTimeoutMs !== undefined
+            ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
+            : {}),
+        },
+      );
     } catch (error) {
       // A child RequestError is a definitive close refusal: the child kept
       // the session live, so a retry is safe. A transport failure has an
@@ -5946,18 +6006,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
-    try {
-      await telemetry.withSpan(
-        'session.close.cancel_active_prompt',
-        {
-          'qwen-code.daemon.bridge.operation':
-            'session.close.cancel_active_prompt',
-          'session.id': sessionId,
-        },
-        async () => await entry.connection.cancel({ sessionId }),
-      );
-    } catch {
-      /* no active prompt or session already torn down */
+    if (!agentSessionClosed) {
+      try {
+        await telemetry.withSpan(
+          'session.close.cancel_active_prompt',
+          {
+            'qwen-code.daemon.bridge.operation':
+              'session.close.cancel_active_prompt',
+            'session.id': sessionId,
+          },
+          async () => await entry.connection.cancel({ sessionId }),
+        );
+      } catch {
+        /* no active prompt or session already torn down */
+      }
     }
     if (ci && hasNoChannelWork(ci)) {
       await reapPendingEmptyChannel(ci);
@@ -6234,6 +6296,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw new SessionNotFoundError(
               existing.sessionId,
               'The session is closing; retry after close completes',
+              'session_closing',
             );
           }
           // BRSCi: bump attach counter BEFORE any await so the
@@ -6501,6 +6564,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           new SessionNotFoundError(
             sessionId,
             'The session is closing; retry after close completes',
+            'session_closing',
           ),
         );
       }
@@ -9397,7 +9461,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       if (isClosingOrAuthorizingClose(entry)) {
-        throw new SessionNotFoundError(sessionId, 'The session is closing');
+        throw new SessionNotFoundError(
+          sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
+        );
       }
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
