@@ -5,6 +5,7 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
 import {
@@ -22,6 +23,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   ApprovalMode,
+  ChatRecord,
   RebuiltSessionArtifactSnapshot,
   TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
@@ -36,7 +38,10 @@ import {
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   normalizeTurnResultError,
+  SessionTranscriptReader,
+  SessionWriterLease,
   TrustGateError,
+  Storage,
   normalizeSnapshotPayload,
   ShellExecutionService,
   type InvocationContextV1,
@@ -1721,6 +1726,96 @@ function terminalStatusRecord(
   };
 }
 
+async function persistTerminalResultsAfterChannelExit(
+  entry: SessionEntry,
+  runtimeBaseDir: string,
+  turnResults: readonly TurnResultRecordPayload[],
+): Promise<void> {
+  if (turnResults.length === 0) return;
+
+  const storage = new Storage(entry.workspaceCwd, runtimeBaseDir);
+  const transcriptPath = path.join(
+    storage.getProjectDir(),
+    'chats',
+    `${entry.sessionId}.jsonl`,
+  );
+  let lease: SessionWriterLease | undefined;
+  try {
+    try {
+      await fs.access(transcriptPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId: entry.sessionId,
+      transcriptPath,
+      processKind: 'daemon',
+      reclaimPolicy: 'local',
+    });
+    const { existingPromptIds, activeLeafUuid } =
+      await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, async () => {
+        const reader = new SessionTranscriptReader(entry.workspaceCwd);
+        const promptIds = new Set<string>();
+        let beforeRecordId: string | undefined;
+        let leafUuid: string | null = null;
+        for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
+          const page = await reader.readPage(entry.sessionId, {
+            ...(beforeRecordId
+              ? { beforeRecordId }
+              : { direction: 'backward' as const }),
+            limit: 500,
+          });
+          if (pageIndex === 0) leafUuid = page.records.at(-1)?.uuid ?? null;
+          for (const record of page.records) {
+            if (
+              record.subtype === 'turn_result' &&
+              record.systemPayload &&
+              typeof (record.systemPayload as { promptId?: unknown })
+                .promptId === 'string'
+            ) {
+              promptIds.add(
+                (record.systemPayload as TurnResultRecordPayload).promptId,
+              );
+            }
+          }
+          if (!page.hasMore || page.records.length === 0) break;
+          beforeRecordId = page.records[0]!.uuid;
+        }
+        return { existingPromptIds: promptIds, activeLeafUuid: leafUuid };
+      });
+    let parentUuid = activeLeafUuid;
+    for (const turnResult of turnResults) {
+      if (existingPromptIds.has(turnResult.promptId)) continue;
+      const record: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid,
+        sessionId: entry.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'turn_result',
+        provenance: 'system',
+        cwd: entry.effectiveCwd,
+        version: 'unknown',
+        systemPayload: turnResult,
+      };
+      await lease.appendJsonLine(record);
+      parentUuid = record.uuid;
+    }
+  } catch (error) {
+    writeStderrLine(
+      `[turn-result] session=${entry.sessionId} action=crash_persist_failed error=${extractErrorMessage(error)}`,
+    );
+  } finally {
+    await lease?.release().catch((error: unknown) => {
+      writeStderrLine(
+        `[turn-result] session=${entry.sessionId} action=crash_lease_release_failed error=${extractErrorMessage(error)}`,
+      );
+    });
+  }
+}
+
 interface StrictTerminalPersistence {
   promise: Promise<void>;
   state: 'pending' | 'succeeded' | 'failed';
@@ -1762,7 +1857,7 @@ function publishPromptTerminal(
   pendingEntry: PendingPromptEntry,
   terminal: PromptTerminal,
   options?: { persistIfDispatched?: boolean },
-): void {
+): BridgeTurnStatus | undefined {
   if (pendingEntry.terminalPublished) {
     // Dedup here is the designed steady state, not an anomaly: deadline
     // expiry, queued removal, and teardown flush each race the prompt's
@@ -1771,7 +1866,7 @@ function publishPromptTerminal(
       `publishPromptTerminal: suppressed duplicate ${terminal.kind} terminal ` +
         `for prompt ${pendingEntry.promptId} (session ${entry.sessionId})`,
     );
-    return;
+    return entry.terminalTurnStatuses.get(pendingEntry.promptId);
   }
   pendingEntry.terminalPublished = true;
   const status = rememberTerminalTurnStatus(entry, pendingEntry, terminal);
@@ -1819,6 +1914,7 @@ function publishPromptTerminal(
       pendingEntry.state === 'running',
     );
   }
+  return status;
 }
 
 function startStrictTerminalPersistence(
@@ -1889,12 +1985,18 @@ function flushPromptTerminals(
   entry: SessionEntry,
   code: string,
   message: string,
-): void {
+): TurnResultRecordPayload[] {
+  const turnResults: TurnResultRecordPayload[] = [];
+  const includedPromptIds = new Set<string>();
   for (const pending of [...entry.pendingPromptList]) {
-    publishPromptTerminal(entry, pending, {
+    const status = publishPromptTerminal(entry, pending, {
       kind: 'error',
       err: { code, message },
     });
+    if (status) {
+      turnResults.push(terminalStatusRecord(status));
+      includedPromptIds.add(pending.promptId);
+    }
     try {
       pending.abortController.abort(
         new DOMException('Prompt aborted', 'AbortError'),
@@ -1903,6 +2005,11 @@ function flushPromptTerminals(
       /* listeners must not break teardown */
     }
   }
+  for (const [promptId, attempt] of strictTerminalPersistences.get(entry) ??
+    []) {
+    if (!includedPromptIds.has(promptId)) turnResults.push(attempt.turnResult);
+  }
+  return turnResults;
 }
 
 async function cancelQueuedPromptsBeforeTeardown(
@@ -2405,6 +2512,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
+  const runtimeBaseDir = path.resolve(
+    opts.runtimeBaseDir ?? Storage.getRuntimeBaseDir(),
+  );
   const persistApprovalMode = opts.persistApprovalMode;
   const telemetry = opts.telemetry ?? NOOP_BRIDGE_TELEMETRY;
 
@@ -3104,6 +3214,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // `killAllSync` iterates THIS set to fire SIGKILL on every alive
   // child regardless of whether it's still the attach target.
   const aliveChannels = new Set<ChannelInfo>();
+  const channelExitCleanups = new Set<Promise<void>>();
+  const crashRecoveries = new Map<string, Promise<void>>();
   // Coalesces a concurrent second `ensureChannel()` call onto the
   // first one's spawn so we never create two children for the same
   // daemon. Cleared in the `finally` of the creator.
@@ -3728,7 +3840,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // so `killAllSync` still has a reference to fire SIGKILL during
       // the SIGTERM grace window — even if a concurrent `spawnOrAttach`
       // has already reassigned `channelInfo` to a fresh channel.
-      void channel.exited.then((exitInfo) => {
+      const exitCleanup = channel.exited.then(async (exitInfo) => {
         clearInFlightExtensionRefreshes(info.connection);
         if (channelInfo === info) cancelIdleTimer();
         if (info.workspaceMcpDiscoveryTimer) {
@@ -3791,31 +3903,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}, ${sessions.length} session(s) torn down)`,
           );
         }
-        for (const sid of sessions) {
-          const sessEntry = byId.get(sid);
-          if (!sessEntry) continue;
+        const crashedSessions = sessions.flatMap((sid) => {
+          const entry = byId.get(sid);
+          return entry ? [{ sid, entry }] : [];
+        });
+        const recoveries: Array<{
+          sid: string;
+          entry: SessionEntry;
+          persistence: Promise<void>;
+        }> = [];
+        for (const { sid, entry: sessEntry } of crashedSessions) {
           cancelPendingForSession(sid);
           // DAEMON-002/005: every still-pending prompt owes its formal
           // terminal before the bus closes below.
-          flushPromptTerminals(
+          const turnResults = flushPromptTerminals(
             sessEntry,
             'channel_closed',
             'agent channel exited before the prompt completed',
           );
-          try {
-            sessEntry.events.publish({
-              type: 'session_died',
-              data: {
-                sessionId: sid,
-                reason: 'channel_closed',
-                // BX9_P: thread exitCode/signalCode through.
-                exitCode: exitInfo?.exitCode ?? null,
-                signalCode: exitInfo?.signalCode ?? null,
-              },
-            });
-          } catch {
-            /* bus already closed */
-          }
           if (sessEntry.promptActive) {
             sessEntry.promptActive = false;
             activePromptCounter--;
@@ -3834,9 +3939,41 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // future load/resume of the same persisted session id.
           info.client.markSessionClosed(sid);
           if (defaultEntry === sessEntry) defaultEntry = undefined;
+          const persistence = persistTerminalResultsAfterChannelExit(
+            sessEntry,
+            runtimeBaseDir,
+            turnResults,
+          );
+          crashRecoveries.set(sid, persistence);
+          recoveries.push({ sid, entry: sessEntry, persistence });
+        }
+        await Promise.all(recoveries.map(({ persistence }) => persistence));
+        for (const { sid, entry: sessEntry, persistence } of recoveries) {
+          if (crashRecoveries.get(sid) === persistence) {
+            crashRecoveries.delete(sid);
+          }
+          try {
+            sessEntry.events.publish({
+              type: 'session_died',
+              data: {
+                sessionId: sid,
+                reason: 'channel_closed',
+                // BX9_P: thread exitCode/signalCode through.
+                exitCode: exitInfo?.exitCode ?? null,
+                signalCode: exitInfo?.signalCode ?? null,
+              },
+            });
+          } catch {
+            /* bus already closed */
+          }
           sessEntry.events.close();
         }
       });
+      channelExitCleanups.add(exitCleanup);
+      void exitCleanup.then(
+        () => channelExitCleanups.delete(exitCleanup),
+        () => channelExitCleanups.delete(exitCleanup),
+      );
 
       // Initialize handshake. The channel is already in
       // `aliveChannels` and the `channel.exited` handler above is
@@ -5917,6 +6054,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+    await crashRecoveries.get(req.sessionId);
+    if (shuttingDown) {
+      throw new Error('AcpSessionBridge is shutting down');
+    }
     if (
       req.approvalMode !== undefined &&
       !KNOWN_APPROVAL_MODES.has(req.approvalMode)
@@ -11242,6 +11383,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         shuttingDown = true;
         cancelIdleTimer();
         stopSessionReaper();
+        // Let an already-observed child exit claim its sessions before the
+        // shutdown snapshot labels remaining prompts as daemon_shutdown.
+        await Promise.resolve();
         const entries = Array.from(byId.values());
         // Snapshot every alive channel (typically 1; up to 2 during a
         // `killSession`-then-`spawnOrAttach` overlap) — entries are
@@ -11261,6 +11405,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // `requestPermission` callers unwind. Each `forgetSession`
         // settles all matching pending as session_closed; the bridge's
         // per-entry index gets cleared alongside.
+        const shutdownTurnResults: Array<{
+          entry: SessionEntry;
+          turnResults: TurnResultRecordPayload[];
+        }> = [];
         for (const e of entries) {
           permissionMediator.forgetSession(e.sessionId);
           e.pendingPermissionIds.clear();
@@ -11285,11 +11433,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           });
           // DAEMON-002/005: pending prompts owe their formal terminal
           // before the bus closes.
-          flushPromptTerminals(
+          const turnResults = flushPromptTerminals(
             e,
             'daemon_shutdown',
             'daemon shut down before the prompt completed',
           );
+          shutdownTurnResults.push({ entry: e, turnResults });
           try {
             e.events.publish({
               type: 'session_died',
@@ -11335,7 +11484,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...inFlightRestoreAwaits,
           inFlightChannelAwait,
         ]);
-        const teardownFailures = teardownResults.flatMap((result) =>
+        const cleanupResults = await Promise.allSettled(channelExitCleanups);
+        await Promise.all(
+          shutdownTurnResults.map(({ entry, turnResults }) =>
+            persistTerminalResultsAfterChannelExit(
+              entry,
+              runtimeBaseDir,
+              turnResults,
+            ),
+          ),
+        );
+        const teardownFailures = [
+          ...teardownResults,
+          ...cleanupResults,
+        ].flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
         );
         if (teardownFailures.length === 1) throw teardownFailures[0];

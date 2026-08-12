@@ -89,6 +89,8 @@ import {
 } from './bridgeTypes.js';
 import {
   ApprovalMode,
+  SessionTranscriptReader,
+  Storage,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   ShellExecutionService,
   stableSessionArtifactId,
@@ -13104,6 +13106,127 @@ describe('createAcpSessionBridge', () => {
       expect(terminalsFor(events, 'prompt-a')).toHaveLength(1);
       expect(terminalsFor(events, 'prompt-b')).toHaveLength(1);
       await bridge.shutdown();
+    });
+
+    it('persists pending terminal results after the channel process exits', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-crash-result-'),
+      );
+      const workspaceCwd = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-crash-workspace-'),
+      );
+      const sessionId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+      const storage = new Storage(workspaceCwd, runtimeBaseDir);
+      const chatsDir = path.join(storage.getProjectDir(), 'chats');
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: 'seed-record',
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date(0).toISOString(),
+          type: 'system',
+          subtype: 'agent_bootstrap',
+          provenance: 'system',
+          cwd: workspaceCwd,
+          version: 'test',
+          systemPayload: { kind: 'fork', history: [] },
+        })}\n`,
+      );
+      const handle = makeChannel({
+        newSessionImpl: () => ({ sessionId }),
+        promptImpl: () => new Promise<PromptResponse>(() => {}),
+      });
+      const bridge = makeBridge({
+        boundWorkspace: workspaceCwd,
+        runtimeBaseDir,
+        maxPendingPromptsPerSession: 70,
+        channelFactory: async () => handle.channel,
+      });
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd });
+        const active = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'active at crash' }],
+          },
+          undefined,
+          { promptId: 'prompt-a' },
+        );
+        active.catch(() => {});
+        const queuedPromptIds = Array.from(
+          { length: 65 },
+          (_, index) => `prompt-${index + 1}`,
+        );
+        for (const promptId of queuedPromptIds) {
+          bridge
+            .sendPrompt(
+              session.sessionId,
+              {
+                sessionId: session.sessionId,
+                prompt: [{ type: 'text', text: 'queued at crash' }],
+              },
+              undefined,
+              { promptId },
+            )
+            .catch(() => {});
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        handle.crash({ exitCode: 1, signalCode: null });
+        await bridge.shutdown();
+
+        await vi.waitFor(async () => {
+          const page = await Storage.runWithResolvedRuntimeBaseDir(
+            runtimeBaseDir,
+            () =>
+              new SessionTranscriptReader(workspaceCwd).readPage(sessionId, {
+                direction: 'backward',
+                limit: 100,
+              }),
+          );
+          const results = page.records.flatMap((record) =>
+            record.subtype === 'turn_result'
+              ? [
+                  record.systemPayload as {
+                    promptId: string;
+                    state: string;
+                    error?: { code?: string };
+                  },
+                ]
+              : [],
+          );
+          expect(results).toHaveLength(66);
+          expect(results.map((result) => result.promptId)).toEqual([
+            'prompt-a',
+            ...queuedPromptIds,
+          ]);
+          expect(results).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                promptId: 'prompt-a',
+                state: 'error',
+                error: expect.objectContaining({ code: 'channel_closed' }),
+              }),
+              expect.objectContaining({
+                promptId: 'prompt-65',
+                state: 'error',
+                error: expect.objectContaining({ code: 'channel_closed' }),
+              }),
+            ]),
+          );
+        });
+      } finally {
+        stderrSpy.mockRestore();
+        await bridge.shutdown();
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+        await fsp.rm(workspaceCwd, { recursive: true, force: true });
+      }
     });
   });
 
