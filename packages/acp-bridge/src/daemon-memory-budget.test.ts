@@ -329,8 +329,8 @@ describe('journalGrowthPoolMb', () => {
   );
 
   it('disables the pool on a below-minimum host instead of flooring', () => {
-    // The 32 MB floor would carve growth capacity out of a budget the host
-    // cannot back; insufficient memory must disable growth outright.
+    // Any positive pool would carve growth capacity out of a budget the
+    // host cannot back; insufficient memory must disable growth outright.
     const budget = resolveDaemonMemoryBudget({ availableMemoryMb: 512 });
     expect(budget.insufficientMemory).toBe(true);
     expect(journalGrowthPoolMb(budget)).toBe(0);

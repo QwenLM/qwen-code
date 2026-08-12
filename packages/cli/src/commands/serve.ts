@@ -403,7 +403,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'text/thought chunks share bounded entries. When exceeded, the ' +
           'daemon first tries adaptive growth (see --max-journal-bytes); ' +
           'without granted headroom the oldest entries are dropped. Pinning ' +
-          'this flag disables adaptive growth. Defaults to ' +
+          'this flag (or --max-journal-bytes) disables adaptive growth. ' +
+          'Defaults to ' +
           DEFAULT_MAX_JOURNAL_EVENTS +
           ' when unset. Must be a positive safe integer.',
       })
@@ -436,11 +437,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
           'way. It does not change how any `qwen --acp` child is sized; the ' +
-          'one consumer today is adaptive live-journal growth, whose ' +
-          'per-bridge pool is 5% of the effective budget (clamped to [32, ' +
-          '1024] MB; see --max-journal-bytes). Reported under `limits.memory` ' +
-          'in daemon status, alongside a modeled per-child partition under ' +
-          '`limits.memory.childHeap`. Must be an integer in [1024, 1048576].',
+          'one consumer today is adaptive live-journal growth: one ' +
+          'daemon-wide pool of 5% of the effective budget (capped at 1024 ' +
+          'MB; 0, growth disabled, when the effective budget falls below ' +
+          'the 1024 MB minimum; see --max-journal-bytes). Reported under ' +
+          '`limits.memory` in daemon status, alongside a modeled per-child ' +
+          'partition under `limits.memory.childHeap`. Must be an integer in ' +
+          '[1024, 1048576].',
       })
       .option('memory-pressure-mode', {
         choices: ['off', 'observe'] as const,

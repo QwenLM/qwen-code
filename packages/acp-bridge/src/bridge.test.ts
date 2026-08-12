@@ -69,6 +69,7 @@ import type {
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import { EventBus, type BridgeEvent } from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
+import { JOURNAL_GROWTH_HARD_CAP_BYTES } from './replayWindowLimits.js';
 import {
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
@@ -5390,10 +5391,76 @@ describe('createAcpSessionBridge', () => {
       expect(
         snap.liveJournal?.find((event) => event.type === 'history_truncated'),
       ).toBeUndefined();
+      // Positively pin that session 2 breached and grew from the returned
+      // headroom: the negative marker check also passes on an empty
+      // journal, which would skip the returned-headroom path entirely.
+      for (const text of ['b-1', 'b-2', 'b-3']) {
+        expect(JSON.stringify(snap.liveJournal)).toContain(text);
+      }
 
       gates.get(second.sessionId)?.resolve();
       await secondPrompt;
       await bridge.shutdown();
+    });
+
+    it('reports the growth pool and grown caps on the daemon status snapshot', async () => {
+      const gate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await gate.promise;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 64 * 1024 * 1024,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'grow' }],
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'prompt-status' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      for (const text of ['chunk-a', 'chunk-b', 'chunk-c']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      const snap = bridge.getDaemonStatusSnapshot();
+      expect(snap.limits.journalGrowth).toEqual({
+        poolBytes: 64 * 1024 * 1024,
+        hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+      });
+      expect(snap.sessions).toHaveLength(1);
+      expect(snap.sessions[0]?.maxJournalEvents).toBeGreaterThan(
+        snap.limits.maxJournalEvents,
+      );
+      expect(snap.sessions[0]?.maxJournalBytes).toBeGreaterThan(
+        snap.limits.maxJournalBytes,
+      );
+
+      gate.resolve();
+      await prompt;
+      await bridge.shutdown();
+
+      const unmanaged = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      expect(
+        unmanaged.getDaemonStatusSnapshot().limits.journalGrowth,
+      ).toBeNull();
+      await unmanaged.shutdown();
     });
   });
 
@@ -5517,8 +5584,20 @@ describe('createAcpSessionBridge', () => {
     gates.get(sessionB.sessionId)?.resolve();
     await promptA;
     await promptB;
+    // The shared view carries the grown cap from A's doubling (the whole
+    // pool) plus B's untouched baseline.
+    expect(journalGrowthSessionLimits()).toEqual([
+      16 * 1024 * 1024,
+      8 * 1024 * 1024,
+    ]);
     await bridgeA.shutdown();
+    // A shut-down bridge's provider must leave the daemon-wide aggregator:
+    // left registered it keeps reporting (and leaks) until daemon restart.
+    expect(providers.size).toBe(1);
+    expect(journalGrowthSessionLimits()).toEqual([8 * 1024 * 1024]);
     await bridgeB.shutdown();
+    expect(providers.size).toBe(0);
+    expect(journalGrowthSessionLimits()).toEqual([]);
   }, 15_000);
 
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {

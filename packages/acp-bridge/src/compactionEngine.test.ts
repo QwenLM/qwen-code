@@ -1395,11 +1395,12 @@ describe('TurnBoundaryCompactionEngine', () => {
     });
 
     it('degrades to eviction when the advisor throws', () => {
+      const advisor = vi.fn(() => {
+        throw new Error('advisor exploded');
+      });
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
-        onJournalGrowth: () => {
-          throw new Error('advisor exploded');
-        },
+        onJournalGrowth: advisor,
       });
       for (let i = 1; i <= 4; i++) {
         engine.ingest(makeUserMessage(i, `message-${i}`));
@@ -1410,6 +1411,9 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
         2,
       );
+      // A thrown advisor is recorded as a refusal: the second breach must
+      // be swallowed by the throttle, not re-ask on the hot ingest path.
+      expect(advisor).toHaveBeenCalledTimes(1);
     });
 
     it('treats a non-growing or malformed grant as a refusal', () => {
@@ -1702,6 +1706,38 @@ describe('TurnBoundaryCompactionEngine', () => {
       engine.ingest(makeUserMessage(4, 'c'));
       engine.ingest(makeUserMessage(5, 'd'));
       expect(advisor).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the refusal throttle when a re-ask is granted', () => {
+      // A refusal at t0, a backward clock jump that lets a re-ask grant,
+      // then a breach back inside [t0, t0+10s): the grant must have
+      // cleared the stale refusal, or the engine throttles asks the pool
+      // is willing to grant.
+      let clockMs = 100_000;
+      let calls = 0;
+      const advisor = vi.fn(() => {
+        calls += 1;
+        return calls === 2
+          ? { maxEvents: 2, maxBytes: 16 * 1024 * 1024 }
+          : undefined;
+      });
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+        now: () => clockMs,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'a'));
+      engine.ingest(makeUserMessage(2, 'b'));
+      expect(advisor).toHaveBeenCalledTimes(1);
+
+      clockMs = 50_000;
+      engine.ingest(makeUserMessage(3, 'c'));
+      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(engine.journalLimits().maxEvents).toBe(2);
+
+      clockMs = 105_000;
+      engine.ingest(makeUserMessage(4, 'd'));
+      expect(advisor).toHaveBeenCalledTimes(3);
     });
 
     it('keeps grown caps across turn boundaries', () => {

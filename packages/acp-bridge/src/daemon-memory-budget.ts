@@ -35,7 +35,6 @@ export const MAX_ROOT_RESERVE_MB = 1_024;
  * preallocation — nothing is reserved until a session actually grows.
  */
 export const JOURNAL_GROWTH_POOL_FRACTION = 0.05;
-export const MIN_JOURNAL_GROWTH_POOL_MB = 32;
 export const MAX_JOURNAL_GROWTH_POOL_MB = 1_024;
 
 export type MemoryBudgetSource = 'flag' | 'derived';
@@ -209,18 +208,14 @@ export function recommendedChildShareMb(
  * single figure this module offers and 5% of it keeps the pool a rounding
  * error next to child heaps while still covering several fully-grown
  * sessions (per-session growth hard-caps at 256 MiB). Returns 0 — growth
- * disabled — on a host too small for the minimum budget, where the floor
- * would carve capacity out of a budget that cannot back it, and never
- * exceeds the headroom left after the root reserve.
+ * disabled — on a host too small for the minimum budget, and never exceeds
+ * the headroom left after the root reserve.
  */
 export function journalGrowthPoolMb(budget: DaemonMemoryBudget): number {
   if (budget.insufficientMemory) return 0;
   return Math.min(
-    clamp(
-      Math.floor(budget.effectiveBudgetMb * JOURNAL_GROWTH_POOL_FRACTION),
-      MIN_JOURNAL_GROWTH_POOL_MB,
-      MAX_JOURNAL_GROWTH_POOL_MB,
-    ),
+    Math.floor(budget.effectiveBudgetMb * JOURNAL_GROWTH_POOL_FRACTION),
+    MAX_JOURNAL_GROWTH_POOL_MB,
     budget.childPoolMb,
   );
 }
