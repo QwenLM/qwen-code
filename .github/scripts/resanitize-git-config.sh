@@ -37,7 +37,7 @@ if [ -e .git ]; then
   rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
   git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
   git config --local --name-only --list 2>/dev/null \
-    | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+    | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
     | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
 fi
 # The GLOBAL scope spans TWO files — ~/.gitconfig and

@@ -7109,6 +7109,20 @@ exit 1
     }
     // The staging steps record the trusted PATH before any branch code runs.
     expect(workflow.match(/trusted_path=\$\{PATH\}/g) ?? []).toHaveLength(2);
+    // gh's own env channels are pinned/stripped BEFORE the first gh call in
+    // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
+    // identity check and a planted GH_TOKEN cannot outrank the inline one.
+    for (const [step, firstGh] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
+      [prepareStep, 'PR_LIVE="$(gh pr view'],
+    ]) {
+      const ghPin = step.indexOf('export GH_HOST=github.com');
+      expect(ghPin).toBeGreaterThan(-1);
+      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN/);
+      expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
+      expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+    }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
     // GIT_ALLOW_PROTOCOL is stripped; these pin the config level).

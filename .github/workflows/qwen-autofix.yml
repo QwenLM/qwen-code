@@ -834,7 +834,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -1606,6 +1606,13 @@ jobs:
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
+          # drop any planted token BEFORE the identity check below, so a
+          # GH_HOST reroute cannot spoof `gh api user` and a planted GH_TOKEN
+          # cannot outrank the inline GITHUB_TOKEN. (git's channels are
+          # stripped in the hermetic preamble further down.)
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
@@ -3378,7 +3385,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -3714,7 +3721,7 @@ jobs:
           # runner) means grep exits 1, which would kill the step exactly
           # when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\..+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\..+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
@@ -3973,6 +3980,12 @@ jobs:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
+          # drop any planted token BEFORE the gh calls below, so a GH_HOST
+          # reroute cannot spoof the eligibility re-check and a planted
+          # GH_TOKEN cannot outrank the inline GITHUB_TOKEN.
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN
           # This PAT-bearing step runs git (status/restore/fetch/checkout and a
           # push preflight) on the shared host BEFORE the agent/gate, so it
           # takes the same hermetic preamble the push steps do — the contract
@@ -5019,6 +5032,13 @@ jobs:
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
+          # drop any planted token BEFORE the identity check below, so a
+          # GH_HOST reroute cannot spoof `gh api user` and a planted GH_TOKEN
+          # cannot outrank the inline GITHUB_TOKEN. (git's channels are
+          # stripped in the hermetic preamble further down.)
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
