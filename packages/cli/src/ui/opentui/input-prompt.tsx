@@ -583,7 +583,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   return (
     <box flexDirection="column" marginLeft={1} marginRight={1}>
       <text fg={borderColor}>{dashLine}</text>
-      <box border={['bottom']} borderStyle="single" borderColor={borderColor}>
+      <box
+        flexDirection="row"
+        border={['bottom']}
+        borderStyle="single"
+        borderColor={borderColor}
+      >
         <text fg={chrome.color ?? C.purple}>{chrome.prefix} </text>
         <textarea
           ref={(el) => {
