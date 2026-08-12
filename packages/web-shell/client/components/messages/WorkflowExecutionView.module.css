@@ -453,6 +453,11 @@
   fill: none;
   stroke: color-mix(in srgb, var(--muted-foreground) 58%, transparent);
   stroke-width: 1.25px;
+  opacity: 0.78;
+  transition:
+    opacity 120ms ease,
+    stroke-width 120ms ease,
+    filter 120ms ease;
   vector-effect: non-scaling-stroke;
 }
 
@@ -475,6 +480,19 @@
 
 .edge[data-status='failed'] {
   stroke: var(--error-color);
+}
+
+.edge[data-path-emphasis='related'] {
+  stroke-width: 2.3px;
+  opacity: 1;
+  filter: drop-shadow(
+    0 0 3px color-mix(in srgb, currentColor 48%, transparent)
+  );
+}
+
+.edge[data-path-emphasis='dimmed'] {
+  opacity: 0.1;
+  filter: none;
 }
 
 .node {
@@ -542,6 +560,23 @@
 .node[data-status='queued'],
 .node[data-status='cancelled'] {
   opacity: 0.62;
+}
+
+.node[data-path-emphasis='active'] {
+  border-color: var(--workflow-node-accent);
+  opacity: 1;
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--workflow-node-accent) 20%, transparent),
+    0 10px 24px color-mix(in srgb, black 24%, transparent);
+}
+
+.node[data-path-emphasis='related'] {
+  opacity: 0.9;
+}
+
+.node[data-path-emphasis='dimmed'] {
+  opacity: 0.22;
+  box-shadow: none;
 }
 
 .nodeState {
@@ -657,12 +692,17 @@
   color: var(--error-color);
 }
 
-.inspector > p {
+.inspectorPrompt {
+  max-height: 132px;
   margin: 0;
+  padding-right: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   color: var(--muted-foreground);
   font-size: 11px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
 }
 
 .inspector dl {
@@ -779,6 +819,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .edge,
   .node,
   .nodeState::after {
     animation-duration: 0.001ms !important;

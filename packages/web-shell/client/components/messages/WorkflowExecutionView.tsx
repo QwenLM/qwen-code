@@ -254,6 +254,8 @@ export function WorkflowExecutionView({
   const markerId = `workflow-arrow-${useId().replaceAll(':', '')}`;
   const layout = useMemo(() => buildWorkflowGraphLayout(task), [task]);
   const [selectedId, setSelectedId] = useState(() => initialDispatchId(task));
+  const [hoveredDispatchId, setHoveredDispatchId] = useState('');
+  const [focusedDispatchId, setFocusedDispatchId] = useState('');
   const [showComparison, setShowComparison] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [historyFilter, setHistoryFilter] =
@@ -278,6 +280,8 @@ export function WorkflowExecutionView({
     setHistoryFilter('all');
     setPendingDeleteRunId('');
     setComparisonRunId(task.sourceRunId ?? '');
+    setHoveredDispatchId('');
+    setFocusedDispatchId('');
   }, [task.id, task.sourceRunId]);
 
   useEffect(() => {
@@ -292,6 +296,17 @@ export function WorkflowExecutionView({
 
   const selected =
     task.dispatches.find((dispatch) => dispatch.id === selectedId) ?? null;
+  const emphasizedDispatchId = hoveredDispatchId || focusedDispatchId;
+  const emphasizedDispatchIds = useMemo(() => {
+    const related = new Set<string>();
+    if (!emphasizedDispatchId) return related;
+    related.add(emphasizedDispatchId);
+    for (const edge of layout.edges) {
+      if (edge.from === emphasizedDispatchId) related.add(edge.to);
+      if (edge.to === emphasizedDispatchId) related.add(edge.from);
+    }
+    return related;
+  }, [emphasizedDispatchId, layout.edges]);
   const approvalBySubagentId = new Map(
     (task.pendingApprovals ?? []).map((approval) => [
       approval.subagentId,
@@ -714,6 +729,9 @@ export function WorkflowExecutionView({
               </defs>
               {layout.edges.map((edge) => {
                 const targetStatus = layout.dispatchStatusById.get(edge.to);
+                const isRelated =
+                  edge.from === emphasizedDispatchId ||
+                  edge.to === emphasizedDispatchId;
                 return (
                   <path
                     key={`${edge.from}:${edge.to}`}
@@ -721,6 +739,13 @@ export function WorkflowExecutionView({
                     className={styles.edge}
                     data-status={targetStatus}
                     data-workflow-edge={`${edge.from}:${edge.to}`}
+                    data-path-emphasis={
+                      emphasizedDispatchId
+                        ? isRelated
+                          ? 'related'
+                          : 'dimmed'
+                        : undefined
+                    }
                     markerEnd={`url(#${markerId})`}
                   />
                 );
@@ -730,6 +755,13 @@ export function WorkflowExecutionView({
               const approval = dispatch.subagentId
                 ? approvalBySubagentId.get(dispatch.subagentId)
                 : undefined;
+              const pathEmphasis = emphasizedDispatchId
+                ? dispatch.id === emphasizedDispatchId
+                  ? 'active'
+                  : emphasizedDispatchIds.has(dispatch.id)
+                    ? 'related'
+                    : 'dimmed'
+                : undefined;
               return (
                 <button
                   key={dispatch.id}
@@ -738,8 +770,13 @@ export function WorkflowExecutionView({
                   data-status={dispatch.status}
                   data-workflow-dispatch={dispatch.id}
                   data-workflow-approval={approval?.approvalId}
+                  data-path-emphasis={pathEmphasis}
                   aria-pressed={dispatch.id === selected?.id}
                   onClick={() => setSelectedId(dispatch.id)}
+                  onMouseEnter={() => setHoveredDispatchId(dispatch.id)}
+                  onMouseLeave={() => setHoveredDispatchId('')}
+                  onFocus={() => setFocusedDispatchId(dispatch.id)}
+                  onBlur={() => setFocusedDispatchId('')}
                   style={
                     {
                       left: `${x}px`,
@@ -777,7 +814,9 @@ export function WorkflowExecutionView({
                 {statusLabel(selected.status, t)}
               </small>
             </div>
-            <p>{selected.prompt}</p>
+            <p className={styles.inspectorPrompt} data-workflow-prompt>
+              {selected.prompt}
+            </p>
             {selectedApproval && (
               <div className={styles.approvalCallout}>
                 <strong>{t('workflow.approvalNeeded')}</strong>

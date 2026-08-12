@@ -241,6 +241,64 @@ describe('WorkflowExecutionView', () => {
     expect(
       container.querySelector('[data-active="true"] strong')?.textContent,
     ).toBe('Review');
+    expect(container.querySelector('[data-workflow-prompt]')).not.toBeNull();
+  });
+
+  it('focuses direct graph connections on hover and keyboard focus', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowExecutionView task={workflowTask()} />
+        </I18nProvider>,
+      );
+    });
+
+    const correctness = container.querySelector<HTMLButtonElement>(
+      '[data-workflow-dispatch="dispatch-2"]',
+    )!;
+    const architecture = container.querySelector<HTMLButtonElement>(
+      '[data-workflow-dispatch="dispatch-3"]',
+    )!;
+    const correctnessEdge = container.querySelector(
+      '[data-workflow-edge="dispatch-1:dispatch-2"]',
+    )!;
+    const architectureEdge = container.querySelector(
+      '[data-workflow-edge="dispatch-1:dispatch-3"]',
+    )!;
+
+    act(() => {
+      correctness.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    });
+    expect(correctness.getAttribute('data-path-emphasis')).toBe('active');
+    expect(
+      container
+        .querySelector('[data-workflow-dispatch="dispatch-1"]')
+        ?.getAttribute('data-path-emphasis'),
+    ).toBe('related');
+    expect(architecture.getAttribute('data-path-emphasis')).toBe('dimmed');
+    expect(correctnessEdge.getAttribute('data-path-emphasis')).toBe('related');
+    expect(architectureEdge.getAttribute('data-path-emphasis')).toBe('dimmed');
+
+    act(() => {
+      correctness.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+    });
+    expect(correctnessEdge.hasAttribute('data-path-emphasis')).toBe(false);
+    expect(architectureEdge.hasAttribute('data-path-emphasis')).toBe(false);
+
+    act(() => {
+      architecture.focus();
+    });
+    expect(architecture.getAttribute('data-path-emphasis')).toBe('active');
+    expect(correctnessEdge.getAttribute('data-path-emphasis')).toBe('dimmed');
+    expect(architectureEdge.getAttribute('data-path-emphasis')).toBe('related');
+
+    act(() => architecture.blur());
+    expect(correctnessEdge.hasAttribute('data-path-emphasis')).toBe(false);
+    expect(architectureEdge.hasAttribute('data-path-emphasis')).toBe(false);
   });
 
   it('locates a pending permission on its dispatch without duplicating approval controls', () => {
