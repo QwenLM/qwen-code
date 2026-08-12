@@ -21,7 +21,10 @@
     },
     {
       "paths": ["packages/core/src/skills/**"],
-      "relatedPaths": ["packages/core/src/skills/**"],
+      "relatedPaths": [
+        "packages/core/src/skills/*.ts",
+        "packages/core/src/skills/bundled/*/SKILL.md"
+      ],
       "domains": ["core-skills"]
     },
     {
