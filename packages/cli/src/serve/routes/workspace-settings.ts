@@ -657,11 +657,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         return;
       }
       let publicValue: unknown = value;
+      const effective = findEffectiveWorkspace(
+        runtime.bridge,
+        runtime.workspaceCwd,
+      );
       try {
-        const effective = findEffectiveWorkspace(
-          runtime.bridge,
-          runtime.workspaceCwd,
-        );
         const persist = async () => {
           const prepared = prepareSettingWrite(
             effective,
@@ -681,18 +681,14 @@ export function registerWorkspaceQualifiedSettingsRoutes(
           );
         };
         if (mcpServerMutation) {
-          await withMcpServerMutationLock(
-            runtime.workspaceCwd,
-            settingScope,
-            persist,
-          );
+          await withMcpServerMutationLock(effective, settingScope, persist);
         } else {
           await persist();
         }
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
         writeStderrLine(
-          `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
+          `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${effective}): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );

@@ -9,7 +9,7 @@ import * as path from 'node:path';
 
 import { findGitRoot } from '@qwen-code/qwen-code-core';
 
-interface SessionLister {
+export interface SessionLister {
   listWorkspaceSessions(
     workspaceCwd: string,
   ): ReadonlyArray<{ worktree?: { path: string } }>;

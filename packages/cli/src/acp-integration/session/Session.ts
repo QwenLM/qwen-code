@@ -1576,8 +1576,9 @@ export class Session implements SessionContext {
   /**
    * Absolute path to the worktree when this session operates inside one.
    * Set by acpAgent after session creation; `null` for regular sessions.
-   * Read by `removeStoredSessionEntry` to clear the agent-level
-   * `defaultSettingsCwd` when the owning session closes.
+   * Read by `resolveSettingsCwd` to route `qwen/settings/*` handlers to this
+   * session's worktree; cleared implicitly when the session is removed from
+   * the agent's session map.
    */
   worktreeCwd: string | null = null;
 

@@ -276,6 +276,9 @@ import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings } from '../config/settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
+import * as fsPromises from 'node:fs/promises';
+import * as nodePath from 'node:path';
+import * as nodeOs from 'node:os';
 
 // ---------------------------------------------------------------------------
 // Test suite — VP1, VP2, VP2b
@@ -538,29 +541,43 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   });
 
   it('VP4: getTargetDir returns a worktree path — session.worktreeCwd is set', async () => {
-    const worktreePath = '/repo/.qwen/worktrees/my-feature';
+    const tmpDir = await fsPromises.mkdtemp(
+      nodePath.join(nodeOs.tmpdir(), 'qwen-wt-vp4-'),
+    );
+    const repoDir = nodePath.join(tmpDir, 'repo');
+    const worktreesDir = nodePath.join(repoDir, '.qwen', 'worktrees');
+    const worktreePath = nodePath.join(worktreesDir, 'my-feature');
+    await fsPromises.mkdir(worktreePath, { recursive: true });
+    await fsPromises.mkdir(nodePath.join(repoDir, '.git'));
+    await fsPromises.writeFile(
+      nodePath.join(worktreePath, '.git'),
+      'gitdir: /fake',
+    );
+
     const innerConfig = makeInnerConfig();
     (innerConfig.getTargetDir as ReturnType<typeof vi.fn>).mockReturnValue(
       worktreePath,
     );
 
-    const { findGitRoot } = await import('@qwen-code/qwen-code-core');
-    vi.mocked(findGitRoot).mockReturnValue('/repo');
+    try {
+      const { agent, agentPromise } =
+        await bootAgentWithLoadSession(innerConfig);
 
-    const { agent, agentPromise } = await bootAgentWithLoadSession(innerConfig);
+      await agent.loadSession({
+        sessionId: SESSION_ID,
+        cwd: '/fake/project',
+        mcpServers: [],
+      });
 
-    await agent.loadSession({
-      sessionId: SESSION_ID,
-      cwd: '/fake/project',
-      mcpServers: [],
-    });
+      expect(
+        (lastSessionMock as Record<string, unknown>)?.['worktreeCwd'],
+      ).toBe(worktreePath);
 
-    expect((lastSessionMock as Record<string, unknown>)?.['worktreeCwd']).toBe(
-      worktreePath,
-    );
-
-    mockConnectionState.resolve();
-    await agentPromise;
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      await fsPromises.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('MUST-1/R2-17: resume restores worktreeCwd from restored sidecar session', async () => {

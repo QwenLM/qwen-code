@@ -116,7 +116,6 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
   type ToolInvocationGuard,
-  findGitRoot,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -172,7 +171,7 @@ import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
@@ -600,11 +599,21 @@ function defaultAcpOnlyLocalReadRoots(): string[] {
 }
 
 /** Returns true when `target` lives under `<repoRoot>/.qwen/worktrees/`. */
-function isWorktreePath(target: string): boolean {
-  const repoRoot = findGitRoot(target);
-  if (!repoRoot) return false;
-  const worktreesDir = path.join(repoRoot, '.qwen', 'worktrees');
-  return path.normalize(target).startsWith(worktreesDir + path.sep);
+export function isWorktreePath(target: string): boolean {
+  const normalizedTarget = path.normalize(target);
+  let searchDir = path.resolve(normalizedTarget);
+
+  while (true) {
+    const gitPath = path.join(searchDir, '.git');
+    if (existsSync(gitPath) && statSync(gitPath).isDirectory()) {
+      const worktreesDir = path.join(searchDir, '.qwen', 'worktrees');
+      return normalizedTarget.startsWith(worktreesDir + path.sep);
+    }
+    const parentDir = path.dirname(searchDir);
+    if (parentDir === searchDir) break;
+    searchDir = parentDir;
+  }
+  return false;
 }
 
 function buildAcpLocalReadRoots(config: Config): string[] {
@@ -9996,8 +10005,10 @@ class QwenAgent implements Agent {
             isWorktreePath(canonicalPath)
           ) {
             session.worktreeCwd = canonicalPath;
+            session.getConfig().setActiveWorktree?.(canonicalPath);
           } else {
             session.worktreeCwd = null;
+            session.getConfig().setActiveWorktree?.(null);
           }
 
           try {
@@ -11469,7 +11480,9 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
         const oldMerged = structuredClone(this.settings.merged);
-        this.settings = loadSettings(settingsCwd);
+        this.settings = loadSettings(settingsCwd, {
+          skipLoadEnvironment: true,
+        });
         const newMerged = this.settings.merged;
 
         const envResult = reloadEnvironment(newMerged, settingsCwd);

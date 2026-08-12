@@ -4377,9 +4377,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('session/cd sets worktreeCwd and getCore resolves against the worktree path', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
-    const targetDir = await fs.mkdtemp(
+    const tmpDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-cd-worktree-settings-'),
     );
+    const repoRoot = path.join(tmpDir, 'repo');
+    const targetDir = path.join(repoRoot, '.qwen', 'worktrees', 'test');
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.mkdir(path.join(repoRoot, '.git'));
+    await fs.writeFile(path.join(targetDir, '.git'), 'gitdir: /fake');
     const canonicalTargetDir = await fs.realpath(targetDir);
     const innerConfig = await setupSessionMocks(sessionId);
     const relocateWorkingDirectory = vi.fn().mockResolvedValue({});
@@ -4420,7 +4425,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agent.extMethod('qwen/settings/getCore', {});
       expect(vi.mocked(loadSettings)).toHaveBeenCalledWith(canonicalTargetDir);
     } finally {
-      await fs.rm(targetDir, { recursive: true, force: true });
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
 
     mockConnectionState.resolve();
@@ -9848,7 +9853,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('qwen/settings handlers resolve against worktree cwd set by createAndStoreSession', async () => {
-    const WORKTREE_DIR = os.tmpdir();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-s1-'));
+    const repoRoot = path.join(tmpDir, 'repo');
+    const WORKTREE_DIR = path.join(repoRoot, '.qwen', 'worktrees', 'test');
+    await fs.mkdir(WORKTREE_DIR, { recursive: true });
+    await fs.mkdir(path.join(repoRoot, '.git'));
+    await fs.writeFile(path.join(WORKTREE_DIR, '.git'), 'gitdir: /fake');
     const innerConfig = await setupSessionMocks('wt-settings-session');
     innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
 
@@ -9880,10 +9890,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('qwen/settings handlers fall back to process.cwd() after worktree session closes', async () => {
-    const WORKTREE_DIR = os.tmpdir();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-s2-'));
+    const repoRoot = path.join(tmpDir, 'repo');
+    const WORKTREE_DIR = path.join(repoRoot, '.qwen', 'worktrees', 'test');
+    await fs.mkdir(WORKTREE_DIR, { recursive: true });
+    await fs.mkdir(path.join(repoRoot, '.git'));
+    await fs.writeFile(path.join(WORKTREE_DIR, '.git'), 'gitdir: /fake');
     const innerConfig = await setupSessionMocks('wt-close-session');
     innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
 
@@ -9910,10 +9926,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('qwen/settings/getCore resolves per-session worktreeCwd via sessionId param', async () => {
-    const WORKTREE_DIR = os.tmpdir();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-s3-'));
+    const repoRoot = path.join(tmpDir, 'repo');
+    const WORKTREE_DIR = path.join(repoRoot, '.qwen', 'worktrees', 'test');
+    await fs.mkdir(WORKTREE_DIR, { recursive: true });
+    await fs.mkdir(path.join(repoRoot, '.git'));
+    await fs.writeFile(path.join(WORKTREE_DIR, '.git'), 'gitdir: /fake');
     const innerConfig = await setupSessionMocks('per-session-wt-id');
     innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
 
@@ -9936,10 +9958,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('qwen/settings/getCore falls through to configWt when worktreeCwd dir is deleted', async () => {
-    const WORKTREE_DIR = '/fake/deleted-wt';
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-s4-'));
+    const repoRoot = path.join(tmpDir, 'repo');
+    const WORKTREE_DIR = path.join(repoRoot, '.qwen', 'worktrees', 'deleted');
+    await fs.mkdir(WORKTREE_DIR, { recursive: true });
+    await fs.mkdir(path.join(repoRoot, '.git'));
+    await fs.writeFile(path.join(WORKTREE_DIR, '.git'), 'gitdir: /fake');
     const innerConfig = await setupSessionMocks('deleted-wt-session');
     innerConfig.getTargetDir = vi.fn().mockReturnValue(WORKTREE_DIR);
     (innerConfig as Record<string, unknown>)['getActiveWorktree'] = vi
@@ -9959,7 +9987,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     })) as { sessionId: string };
     const sessionId = newResult.sessionId;
 
-    mockExistsSync.mockReturnValue(false);
+    await fs.rm(WORKTREE_DIR, { recursive: true, force: true });
     try {
       vi.mocked(loadSettings).mockClear();
       await agent.extMethod('qwen/settings/getCore', { sessionId });
@@ -9970,10 +9998,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('qwen/settings/getCore uses configWt when worktreeCwd is deleted but activeWorktree exists', async () => {
-    const ACTIVE_WT = os.tmpdir();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-s5-'));
+    const repoRoot = path.join(tmpDir, 'repo');
+    const ACTIVE_WT = path.join(repoRoot, '.qwen', 'worktrees', 'active');
+    await fs.mkdir(ACTIVE_WT, { recursive: true });
+    await fs.mkdir(path.join(repoRoot, '.git'));
+    await fs.writeFile(path.join(ACTIVE_WT, '.git'), 'gitdir: /fake');
     const innerConfig = await setupSessionMocks('active-wt-session');
     innerConfig.getTargetDir = vi.fn().mockReturnValue('/fake/deleted-wt');
     (innerConfig as Record<string, unknown>)['getActiveWorktree'] = vi
@@ -10006,6 +10040,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('qwen/permissions/setRules validates scope and ruleType', async () => {
@@ -18057,12 +18092,22 @@ describe('sessionLanguage multi-session propagation', () => {
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
+    const reloadedSettings = {
+      merged: { modelProviders: providerConfig },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-reload'),
       getAuthType: vi.fn().mockReturnValue('openai'),
     });
 
-    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadSettings).mockImplementation((...args) => {
+      if (args[1] && (args[1] as Record<string, unknown>).skipLoadEnvironment) {
+        return reloadedSettings;
+      }
+      return settings;
+    });
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
     vi.mocked(Session).mockImplementation(
       () =>
@@ -18121,6 +18166,11 @@ describe('sessionLanguage multi-session propagation', () => {
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
+    const reloadedSettings = {
+      merged: { tools: { approvalMode: 'plan' } },
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
     let approvalMode = 'default';
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-plan-reload'),
@@ -18133,7 +18183,12 @@ describe('sessionLanguage multi-session propagation', () => {
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
 
-    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadSettings).mockImplementation((...args) => {
+      if (args[1] && (args[1] as Record<string, unknown>).skipLoadEnvironment) {
+        return reloadedSettings;
+      }
+      return settings;
+    });
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
     vi.mocked(Session).mockImplementation(
       () =>
