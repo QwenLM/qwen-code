@@ -9,7 +9,8 @@
 // The iterative reverse audit (Step 5) is the one stage of a review whose cost
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
-// two consecutive dry rounds or the 5-round cap. On a PR where every round
+// two consecutive dry rounds or the plan's round cap (5, or 3 for a huge
+// diff). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while
@@ -38,8 +39,15 @@
 // still bounds the run, and a broken environment variable must degrade to
 // today's behaviour, not wedge every budgeted review at round 1.
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
+import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
 import { promptRecordDir } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
@@ -131,6 +139,16 @@ export const DEFAULT_ROUND_SECONDS = 1800;
 /** Floor for an observed round cost — a quick same-round rebuild is not a round. */
 const MIN_OBSERVED_ROUND_SECONDS = 600;
 
+/**
+ * The runtime's concurrent-agent slots — the pool every fan-out launch
+ * shares. The core tool scheduler runs the orchestrator's parallel `agent`
+ * calls under this cap (default 10), the review workflow does not override
+ * it, and an `agent-prompt` subprocess inherits the orchestrator's
+ * environment — so the gate and the launches it gates read the same pool.
+ */
+export const TOOL_CONCURRENCY_ENV = 'QWEN_CODE_MAX_TOOL_CONCURRENCY';
+export const DEFAULT_TOOL_CONCURRENCY = 10;
+
 interface RoundStamp {
   round: number | null;
   atMs: number;
@@ -220,6 +238,27 @@ export function stampRound(
 }
 
 /**
+ * The costliest of `stamps`' admission-to-admission spans — each span ends
+ * at the next stamp, the last at `endMs` — floored at the observation
+ * floor; `null` when there are no stamps.
+ */
+function costliestSpanSeconds(
+  stamps: RoundStamp[],
+  endMs: number,
+): number | null {
+  if (stamps.length === 0) return null;
+  let maxSeconds = 0;
+  for (let i = 0; i < stamps.length; i++) {
+    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : endMs;
+    maxSeconds = Math.max(
+      maxSeconds,
+      Math.round((end - stamps[i].atMs) / 1000),
+    );
+  }
+  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
+}
+
+/**
  * What the round about to be admitted is expected to cost, in seconds: the
  * COSTLIEST round the run has measured (admission-to-admission — its audit
  * fan-out and the orchestration around it; under the pipelined loop a
@@ -242,16 +281,70 @@ export function expectedRoundSeconds(
   const stamps = readRoundStamps(planPath).filter(
     (s) => round === undefined || s.round !== round,
   );
-  if (stamps.length === 0) return DEFAULT_ROUND_SECONDS;
-  let maxSeconds = 0;
-  for (let i = 0; i < stamps.length; i++) {
-    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : nowMs;
-    maxSeconds = Math.max(
-      maxSeconds,
-      Math.round((end - stamps[i].atMs) / 1000),
-    );
+  return costliestSpanSeconds(stamps, nowMs) ?? DEFAULT_ROUND_SECONDS;
+}
+
+/**
+ * What the ADMISSION itself commits, in seconds — `expectedRoundSeconds`,
+ * except when the round being admitted launches while its predecessor is
+ * still in flight: the convergence pair's second member, built in the same
+ * response as the first. The predecessor's stamp is fresher than the
+ * observation floor — nothing has measured the round yet, and no elapsed
+ * time has paid for it — so the admission must cover BOTH members' wall,
+ * not just its own. That wall is the pair's two fan-outs sharing the
+ * tool-concurrency pool: ceil(2C/N) waves against one round's ceil(C/N),
+ * for C auditors on a pool of N, and the first never exceeds twice the
+ * second — so the price is the single-round estimate scaled by exactly
+ * those waves: one round's price when the pool holds both members at once
+ * (the 3A shape, and a 3B pair whose chunks fit), more as the pool
+ * serializes them, and never beyond the two-round bound whatever the pool.
+ * Pricing the second member off the just-written first stamp instead — a
+ * seconds-old span clamped to the floor — committed the pair at one
+ * round's price for up to two rounds' wall, and near the deadline the
+ * pair consumed the reserve and hit the outer timeout before posting.
+ *
+ * The price deliberately covers the pair's AUDITOR fan-outs only: the pair
+ * launches in the same response as the Step 4 verifier shards, which share
+ * the same pool waves, and if they stretch the batch past the priced waves
+ * the extra wall is bounded by the verifier batch's own wave count — one
+ * wave for any normal finding set — which the reserve the gate holds ahead
+ * of every admission is there to carry.
+ *
+ * One ledger shape the price does not correct: the pair stamps rounds 1
+ * and 2 seconds apart, so after the pair returns, the span from round 2's
+ * stamp to the next admission covers the pair's whole wall, and every solo
+ * round after it prices at up to twice its true cost. Accepted
+ * conservatism: an over-priced gate refuses a round near the deadline that
+ * would have fit — a capped verdict that still posts — never the
+ * killed-before-compose shape the gate exists to prevent.
+ */
+export function expectedAdmissionSeconds(
+  planPath: string,
+  round: number | undefined,
+  fanOutWidth: number,
+  env: NodeJS.ProcessEnv,
+  nowMs: number = Date.now(),
+): number {
+  const stamps = readRoundStamps(planPath).filter(
+    (s) => round === undefined || s.round !== round,
+  );
+  const last = stamps.length > 0 ? stamps[stamps.length - 1] : undefined;
+  const predecessorInFlight =
+    last !== undefined && nowMs - last.atMs < MIN_OBSERVED_ROUND_SECONDS * 1000;
+  if (!predecessorInFlight) {
+    return expectedRoundSeconds(planPath, round, nowMs);
   }
-  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
+  const single =
+    costliestSpanSeconds(stamps.slice(0, -1), last.atMs) ??
+    DEFAULT_ROUND_SECONDS;
+  const pool = parsePositiveIntegerEnv(
+    env[TOOL_CONCURRENCY_ENV],
+    DEFAULT_TOOL_CONCURRENCY,
+  );
+  const width = Math.max(1, Math.floor(fanOutWidth));
+  const pairWaves = Math.ceil((2 * width) / pool);
+  const roundWaves = Math.ceil(width / pool);
+  return Math.ceil((single * pairWaves) / roundWaves);
 }
 
 export interface BudgetExhausted {
@@ -397,6 +490,16 @@ export function verifyBudgetMessage(spent: ComposeFloorExhausted): string {
 }
 
 export interface BudgetStop {
+  /**
+   * Which termination wrote this marker: the time budget (the reverse-audit
+   * loop ran out of clock) or the round cap (it ran its full allotted
+   * rounds without converging). `compose-review` picks the disclosure text
+   * by this; an absent value reads as `time-budget` for back-compat.
+   */
+  cause?: 'time-budget' | 'round-cap';
+  /** The round cap, when `cause` is `round-cap` — what `compose-review`
+   * re-derives the disclosure from, the way it uses `round` for a time stop. */
+  cap?: number;
   /** The exact `unreviewedDimensions` entry, composed here so the text that
    * caps the verdict is this module's in both channels. */
   entry: string;
@@ -450,11 +553,89 @@ export function budgetStopEntryZh(round: number | undefined): string {
 }
 
 /**
+ * The phrase identifying a ROUND-CAP disclosure wherever it is relayed —
+ * the cap analogue of `BUDGET_STOP_PHRASE`, so `compose-review` dedups the
+ * orchestrator's relayed copy against the marker's by shared text.
+ */
+export const ROUND_CAP_PHRASE = 'reverse-audit round cap';
+
+/**
+ * The round-cap disclosure as structural parts, both languages — the
+ * analogue of `budgetStopDisclosure` for a loop that ran its full allotted
+ * rounds without converging.
+ */
+export function roundCapStopDisclosure(cap: number): {
+  subject: string;
+  reason: string;
+  subjectZh: string;
+  reasonZh: string;
+} {
+  return {
+    subject: 'reverse audit',
+    reason: `did not converge within the ${ROUND_CAP_PHRASE} of ${cap}`,
+    subjectZh: '反向审计',
+    reasonZh: `在 ${cap} 轮的反审轮数上限内未收敛`,
+  };
+}
+
+/** The round-cap entry, spelled once for the marker AND the stderr message. */
+export function roundCapStopEntry(cap: number): string {
+  const d = roundCapStopDisclosure(cap);
+  return `${d.subject} — ${d.reason}`;
+}
+
+/** The Chinese pair of `roundCapStopEntry`. */
+export function roundCapStopEntryZh(cap: number): string {
+  const d = roundCapStopDisclosure(cap);
+  return `${d.subjectZh}——${d.reasonZh}`;
+}
+
+/**
+ * Persist a round-cap refusal beside the prompt records, so
+ * `compose-review` caps the verdict on a loop that ran its full rounds
+ * without converging — without depending on the orchestrator to relay the
+ * entry. Same marker file and same swallow-on-write-error discipline as
+ * `writeBudgetStop`; only one stop fires per run, whichever refusal comes
+ * first — the same-run guard below enforces it, so a retry-past-cap after a
+ * time-budget stop cannot flip the recorded cause.
+ */
+export function writeRoundCapStop(
+  planPath: string,
+  cap: number,
+  round: number | undefined,
+  nowMs: number = Date.now(),
+): void {
+  try {
+    // First refusal wins: a same-run marker already on disk (its run-epoch
+    // fence in `readBudgetStop` excludes previous runs') is left untouched,
+    // so a time-budget stop followed by a retry that the cap then refuses
+    // does not post two contradictory stop disclosures.
+    if (readBudgetStop(planPath) !== null) return;
+    const dir = promptRecordDir(planPath);
+    mkdirSync(dir, { recursive: true });
+    const stop: BudgetStop = {
+      cause: 'round-cap',
+      cap,
+      entry: roundCapStopEntry(cap),
+      entryZh: roundCapStopEntryZh(cap),
+      round: round ?? null,
+      remainingSeconds: 0,
+      reserveSeconds: 0,
+      atMs: nowMs,
+    };
+    writeFileSync(join(dir, STOP_FILE), JSON.stringify(stop, null, 2));
+  } catch {
+    // Refusing is the load-bearing half; the stderr entry still carries it.
+  }
+}
+
+/**
  * Persist the refusal beside the prompt records, where `compose-review`
  * reads it back and synthesizes the verdict-capping disclosure without
  * depending on the orchestrator to relay a sentence. Write errors are
  * swallowed: the stderr instruction still carries the entry, and a gate
- * that cannot write must still refuse.
+ * that cannot write must still refuse. First refusal wins here too — a
+ * same-run marker already on disk is left untouched.
  */
 export function writeBudgetStop(
   planPath: string,
@@ -463,6 +644,7 @@ export function writeBudgetStop(
   nowMs: number = Date.now(),
 ): void {
   try {
+    if (readBudgetStop(planPath) !== null) return;
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
     const stop: BudgetStop = {
@@ -510,6 +692,23 @@ export function readBudgetStop(planPath: string): BudgetStop | null {
 }
 
 /**
+ * Remove any stop marker beside the prompt records. Called when the loop
+ * reaches a clean end that outranks an earlier same-run refusal — a
+ * CONVERGED exit after an over-cap round was refused: the marker would
+ * otherwise survive (nothing else unlinks it) and cap a verdict the audit
+ * legitimately converged. Missing file and unlink errors are swallowed —
+ * the file was the thing to be rid of.
+ */
+export function clearBudgetStop(planPath: string): void {
+  try {
+    rmSync(join(promptRecordDir(planPath), STOP_FILE), { force: true });
+  } catch {
+    // Best-effort: a marker we could not remove still only caps a verdict,
+    // never corrupts one, and the converged stderr is the load-bearing half.
+  }
+}
+
+/**
  * The refusal, spelled as the termination rule it is. Printed to stderr by
  * `agent-prompt` alongside exit code 4; the disclosure sentence matches the
  * `budget-stop.json` marker byte for byte, so both channels cap the verdict
@@ -538,9 +737,11 @@ export function reverseAuditBudgetMessage(
     `\`agent-prompt --role verify\` (never a hand-rolled agent) — it is gated ` +
     `on the compose floor and will refuse once too little time remains, ` +
     `leaving any still-\`[unverified]\` findings tagged for compose-review to ` +
-    `cap — then compose and submit. Do NOT re-verify findings already ` +
-    `confirmed in earlier rounds. A review that stops here still reports ` +
-    `everything it proved; a review that runs past its deadline is killed ` +
-    `holding all of it.`
+    `cap; when the deadline is within that floor, stop waiting on any ` +
+    `verifier batch still out and compose with the tags in hand. Do NOT ` +
+    `re-verify findings already confirmed in earlier rounds, and do NOT ` +
+    `invent a fresh re-verification pass. Then compose and submit — a ` +
+    `review that stops here still reports everything it proved; a review ` +
+    `that runs past its deadline is killed holding all of it.`
   );
 }

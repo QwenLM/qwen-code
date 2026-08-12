@@ -136,6 +136,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         mockComposerCoreState.pastedImages.length > 0 ||
         mockComposerCoreState.composerTags.length > 0,
       hasContent: false,
+      canSubmit: false,
+      pendingImageBatchCount: 0,
+      imageDragActive: false,
+      imageTransferHandlers: {},
       handle: {
         focus: vi.fn(),
         insertText: vi.fn(),
@@ -265,6 +269,7 @@ function renderChatEditor(props: {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
+  onImagePreview?: (src: string, alt?: string) => void;
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
@@ -655,6 +660,27 @@ describe('ChatEditor attachment reporting', () => {
       onAttachmentsChange: onImageAttachmentsChange,
     });
     expect(onImageAttachmentsChange).toHaveBeenLastCalledWith(true);
+
+    const disabled = renderChatEditor({
+      disabled: true,
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+    });
+    expect(disabled.querySelector('img')?.nextElementSibling).toHaveProperty(
+      'disabled',
+      true,
+    );
+  });
+
+  it('opens the image preview when a pasted image is clicked', () => {
+    const onImagePreview = vi.fn();
+    const container = renderChatEditor({
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+      onImagePreview,
+    });
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    act(() => img!.click());
+    expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
 });
 

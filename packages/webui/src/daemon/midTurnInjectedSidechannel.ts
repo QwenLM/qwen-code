@@ -13,11 +13,10 @@ import type { DaemonMidTurnMessageInjectedData } from '@qwen-code/sdk/daemon';
  * the session event pump parses each raw frame and publishes here, appending to
  * a buffer that a consumer (`useDaemonMidTurnInjected`) drains via
  * `useSyncExternalStore` and then clears. Kept out of the transcript reducer
- * because it is a transient UX signal — the consumer moves the matching messages
- * out of its own pending queue (so they are not resent as the next turn) rather
- * than rendering anything from it. (Followup can be latest-wins because only the
- * newest suggestion matters; mid-turn drains are cumulative — every batch must
- * be reconciled or its messages get double-delivered.)
+ * because it is a transient UX signal — the consumer settles stable-id
+ * callbacks and removes matching legacy local rows rather than rendering
+ * anything from it. (Followup can be latest-wins because only the newest
+ * suggestion matters; mid-turn drains are cumulative.)
  */
 
 const listeners = new Set<() => void>();
@@ -25,16 +24,15 @@ const listeners = new Set<() => void>();
 // tool batch, so the daemon publishes one frame per non-empty drain, and the
 // event pump delivers buffered frames back-to-back with no await between them.
 // Two frames can therefore land before the consumer's effect runs; a single-
-// slot store would drop the first, and its messages would never be removed from
-// the browser's pending queue (⇒ resent next turn = the double delivery this
-// feature prevents). Every batch is retained until the consumer reconciles it
-// and calls `clearSidechannelMidTurnInjected`. `EMPTY` is a shared frozen ref so
-// the empty snapshot is reference-stable for `useSyncExternalStore`.
+// slot store would drop the first, leaving callbacks or legacy local rows
+// unsettled. Every batch is retained until the consumer reconciles it and calls
+// `clearSidechannelMidTurnInjected`. `EMPTY` is a shared frozen ref so the empty
+// snapshot is reference-stable for `useSyncExternalStore`.
 const EMPTY: readonly DaemonMidTurnMessageInjectedData[] = Object.freeze([]);
 // Safety cap so an orphaned buffer (consumer unmounted or session switched
 // without ever consuming) can't grow without bound. Past the cap the OLDEST
 // batch is evicted: under that much un-reconciled backlog the consumer is gone,
-// so there is no pending queue left to double-deliver into.
+// so there is no mounted consumer left to settle.
 const MAX_PENDING_BATCHES = 64;
 let pending: readonly DaemonMidTurnMessageInjectedData[] = EMPTY;
 
@@ -158,9 +156,8 @@ export function parseSidechannelMidTurnInjected(
     )
       ? (messageIds as string[])
       : undefined;
-  // `originatorClientId` lives on the SSE envelope (top-level), not in `data` —
-  // the daemon publishes one frame per originator so consumers dedupe only
-  // their own queue.
+  // Older daemons put `originatorClientId` on the SSE envelope. New clients
+  // use it only in the capability fallback for those daemons.
   const originatorClientId = record['originatorClientId'];
   return {
     sessionId,
