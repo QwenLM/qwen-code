@@ -83,6 +83,12 @@ export interface DaemonSessionClientOptions {
   eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** True when the load response explicitly carried both replay arrays. */
+  replaySnapshotComplete?: boolean;
+  /** True when persisted replay was only partially reconstructed. */
+  replayPartial?: boolean;
+  /** Diagnostic for a partial persisted replay. */
+  replayError?: string;
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
@@ -139,6 +145,9 @@ export class DaemonSessionClient {
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
   readonly replaySnapshot: DaemonReplaySnapshot;
+  readonly replaySnapshotComplete: boolean;
+  readonly replayPartial: boolean;
+  readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
   /**
@@ -189,6 +198,9 @@ export class DaemonSessionClient {
       compactedReplay: [],
       liveJournal: [],
     };
+    this.replaySnapshotComplete = opts.replaySnapshotComplete ?? false;
+    this.replayPartial = opts.replayPartial ?? false;
+    this.replayError = opts.replayError;
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
     this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
@@ -260,6 +272,10 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
+    const restored = await client.loadSession(sessionId, req, clientId);
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
     const {
       state,
       hasActivePrompt,
@@ -268,10 +284,12 @@ export class DaemonSessionClient {
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
+      partial,
+      replayError,
       lastEventId: serverLastEventId,
       eventEpoch,
       ...session
-    } = await client.loadSession(sessionId, req, clientId);
+    } = restored;
     return new DaemonSessionClient({
       client,
       session,
@@ -283,6 +301,9 @@ export class DaemonSessionClient {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
       },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
@@ -344,6 +365,10 @@ export class DaemonSessionClient {
 
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
+  }
+
+  get eventEpoch(): string | undefined {
+    return this.lastSeenEpoch;
   }
 
   setLastEventId(lastEventId: number | undefined): void {

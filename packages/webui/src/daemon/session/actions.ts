@@ -129,11 +129,14 @@ export interface CreateDaemonSessionActionsArgs {
       mode: 'load' | 'resume';
       workspaceCwd?: string;
       origin: 'action' | 'controlled';
+      sameLogical?: boolean;
+      signal?: AbortSignal;
     },
     startLegacy: () => Promise<void>,
   ) => Promise<void>;
   cancelCrossSessionTransition?: (reason: string) => void;
   isCrossSessionTransitionPending?: () => boolean;
+  isDifferentLogicalTransitionPending?: () => boolean;
   isSourceBoundOperationInFlight?: () => boolean;
   setSourceBoundOperationInFlight?: (inFlight: boolean) => void;
   getTransitionOrigin?: () => 'action' | 'controlled';
@@ -204,6 +207,7 @@ export function createDaemonSessionActions({
   beginCrossSessionTransition,
   cancelCrossSessionTransition = () => undefined,
   isCrossSessionTransitionPending = () => false,
+  isDifferentLogicalTransitionPending = () => false,
   isSourceBoundOperationInFlight = () => false,
   setSourceBoundOperationInFlight = () => undefined,
   getTransitionOrigin = () => 'action',
@@ -465,6 +469,7 @@ export function createDaemonSessionActions({
       );
     }
     const origin = getTransitionOrigin();
+    const sourceBoundOperationInFlight = isSourceBoundOperationInFlight();
     const startLegacy = () =>
       startLegacySessionSwitch(
         sessionId,
@@ -474,17 +479,26 @@ export function createDaemonSessionActions({
         replaySource,
       );
     const current = sessionRef.current;
+    if (
+      sourceBoundOperationInFlight &&
+      (current === undefined ||
+        replaySource === 'memory' ||
+        !beginCrossSessionTransition)
+    ) {
+      return Promise.reject(
+        new DOMException(
+          'Another session operation is already in progress',
+          'InvalidStateError',
+        ),
+      );
+    }
     const targetWorkspace = workspaceCwd ?? getConnection().workspaceCwd;
     const crossLogicalTarget =
       current !== undefined &&
       (current.sessionId !== sessionId ||
         normalizeWorkspaceIdentity(current.workspaceCwd) !==
           normalizeWorkspaceIdentity(targetWorkspace));
-    if (
-      !crossLogicalTarget &&
-      replaySource === undefined &&
-      isCrossSessionTransitionPending()
-    ) {
+    if (!crossLogicalTarget && isDifferentLogicalTransitionPending()) {
       return Promise.reject(
         new DOMException(
           'A session switch is still preparing',
@@ -493,8 +507,8 @@ export function createDaemonSessionActions({
       );
     }
     if (
-      !crossLogicalTarget ||
-      replaySource !== undefined ||
+      current === undefined ||
+      replaySource === 'memory' ||
       !beginCrossSessionTransition
     ) {
       return startLegacy();
@@ -507,6 +521,8 @@ export function createDaemonSessionActions({
           ? { workspaceCwd: targetWorkspace }
           : {}),
         origin,
+        sameLogical: !crossLogicalTarget,
+        ...(signal ? { signal } : {}),
       },
       startLegacy,
     );
@@ -958,7 +974,7 @@ export function createDaemonSessionActions({
     },
 
     async reloadSession(signal, options) {
-      requireStableSession();
+      if (options?.replaySource === 'memory') requireStableSession();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -986,6 +1002,35 @@ export function createDaemonSessionActions({
       branch?: { name: string };
     }) {
       requireStableSession();
+      let rawCreateStarted = false;
+      let rawCreateSettled = false;
+      let retireLateResult = false;
+      const trackCreate = <T>(
+        request: Promise<T>,
+        retire: (created: T) => Promise<unknown>,
+      ) => {
+        rawCreateStarted = true;
+        setSourceBoundOperationInFlight(true);
+        void request.then(
+          (created) => {
+            rawCreateSettled = true;
+            setSourceBoundOperationInFlight(false);
+            if (retireLateResult) {
+              void retire(created).catch((error: unknown) => {
+                console.warn(
+                  '[DaemonSessionActions] detach after timed-out create failed:',
+                  error,
+                );
+              });
+            }
+          },
+          () => {
+            rawCreateSettled = true;
+            setSourceBoundOperationInFlight(false);
+          },
+        );
+        return request;
+      };
       try {
         manualSessionClearRef.current = false;
         // Fold the initial approval mode into the create request so the daemon
@@ -1013,13 +1058,20 @@ export function createDaemonSessionActions({
             : undefined;
         if (activeSession) {
           const nextSession = await withActionTimeout(
-            activeSession.client.createOrAttachSession({
-              ...getCreateSessionRequest(),
-              ...(options?.workspaceCwd !== undefined
-                ? { workspaceCwd: options.workspaceCwd }
-                : {}),
-              ...requestOverrides,
-            }),
+            trackCreate(
+              activeSession.client.createOrAttachSession({
+                ...getCreateSessionRequest(),
+                ...(options?.workspaceCwd !== undefined
+                  ? { workspaceCwd: options.workspaceCwd }
+                  : {}),
+                ...requestOverrides,
+              }),
+              (created) =>
+                activeSession.client.detachSession(
+                  created.sessionId,
+                  created.clientId,
+                ),
+            ),
             'Create session timed out',
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
@@ -1027,7 +1079,10 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(options?.workspaceCwd, requestOverrides),
+          trackCreate(
+            createDetachedSession(options?.workspaceCwd, requestOverrides),
+            (created) => created.detach(),
+          ),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {
@@ -1059,6 +1114,7 @@ export function createDaemonSessionActions({
         }));
         return nextSession;
       } catch (error) {
+        if (rawCreateStarted && !rawCreateSettled) retireLateResult = true;
         throw dispatchActionError(
           addNotice,
           `Create session failed${
