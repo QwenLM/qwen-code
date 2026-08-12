@@ -4364,6 +4364,7 @@ describe('createAcpSessionBridge', () => {
       attached: true,
       historyHasMore: true,
       lastEventId: loaded.lastEventId,
+      eventEpoch: loaded.eventEpoch,
       compactedReplay: [
         {
           type: 'session_update',
