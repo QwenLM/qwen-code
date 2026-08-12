@@ -881,6 +881,14 @@ export interface DaemonStatusReport {
   /** Present only when requested with `detail=full`. */
   full?: {
     sessions: DaemonStatusReportSession[];
+    /** Additive; absent when reading full status from an older daemon. */
+    acpMounts?: Array<{
+      workspaceId: string | null;
+      primary: boolean;
+      connectionCount: number;
+      wsStreams: number;
+      preAttachGuardFailures: number;
+    }>;
     acpConnections: Array<{
       connectionIdPrefix: string;
       workspaceId?: string | null;

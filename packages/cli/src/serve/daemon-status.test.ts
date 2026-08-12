@@ -1078,9 +1078,24 @@ describe('buildDaemonStatusResponse', () => {
             pendingDeliveryFrames: 1,
             highWaterFrames: 7,
             highWaterBytes: 8192,
-            guardFailures: 2,
+            guardFailures: 4,
           },
-          mounts: [],
+          mounts: [
+            {
+              workspaceId: null,
+              primary: true,
+              connectionCount: 1,
+              wsStreams: 1,
+              preAttachGuardFailures: 1,
+            },
+            {
+              workspaceId: 'secondary-id',
+              primary: false,
+              connectionCount: 1,
+              wsStreams: 1,
+              preAttachGuardFailures: 3,
+            },
+          ],
           connections: [primaryDiagnostic, secondaryDiagnostic],
         },
       }),
@@ -1095,7 +1110,7 @@ describe('buildDaemonStatusResponse', () => {
       usedBytes: 4096,
       highWaterFrames: 7,
       highWaterBytes: 8192,
-      guardFailures: 2,
+      guardFailures: 4,
     });
     expect(response.limits).toMatchObject({
       acpPreAttachMaxFramesPerStream: 256,
@@ -1107,6 +1122,22 @@ describe('buildDaemonStatusResponse', () => {
     expect(response.full?.acpConnections).toEqual([
       primaryDiagnostic,
       secondaryDiagnostic,
+    ]);
+    expect(response.full?.acpMounts).toEqual([
+      {
+        workspaceId: null,
+        primary: true,
+        connectionCount: 1,
+        wsStreams: 1,
+        preAttachGuardFailures: 1,
+      },
+      {
+        workspaceId: 'secondary-id',
+        primary: false,
+        connectionCount: 1,
+        wsStreams: 1,
+        preAttachGuardFailures: 3,
+      },
     ]);
   });
 

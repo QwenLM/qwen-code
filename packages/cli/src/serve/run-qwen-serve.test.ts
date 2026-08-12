@@ -7835,6 +7835,7 @@ describe('runQwenServe runtime startup failures', () => {
         },
         full: {
           sessions: [],
+          acpMounts: [],
           acpConnections: [],
           workspace: {},
           auth: {
