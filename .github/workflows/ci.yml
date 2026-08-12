@@ -511,7 +511,13 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
           # run's log captures the spike, and dump the full state on failure.
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          # Route test temp files to the runner's disk-backed, per-registration
+          # temp area instead of the shared /tmp: on a tmpfs-mounted /tmp,
+          # concurrent jobs' temp files fail writes with ENOSPC during memory
+          # spikes, and shared /tmp also mixes temp state across the several
+          # registrations on one host.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
@@ -821,7 +827,13 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
           # run's log captures the spike, and dump the full state on failure.
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          # Route test temp files to the runner's disk-backed, per-registration
+          # temp area instead of the shared /tmp: on a tmpfs-mounted /tmp,
+          # concurrent jobs' temp files fail writes with ENOSPC during memory
+          # spikes, and shared /tmp also mixes temp state across the several
+          # registrations on one host.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
@@ -939,7 +951,13 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
           # run's log captures the spike, and dump the full state on failure.
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
+          # Route test temp files to the runner's disk-backed, per-registration
+          # temp area instead of the shared /tmp: on a tmpfs-mounted /tmp,
+          # concurrent jobs' temp files fail writes with ENOSPC during memory
+          # spikes, and shared /tmp also mixes temp state across the several
+          # registrations on one host.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
