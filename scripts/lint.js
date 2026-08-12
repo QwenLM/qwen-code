@@ -15,6 +15,22 @@ import { join } from 'node:path';
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
 const YAMLLINT_VERSION = '1.35.1';
+const ACTIONLINT_SHA256 = {
+  linux_amd64:
+    '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8',
+  darwin_amd64:
+    '5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644',
+  darwin_arm64:
+    'aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f',
+};
+const SHELLCHECK_SHA256 = {
+  'linux.x86_64':
+    '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198',
+  'darwin.x86_64':
+    '3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6',
+  'darwin.aarch64':
+    '56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79',
+};
 
 function sanitizePathPart(value) {
   return value.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -55,6 +71,35 @@ export function getLinterCacheDir({
     'qwen-code',
     'linters',
   );
+}
+
+export function getCachedArchiveInstaller({
+  cacheArchive,
+  localArchive,
+  expectedSha256,
+  downloadUrl,
+  archiveCheck,
+  extract,
+  executable,
+}) {
+  return `
+      set -e
+      verify_sha256() {
+        "${process.execPath}" -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");process.exit(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex")===process.argv[2]?0:1)' "$1" "$2"
+      }
+      if ! cp "${cacheArchive}" "${localArchive}" 2>/dev/null \
+        || ! verify_sha256 "${localArchive}" "${expectedSha256}"; then
+        rm -f "${localArchive}"
+        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
+          -o "${localArchive}" "${downloadUrl}"
+        verify_sha256 "${localArchive}" "${expectedSha256}"
+        ${archiveCheck}
+        cp "${localArchive}" "${cacheArchive}.$$"
+        mv -f "${cacheArchive}.$$" "${cacheArchive}"
+      fi
+      ${extract}
+      test -x "${executable}"
+  `;
 }
 
 const TEMP_DIR = getLinterTempDir();
@@ -109,21 +154,22 @@ function getLinters() {
       CACHE_DIR,
       `shellcheck_${SHELLCHECK_VERSION}_${platformArch.shellcheck}.tar.xz`,
     );
+    const actionlintLocalArchive = join(TEMP_DIR, '.actionlint.tgz');
+    const shellcheckLocalArchive = join(TEMP_DIR, '.shellcheck.txz');
     lintersCache = {
       actionlint: {
         check: 'command -v actionlint',
         installer: `
-      set -e
       mkdir -p "${TEMP_DIR}/actionlint" "${CACHE_DIR}"
-      if ! tar -tzf "${actionlintArchive}" >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
-          -o "${TEMP_DIR}/.actionlint.tgz" \
-          "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
-        tar -tzf "${TEMP_DIR}/.actionlint.tgz" >/dev/null
-        cp "${TEMP_DIR}/.actionlint.tgz" "${actionlintArchive}.$$"
-        mv -f "${actionlintArchive}.$$" "${actionlintArchive}"
-      fi
-      tar -xzf "${actionlintArchive}" -C "${TEMP_DIR}/actionlint"
+      ${getCachedArchiveInstaller({
+        cacheArchive: actionlintArchive,
+        localArchive: actionlintLocalArchive,
+        expectedSha256: ACTIONLINT_SHA256[platformArch.actionlint],
+        downloadUrl: `https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz`,
+        archiveCheck: `tar -tzf "${actionlintLocalArchive}" >/dev/null`,
+        extract: `tar -xzf "${actionlintLocalArchive}" -C "${TEMP_DIR}/actionlint"`,
+        executable: join(TEMP_DIR, 'actionlint', 'actionlint'),
+      })}
     `,
         run: `
       actionlint \
@@ -140,17 +186,16 @@ function getLinters() {
       shellcheck: {
         check: 'command -v shellcheck',
         installer: `
-      set -e
       mkdir -p "${TEMP_DIR}/shellcheck" "${CACHE_DIR}"
-      if ! tar -tf "${shellcheckArchive}" >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
-          -o "${TEMP_DIR}/.shellcheck.txz" \
-          "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
-        tar -tf "${TEMP_DIR}/.shellcheck.txz" >/dev/null
-        cp "${TEMP_DIR}/.shellcheck.txz" "${shellcheckArchive}.$$"
-        mv -f "${shellcheckArchive}.$$" "${shellcheckArchive}"
-      fi
-      tar -xf "${shellcheckArchive}" -C "${TEMP_DIR}/shellcheck" --strip-components=1
+      ${getCachedArchiveInstaller({
+        cacheArchive: shellcheckArchive,
+        localArchive: shellcheckLocalArchive,
+        expectedSha256: SHELLCHECK_SHA256[platformArch.shellcheck],
+        downloadUrl: `https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz`,
+        archiveCheck: `tar -tf "${shellcheckLocalArchive}" >/dev/null`,
+        extract: `tar -xf "${shellcheckLocalArchive}" -C "${TEMP_DIR}/shellcheck" --strip-components=1`,
+        executable: join(TEMP_DIR, 'shellcheck', 'shellcheck'),
+      })}
     `,
         run: `
       git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \

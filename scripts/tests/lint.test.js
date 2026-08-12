@@ -4,6 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -89,4 +100,65 @@ describe('linter directories', () => {
     expect(toPosix(first)).toBe('/runner/cache/qwen-code/linters');
     expect(second).toBe(first);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'replaces an untrusted cache and reuses the verified archive offline',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-cache-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const fixture = path.join(root, 'official.tar');
+        const curlLog = path.join(root, 'curl.log');
+        const curl = path.join(binDir, 'curl');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(cacheArchive), { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(cacheArchive, 'validator-passing plant');
+        writeFileSync(fixture, 'official archive');
+        writeFileSync(
+          curl,
+          '#!/bin/sh\nprintf "download\\n" >> "$CURL_LOG"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit; fi\n  shift\ndone\nexit 1\n',
+        );
+        chmodSync(curl, 0o755);
+
+        const expectedSha256 = createHash('sha256')
+          .update(readFileSync(fixture))
+          .digest('hex');
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256,
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: `cp "${localArchive}" "${executable}" && chmod +x "${executable}"`,
+          executable,
+        });
+        const env = {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH}`,
+          CURL_LOG: curlLog,
+          FIXTURE_ARCHIVE: fixture,
+        };
+
+        execSync(installer, { env });
+        expect(readFileSync(cacheArchive, 'utf8')).toBe('official archive');
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        expect(readFileSync(curlLog, 'utf8')).toBe('download\n');
+
+        rmSync(localArchive);
+        rmSync(executable);
+        rmSync(fixture);
+        execSync(installer, { env });
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        expect(readFileSync(curlLog, 'utf8')).toBe('download\n');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
