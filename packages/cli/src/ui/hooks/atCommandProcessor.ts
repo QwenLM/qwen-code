@@ -675,11 +675,30 @@ export async function resolveAtCommandQuery({
           urlBase,
           delivery.additionalMedia,
         );
+        // Session resource handle (memory design M §5.2): leads the part
+        // group in every branch below, exactly as readMediaViaOmniDelivery
+        // does it. Without this, URL-delivered media accrues memory records
+        // and an issued registry binding that the model is never told about
+        // — active recall rejects the unknown handle and the passive
+        // selector finds no handles to consult, so the session can never
+        // recall what it just spent an upload collecting. Placed FIRST so
+        // the disclosure keeps its D8 adjacency to the media part.
+        const handleParts = delivery.resourceId
+          ? [
+              {
+                text: core.formatResourceHandleText(
+                  urlBase,
+                  delivery.resourceId,
+                ),
+              },
+            ]
+          : [];
         if (delivery.omission) {
           // Explicit omission (policy design §10.2): the media is withheld
           // and the omission notice text stands in its place — mirroring
           // readMediaViaOmniDelivery. Not an error: the fetch succeeded;
           // the transport guard's verdict is the content.
+          urlMediaParts.push(...handleParts);
           urlMediaParts.push({
             text: core.formatOmissionText(urlBase, delivery.omission.reason),
           });
@@ -702,6 +721,7 @@ export async function resolveAtCommandQuery({
           // for the primary (additional deliverables, if any, still are).
           // The primary disclosure (chained prior lossy steps, decision
           // D8) still renders: the transcript was derived through them.
+          urlMediaParts.push(...handleParts);
           if (delivery.disclosure) {
             urlMediaParts.push({
               text: core.formatDisclosureText(urlBase, delivery.disclosure),
@@ -720,6 +740,7 @@ export async function resolveAtCommandQuery({
           });
           continue;
         }
+        urlMediaParts.push(...handleParts);
         // Disclosure IMMEDIATELY before its media part (decision D8):
         // provider converters that relocate media move the pair together.
         if (delivery.disclosure) {
