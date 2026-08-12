@@ -180,11 +180,16 @@ describe('Config.startNewSession session-registry patch', () => {
     const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
     const config = makeConfig(sessionA);
     config.markRuntimeStatusEnabled();
-    await registerSession({
-      sessionId: sessionA,
-      cwd: tmpDir,
-      qwenVersion: '0.0.0-test',
-    });
+    // registerSession never throws — it returns false on a failed write.
+    // Assert the seam itself before relying on anything downstream of
+    // it, or a write failure surfaces as a confusing patch-path error.
+    expect(
+      await registerSession({
+        sessionId: sessionA,
+        cwd: tmpDir,
+        qwenVersion: '0.0.0-test',
+      }),
+    ).toBe(true);
     config.markSessionRegistered();
 
     const [before] = await listLiveSessions();
@@ -216,11 +221,13 @@ describe('Config.startNewSession session-registry patch', () => {
     const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
     const config = makeConfig(sessionA);
     // No markRuntimeStatusEnabled(): models the failed sidecar write.
-    await registerSession({
-      sessionId: sessionA,
-      cwd: tmpDir,
-      qwenVersion: '0.0.0-test',
-    });
+    expect(
+      await registerSession({
+        sessionId: sessionA,
+        cwd: tmpDir,
+        qwenVersion: '0.0.0-test',
+      }),
+    ).toBe(true);
     config.markSessionRegistered();
 
     config.startNewSession(sessionB);

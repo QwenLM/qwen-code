@@ -4007,21 +4007,25 @@ export class Config {
   }
 
   private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
-    if (!this.runtimeStatusEnabled && !this.sessionRegistered) {
-      return;
+    const sessionId = this.sessionId;
+    // Two separate queue entries, mirroring startNewSession:
+    // `writeRuntimeStatus` propagates exceptions, so sharing one closure
+    // would let a sidecar failure (read-only or full project filesystem)
+    // reject the entry before the registry patch runs — and the queue's
+    // trailing catch would swallow it, leaving `ps` advertising the
+    // folder this session left. The failure domains are independent.
+    if (this.runtimeStatusEnabled) {
+      const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
+      this.queueRuntimeStatusWrite(async () => {
+        await writeRuntimeStatus(sidecarPath, {
+          sessionId,
+          workDir,
+          qwenVersion: this.cliVersion ?? null,
+        });
+      });
     }
-    this.queueRuntimeStatusWrite(async () => {
-      if (this.runtimeStatusEnabled) {
-        await writeRuntimeStatus(
-          this.storage.getRuntimeStatusPath(this.sessionId),
-          {
-            sessionId: this.sessionId,
-            workDir,
-            qwenVersion: this.cliVersion ?? null,
-          },
-        );
-      }
-      if (this.sessionRegistered) {
+    if (this.sessionRegistered) {
+      this.queueRuntimeStatusWrite(async () => {
         // The registry's DIRECTORY column is how a user tells two live
         // sessions apart, so a mid-session directory switch has to reach
         // it too — otherwise `qwen sessions ps` keeps advertising the
@@ -4030,10 +4034,10 @@ export class Config {
         // exactly what changed here.
         await patchSessionRecord({
           cwd: workDir,
-          name: deriveSessionName(workDir, this.sessionId),
+          name: deriveSessionName(workDir, sessionId),
         });
-      }
-    });
+      });
+    }
     await this.flushRuntimeStatusWrites();
   }
 

@@ -6310,6 +6310,89 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should patch the registry even when the sidecar write failed at startup', async () => {
+    // Mirror of the startNewSession divergence pin: registration writes
+    // to the global dir, the sidecar to the project's chats/ dir —
+    // independent failure domains, so the registered-but-sidecar-off
+    // state is reachable and the /cd patch must survive it.
+    const config = new Config(baseParams);
+    // No markRuntimeStatusEnabled(): models the failed sidecar write.
+    config.markSessionRegistered();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue('unused');
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck.toString() === newDir,
+    );
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+      cwd: newDir,
+      name: sessionRegistry.deriveSessionName(newDir, sessionId),
+    });
+    expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should refresh the sidecar even when registration failed', async () => {
+    // The opposite divergence: the sidecar write succeeded at startup
+    // but registerSession returned false (foreign-identity refusal,
+    // unwritable global dir), so only the sidecar gate is armed. A gate
+    // regressed to `if (!this.sessionRegistered) return;` would silently
+    // stop refreshing runtime.json on /cd for these sessions.
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    // No markSessionRegistered(): models the failed registration.
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const newStorage = new Storage(newDir);
+    const oldStorage = new Storage(config.getTargetDir());
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockResolvedValue(newRuntimeStatusPath);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === oldRuntimeStatusPath || checked === newDir;
+    });
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(writeRuntimeStatusSpy).toHaveBeenCalledWith(newRuntimeStatusPath, {
+      sessionId,
+      workDir: newDir,
+      qwenVersion: null,
+    });
+    expect(patchSessionRecordSpy).not.toHaveBeenCalled();
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
     const config = new Config({ ...baseParams, chatRecording: true });
     const disposeResidentAgents = vi.spyOn(

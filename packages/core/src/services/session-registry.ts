@@ -52,6 +52,17 @@
  * cleanup): no future reader shares that namespace, so the record is
  * never reclaimed and stays until removed by hand. Anything else we
  * cannot positively prove dead is left alone.
+ *
+ * One consequence of the boot prefix being the only machine identity: it
+ * does not survive a reboot, and the model has no reboot-surviving
+ * machine component to pair it with, so this machine's own records from
+ * a PREVIOUS boot — provably dead, since a boot ending kills every
+ * process in it — are indistinguishable from another machine's live
+ * records. Both conservative rules above therefore also strand them: a
+ * hard reset (power loss, panic, kill -9 plus reboot) leaves a record
+ * nothing ever reclaims, and a later session that draws the same PID
+ * number is refused by registration on the boot mismatch and stays
+ * undiscoverable until the file is removed by hand.
  */
 
 import { createHash } from 'node:crypto';
@@ -144,6 +155,20 @@ export function getSessionRecordPath(): string {
 }
 
 /**
+ * The record path captured when registration succeeds. `getGlobalQwenDir()`
+ * resolves a relative `QWEN_HOME` against the CURRENT `process.cwd()` on
+ * every call, and `/cd` changes the cwd mid-session — so patch and
+ * unregister must keep operating on the directory registration wrote to
+ * rather than wherever the cwd moved afterwards. Null before a successful
+ * registration (both seams no-op then anyway) and consumed by unregister.
+ */
+let registeredRecordPath: string | null = null;
+
+function thisProcessRecordPath(): string {
+  return registeredRecordPath ?? getSessionRecordPath();
+}
+
+/**
  * A short, stable, human-readable label: the working directory's basename
  * plus two hex characters derived from the session id.
  *
@@ -153,16 +178,25 @@ export function getSessionRecordPath(): string {
  * same-directory collision unlikely rather than certain; callers that
  * need a guaranteed-unique handle should use the session id.
  *
- * Letters and digits are matched Unicode-aware: an ASCII-only class would
- * strip a CJK basename down to a bare dash, leaving every such project
- * with an identical, information-free label.
+ * Letters, digits and combining marks are matched Unicode-aware: an
+ * ASCII-only class would strip a CJK basename down to a bare dash,
+ * leaving every such project with an identical, information-free label.
+ * The basename is NFC-normalized first and combining marks are kept, so
+ * an NFD accent (macOS' default normalization) or an Indic vowel sign is
+ * not dashed away mid-word, and the cap counts code points rather than
+ * UTF-16 units, so an astral character at the boundary cannot be cut
+ * into a lone surrogate.
  */
 export function deriveSessionName(cwd: string, sessionId: string): string {
-  const base = path
-    .basename(cwd)
-    .replace(/[^\p{L}\p{N}._-]+/gu, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 32);
+  const base = Array.from(
+    path
+      .basename(cwd)
+      .normalize('NFC')
+      .replace(/[^\p{L}\p{M}\p{N}._-]+/gu, '-')
+      .replace(/^-+|-+$/g, ''),
+  )
+    .slice(0, 32)
+    .join('');
   const suffix = createHash('sha256')
     .update(sessionId)
     .digest('hex')
@@ -177,18 +211,34 @@ export function deriveSessionName(cwd: string, sessionId: string): string {
  *
  * Returns true when the record was written. Returns false — without
  * writing — when the path is already held by a record carrying another
- * namespace's or another machine's identity: a colliding session on the
- * other side is live, and overwriting its record would hide it from
- * discovery and destroy it when we exit. This session then simply stays
+ * namespace's or another machine's identity, or one this build cannot
+ * parse because of a newer schema version: a colliding session on the
+ * other side may be live, and overwriting its record would hide it from
+ * discovery and destroy it when we exit. Also refuses on Linux when the
+ * start token is unreadable even after a retry — a tokenless record is
+ * impersonable by any same-namespace reader, including another machine
+ * sharing the home. In all of these cases this session simply stays
  * undiscoverable.
  */
 export async function registerSession(
   fields: RegisterSessionFields,
 ): Promise<boolean> {
+  let procStart = readProcStartToken(process.pid);
+  if (process.platform === 'linux' && procStart === null) {
+    // Boot-id read failures are not cached, so a second attempt recovers
+    // from the transient fd-pressure moment startup registration sits in.
+    procStart = readProcStartToken(process.pid);
+    if (procStart === null) {
+      debugLogger.debug(
+        'registerSession: start token unreadable; refusing to write an impersonable record',
+      );
+      return false;
+    }
+  }
   const record: SessionRegistryRecord = {
     schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
     pid: process.pid,
-    procStart: readProcStartToken(process.pid),
+    procStart,
     pidNs: readPidNamespaceId(),
     sessionId: fields.sessionId,
     cwd: fields.cwd,
@@ -204,9 +254,16 @@ export async function registerSession(
     // collided with us on the PID number across a namespace or machine
     // boundary (host + devcontainer, sibling containers, NFS-shared
     // homes). Overwriting it would hide that session from discovery and
-    // destroy its record when we exit — refuse instead.
+    // destroy its record when we exit — refuse instead. The same holds
+    // for a newer-schema record: readable, but not safely parsable.
     const existing = await readRecord(filePath);
-    if (existing !== null && !matchesLocalIdentity(existing)) {
+    if (existing.status === 'unsupported-version') {
+      debugLogger.debug(
+        'registerSession: record path held by a newer-schema record',
+      );
+      return false;
+    }
+    if (existing.status === 'ok' && !matchesLocalIdentity(existing.record)) {
       debugLogger.debug(
         'registerSession: record path held by a foreign-identity record',
       );
@@ -222,6 +279,7 @@ export async function registerSession(
       forceMode: true,
       noFollow: true,
     });
+    registeredRecordPath = filePath;
     return true;
   } catch (error) {
     debugLogger.debug(`registerSession failed: ${describe(error)}`);
@@ -249,17 +307,21 @@ export async function patchSessionRecord(
   >,
 ): Promise<void> {
   try {
-    // Inside the try: `getGlobalQwenDir()` resolves the home directory
-    // and can throw, and this function promises never to reject.
-    const filePath = getSessionRecordPath();
+    // Inside the try: the fallback `getGlobalQwenDir()` resolution reads
+    // the home directory and can throw, and this function promises never
+    // to reject.
+    const filePath = thisProcessRecordPath();
     const existing = await readRecord(filePath);
-    // Missing, or not actually a record for this PID, namespace and
-    // boot: the path is keyed by PID alone, and `readRecord` does not
-    // check the filename/contents agreement that `listLiveSessions`
-    // insists on, so merging into a foreign record would write back
-    // something the reader will neither show nor sweep — permanent
-    // litter.
-    if (existing === null || !matchesLocalIdentity(existing)) return;
+    // Missing, unreadable, newer-schema, or not actually a record for
+    // this PID, namespace and boot: the path is keyed by PID alone, and
+    // `readRecord` does not check the filename/contents agreement that
+    // `listLiveSessions` insists on, so merging into a foreign record
+    // would write back something the reader will neither show nor sweep
+    // — permanent litter.
+    if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
+      return;
+    }
+    const record = existing.record;
     // The identity check alone also passes for a stale record left by a
     // DEAD previous incarnation of this PID (session A dies without
     // unlinking; the PID is recycled by session B whose registration
@@ -268,15 +330,15 @@ export async function patchSessionRecord(
     // record and lists the chimera as live.
     const currentToken = readProcStartToken(process.pid);
     if (
-      existing.procStart !== null &&
+      record.procStart !== null &&
       currentToken !== null &&
-      existing.procStart !== currentToken
+      record.procStart !== currentToken
     ) {
       return;
     }
     await atomicWriteJSON(
       filePath,
-      { ...existing, ...patch },
+      { ...record, ...patch },
       { mode: REGISTRY_FILE_MODE, forceMode: true, noFollow: true },
     );
   } catch (error) {
@@ -287,14 +349,21 @@ export async function patchSessionRecord(
 /** Remove this process's record. Safe to call when none was written. */
 export async function unregisterSession(): Promise<void> {
   try {
-    const filePath = getSessionRecordPath();
+    const filePath = thisProcessRecordPath();
+    // Consume the capture regardless of the outcome below: after this
+    // call returns, this process no longer holds a record at the path.
+    registeredRecordPath = null;
     // The path is keyed by PID alone, and PIDs collide across namespace
     // and machine boundaries: the record sitting at our path may belong
     // to a live session on the other side of a shared home. Unlink only
     // what this side wrote; an unreadable one (a write torn by a crash)
-    // cannot belong to anyone else and goes too.
+    // cannot belong to anyone else and goes too. A newer-schema record
+    // is readable but not safely parsable, so it might be — leave it.
     const existing = await readRecord(filePath);
-    if (existing !== null && !matchesLocalIdentity(existing)) return;
+    if (existing.status === 'unsupported-version') return;
+    if (existing.status === 'ok' && !matchesLocalIdentity(existing.record)) {
+      return;
+    }
     await fs.unlink(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
@@ -337,8 +406,11 @@ export async function listLiveSessions(): Promise<SessionRegistryRecord[]> {
         return;
       }
 
-      const record = await readRecord(filePath);
-      if (record === null) return;
+      const read = await readRecord(filePath);
+      // Malformed and newer-schema records are skipped without sweeping
+      // — the list path never deletes what it cannot fully understand.
+      if (read.status !== 'ok') return;
+      const record = read.record;
 
       // A record whose filename disagrees with its contents was not
       // written by this code (or was renamed by hand). Skip it, and
@@ -358,14 +430,13 @@ export async function listLiveSessions(): Promise<SessionRegistryRecord[]> {
       // write one directory. A token whose boot prefix names another
       // boot names another machine — its PIDs resolve to the wrong
       // processes here, so leave it to a reader on its own side, and
-      // never sweep it.
+      // never sweep it. The guard must not depend on OUR boot id being
+      // readable: during the same outage `isSameProcess` degrades to a
+      // bare liveness check, so a disabled guard here would let the
+      // sweep unlink another machine's live record.
       const recordBootId =
         record.procStart === null ? null : bootIdOf(record.procStart);
-      if (
-        ownBootId !== null &&
-        recordBootId !== null &&
-        recordBootId !== ownBootId
-      ) {
+      if (recordBootId !== null && recordBootId !== ownBootId) {
         return;
       }
 
@@ -389,17 +460,24 @@ export async function listLiveSessions(): Promise<SessionRegistryRecord[]> {
  * True when a record found at this process's path was written from this
  * PID namespace and this boot. The path is keyed by PID alone, and PID
  * numbers collide across both boundaries; these are the fields a
- * colliding writer on another side differs on. A missing token or an
- * unreadable local boot id degrades to the namespace comparison alone,
- * matching `isSameProcess`'s conservatism.
+ * colliding writer on another side differs on. A missing token degrades
+ * to the namespace comparison alone, matching `isSameProcess`'s
+ * conservatism.
+ *
+ * An unreadable local boot id is different: `isSameProcess`'s
+ * conservatism is "keep when unprovable", which is right for a read
+ * path, but the callers here decide to OVERWRITE, MERGE or UNLINK — on
+ * those write paths "cannot compare" must mean "not ours". A writer
+ * that cannot read its boot id writes a tokenless record, so accepting
+ * only tokenless records in this state costs nothing.
  */
 function matchesLocalIdentity(record: SessionRegistryRecord): boolean {
   if (record.pid !== process.pid) return false;
   if (record.pidNs !== readPidNamespaceId()) return false;
   if (record.procStart === null) return true;
   const ownBootId = readLocalBootId();
-  if (ownBootId === null) return true;
   const recordBootId = bootIdOf(record.procStart);
+  if (ownBootId === null) return recordBootId === null;
   return recordBootId === null || recordBootId === ownBootId;
 }
 
@@ -430,39 +508,55 @@ async function sweepOrphanedTempFile(
   }
 }
 
-/** Read and validate one record. Returns null for anything unusable. */
-async function readRecord(
-  filePath: string,
-): Promise<SessionRegistryRecord | null> {
+/**
+ * One record file as read from disk: parsed, or unusable.
+ *
+ * `unreadable` covers a missing, corrupt or torn file — content this
+ * code never wrote in a usable form. `unsupported-version` is a
+ * well-formed record written by a NEWER build: readable, and it may
+ * belong to a live session this build cannot parse, so the write paths
+ * must treat it the way they treat a parsed foreign-identity record.
+ */
+type ReadRecordResult =
+  | { status: 'ok'; record: SessionRegistryRecord }
+  | { status: 'unreadable' }
+  | { status: 'unsupported-version' };
+
+const UNREADABLE: ReadRecordResult = { status: 'unreadable' };
+const UNSUPPORTED_VERSION: ReadRecordResult = {
+  status: 'unsupported-version',
+};
+
+/** Read and validate one record, discriminating newer-schema files. */
+async function readRecord(filePath: string): Promise<ReadRecordResult> {
   let raw: string;
   try {
     const stat = await fs.stat(filePath);
-    if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return null;
+    if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return UNREADABLE;
     raw = await fs.readFile(filePath, 'utf8');
   } catch {
-    return null;
+    return UNREADABLE;
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return null;
+    return UNREADABLE;
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return null;
+    return UNREADABLE;
   }
   const value = parsed as Record<string, unknown>;
 
   // Forward compatibility runs one way: a newer schema may add fields, so
-  // an unknown *higher* version is skipped rather than guessed at.
+  // an unknown *higher* version is reported as such rather than guessed
+  // at — and, unlike a torn file, must not be treated as unowned.
   const schemaVersion = value['schemaVersion'];
-  if (
-    typeof schemaVersion !== 'number' ||
-    schemaVersion > SESSION_REGISTRY_SCHEMA_VERSION
-  ) {
-    return null;
+  if (typeof schemaVersion !== 'number') return UNREADABLE;
+  if (schemaVersion > SESSION_REGISTRY_SCHEMA_VERSION) {
+    return UNSUPPORTED_VERSION;
   }
 
   const pid = value['pid'];
@@ -480,7 +574,7 @@ async function readRecord(
     typeof startedAt !== 'number' ||
     !Number.isFinite(startedAt)
   ) {
-    return null;
+    return UNREADABLE;
   }
 
   const procStart = value['procStart'];
@@ -488,15 +582,18 @@ async function readRecord(
   const qwenVersion = value['qwenVersion'];
 
   return {
-    schemaVersion,
-    pid,
-    procStart: typeof procStart === 'string' ? procStart : null,
-    pidNs: typeof pidNs === 'number' && Number.isFinite(pidNs) ? pidNs : null,
-    sessionId,
-    cwd,
-    name,
-    startedAt,
-    qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
+    status: 'ok',
+    record: {
+      schemaVersion,
+      pid,
+      procStart: typeof procStart === 'string' ? procStart : null,
+      pidNs: typeof pidNs === 'number' && Number.isFinite(pidNs) ? pidNs : null,
+      sessionId,
+      cwd,
+      name,
+      startedAt,
+      qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
+    },
   };
 }
 
