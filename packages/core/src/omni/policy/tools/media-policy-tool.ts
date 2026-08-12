@@ -293,12 +293,15 @@ export function policyOutputFileName(params: {
   extension: string;
 }): string {
   const raw = path.basename(params.inputPath, path.extname(params.inputPath));
-  // Collapse anything outside a conservative portable set: the stem comes
+  // Collapse anything outside a conservative portable set (`+` is kept:
+  // it is portable everywhere and appears in this scheme's own variants,
+  // e.g. a clip's `123s+40s`, so derived artifacts of a clip keep a stem
+  // that still round-trips). The stem comes
   // from user-supplied media names (spaces, quotes, CJK, shell
   // metacharacters) and is about to become a real path component.
   const stem =
     raw
-      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/[^A-Za-z0-9._+-]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, MAX_OUTPUT_STEM_LENGTH) || 'media';
   const variant = params.variant ? `-${params.variant}` : '';
