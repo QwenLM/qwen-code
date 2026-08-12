@@ -1856,6 +1856,60 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.errorType).toBeUndefined();
   });
 
+  it('readMediaViaOmniDelivery keeps the recall handle on an omitted media', async () => {
+    // The omission branch is the one shape that puts NO media part in front
+    // of the model. Without the handle leading it, the withheld resource has
+    // no identity the model can name — it can neither recall what memory
+    // knows about it nor ask a policy tool to reprocess it into something
+    // deliverable, and paths are never surfaced (M §5.2).
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const { MediaResourceRegistry } = await import(
+      '../services/media-memory/index.js'
+    );
+    const registry = new MediaResourceRegistry();
+
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: {
+        ...policyConfig({ maxUploadFileBytes: 500 }),
+        getOmniMemoryConfig: () => ({
+          collection: { maxInlineTextBytes: 4096 },
+        }),
+        getOmniMediaResourceRegistry: () => registry,
+      } as unknown as Config,
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+
+    // With memory off this branch collapses to a bare notice string (test
+    // above); a bound handle must turn it into a part array led by the
+    // handle, with the notice standing in for the media behind it.
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(2);
+    const handleText = parts[0]!['text'] as string;
+    expect(handleText).toContain('【媒体资源】pic.png：');
+    expect(registry.resolve(handleText.split('：')[1]!)).toMatchObject({
+      mediaType: 'image',
+    });
+    expect(parts[1]!['text']).toMatch(/^【媒体省略】pic\.png：/);
+    expect(result.returnDisplay).toBe(
+      'Media omitted by the omni transport guard: pic.png',
+    );
+  });
+
   it('threads the quarantine retention settings into startup recovery', async () => {
     const recoveryMock = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./recovery.js', () => ({

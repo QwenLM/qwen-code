@@ -218,9 +218,16 @@ describe('assertMediaPolicyIo', () => {
   it('rejects a missing input file', async () => {
     const outputDir = path.join(root, 'staging');
     await fs.mkdir(outputDir);
-    await expect(
-      assertMediaPolicyIo({ inputPath: path.join(root, 'nope'), outputDir }),
-    ).rejects.toThrow(/input file not found/);
+    const error = await assertMediaPolicyIo({
+      inputPath: path.join(root, 'nope'),
+      outputDir,
+    }).catch((err: Error) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/input file not found/);
+    // Basename only: this message reaches the model, and a resourceId-
+    // resolved call must never leak the locator the handle stands in for
+    // (M §5.2). A full-path message satisfies the matcher above too.
+    expect((error as Error).message).not.toContain(root);
   });
 
   it('rejects a symlinked input (never reads through a link)', async () => {
