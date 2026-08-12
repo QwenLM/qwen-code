@@ -2,7 +2,7 @@
 
 ## Overview
 
-The daemon never lets HTTP routes or ACP-side agent calls touch the host filesystem directly. Every read, write, list, glob, and stat goes through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
+Daemon HTTP file routes and ordinary delegated ACP `readTextFile` / `writeTextFile` calls go through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
 
 - **Path resolution** — canonicalize paths and reject anything escaping the bound workspace, including via symlinks.
 - **Trust gating** — refuse writes when the workspace is not trusted (`untrusted_workspace`).
@@ -11,7 +11,16 @@ The daemon never lets HTTP routes or ACP-side agent calls touch the host filesys
 - **Audit** — every access / denial emits a structured event for `PermissionAuditRing` / monitoring.
 - **Typed errors** — closed `FsErrorKind` union mapped to HTTP statuses.
 
-The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) and the ACP-side `BridgeFileSystem` adapter (so agent-driven `readTextFile` / `writeTextFile` calls get the same gates) both go through this boundary.
+The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) use this boundary and never receive the same-host exception. In the production daemon, ACP calls that remain delegated reach the injected bridge adapter; generic bridge callers use WFS only when they inject such an adapter. Production same-host `qwen serve` runtimes advertise `readTextFile: false`, so all child `FileSystemService.readTextFile` consumers use the regular CLI filesystem service. Final ACP `writeTextFile` content writes remain delegated: workspace targets use WFS, while a strict built-in-tool marker may select an equivalent host writer for an external path only on daemon-created same-host adapters. See [the external write design](../../design/daemon-external-tool-text-writes.md).
+
+That text-read capability slice covers direct `read_file` plus the shared pre-reads used by write, edit, notebook, sed, and artifact operations:
+
+- It intentionally accepts regular CLI read behavior rather than the WFS read-side guarantees. [The design doc](../../design/daemon-local-text-reads.md) owns the exact list of what is given up.
+- The same doc records the bounded sense in which the retained adapter read path "fails closed"; the separate external-write design records how the approved final-write failure is closed.
+- Direct external `read_file` keeps the normal CLI permission rules and core file-operation telemetry.
+- HTTP filesystem routes remain workspace-scoped, and agent discovery-tool behavior is unchanged by this capability.
+- Auxiliary actions such as parent-directory creation and arbitrary shell commands are separate existing paths, not covered by this boundary.
+- `qwen serve` assumes a same-machine, same-UID security principal and is not an OS sandbox.
 
 ## Responsibilities
 
@@ -66,14 +75,14 @@ interface BridgeFileSystem {
 }
 ```
 
-This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) so agent-side ACP writes pick up the same TOCTOU, symlink, trust-gate, and audit gates the HTTP routes use.
+This is the injection point for ACP `readTextFile` / `writeTextFile`. Bridge tests and Mode A embedded callers can omit it on `BridgeOptions`; `BridgeClient` falls back to its inline `fs.readFile` / `fs.writeFile` proxy (preserves pre-F1 behavior). Production `qwen serve` wires `BridgeFileSystem` through `createBridgeFileSystemAdapter(fsFactory)` (`packages/cli/src/serve/bridge-file-system-adapter.ts`) and sets `delegateReadTextFileToClient: false`. Capability-compliant children therefore read text locally and delegate final ACP text writes. The adapter retains its read implementation so unexpected or capability-violating delegated reads still encounter WFS's workspace boundary. Its external host-writer path is disabled by default and selected only by exact versioned provenance on daemon-owned same-host adapters; injected bridges, workspace registries and factories, generic ACP, and HTTP retain the ordinary boundary.
 
 Two defensive properties the adapter MUST preserve (because the inline proxy is fully bypassed when the adapter is injected):
 
 1. **Reject non-regular files** — sockets / pipes / char devices / procfs / sysfs entries can stream unbounded data despite `stats.size === 0`. The inline path throws with `describeStatKind(stats)` in the message.
 2. **Avoid unbounded full-file buffering.** The inline fallback caps a buffered read at `READ_FILE_SIZE_CAP = 100 MiB`. The injected adapter instead applies the stricter WorkspaceFileSystem contract: full snapshots stop at 256 KiB, while larger UTF-8 files require a finite `limit` and are streamed from an inode-bound handle with at most 256 KiB returned. It must not read an entire 500 MB log merely to return `{ line: 1, limit: 10 }`.
 
-The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside a per-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
+The adapter goes further: it uses `WorkspaceFileSystem.writeTextOverwrite` (PR 18 primitive) for workspace writes and a factory-owned equivalent for strictly marked external built-in-tool writes. Both use atomic temporary-file-and-rename writes with mode preservation, `0o600` default, and symlink rejection inside the shared canonical-path lock. This is a **divergence from the pre-F1 inline proxy** which resolved symlinks and wrote through to their target — agents that relied on writing through symlinked dotfiles now have to address the resolved path directly.
 
 ### FsError preservation over the ACP wire
 

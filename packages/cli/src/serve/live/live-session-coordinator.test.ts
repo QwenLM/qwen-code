@@ -101,7 +101,9 @@ function makeHarness(
     sessionId: string;
     prompt: string;
     modelPrompt?: string;
+    deadlineMs?: number;
   }> = [];
+  let settleQueuedMidTurn: (() => void) | undefined;
   const publish = (event: Omit<BridgeEvent, 'v'>) => {
     for (const subscriber of subscribers) {
       subscriber.queue.push({ v: 1, ...event });
@@ -141,10 +143,21 @@ function makeHarness(
     getSessionSummary: vi.fn(() => ({
       pendingInteractions: options.pendingInteractions ?? [],
     })),
-    enqueueMidTurnMessage: vi.fn(() => ({
-      accepted: options.enqueueAccepted ?? true,
-      queued: options.enqueueAccepted ?? true,
-    })),
+    enqueueMidTurnMessage: vi.fn(
+      (
+        _sessionId: string,
+        _message: string,
+        _context: unknown,
+        _messageId: string | undefined,
+        enqueueOptions?: { onSettledWithoutDrain?: () => void },
+      ) => {
+        settleQueuedMidTurn = enqueueOptions?.onSettledWithoutDrain;
+        return {
+          accepted: options.enqueueAccepted ?? true,
+          queued: options.enqueueAccepted ?? true,
+        };
+      },
+    ),
     async *subscribeEvents(
       _sessionId: string,
       request?: { signal?: AbortSignal },
@@ -180,6 +193,7 @@ function makeHarness(
         context: {
           promptId: string;
           modelPrompt?: string;
+          deadlineMs?: number;
           onPromptAdmitted?: () => void;
         },
       ) => {
@@ -187,6 +201,7 @@ function makeHarness(
           sessionId,
           prompt: request.prompt.map((part) => part.text ?? '').join(''),
           modelPrompt: context.modelPrompt,
+          deadlineMs: context.deadlineMs,
         });
         context.onPromptAdmitted?.();
         await new Promise<void>((resolve) => {
@@ -343,6 +358,7 @@ function makeHarness(
     openRealtimeSession,
     promptRequests,
     pendingTurns,
+    settleQueuedMidTurn: () => settleQueuedMidTurn?.(),
     publish,
     get callbacks() {
       if (!callbacks) throw new Error('Realtime callbacks are unavailable.');
@@ -581,6 +597,7 @@ describe('LiveSessionCoordinator', () => {
       prompt: '检查 <repo> & tests',
       modelPrompt:
         '<realtime_delegation>\n  <input>检查 &lt;repo&gt; &amp; tests</input>\n  <transcript_delta>user: 先聊一下\nassistant: 好的。\nuser: 检查 &lt;repo&gt; &amp; tests</transcript_delta>\n</realtime_delegation>',
+      deadlineMs: 10 * 60_000,
     });
     expect(harness.bridge.changeSessionCwd).toHaveBeenCalledWith('live-new', {
       path: '/conversations/conversation-live-new',
@@ -747,6 +764,12 @@ describe('LiveSessionCoordinator', () => {
       expect(harness.bridge.enqueueMidTurnMessage).toHaveBeenCalledWith(
         'live-new',
         '<realtime_delegation>\n  <input>只检查测试目录</input>\n  <transcript_delta>user: 只检查测试目录</transcript_delta>\n</realtime_delegation>',
+        undefined,
+        undefined,
+        expect.objectContaining({
+          queueOnly: true,
+          onSettledWithoutDrain: expect.any(Function),
+        }),
       ),
     );
     expect(harness.bridge.sendPrompt).toHaveBeenCalledTimes(1);
@@ -788,9 +811,67 @@ describe('LiveSessionCoordinator', () => {
     expect(harness.promptRequests[1]).toMatchObject({
       sessionId: 'live-new',
       prompt: '第二步',
+      deadlineMs: 10 * 60_000,
     });
     expect(harness.bridge.spawnOrAttach).toHaveBeenCalledTimes(1);
+    // Steering opts out of idle promotion: a promoted steering prompt would
+    // run without backend-context forwarding or a turn deadline, so the
+    // bridge hands the idle case back to the coordinator.
+    expect(harness.bridge.enqueueMidTurnMessage).toHaveBeenCalledWith(
+      'live-new',
+      expect.stringContaining('第二步'),
+      undefined,
+      undefined,
+      expect.objectContaining({
+        queueOnly: true,
+        onSettledWithoutDrain: expect.any(Function),
+      }),
+    );
 
+    await harness.finishTurn(1, [{ type: 'message', text: '第二步完成。' }]);
+    await waitFor(() =>
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledWith(
+        '第二步完成。',
+      ),
+    );
+  });
+
+  it('starts an accepted steering request as the next turn when it misses the final drain', async () => {
+    const harness = makeHarness({ enqueueAccepted: true });
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '第一步',
+      activeTranscript: [{ role: 'user', text: '第一步' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-2',
+      callId: 'handoff-steer',
+      request: '第二步',
+      activeTranscript: [{ role: 'user', text: '第二步' }],
+    });
+    await waitFor(() =>
+      expect(harness.bridge.enqueueMidTurnMessage).toHaveBeenCalledOnce(),
+    );
+
+    harness.settleQueuedMidTurn();
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(2));
+    expect(harness.promptRequests[1]).toMatchObject({
+      sessionId: 'live-new',
+      prompt: '第二步',
+      deadlineMs: 10 * 60_000,
+    });
+
+    await harness.finishTurn(0, [{ type: 'message', text: '第一步完成。' }]);
     await harness.finishTurn(1, [{ type: 'message', text: '第二步完成。' }]);
     await waitFor(() =>
       expect(harness.realtime.sendBackendContext).toHaveBeenCalledWith(

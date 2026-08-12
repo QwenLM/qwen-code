@@ -34,6 +34,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
   session_resume: { since: 'v1' },
@@ -52,6 +53,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
+  // Daemon-owned reconciliation surface for mid-turn messages:
+  // `GET /session/:id/mid-turn-messages` returns the messages still waiting
+  // in the queue plus bounded settled/promoted id rings. Clients pre-flight
+  // this tag before calling the route; an
+  // older daemon without it leaves them on the legacy client-fallback
+  // behavior. Client-generated message ids make retries idempotent.
+  session_mid_turn_message_query: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -170,6 +178,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_toggle: { since: 'v1' },
+  workspace_skill_batch_toggle: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is

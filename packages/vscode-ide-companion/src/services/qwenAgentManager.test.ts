@@ -5,6 +5,9 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   extractSessionListItems,
   QwenAgentManager,
@@ -172,5 +175,56 @@ describe('QwenAgentManager.createNewSession', () => {
     await expect(newSessionPromise).resolves.toBe('session-2');
     expect(connection.newSession).toHaveBeenCalledTimes(1);
     expect(connection.newSession).toHaveBeenCalledWith('/workspace');
+  });
+});
+
+describe('QwenAgentManager.getSessionMessages', () => {
+  it('projects UserPromptSubmit provenance while mapping JSONL history', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
+    const filePath = join(tempDir, 'session.jsonl');
+    const timestamp = '2026-03-22T16:48:35.000Z';
+    const taggedContext =
+      '<qwen:user-prompt-submit-context>\nhook-only context\n</qwen:user-prompt-submit-context>';
+    writeFileSync(
+      filePath,
+      `${JSON.stringify({
+        sessionId: 'session-1',
+        uuid: 'user-1',
+        timestamp,
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'expanded model prompt' }, { text: taggedContext }],
+        },
+        systemPayload: {
+          displayText: 'raw @file prompt',
+          hookContext: 'hook-only context',
+        },
+      })}\n`,
+    );
+
+    try {
+      const manager = new QwenAgentManager();
+      vi.spyOn(manager, 'getSessionList').mockResolvedValue([
+        {
+          id: 'session-1',
+          sessionId: 'session-1',
+          filePath,
+        },
+      ]);
+
+      const messages = await manager.getSessionMessages('session-1');
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: 'raw @file prompt',
+          timestamp: new Date(timestamp).getTime(),
+        },
+      ]);
+      expect(messages[0]?.content).not.toContain('hook-only context');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

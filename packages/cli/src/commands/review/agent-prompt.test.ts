@@ -34,11 +34,18 @@ import { dirname, join, resolve } from 'node:path';
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   DEADLINE_ENV,
   RESERVE_ENV,
+  COMPOSE_FLOOR_ENV,
+  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
 } from './lib/deadline.js';
@@ -51,6 +58,7 @@ import {
   findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
   readRecordedPrompts,
   briefPath,
@@ -526,13 +534,24 @@ describe('--all-chunks — every auditor of a Step 5 round, in one call', () => 
         )!;
         expect(key).toMatch(/--[0-9a-f]{12}$/);
         const rec = recorded.get(key)!;
-        // The record IS the printed block, identity line first, findings in.
+        // The record IS the printed block, identity line first, findings
+        // pointer in. The list itself rides the digest-named file — one per
+        // round, shared by every block — never the block (issue #8597).
         expect(printed).toContain(rec);
         expect(rec.startsWith('You are review agent `reverse-audit`')).toBe(
           true,
         );
-        expect(rec).toContain('- **[Critical]** x.ts:1 — y');
+        expect(rec).not.toContain('- **[Critical]** x.ts:1 — y');
+        expect(rec).toContain('.findings.md');
       }
+      // The round's findings file holds the list every block points at.
+      const anyRec = recorded.get(keys[0])!;
+      const listPath = /read_file\(file_path="([^"]*\.findings\.md)"/.exec(
+        anyRec,
+      )![1];
+      expect(readFileSync(listPath, 'utf8')).toContain(
+        '- **[Critical]** x.ts:1 — y',
+      );
       // Each block reads its OWN chunk's range — asserted on two different
       // chunks, because checking only the first cannot see a batch that built
       // every block from the same chunk.
@@ -1365,10 +1384,11 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 // Dogfooded on a real 3A review: the orchestrator delivered Step 3 prompts verbatim
 // but PARAPHRASED the Step 4/5 ones — added "(round 2)", inserted its own summary,
 // truncated the "nothing replaces the brief" line — because it hand-prepended the
-// findings list. `--findings` removes that assembly step: the command folds the list
-// in and prints one block. The record stays findings-free, so the shared key still
-// matches by the add-only delivery rule.
-describe('--findings — fold the list in, print one block, record EXACTLY that block', () => {
+// findings list. `--findings` removes that assembly step: the command copies the
+// list to a digest-named file and prints one block pointing at it. The record IS
+// that block — pointer included, keyed per findings digest — so a launch that
+// drops the pointer matches no record.
+describe('--findings — point the block at the list file, record EXACTLY that block', () => {
   // Every temp dir this block makes, cleaned up after each test — the rest of the
   // file uses try/finally; a helper-based block tracks and sweeps instead.
   let dirs: string[] = [];
@@ -1416,20 +1436,31 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     return { printed, plan };
   }
 
-  it('a verifier gets the findings folded beneath its identity line, and the record IS the printed prompt', () => {
+  it('a verifier gets the findings pointer beneath its identity line, and the record IS the printed prompt', () => {
     const { printed, plan } = run({ role: 'verify' });
-    // Printed: the findings section AND the findings themselves — and NOT the
-    // reverse auditor's framing (a branch swap in findingsSection would pass both
-    // tests if each only asserted its own heading).
+    // Printed: the findings section AND the pointer to the digest-named list
+    // file — and NOT the reverse auditor's framing (a branch swap in
+    // findingsSection would pass both tests if each only asserted its own
+    // heading). The list itself is NOT in the block: inlined per block it
+    // made a 12-14-auditor launch one 65-82 KB assistant message, and the
+    // stream generating it never completed (issue #8597).
     expect(printed).toContain('## The findings you are ruling on');
     expect(printed).not.toContain('Already confirmed');
-    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
     // and the line the orchestrator used to truncate away.
     expect(printed).toContain('does not replace the brief; read it first');
-    // Recorded: EXACTLY what was printed, findings included, under a digest key.
-    // The findings-free record was a receipt a partial delivery could satisfy:
-    // launch the agent with only the recorded tail, let it open the brief, and
-    // the delivery check passed while no verifier ever saw a finding.
+    // The list is on disk, named by the same digest that keys the record,
+    // holding exactly what --findings was given.
+    const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(printed);
+    expect(m).not.toBeNull();
+    expect(readFileSync(m![1], 'utf8')).toContain(
+      'foo.ts:10 — the collision drops arguments',
+    );
+    // Recorded: EXACTLY what was printed, pointer included, under a digest
+    // key. The findings-free record was a receipt a partial delivery could
+    // satisfy; the pointer keeps that guarantee — a launch that drops it
+    // matches no record, and the delivery floor counts the read it
+    // instructs (see the verificationGaps tests).
     const recorded = recordByPrefix(plan, 'verify--');
     expect(recorded).toBe(printed);
     // The identity line leads the output — the one spot a real run edited on a
@@ -1456,7 +1487,12 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     expect(printed).toContain('Already confirmed — do not re-report these');
     // and NOT the verifier's framing — the mirror of the assertion above.
     expect(printed).not.toContain('The findings you are ruling on');
-    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
+    const m = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(printed);
+    expect(m).not.toBeNull();
+    expect(readFileSync(m![1], 'utf8')).toContain(
+      'foo.ts:10 — the collision drops arguments',
+    );
     const recorded = recordByPrefix(plan, 'reverse-audit--');
     expect(recorded).toBe(printed);
   });
@@ -1464,8 +1500,8 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
   it('a Step 3B per-chunk reverse auditor takes --chunk and --findings together', () => {
     // The one valid triple: reverse-audit declares both acceptsChunk and
     // acceptsFindings, and Step 5 3B launches `--role reverse-audit --chunk N
-    // --findings <cumulative>` per chunk per round. The findings fold above the
-    // chunk-scoped prompt; the record is that chunk's block, findings-free, keyed by
+    // --findings <cumulative>` per chunk per round. The findings pointer folds
+    // above the chunk-scoped prompt; the record is that chunk's block, keyed by
     // the chunk. (PLAN's chunks are 13/14/15 — chunk 14 is offset 4024, limit 176.)
     const { printed, plan } = run({
       role: 'reverse-audit',
@@ -1473,7 +1509,8 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
       round: 1,
     });
     expect(printed).toContain('Already confirmed — do not re-report these');
-    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).toContain('.findings.md');
     expect(printed).toContain('offset=4024, limit=176'); // this chunk's range only
     expect(printed).not.toContain('offset=3807'); // not chunk 13's
     const recorded = recordByPrefix(plan, 'reverse-audit--chunk-14--');
@@ -1486,8 +1523,58 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // must fail loudly, not inherit the reverse auditor's "do not re-report" prose.
     // Called directly with a role the function does not frame — the guards never let
     // a non-findings role reach it in a real run.
-    expect(() => findingsSection('2', 'some findings')).toThrow(
-      /--findings has no framing for role "2"/,
+    expect(() =>
+      findingsSection('2', 'some findings', '/tmp/x.findings.md'),
+    ).toThrow(/--findings has no framing for role "2"/);
+  });
+
+  it('inlines the list when the findings file could not be written', () => {
+    // A read-only tmp dir makes writeFindingsFile return null; the section
+    // must then fall back to the pre-#8597 inline shape rather than point
+    // the block at a file that does not exist — a whole round would run
+    // against the dead path before the delivery floor could fail it.
+    const list = '- **[Critical]** foo.ts:10 — the collision drops arguments';
+    const verify = findingsSection('verify', list, null);
+    expect(verify).toContain('## The findings you are ruling on');
+    expect(verify).toContain(list);
+    expect(verify).not.toContain('The list is a file');
+    expect(verify).not.toContain('.findings.md');
+    const audit = findingsSection('reverse-audit', list, null);
+    expect(audit).toContain('Already confirmed — do not re-report these');
+    expect(audit).toContain(list);
+    expect(audit).not.toContain('The list is a file');
+  });
+
+  it('a failed findings write builds with the list inlined, not a dead pointer', () => {
+    // End-to-end shape of the fallback: a FILE where the record directory
+    // must sit makes the findings write fail, and the printed block carries
+    // the list itself with no `.findings.md` pointer. The agents then read
+    // what they were launched with; the floor owes no findings read for a
+    // pointer-less prompt.
+    const dir = tmp('ap-ff-');
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    writeFileSync(
+      join(dir, 'plan-prompts'),
+      'a file where the record dir would go',
+    );
+    const findings = join(dir, 'findings.md');
+    writeFileSync(
+      findings,
+      '- **[Critical]** foo.ts:10 — the collision drops arguments',
+    );
+    (writeStderrLineSafe as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('foo.ts:10 — the collision drops arguments');
+    expect(printed).not.toContain('.findings.md');
+    expect((writeStderrLineSafe as unknown as Mock).mock.calls[0][0]).toContain(
+      'inlining the list instead',
     );
   });
 
@@ -1542,8 +1629,8 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     // The old shape shared one findings-free record across shards — a receipt a
     // tail-only delivery could satisfy. Now each shard's record is its exact
     // printed prompt under a findings-digest key: shard 2 does not overwrite
-    // shard 1, each launch is verified against its own list, and a launch
-    // carrying the wrong shard's list matches nothing.
+    // shard 1, each launch points at its own list file, and a launch carrying
+    // the wrong shard's pointer matches nothing.
     const dir = tmp('ap-shards-');
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(PLAN));
@@ -1575,10 +1662,17 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     const records = verifyKeys.map((k) => recorded.get(k)!);
     expect(records).toContain(printed1);
     expect(records).toContain(printed2);
-    // Cross-delivery fails: shard 1's launch does not satisfy shard 2's record.
-    const rec2 = records.find((r) => r.includes('second shard'))!;
-    expect(wasDeliveredVerbatim(printed1, rec2)).toBe(false);
-    expect(wasDeliveredVerbatim(printed2, rec2)).toBe(true);
+    // Each shard's list file holds its own findings.
+    const listOf = (p: string) =>
+      readFileSync(
+        /read_file\(file_path="([^"]*\.findings\.md)"/.exec(p)![1],
+        'utf8',
+      );
+    expect(listOf(printed1)).toContain('first shard');
+    expect(listOf(printed2)).toContain('second shard');
+    // Cross-delivery fails: shard 1's launch does not satisfy shard 2's record
+    // (printed2 IS shard 2's record — asserted above).
+    expect(wasDeliveredVerbatim(printed1, printed2)).toBe(false);
   });
 
   it('refuses a findings-taking role launched without --findings', () => {
@@ -1630,12 +1724,12 @@ describe('--findings — fold the list in, print one block, record EXACTLY that 
     [
       'a dimension role',
       { role: '2', findings: '/f' },
-      /--findings folds a findings list into the prompt, only for a role that takes one/,
+      /--findings hands a findings list to the printed block, only for a role that takes one/,
     ],
     [
       'no role',
       { findings: '/f' },
-      /--findings folds a findings list into a --role verify \/ --role reverse-audit/,
+      /--findings hands a findings list to a --role verify \/ --role reverse-audit/,
     ],
     [
       'whole-diff',
@@ -1828,6 +1922,103 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('say what you examined');
     expect(p).toContain('**Critical**');
     expect(p).not.toMatch(/If you find no issues, say/i);
+  });
+
+  it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
+    const contextPlan = {
+      ...PR_PLAN,
+      repositoryContext: {
+        version: 1,
+        provider: 'fake-provider',
+        label: 'Example project',
+        domains: ['compiler', 'runtime'],
+        relatedPaths: ['src/compiler.ts', 'src/runtime.ts'],
+        recommendedTests: ['test:compiler'],
+        requiredConfigurations: ['debug', 'linux-x64'],
+        requiredAgents: ['test-matrix'],
+        unverifiedDimensions: ['Alternate runtime was not exercised'],
+        verificationNotes: ['Use the repository native test runner'],
+      },
+    };
+
+    // Negative pins: roles outside the code-reviewing set and outside the
+    // manifest's required agents get nothing. A `brief.reviewsCode ||` →
+    // `true ||` regression would hand Agent 0 (issue fidelity, not code
+    // review) the full block on every context-bearing plan, and would give
+    // it to a role the manifest did not require, with the suite green.
+    expect(buildRoleBrief(contextPlan, '0')).not.toContain(
+      'Example project repository context',
+    );
+    expect(
+      buildRoleBrief(
+        {
+          ...contextPlan,
+          repositoryContext: {
+            ...contextPlan.repositoryContext,
+            requiredAgents: [],
+          },
+        },
+        'test-matrix',
+      ),
+    ).not.toContain('Example project repository context');
+
+    const reviewerBrief = buildRoleBrief(contextPlan, '1a');
+    expect(reviewerBrief).toContain('Example project repository context');
+    expect(reviewerBrief).toContain('compiler, runtime');
+    expect(reviewerBrief).toContain('src/compiler.ts');
+    expect(reviewerBrief).toContain('test:compiler');
+    expect(reviewerBrief).toContain('debug, linux-x64');
+    expect(reviewerBrief).toContain('Alternate runtime was not exercised');
+    expect(reviewerBrief).toContain('Use the repository native test runner');
+    // Section adjacency: each field is pinned under ITS OWN label, or a
+    // rendering swap between two same-shaped arrays ships green while
+    // reviewers are told the repository's proof boundaries are its
+    // verification instructions — and vice versa.
+    expect(reviewerBrief).toContain(
+      'Related paths:\n- src/compiler.ts\n- src/runtime.ts',
+    );
+    expect(reviewerBrief).toContain(
+      'Unverified dimensions:\n- Alternate runtime was not exercised',
+    );
+    expect(reviewerBrief).toContain(
+      'Verification notes:\n- Use the repository native test runner',
+    );
+
+    const territoryBrief = buildChunkAgentPrompt(contextPlan, 13);
+    expect(territoryBrief).toContain('Example project repository context');
+    expect(territoryBrief).toContain('src/compiler.ts');
+
+    const requiredAgentBrief = buildRoleBrief(contextPlan, 'test-matrix');
+    expect(requiredAgentBrief).toContain('Example project repository context');
+    expect(requiredAgentBrief).toContain('src/compiler.ts');
+    expect(requiredAgentBrief).toContain('test:compiler');
+
+    // Positive pins for code-reviewing roles OUTSIDE the manifest
+    // allow-list that reach the block solely through `brief.reviewsCode`:
+    // a narrowing mutant that keeps every pinned role strips exactly these
+    // and ships green.
+    for (const role of ['verify', 'reverse-audit'] as const) {
+      expect(buildRoleBrief(contextPlan, role)).toContain(
+        'Example project repository context',
+      );
+    }
+
+    const buildBrief = buildRoleBrief(contextPlan, '7');
+    expect(buildBrief).not.toContain('Example project repository context');
+    expect(buildBrief).not.toContain('compiler, runtime');
+    expect(buildBrief).not.toContain('src/compiler.ts');
+    expect(buildBrief).not.toContain('Alternate runtime was not exercised');
+    expect(buildBrief).toContain('Repository-specific verification boundary');
+    expect(buildBrief).toContain('test:compiler');
+    expect(buildBrief).toContain('debug, linux-x64');
+    expect(buildBrief).toContain('Use the repository native test runner');
+
+    // The --whole-diff path builds Agent 8's briefs; it carries the same
+    // block, or the one finder launched for a dominant domain is the one
+    // reviewer denied that domain's guidance.
+    const wholeDiff = buildWholeDiffBlock(contextPlan);
+    expect(wholeDiff).toContain('Example project repository context');
+    expect(wholeDiff).toContain('src/compiler.ts');
   });
 
   it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
@@ -2468,6 +2659,7 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
   afterEach(() => {
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
+    delete process.env[TOOL_CONCURRENCY_ENV];
     process.exitCode = undefined;
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
@@ -2541,8 +2733,14 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
   });
 
-  it('does not gate the verifier — the reserve exists so it can run', () => {
-    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+  it('does not gate the verifier by the reserve — it runs within it', () => {
+    // The reverse-audit RESERVE is not a verifier gate: within it (above
+    // the smaller compose floor) the terminal round's verification is
+    // exactly the work the reserve was kept for. 30 minutes remain — inside
+    // the 80-minute reserve, above the 20-minute compose floor — so the
+    // verifier builds. (The compose floor DOES gate it; that is a separate
+    // describe.)
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 1800);
     const dir = mkdtempSync(join(tmpdir(), 'ap-budget-v-'));
     dirs.push(dir);
     const plan = join(dir, 'plan.json');
@@ -2907,6 +3105,59 @@ describe('the reverse-audit budget gate — the loop must end by reporting', () 
     // A refusal is not an admission.
     expect(readRoundStamps(plan)).toHaveLength(1);
   });
+
+  it('prices the 3B pair as one admission — round 2 bears the pair wall', () => {
+    // Round 2's build lands seconds after round 1's stamp, so nothing has
+    // measured a round yet; the price is both members' wall in waves of the
+    // tool-concurrency pool. PLAN has three chunks; at a 2-slot pool each
+    // round runs two waves and the pair three, so round 2 pays 3/2 of the
+    // round estimate — and the gate refuses it when the reserve plus that
+    // does not fit, even though round 1 (one estimate) just admitted.
+    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).some((st) => st.round === 1)).toBe(true);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    // Reserve 600 + pair price 2700 = 3300 > the 3000 remaining.
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 2 by the review time budget',
+    );
+    expect(readRoundStamps(plan)).toHaveLength(1);
+  });
+
+  it('admits the 3B pair when the reserve plus the pair wall fits', () => {
+    process.env[TOOL_CONCURRENCY_ENV] = '2';
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3400);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).map((st) => st.round)).toEqual([1, 2]);
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('prices the pair at one round when the pool holds both fan-outs at once', () => {
+    // The default 10-slot pool holds all six auditors of PLAN's 3-chunk
+    // pair in one wave, so round 2 pays one round estimate — a flat 2x
+    // price would refuse this admission (reserve 600 + 3600 > 3000) and
+    // gut the pair's admission win near the deadline.
+    process.env[RESERVE_ENV] = '600';
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 3000);
+    const plan = call('reverse-audit', { 'all-chunks': true, round: 1 });
+    expect(process.exitCode).toBeUndefined();
+    (writeStdoutLine as unknown as Mock).mockClear();
+    call('reverse-audit', { 'all-chunks': true, round: 2 }, plan);
+    expect(process.exitCode).toBeUndefined();
+    expect(readRoundStamps(plan).map((st) => st.round)).toEqual([1, 2]);
+  });
 });
 
 describe('per-chunk retirement — cold territories stop costing a round', () => {
@@ -3006,11 +3257,16 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
    * Write a transcript the way the harness writes one: the launch prompt as
    * the first record, then `calls` successful reads of the diff, then the
    * final text. `calls: 0` is the whiff shape — prose and nothing else.
+   * `readOverride` makes the auditor read THAT window instead of the one the
+   * launch bakes — the lazy-auditor shape the territory bar exists to catch.
    */
   function auditorTranscript(
     launchPrompt: string,
     finalText: string,
-    opts: { calls?: number } = {},
+    opts: {
+      calls?: number;
+      readOverride?: { offset: number; limit: number };
+    } = {},
   ): void {
     const id = `aud-${++seq}`;
     const base = { agentId: id, agentName: 'general-purpose', sessionId: 'S1' };
@@ -3019,8 +3275,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // record's own baked read, so a synthetic auditor must open the same
     // window its prompt names.
     const baked = /offset=(\d+), limit=(\d+)/.exec(launchPrompt);
-    const readOffset = baked ? Number(baked[1]) : 0;
-    const readLimit = baked ? Number(baked[2]) : 100;
+    const readOffset =
+      opts.readOverride?.offset ?? (baked ? Number(baked[1]) : 0);
+    const readLimit =
+      opts.readOverride?.limit ?? (baked ? Number(baked[2]) : 100);
     const lines = [
       JSON.stringify({
         ...base,
@@ -3107,6 +3365,30 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(keysOf(2)).toHaveLength(3);
   });
 
+  it('the 3B pair: round 2 builds every chunk with round 1 still in flight (no round-1 transcripts)', () => {
+    // The convergence pair on 3B — the latency lever: rounds 1 and 2 are
+    // launched together, so round 2's builder runs BEFORE round 1's auditors
+    // have returned any transcript. Round 2 must still fan out to every chunk
+    // (the retirement schedule only reads history at k >= 3, so nothing here
+    // depends on round 1's records existing) and stamp its own admission, so
+    // the two rounds' auditors run concurrently instead of one round-wall
+    // apart. Pins the mechanism the SKILL 3B-pair orchestration relies on.
+    const r1 = runRound(1); // built, but no transcripts written for it
+    expect(r1).toContain('3 auditors required this round — one per chunk.');
+    const r2 = runRound(2); // round 1's transcripts don't exist yet at this point
+    expect(r2).toContain('3 auditors required this round — one per chunk.');
+    expect(r2).not.toContain('retirement:');
+    expect(keysOf(1)).toHaveLength(3);
+    expect(keysOf(2)).toHaveLength(3);
+    // Both admissions are stamped, so the deadline gate prices each and the
+    // clock advances a round per stamp.
+    const rounds = readRoundStamps(plan)
+      .map((s) => s.round)
+      .sort();
+    expect(rounds).toContain(1);
+    expect(rounds).toContain(2);
+  });
+
   it('round 3 skips a chunk dry in rounds 1 and 2, and the note names it', () => {
     answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
@@ -3136,21 +3418,27 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   });
 
   it('findings quoting a read window cannot widen a territory', () => {
-    // The record is the FOLDED prompt — the cumulative findings list rides
-    // inside it verbatim. Prose quoting a read window used to inject the
-    // range into the baked territory, and any-overlap-passes meant an
-    // auditor that read only the diff's head could retire a chunk whose
-    // territory is thousands of lines below — the hole the territory check
-    // closed, reopened by honest findings. Chunk 13's territory is
-    // 3808-4024; the injected `offset=0, limit=50` is exactly the window
-    // the auditors below read.
+    // The findings list now rides a digest-named FILE the block points at
+    // (issue #8597), so its prose can no longer inject a range into the
+    // record at all — the territory scan only ever sees the builder's own
+    // diff-aimed read. The guard still matters one level down: the auditor
+    // READS that findings file, and a lazy auditor whose only diff read is
+    // the quoted head window must not retire a chunk whose territory sits
+    // thousands of lines below. Chunk 13's territory is 3808-4024; the
+    // auditors below read only the diff's head (offset=0, limit=50).
     writeFileSync(
       findings,
       '- **File:** packages/cli/src/x.ts:12 — the earlier read used ' +
         'offset=0, limit=50 — **Severity:** Suggestion\n',
     );
-    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
-    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    for (const round of [1, 2]) {
+      runRound(round);
+      auditorTranscript(recordOf(round, 13), DRY, {
+        readOverride: { offset: 0, limit: 50 },
+      });
+      auditorTranscript(recordOf(round, 14), YIELD);
+      auditorTranscript(recordOf(round, 15), YIELD);
+    }
 
     const out = runRound(3);
     expect(out).toContain('3 auditors required this round');
@@ -3215,6 +3503,170 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('retirement:');
   });
 
+  it('huge cap: a chunk dry in rounds 1 and 2 retires with a final certificate', () => {
+    // Under the reduced 3-round cap, chunk 13's next cold check (round 4) is
+    // past the cap, so the retirement note must read `certificate final`, not
+    // `next cold check round 4` — the same builder's admission gate refuses a
+    // round-4 build. Pins the plan-cap comparison (`nextColdCheck >
+    // planRoundCap`) at cap 3; the only other cap-3 test keeps every chunk
+    // yielding, so nothing retires there.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('2 auditors required this round');
+    expect(out).toContain('chunk 13 — retired: dry in rounds 1 and 2');
+    expect(out).toContain('certificate final');
+    // Pin the spelled cap number, not just the branch: a hardcoded `5-round
+    // cap leaves` in the note wording would otherwise ship silently and tell
+    // the orchestrator a false cap on exactly the huge-diff runs this targets.
+    expect(out).toContain('3-round cap leaves');
+    expect(out).not.toContain('next cold check round 4');
+  });
+
+  it('huge cap: a non-converging loop is refused past the reduced 3-round cap', () => {
+    // A huge diff caps at 3 rounds. Rounds 1-3 never converge (every chunk
+    // keeps yielding), so round 4 is refused at the cap: exit 4, nothing
+    // built, and — the robustness half — a marker compose-review caps on,
+    // so the verdict is capped whether or not the orchestrator relays.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    const out = runRound(4);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(4)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 3');
+    // The load-bearing tail rules — the same verify-only / compose-floor
+    // contract the budget message's test pins and SKILL.md's round-cap
+    // bullet mirrors; a reword that drops any of these silently loosens
+    // the termination contract, so pin each.
+    expect(msg).toContain('agent-prompt --role verify');
+    expect(msg).toContain('never a hand-rolled agent');
+    expect(msg).toContain('compose floor');
+    expect(msg).toContain('Do NOT re-verify findings already');
+    // The wait-bound and no-fresh-pass clauses too — the budget message's
+    // test pins the same two for the sibling refusal; one bounded-tail
+    // protocol, both pin both.
+    expect(msg).toContain('stop waiting on any verifier batch still out');
+    expect(msg).toContain('invent a fresh re-verification pass');
+    // The marker is on disk so compose-review caps without the relay.
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+    expect(readBudgetStop(plan)?.cap).toBe(3);
+  });
+
+  it('huge cap: a --chunk build past the cap is refused too — the per-chunk gate', () => {
+    // The round-cap gate must fire on the per-chunk call site, not only
+    // through --all-chunks: a huge-diff review whose rounds are built or
+    // repaired per chunk would otherwise admit round 4+ against the cap and
+    // run ~90-minute rounds in the exact timeout band this cap sheds. Rounds
+    // 1-3 are built (non-converging), then a `--chunk 13 --round 4` build —
+    // an unadmitted round, so its first chunk build IS the round's admission
+    // — must be refused at the cap, writing the round-cap marker.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 4,
+    });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(keysOf(4)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 3');
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+    expect(readBudgetStop(plan)?.cap).toBe(3);
+    // The refusal precedes admission — no round-4 stamp is left behind.
+    expect(readRoundStamps(plan).some((s) => s.round === 4)).toBe(false);
+  });
+
+  it('huge cap: a chunkless single build past the cap is refused too — the 3A gate', () => {
+    // The chunkless whole-diff gate (Step 5's 3A single auditor) is the third
+    // call site the cap passes through. No history is needed — round 4 > cap
+    // 3 alone refuses it, exit 4 with the round-cap marker.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      round: 4,
+    });
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 3');
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+    expect(readBudgetStop(plan)?.cap).toBe(3);
+  });
+
+  it('the default 5-round cap is enforced by the builder, not just prose', () => {
+    // Pins the general ROUND CAP enforcement: the mutation `round > cap`
+    // → `round > cap && cap === 1` (a sixth round builds) fails here.
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(4, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(5, { 13: YIELD, 14: YIELD, 15: YIELD });
+    const out = runRound(6);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(6)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 5');
+  });
+
   it('all retired and none due: exit 5, CONVERGED, nothing built, nothing stamped', () => {
     answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
     answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
@@ -3234,6 +3686,165 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     // was never admitted, and must not skew the next admission's estimate.
     expect(readRecordedPrompts(plan).size).toBe(recordsBefore);
     expect(readRoundStamps(plan)).toHaveLength(stampsBefore);
+  });
+
+  it('huge cap: a converged past-cap round exits 5, not the cap — convergence outranks it', () => {
+    // The ordering the PR documents four times (the convergence check runs
+    // BEFORE the round-cap gate) with no test pin: hoisting the cap check
+    // above it survives the whole suite. Round 5 is past the cap of 3, but
+    // its schedule has converged (every chunk twice-dry, odd round → all
+    // skipped), so it must exit 5 CONVERGED with NO marker — not exit 4 at
+    // the cap. History that lands convergence on an odd past-cap round: 13/14
+    // dry in rounds 1-2 (retire at 3), 15 whiffs round 1 then goes dry in
+    // 2-3, so round 3 (odd) builds only 15 and nothing converges before 5.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY }); // 13,14 retired (odd → skipped); only 15 built
+    expect(keysOf(3)).toHaveLength(1);
+
+    const out = runRound(5); // 5 > cap 3, but the schedule has converged
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    // Convergence outranks the cap: no round-cap refusal, no marker written.
+    expect(readBudgetStop(plan)).toBeNull();
+  });
+
+  it('huge cap: a CONVERGED exit clears a stale same-run round-cap marker', () => {
+    // Retry-after-refusal: round 4 (even) is refused at the cap — every
+    // retired chunk is DUE a cold check, so the schedule is not converged and
+    // 4 > 3 refuses, writing the marker. The orchestrator then asks for round
+    // 5, which converges. Nothing else unlinks budget-stop.json, so without
+    // the converged-branch clear the stale marker caps a verdict that
+    // legitimately converged.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    runRound(4); // even → retired chunks due cold checks → not converged → cap refuses
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+
+    process.exitCode = undefined;
+    const out = runRound(5); // odd → all skipped → converged
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    // The marker channel is closed AND the relay channel is recalled: the
+    // refusal instructed the orchestrator to add the stop entry to
+    // unreviewedDimensions, and nothing but this sentence removes it once
+    // the marker (and with it compose-review's dedup splice) is gone.
+    expect(msg).toContain('remove it now — this convergence supersedes');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
+  });
+
+  it('huge cap: a CONVERGED exit clears a stale same-run time-budget marker too', () => {
+    // The clear is cause-blind, but both sibling clear tests produce their
+    // marker via the round-cap gate — a cause-conditional clear
+    // (`if (readBudgetStop(p)?.cause === 'round-cap') clearBudgetStop(p)`)
+    // passes them both and leaves a time-budget marker capping a verdict
+    // the audit legitimately converged. Cap 5 so even round 4 reaches the
+    // TIME gate instead of the cap gate: cold checks due → not converged →
+    // admitted at the cap, refused at the near deadline. Round 5 then
+    // converges and must clear the time-budget marker the same way.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 5 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    runRound(4); // even → not converged → 4 <= cap 5 → refused at the time gate
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.entry).toBe(
+      'reverse audit — stopped before round 4 by the review time budget',
+    );
+
+    process.exitCode = undefined;
+    const out = runRound(5); // odd → all skipped → converged, before any gate
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale time-budget marker is cleared
+  });
+
+  it('huge cap: a converged --chunk retry clears the stale cap marker too', () => {
+    // The --chunk gate threads the same convergence-first path with its own
+    // `args.plan`, but only the --all-chunks site's marker clear is pinned
+    // above: a converged per-chunk retry after a cap refusal must exit 5
+    // CONVERGED and clear the stale marker exactly like it, not exit 4 at
+    // the cap (the ordering) and not leave the marker capping a verdict the
+    // audit legitimately converged (the clear). Same retry-after-refusal
+    // history as the --all-chunks test.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, budget: { reverseAuditRounds: 3 } }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    auditorTranscript(recordOf(1, 13), DRY);
+    auditorTranscript(recordOf(1, 14), DRY);
+    auditorTranscript(recordOf(1, 15), WHIFF, { calls: 0 });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(3, { 15: DRY });
+
+    runRound(4); // even → retired chunks due cold checks → cap refuses
+    expect(process.exitCode).toBe(4);
+    expect(readBudgetStop(plan)?.cause).toBe('round-cap');
+
+    process.exitCode = undefined;
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 5,
+    });
+    expect(process.exitCode).toBe(5);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(keysOf(5)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(readBudgetStop(plan)).toBeNull(); // the stale marker is cleared
   });
 
   it('a cold-check-only round is still built, admitted and stamped', () => {
@@ -3462,5 +4073,413 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .map((c) => c[0])
       .join('\n');
     expect(msg).toContain('CONVERGED');
+  });
+});
+
+describe('the tool budget in the briefs', () => {
+  // The untyped literal exists so tests can spread it (`as never` cannot be
+  // spread); `budgetPlan` is the cast the builders take.
+  const budgetPlanObj = {
+    ...PLAN,
+    // Role 0 refuses to build without a PR to check issues against.
+    prNumber: '6771',
+    ownerRepo: 'QwenLM/qwen-code',
+    files: [
+      {
+        path: 'big.ts',
+        kind: 'source',
+        heavy: true,
+        addedLines: 300,
+        removedLines: 100,
+      },
+    ],
+    budget: {
+      inlineAngles: 4,
+      sweep: true,
+      specialistCap: 2,
+      verifyShard: 8,
+      agentToolBudget: 42,
+    },
+  };
+  const budgetPlan = budgetPlanObj as never;
+
+  it('scopes a chunk agent to its own territory, not the whole plan', () => {
+    // Chunk 13 is 217 lines / 9,000 chars: allowance min(plan 42, 30+217/20
+    // = 40) = 40, plus its reading list (brief + one diff page). Handing it
+    // the whole-diff number instead keeps exactly the wandering headroom the
+    // budget exists to cut.
+    expect(buildChunkAgentPrompt(budgetPlan, 13)).toContain(
+      'About **42 tool calls**',
+    );
+    // Chunk 14's 40,000 chars take two reads to page through: brief + two
+    // pages ride on top of its 38-call allowance.
+    expect(buildChunkAgentPrompt(budgetPlan, 14)).toContain(
+      'About **41 tool calls**',
+    );
+  });
+
+  it('an UNCOVERABLE chunk gets no budget block at all', () => {
+    // Chunk 15's instruction is to return the exact `Uncoverable:` line and
+    // stop. A budget block telling it to "write your findings from the
+    // evidence in hand" beside that is two contradicting masters — and an
+    // agent following the budget's format never matches the uncoverable
+    // parser, turning a disclosed gap into a hard coverage failure.
+    const p = buildChunkAgentPrompt(budgetPlan, 15);
+    expect(p).toContain('Uncoverable: chunk 15');
+    expect(p).not.toContain('Tool budget');
+  });
+
+  it('gives a whole-diff role the plan allowance plus its reading list', () => {
+    // 42 from the plan + its brief + every chunk's PAGES (1 + 2 + 3 = 6
+    // for the fixture's 9k/40k/60k-char chunks) — an oversized chunk's
+    // `isTruncated` paging must not be paid out of the analysis allowance.
+    for (const role of ['1a', '2', '6b'] as const) {
+      expect(buildRoleBrief(budgetPlan, role)).toContain(
+        'About **49 tool calls**',
+      );
+    }
+    // The chunkless (Step 3A) reverse auditor also owes the cumulative
+    // findings list its brief orders read in full — same three pages the
+    // chunk-scoped branch counts, keyed on `acceptsFindings`.
+    expect(buildRoleBrief(budgetPlan, 'reverse-audit')).toContain(
+      'About **52 tool calls**',
+    );
+  });
+
+  it('a chunk-scoped reverse auditor gets its chunk, not the diff', () => {
+    // Chunk 13's 40-call allowance + brief + one diff page + the cumulative
+    // findings list its brief orders read in full (measured 65-82 KB).
+    expect(
+      buildRoleBrief(budgetPlan, 'reverse-audit', { chunk: 13 }),
+    ).toContain('About **45 tool calls**');
+  });
+
+  it('an invariant agent budgets on its file, reads scaled by its size', () => {
+    // 300 added + 100 removed lines: territory allowance min(42, 30+400/20
+    // = 50) = 42, plus reads max(4, 2 + ceil(300/500)) = 4. The reads floor
+    // at the old flat 4 and grow with the added lines a heavy rewrite pages
+    // through — a flat count once told a 400 KB file's agent its mandatory
+    // paging was already overspending.
+    expect(
+      buildRoleBrief(budgetPlan, 'invariant-a', { file: 'big.ts' }),
+    ).toContain('About **46 tool calls**');
+  });
+
+  it('invariant reads scale with the file, past the floor', () => {
+    // The fixture sits ABOVE both thresholds it pins — a +300-line file's
+    // reads land on the flat-4 floor, so a mutant deleting the scaling
+    // term entirely stayed green. 3,200 post-change lines: reads = 2 + 7 =
+    // 9, territory 3000 → min(plan 60, cap 60) = 60 → 69 (a flat 4 gives
+    // 64).
+    const big = {
+      ...budgetPlanObj,
+      files: [
+        {
+          path: 'huge.ts',
+          kind: 'source',
+          heavy: true,
+          addedLines: 3000,
+          removedLines: 0,
+          fileLines: 3200,
+          addedRanges: [{ start: 10, end: 3010 }],
+          diffRange: { startLine: 1, endLine: 3600 },
+        },
+      ],
+      budget: { agentToolBudget: 60 },
+    } as never;
+    expect(buildRoleBrief(big, 'invariant-a', { file: 'huge.ts' })).toContain(
+      'About **69 tool calls**',
+    );
+  });
+
+  it('removed lines are territory too — a gutting rewrite is not 200 lines', () => {
+    // added 200 / removed 800: territory 1000 → allowance 60. An
+    // added-only derivation would hand this launch 40.
+    const gutted = {
+      ...budgetPlanObj,
+      files: [
+        {
+          path: 'gut.ts',
+          kind: 'source',
+          heavy: true,
+          addedLines: 200,
+          removedLines: 800,
+          fileLines: 400,
+          addedRanges: [{ start: 1, end: 200 }],
+          diffRange: { startLine: 1, endLine: 1100 },
+        },
+      ],
+      budget: { agentToolBudget: 60 },
+    } as never;
+    expect(buildRoleBrief(gutted, 'invariant-a', { file: 'gut.ts' })).toContain(
+      'About **64 tool calls**',
+    );
+  });
+
+  it('a volume-heavy file budgets its paging from fileLines, not added lines', () => {
+    // A file can go heavy by VOLUME: ~450 added lines in a 9,000-line
+    // file. The brief mandates paging the WHOLE post-change file — 18
+    // pages, not the 1 the added lines suggest. reads = max(4, 2 + 18) =
+    // 20; territory 450 → min(60, 52) = 52 → 72. The added-only estimate
+    // told exactly this agent its mandatory reading was overspending (56).
+    const voluminous = {
+      ...budgetPlanObj,
+      files: [
+        {
+          path: 'vol.ts',
+          kind: 'source',
+          heavy: true,
+          addedLines: 450,
+          removedLines: 0,
+          fileLines: 9000,
+          addedRanges: [{ start: 100, end: 550 }],
+          diffRange: { startLine: 1, endLine: 700 },
+        },
+      ],
+      budget: { agentToolBudget: 60 },
+    } as never;
+    expect(
+      buildRoleBrief(voluminous, 'invariant-a', { file: 'vol.ts' }),
+    ).toContain('About **72 tool calls**');
+  });
+
+  it('chunk territory is source-weighted, like the plan allowance it mirrors', () => {
+    // A 640-line chunk that is 80 source lines + 560 lockfile lines is
+    // not 640 lines of risk: weighted = 640·(80 + 560/8)/640 = 150 →
+    // allowance min(42, 30 + 7) = 37, reads 2 → 39. Raw-lines scaling
+    // handed this chunk min(42, 60) = 42 — and the inversion the finding
+    // measured: the generated chunk out-earning the source one.
+    const mixed = {
+      ...budgetPlanObj,
+      files: [
+        { path: 'src/real.ts', kind: 'source' },
+        { path: 'package-lock.json', kind: 'generated' },
+      ],
+      chunks: [
+        {
+          id: 21,
+          startLine: 1,
+          endLine: 640,
+          lines: 640,
+          chars: 20_000,
+          maxLineChars: 120,
+          files: [
+            { path: 'src/real.ts', newStart: 1, newEnd: 80 },
+            { path: 'package-lock.json', newStart: 1, newEnd: 560 },
+          ],
+        },
+      ],
+    } as never;
+    expect(buildChunkAgentPrompt(mixed, 21)).toContain(
+      'About **39 tool calls**',
+    );
+  });
+
+  it('an Agent 8 specialist is budgeted like any other whole-diff finder', () => {
+    // Specialists launch through buildWholeDiffBlock (its one consumer);
+    // without this they were the one launch class that could still wander
+    // unbudgeted. Its domain brief is appended inline, so its reading list
+    // is the diff pages alone — all six of them, per chunk size.
+    expect(buildWholeDiffBlock(budgetPlan)).toContain(
+      'About **48 tool calls**',
+    );
+  });
+
+  it('budgets every role in BRIEFS except the ones declaring budgetExempt', () => {
+    // Walked from the runtime roster, not a hand-copied list: a role added
+    // later must DECLARE its exemption at its brief, where the reason lives,
+    // or it gets the ceiling — it cannot silently join the exempt set, and
+    // the exempt set itself is pinned below.
+    const roles = Object.keys(BRIEFS) as Array<keyof typeof BRIEFS>;
+    const budgeted = Object.fromEntries(
+      roles.map((role) => {
+        const opts = String(role).startsWith('invariant-')
+          ? { file: 'big.ts' }
+          : {};
+        return [
+          role,
+          buildRoleBrief(budgetPlan, role, opts).includes('Tool budget'),
+        ];
+      }),
+    );
+    expect(budgeted).toEqual(
+      Object.fromEntries(
+        roles.map((role) => [role, !BRIEFS[role].budgetExempt]),
+      ),
+    );
+    const exempt = roles.filter((r) => BRIEFS[r].budgetExempt).sort();
+    expect(exempt).toEqual(['0', '7', 'verify']);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['a string', '42'],
+  ])('a plan whose ceiling is %s gets no ceiling at all', (_name, value) => {
+    // The plan is parsed off disk with an unchecked cast; a garbled field
+    // must fall back exactly like an absent one — toward more coverage —
+    // not render `About **NaN tool calls**` into a brief.
+    const garbled = {
+      ...PLAN,
+      budget: { agentToolBudget: value },
+    } as never;
+    expect(buildChunkAgentPrompt(garbled, 13)).not.toContain('Tool budget');
+    expect(buildRoleBrief(garbled, '1a')).not.toContain('Tool budget');
+  });
+
+  it.each([
+    // A version-skewed or hand-edited plan: a positive-but-absurd value is
+    // clamped into the budget's own band, in both directions — 0.5 must not
+    // become a three-call brief, 100000 must not remove the ceiling.
+    ['a fraction', 0.5, 37],
+    ['oversized', 100_000, 67],
+  ])(
+    'a plan whose ceiling is %s is clamped, not obeyed',
+    (_name, value, expected) => {
+      const skewed = {
+        ...budgetPlanObj,
+        budget: { agentToolBudget: value },
+      } as never;
+      expect(buildRoleBrief(skewed, '1a')).toContain(
+        `About **${expected} tool calls**`,
+      );
+    },
+  );
+
+  it('a chunk entry missing lines and chars still renders finite numbers', () => {
+    // `chunkFrom` validates only startLine/endLine; the twin guard at the
+    // role-brief call site existed and this one did not — a malformed chunk
+    // must degrade to the scoped floor, never to `About **NaN tool calls**`
+    // and never to inheriting the whole-diff headroom.
+    const garbledChunk = {
+      ...budgetPlanObj,
+      chunks: [
+        {
+          id: 16,
+          startLine: 1,
+          endLine: 2,
+          files: [{ path: 'a.ts', newStart: 1, newEnd: 2 }],
+        },
+      ],
+    } as never;
+    const p = buildChunkAgentPrompt(garbledChunk, 16);
+    expect(p).not.toContain('NaN');
+    // Floor allowance 30 + brief + one page = 32 — not the whole-diff 42.
+    expect(p).toContain('About **32 tool calls**');
+  });
+
+  it('a plan without the field falls back to no ceiling — more coverage, never less', () => {
+    expect(buildChunkAgentPrompt(PLAN as never, 13)).not.toContain(
+      'Tool budget',
+    );
+    expect(buildRoleBrief(PLAN as never, '1a')).not.toContain('Tool budget');
+  });
+
+  it('restates the recall rule and fixes the disclosure format', () => {
+    // Self-contained on purpose — a chunk brief has no RECALL section, so
+    // the sentence must carry the rule instead of citing it; and without
+    // the fixed format, check-coverage has nothing to parse.
+    const brief = buildRoleBrief(budgetPlan, '1a');
+    expect(brief).toContain('never suppresses a finding');
+    expect(brief).toContain('Budget gap: <the check>');
+    expect(brief).not.toContain('as the recall rule requires');
+  });
+});
+
+describe('the verify gate — compose survives a budget stop', () => {
+  const dirs: string[] = [];
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+  });
+  afterEach(() => {
+    delete process.env[DEADLINE_ENV];
+    delete process.env[COMPOSE_FLOOR_ENV];
+    process.exitCode = undefined;
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function verifyCall(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verifygate-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.md');
+    // Non-empty: an empty verify findings file throws earlier, before the gate.
+    writeFileSync(findings, '- **[Critical]** x.ts:1 — y — [unverified]');
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'verify',
+      findings,
+    });
+    return plan;
+  }
+
+  it('refuses a verify build below the compose floor: exit 4, no prompt', () => {
+    // 60s left — far below the ~20-minute compose floor.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const plan = verifyCall();
+
+    expect(process.exitCode).toBe(4);
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(0);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('VERIFY BUDGET:');
+    expect(msg).toContain('compose');
+    expect(msg).toContain('[unverified]');
+    // A refused verifier is NOT a reverse-audit stop: it must write no
+    // budget-stop marker (compose-review would otherwise post a false
+    // "reverse audit — stopped before round N" on a run whose audit
+    // converged and only the verifier hit the floor) and no admission stamp
+    // (a stray stamp would price later rounds from a refusal timestamp).
+    expect(readBudgetStop(plan)).toBeNull();
+    expect(readRoundStamps(plan)).toHaveLength(0);
+  });
+
+  it('validation beats the gate: a malformed verify call under the floor throws, not exit 4', () => {
+    // The gate sits AFTER argument validation, like the RA gate. A budgeted
+    // run whose orchestrator issues a broken verify call must get the
+    // validation error naming the bug, not a VERIFY BUDGET termination rule
+    // it would mistake for a budget stop.
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verifyval-'));
+    dirs.push(dir);
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    // --findings omitted: a malformed verify call.
+    expect(() =>
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+      }),
+    ).toThrow(/--findings/);
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStderrLine as unknown as Mock).mock.calls).toHaveLength(0);
+  });
+
+  it('builds the verifier normally when the deadline is far', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 7200);
+    const plan = verifyCall();
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    expect(readRecordedPrompts(plan).size).toBe(1);
+  });
+
+  it('builds the verifier when there is no deadline at all — every local run', () => {
+    verifyCall();
+    expect(process.exitCode).toBeUndefined();
+    expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+  });
+
+  it('the floor-0 escape hatch disables the verify gate', () => {
+    process.env[DEADLINE_ENV] = String(Math.floor(Date.now() / 1000) + 60);
+    process.env[COMPOSE_FLOOR_ENV] = '0';
+    const plan = verifyCall();
+    expect(process.exitCode).toBeUndefined();
+    expect(readRecordedPrompts(plan).size).toBe(1);
   });
 });

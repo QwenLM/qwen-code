@@ -157,6 +157,31 @@ const detail = await q.getContextUsage(true);
 await q.close();
 ```
 
+`interrupt()` cancels only the active turn. For a multi-turn query created with
+an async iterable prompt, the query and its input stream remain open, so later
+messages from the iterable are processed normally. Use `close()` or abort the
+configured `AbortController` when you want to end the entire session.
+
+## Daemon caller-supplied session IDs
+
+`DaemonClient.createOrAttachSession` accepts an optional `sessionId` for callers that must persist an identity before session creation:
+
+```typescript
+import { DaemonClient } from '@qwen-code/sdk';
+
+const daemon = new DaemonClient({ baseUrl: 'http://127.0.0.1:4170' });
+const session = await daemon.createOrAttachSession({
+  workspaceCwd: '/path/to/project',
+  sessionId: '550E8400-E29B-41D4-A716-446655440000',
+});
+
+console.log(session.sessionId); // 550e8400-e29b-41d4-a716-446655440000
+```
+
+The SDK requires the daemon's `session_id_override` capability before sending the mutation. REST mode serializes `sessionId` directly; an active ACP adapter maps it to `session/new._meta["qwen-code/sessionId"]`. The SDK verifies the success response and throws `DaemonSessionIdProtocolError` if the daemon returns a different ID.
+
+This option always creates a new thread session and is not an idempotent attach. If the create outcome is ambiguous, use the known ID with load or resume. Omitting the option preserves the existing create-or-attach behavior.
+
 ## Permission Modes
 
 The SDK supports different permission modes for controlling tool execution:
