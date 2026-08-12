@@ -309,7 +309,12 @@ describe('GeminiChat', async () => {
             functionResponse: {
               id: 's0',
               name: 'skill',
-              response: { output: 'skill body content '.repeat(20) },
+              response: {
+                output: buildSkillLlmContent(
+                  '/demo',
+                  'skill body content '.repeat(20),
+                ),
+              },
             },
           },
         ],

@@ -101,7 +101,6 @@ import {
 import {
   microcompactHistory,
   buildCallIdToSkillName,
-  MICROCOMPACT_CLEARED_MESSAGE,
   type MicrocompactMeta,
 } from '../services/microcompaction/microcompact.js';
 import {
@@ -2190,14 +2189,13 @@ export class GeminiChat {
         const output = (fr.response as { output?: unknown } | undefined)?.[
           'output'
         ];
-        // Skip results an earlier rewrite already blanked — re-blanking
-        // only churns bytes (and prompt cache) for zero savings. Also
-        // skip error-shaped responses: they carry no body and rewriting
-        // them into a success-shaped placeholder would discard the error.
+        // Only rewrite a real skill body or dedup confirmation —
+        // error texts, placeholders, and cleared messages are left
+        // intact (rewriting them would discard diagnostics or churn
+        // bytes for zero savings).
         if (
-          fr.response?.['error'] !== undefined ||
-          (typeof output === 'string' &&
-            (output === placeholder || output === MICROCOMPACT_CLEARED_MESSAGE))
+          typeof output !== 'string' ||
+          (!isSkillBodyOutput(output) && !isSkillDedupConfirmation(output))
         ) {
           return part;
         }
