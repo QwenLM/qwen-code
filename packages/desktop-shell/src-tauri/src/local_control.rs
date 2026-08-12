@@ -468,6 +468,43 @@ fn primary_lan_ipv4() -> Result<LocalNetwork, String> {
     select_lan_ipv4(routed_ipv4().ok(), NetworkInterface::show().ok())
 }
 
+fn is_virtual_interface(name: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        name.starts_with("utun")
+            || name.starts_with("llw")
+            || name.starts_with("awdl")
+            || name.starts_with("bridge")
+            || name.starts_with("gif")
+            || name.starts_with("stf")
+            || name.starts_with("ap")
+            || name.starts_with("XHC")
+            || name.starts_with("pdp_ip")
+            || name.contains("VPN")
+            || name.contains("TAP")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        name.starts_with("docker")
+            || name.starts_with("veth")
+            || name.starts_with("br-")
+            || name.starts_with("virbr")
+            || name.contains("tun")
+            || name.contains("tap")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        name.contains("Hyper-V")
+            || name.starts_with("vEthernet")
+            || name.contains("VPN")
+            || name.contains("TAP")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
+
 fn select_lan_ipv4(
     routed: Option<Ipv4Addr>,
     interfaces: Option<Vec<NetworkInterface>>,
@@ -484,6 +521,7 @@ fn select_lan_ipv4(
                     .mac_addr
                     .as_deref()
                     .is_some_and(|mac| mac != "00:00:00:00:00:00")
+                && !is_virtual_interface(&interface.name)
         })
         .flat_map(|interface| interface.addr)
         .filter_map(|address| match address {
@@ -986,5 +1024,40 @@ mod tests {
             "127.0.0.1:4170",
         );
         assert!(runtime_socket_addr(&Url::parse("http://0.0.0.0:4170/").expect("url")).is_err());
+    }
+
+    #[test]
+    fn excludes_virtual_interfaces() {
+        let routed = Ipv4Addr::new(192, 168, 1, 20);
+        let interface = |name, address, netmask| {
+            NetworkInterface::new_afinet(name, address, netmask, Some(address), 1, false)
+                .with_mac_addr(Some("00:11:22:33:44:55".to_string()))
+        };
+        let en0 = interface(
+            "en0",
+            routed,
+            Some(Ipv4Addr::new(255, 255, 255, 0)),
+        );
+        // A virtual VPN adapter with the same routed address must not win
+        // over the physical LAN.
+        let virtual_name = if cfg!(target_os = "macos") {
+            "utun3"
+        } else if cfg!(target_os = "windows") {
+            "vEthernet (Default Switch)"
+        } else {
+            "tun0"
+        };
+        let virtual_interface = interface(
+            virtual_name,
+            Ipv4Addr::new(100, 64, 0, 10),
+            Some(Ipv4Addr::new(255, 192, 0, 0)),
+        );
+        let result = select_lan_ipv4(
+            Some(Ipv4Addr::new(100, 64, 0, 10)),
+            Some(vec![en0, virtual_interface]),
+        )
+        .expect("physical LAN");
+        assert_eq!(result.address, routed);
+        assert_eq!(result.netmask, Ipv4Addr::new(255, 255, 255, 0));
     }
 }

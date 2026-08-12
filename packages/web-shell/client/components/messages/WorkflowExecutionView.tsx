@@ -209,7 +209,9 @@ function downloadWorkflowHistory(
         runtimeMs: run.runtimeMs,
         currentPhase: run.currentPhase,
         phaseVisits: run.phaseVisits,
-        dispatches: run.dispatches,
+        dispatches: run.dispatches.map(
+          ({ prompt: _prompt, ...dispatch }) => dispatch,
+        ),
         agentsDispatched: run.agentsDispatched,
         agentsCompleted: run.agentsCompleted,
         tokensSpent: run.tokensSpent,

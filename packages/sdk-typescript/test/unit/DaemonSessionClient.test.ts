@@ -300,6 +300,7 @@ describe('DaemonSessionClient', () => {
           state: { configOptions: [] },
           hasActivePrompt: true,
           lastEventId: 42,
+          eventEpoch: 'epoch-42',
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 42, v: 1, type: 'session_update', data: {} }],
         });
@@ -319,6 +320,10 @@ describe('DaemonSessionClient', () => {
     expect(session.clientId).toBe('client-1');
     expect(session.hasActivePrompt).toBe(true);
     expect(session.state).toEqual({ configOptions: [] });
+    expect(session.eventEpoch).toBe('epoch-42');
+    expect(session.replaySnapshotComplete).toBe(true);
+    expect(session.replayPartial).toBe(false);
+    expect(session.replayError).toBeUndefined();
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
@@ -381,6 +386,31 @@ describe('DaemonSessionClient', () => {
     expect(session.replayDegraded).toBe(true);
   });
 
+  it('reports incomplete and partial load replay snapshots', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          compactedReplay: [],
+          partial: true,
+          replayError: 'journal read failed',
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+
+    expect(session.replaySnapshotComplete).toBe(false);
+    expect(session.replayPartial).toBe(true);
+    expect(session.replayError).toBe('journal read failed');
+  });
+
   it('resumes an existing daemon session using server watermark', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
@@ -409,6 +439,7 @@ describe('DaemonSessionClient', () => {
     expect(session.state).toEqual({ modes: null });
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
     expect(session.replaySnapshot.liveJournal).toHaveLength(0);
+    expect(session.replaySnapshotComplete).toBe(false);
     for await (const _event of session.events()) {
       /* empty */
     }

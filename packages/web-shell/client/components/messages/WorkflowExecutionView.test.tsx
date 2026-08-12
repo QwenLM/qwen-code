@@ -558,10 +558,17 @@ describe('WorkflowExecutionView', () => {
       reader.readAsText(blob);
     });
     const exported = JSON.parse(text) as {
-      runs: Array<{ id: string; events?: unknown[] }>;
+      runs: Array<{
+        id: string;
+        events?: unknown[];
+        dispatches: Array<Record<string, unknown>>;
+      }>;
     };
     expect(exported.runs.map((run) => run.id)).toEqual(['wf-failed']);
     expect(exported.runs[0]?.events).toEqual(failed.events);
+    expect(exported.runs[0]?.dispatches).not.toContainEqual(
+      expect.objectContaining({ prompt: expect.anything() }),
+    );
 
     act(() => {
       filter!.value = 'cancelled';
