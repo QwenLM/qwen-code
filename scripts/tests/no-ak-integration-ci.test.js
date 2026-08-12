@@ -5,7 +5,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -28,13 +34,23 @@ describe('no-AK integration CI wiring', () => {
         path.join(ROOT, '.github/workflows/ci.yml'),
         'utf8',
       );
-      const testStep = getWorkflowStep(
-        getWorkflowJob(workflow, 'test'),
-        'Run tests and generate reports',
+      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+        (jobName) => {
+          const testStep = getWorkflowStep(
+            getWorkflowJob(workflow, jobName),
+            'Run tests and generate reports',
+          );
+          const start = testStep.indexOf('export TMPDIR=');
+          expect(start, `${jobName}: TMPDIR routing block`).toBeGreaterThanOrEqual(
+            0,
+          );
+          const end = testStep.indexOf('\n          ( while true', start);
+          expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
+          return testStep.slice(start, end);
+        },
       );
-      const start = testStep.indexOf('export TMPDIR=');
-      const end = testStep.indexOf('\n          ( while true', start);
-      const routeTemp = testStep.slice(start, end);
+      expect(new Set(routingBlocks)).toHaveLength(1);
+      const [routeTemp] = routingBlocks;
       const root = mkdtempSync(path.join(tmpdir(), 'ci-temp-routing-'));
       const longRunnerTemp = path.join(root, 'x'.repeat(180));
 
@@ -60,6 +76,7 @@ describe('no-AK integration CI wiring', () => {
 
         expect(resolvedTemp).toBe(routedTemp);
         expect(routedTemp).toMatch(/^\/var\/tmp\/qwen-ci-/);
+        expect(existsSync(routedTemp)).toBe(false);
         expect(
           Buffer.byteLength(
             path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
