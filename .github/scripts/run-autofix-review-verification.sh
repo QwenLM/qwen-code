@@ -15,9 +15,14 @@ set -eo pipefail
 # a timeout. Every git this script or its checks spawn (vitest fixture
 # repos included) reads a per-run throwaway global config instead — seeded
 # with the workspace safe.directory actions/checkout put in the real one —
-# and no system config. The redirect also keeps a branch-authored
-# `git config --global` from writing durable state onto the host: it lands
-# in the throwaway file and dies with the run.
+# and no system config — any system-level git setting the checks ever
+# come to depend on (a CA bundle, a proxy) must be replicated via per-job
+# env, not /etc/gitconfig, because the redirect silently drops it. The
+# redirect also keeps a branch-authored `git config --global` from writing
+# durable state onto the host: it lands in the throwaway file and dies
+# with the run. Enforcement is inherited-env only — branch code writing
+# the real file directly bypasses it, which is why the PAT-bearing steps
+# re-run resanitize-git-config.sh afterwards.
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
 : > "${GIT_CONFIG_GLOBAL}"

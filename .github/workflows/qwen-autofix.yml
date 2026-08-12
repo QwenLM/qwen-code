@@ -761,10 +761,39 @@ jobs:
       - name: 'Sanitize workspace git config'
         run: |-
           set -uo pipefail
+          # The runner USER's global config is the same exec surface as the
+          # workspace config below: pool jobs run human-authored code (branch
+          # tests) as this user, and a stray `git config --global` outlives
+          # the job on the persistent pool. Measured: run 31516789251 found
+          # diff.external=global-driver in ~/.gitconfig, failing per-hunk
+          # probe tests in every later verification gate on this host. The
+          # gates read a throwaway global config now, so this scrub is host
+          # hygiene plus protection for THIS job's PAT-bearing git steps,
+          # which do read the real file. It runs BEFORE the .git early-exit:
+          # host hygiene owes nothing to the workspace existing. Denylist
+          # here, not the local allowlist below: the file belongs to the
+          # pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which arms
+          # the command-executing ext:: transport a kept url.insteadOf could
+          # redirect to). Subsection slots are `.+`, never `[^.]+`: git
+          # subsection names may contain dots (`[diff "a.b"] command`
+          # flattens to diff.a.b.command and would slip past `[^.]+`);
+          # overmatching is harmless in a denylist. Guarded `|| true` twice:
+          # no global file and no match are both normal, and either would
+          # kill the step under the default `bash -e` + pipefail otherwise.
+          # The same denylist lives in resanitize-git-config.sh, which the
+          # PAT-bearing steps re-run AFTER branch code executed on the host;
+          # the workflow contract tests pin every copy byte-identical — edit
+          # them together.
+          { git config --global --name-only --list 2>/dev/null || true; } \
+            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
+            echo "no prior workspace; nothing local to sanitize"
             exit 0
           fi
           # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
@@ -791,26 +820,6 @@ jobs:
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
-          # The runner USER's global config is the same exec surface: pool
-          # jobs run human-authored code (branch tests) as this user, and a
-          # stray `git config --global` outlives the job on the persistent
-          # pool. Measured: run 31516789251 found diff.external=global-driver
-          # in ~/.gitconfig, failing per-hunk probe tests in every later
-          # verification gate on this host. The gates read a throwaway global
-          # config now, so this scrub is host hygiene plus protection for
-          # THIS job's PAT-bearing git steps, which do read the real file.
-          # Denylist here, not the local allowlist above: the file belongs to
-          # the pool image, so routing/credential keys (http.*, url.*,
-          # credential.*) may be deliberate infra and are left alone — only
-          # the command-execution families go, plus include/includeIf (which
-          # can pull any of them back in) and protocol.ext.allow (which
-          # arms the command-executing ext:: transport a kept url.insteadOf
-          # could redirect to). Guarded `|| true` twice: no global file and
-          # no match are both normal, and either would kill the step under
-          # the default `bash -e` + pipefail otherwise.
-          { git config --global --name-only --list 2>/dev/null || true; } \
-            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\.[^.]+\.(command|textconv)$|merge\.[^.]+\.driver$|filter\.|alias\.|sequence\.editor$|gpg\.program$|init\.templatedir$|submodule\.[^.]+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
           # unlinked, never swept — a recursive delete of a planted path is
@@ -914,6 +923,7 @@ jobs:
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+          cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
 
       - name: 'Check bot credentials'
         env:
@@ -1574,14 +1584,25 @@ jobs:
             exit 1
           fi
           BRANCH="autofix/issue-${ISSUE}"
+          # The agent and the verification gate ran branch code on the host
+          # since the job-start sanitize; re-scrub the local and global git
+          # config surfaces this PAT-bearing step is about to read. Invoked
+          # from the trusted-base staged copy — the working tree holds the
+          # agent-authored branch at this point.
+          bash "${RUNNER_TEMP}/resanitize-git-config.sh"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config core.hooksPath /dev/null
           # Authenticate the push with a one-shot, host-scoped credential
           # helper via `git -c`: nothing is written to the reused
           # workspace's .git/config (no error path can strand it there),
           # argv holds only the literal ${GITHUB_TOKEN} reference, and the
-          # host scope means it cannot answer a non-GitHub URL.
-          git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+          # host scope means it cannot answer a non-GitHub URL. The leading
+          # empty credential.helper RESETS the inherited helper list first:
+          # helpers run in config order and the first to answer wins, so a
+          # helper planted at any earlier scope would otherwise see the
+          # request (and the env) before ours answers — probe-verified in
+          # the #8961 review.
+          git -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
             push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
@@ -3201,10 +3222,39 @@ jobs:
       - name: 'Sanitize workspace git config'
         run: |-
           set -uo pipefail
+          # The runner USER's global config is the same exec surface as the
+          # workspace config below: pool jobs run human-authored code (branch
+          # tests) as this user, and a stray `git config --global` outlives
+          # the job on the persistent pool. Measured: run 31516789251 found
+          # diff.external=global-driver in ~/.gitconfig, failing per-hunk
+          # probe tests in every later verification gate on this host. The
+          # gates read a throwaway global config now, so this scrub is host
+          # hygiene plus protection for THIS job's PAT-bearing git steps,
+          # which do read the real file. It runs BEFORE the .git early-exit:
+          # host hygiene owes nothing to the workspace existing. Denylist
+          # here, not the local allowlist below: the file belongs to the
+          # pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which arms
+          # the command-executing ext:: transport a kept url.insteadOf could
+          # redirect to). Subsection slots are `.+`, never `[^.]+`: git
+          # subsection names may contain dots (`[diff "a.b"] command`
+          # flattens to diff.a.b.command and would slip past `[^.]+`);
+          # overmatching is harmless in a denylist. Guarded `|| true` twice:
+          # no global file and no match are both normal, and either would
+          # kill the step under the default `bash -e` + pipefail otherwise.
+          # The same denylist lives in resanitize-git-config.sh, which the
+          # PAT-bearing steps re-run AFTER branch code executed on the host;
+          # the workflow contract tests pin every copy byte-identical — edit
+          # them together.
+          { git config --global --name-only --list 2>/dev/null || true; } \
+            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
+            echo "no prior workspace; nothing local to sanitize"
             exit 0
           fi
           # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
@@ -3231,26 +3281,6 @@ jobs:
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
-          # The runner USER's global config is the same exec surface: pool
-          # jobs run human-authored code (branch tests) as this user, and a
-          # stray `git config --global` outlives the job on the persistent
-          # pool. Measured: run 31516789251 found diff.external=global-driver
-          # in ~/.gitconfig, failing per-hunk probe tests in every later
-          # verification gate on this host. The gates read a throwaway global
-          # config now, so this scrub is host hygiene plus protection for
-          # THIS job's PAT-bearing git steps, which do read the real file.
-          # Denylist here, not the local allowlist above: the file belongs to
-          # the pool image, so routing/credential keys (http.*, url.*,
-          # credential.*) may be deliberate infra and are left alone — only
-          # the command-execution families go, plus include/includeIf (which
-          # can pull any of them back in) and protocol.ext.allow (which
-          # arms the command-executing ext:: transport a kept url.insteadOf
-          # could redirect to). Guarded `|| true` twice: no global file and
-          # no match are both normal, and either would kill the step under
-          # the default `bash -e` + pipefail otherwise.
-          { git config --global --name-only --list 2>/dev/null || true; } \
-            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\.[^.]+\.(command|textconv)$|merge\.[^.]+\.driver$|filter\.|alias\.|sequence\.editor$|gpg\.program$|init\.templatedir$|submodule\.[^.]+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
           # unlinked, never swept — a recursive delete of a planted path is
@@ -3512,10 +3542,39 @@ jobs:
       - name: 'Sanitize workspace git config'
         run: |-
           set -uo pipefail
+          # The runner USER's global config is the same exec surface as the
+          # workspace config below: pool jobs run human-authored code (branch
+          # tests) as this user, and a stray `git config --global` outlives
+          # the job on the persistent pool. Measured: run 31516789251 found
+          # diff.external=global-driver in ~/.gitconfig, failing per-hunk
+          # probe tests in every later verification gate on this host. The
+          # gates read a throwaway global config now, so this scrub is host
+          # hygiene plus protection for THIS job's PAT-bearing git steps,
+          # which do read the real file. It runs BEFORE the .git early-exit:
+          # host hygiene owes nothing to the workspace existing. Denylist
+          # here, not the local allowlist below: the file belongs to the
+          # pool image, so routing/credential keys (http.*, url.*,
+          # credential.*) may be deliberate infra and are left alone — only
+          # the command-execution families go, plus include/includeIf (which
+          # can pull any of them back in) and protocol.ext.allow (which arms
+          # the command-executing ext:: transport a kept url.insteadOf could
+          # redirect to). Subsection slots are `.+`, never `[^.]+`: git
+          # subsection names may contain dots (`[diff "a.b"] command`
+          # flattens to diff.a.b.command and would slip past `[^.]+`);
+          # overmatching is harmless in a denylist. Guarded `|| true` twice:
+          # no global file and no match are both normal, and either would
+          # kill the step under the default `bash -e` + pipefail otherwise.
+          # The same denylist lives in resanitize-git-config.sh, which the
+          # PAT-bearing steps re-run AFTER branch code executed on the host;
+          # the workflow contract tests pin every copy byte-identical — edit
+          # them together.
+          { git config --global --name-only --list 2>/dev/null || true; } \
+            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
-            echo "no prior workspace; nothing to sanitize"
+            echo "no prior workspace; nothing local to sanitize"
             exit 0
           fi
           # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
@@ -3542,26 +3601,6 @@ jobs:
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
-          # The runner USER's global config is the same exec surface: pool
-          # jobs run human-authored code (branch tests) as this user, and a
-          # stray `git config --global` outlives the job on the persistent
-          # pool. Measured: run 31516789251 found diff.external=global-driver
-          # in ~/.gitconfig, failing per-hunk probe tests in every later
-          # verification gate on this host. The gates read a throwaway global
-          # config now, so this scrub is host hygiene plus protection for
-          # THIS job's PAT-bearing git steps, which do read the real file.
-          # Denylist here, not the local allowlist above: the file belongs to
-          # the pool image, so routing/credential keys (http.*, url.*,
-          # credential.*) may be deliberate infra and are left alone — only
-          # the command-execution families go, plus include/includeIf (which
-          # can pull any of them back in) and protocol.ext.allow (which
-          # arms the command-executing ext:: transport a kept url.insteadOf
-          # could redirect to). Guarded `|| true` twice: no global file and
-          # no match are both normal, and either would kill the step under
-          # the default `bash -e` + pipefail otherwise.
-          { git config --global --name-only --list 2>/dev/null || true; } \
-            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\.[^.]+\.(command|textconv)$|merge\.[^.]+\.driver$|filter\.|alias\.|sequence\.editor$|gpg\.program$|init\.templatedir$|submodule\.[^.]+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
           # Belt and braces after the config scrub: only delete inside the
           # repository's own git dir. A hooks path resolving anywhere else is
           # unlinked, never swept — a recursive delete of a planted path is
@@ -3655,6 +3694,7 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -3899,7 +3939,7 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            if ! git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+            if ! git -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
               push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
@@ -4818,6 +4858,13 @@ jobs:
             exit 1
           fi
 
+          # The gates ran branch test code on the host (and the sandboxed
+          # agent had the workspace mounted) since the job-start sanitize;
+          # re-scrub the local and global git config surfaces this
+          # PAT-bearing step is about to read. Invoked from the trusted-base
+          # staged copy — the working tree holds the PR branch at this point.
+          bash "${RUNNER_TEMP}/resanitize-git-config.sh"
+
           if [[ "${OUTCOME}" == "fixed" ]]; then
             NEXT_ROUND="$(( ROUND + 1 ))"
             git config --local --unset-all http.https://github.com/.extraheader || true
@@ -4828,8 +4875,10 @@ jobs:
             git config core.hooksPath /dev/null
             # Authenticate push/fetch with a one-shot, host-scoped credential
             # helper via a git_auth wrapper (see Publish PR) — nothing lands
-            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
-            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
+            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference,
+            # and the leading empty credential.helper resets the inherited
+            # helper list so a planted helper never answers first.
+            git_auth() { git -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's

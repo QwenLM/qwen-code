@@ -21,6 +21,8 @@ import { makeGitProbe } from './comment-status.js';
 
 let repo: string;
 let savedCwd: string;
+let home: string;
+let savedEnv: NodeJS.ProcessEnv;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -43,14 +45,30 @@ function commitFile(path: string, content: string, message: string): string {
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'comment-status-probe-'));
+  home = mkdtempSync(join(tmpdir(), 'comment-status-home-'));
+  writeFileSync(join(home, '.gitconfig'), '');
   savedCwd = process.cwd();
+
+  // Isolate the fixture from the user's git environment, like the sibling
+  // integration tests under review/ do (git.integration.test.ts et al.):
+  // a global `commit.gpgsign=true` fails every commitFile for want of a
+  // key, a global `core.hooksPath` executes host-state hooks on each
+  // fixture commit, and a global `diff.external` kills plain `git diff`
+  // (the pollution class observed on a persistent CI runner).
+  savedEnv = { ...process.env };
+  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+  process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
+  process.env['HOME'] = home;
+
   execFileSync('git', ['init', '-q', repo]);
   mkdirSync(join(repo, 'pkg', 'src'), { recursive: true });
 });
 
 afterEach(() => {
   process.chdir(savedCwd);
+  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 });
 
 describe('makeGitProbe (real git)', () => {

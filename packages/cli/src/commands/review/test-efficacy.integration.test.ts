@@ -257,6 +257,22 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
+describe('fixture git-config isolation', () => {
+  it('spawned git reads the throwaway global config, not the host user config', () => {
+    // Tripwire for the beforeEach isolation: if the GIT_CONFIG_GLOBAL /
+    // HOME redirect is ever removed, the sentinel below becomes
+    // unreadable through a child git and this test goes red — instead of
+    // the whole suite going red only on hosts whose real config happens
+    // to be hostile (the incident mode: a leaked global diff.external
+    // killed the per-hunk tests on a persistent CI runner).
+    writeFileSync(join(home, '.gitconfig'), '[qwen]\n\tisolation = sentinel\n');
+    expect(git(repo, 'config', '--global', 'qwen.isolation').trim()).toBe(
+      'sentinel',
+    );
+    expect(process.env['GIT_CONFIG_GLOBAL']).toBe(join(home, '.gitconfig'));
+  });
+});
+
 describe('test-efficacy probe isolation (#6832)', () => {
   it('probes in a disposable worktree and never mutates the shared one', async () => {
     const { wt, base } = scaffoldModifiedPr();
