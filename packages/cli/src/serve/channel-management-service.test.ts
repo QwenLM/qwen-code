@@ -9,12 +9,32 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { PairingStore } from '@qwen-code/channel-base';
 import type { CreatePairingRequestResult } from '@qwen-code/channel-base';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    readAll: vi.fn(() => ({})),
+    get: vi.fn(),
+    set: mockChannelStateStoreSet,
+    setMany: vi.fn(),
+  })),
+);
+
+vi.mock('../commands/channel/channel-state-store.js', () => ({
+  ChannelStateStore: mockChannelStateStore,
+}));
+
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
 import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+
+beforeEach(() => {
+  mockChannelStateStore.mockClear();
+  mockChannelStateStoreSet.mockClear();
+});
 
 const WORKSPACE = '/ws/primary';
 
@@ -594,8 +614,44 @@ describe('createChannelManagementService', () => {
       { name: 'second', workspaceCwd: WORKSPACE },
       false,
     );
+    // An explicit stop is persisted so `--channel all` skips it (#8975).
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('second', 'stopped');
     expect(store.upsert).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('records stops in the workspace state file (#8975)', async () => {
+    const { service } = setup({ committedNames: ['bot'] });
+
+    await service.stop('bot');
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      expect.stringContaining(path.join('channels', 'daemon')),
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      expect.stringContaining('channel-state.json'),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
+  it('does not record state when the stop itself fails (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.setChannelEnabled.mockRejectedValueOnce(new Error('stop failed'));
+
+    await expect(service.stop('bot')).rejects.toThrow('stop failed');
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
+  it('keeps stopping when state persistence fails (#8975)', async () => {
+    const { service } = setup({ committedNames: ['bot'] });
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
   });
 
   it('updates persisted startup selection without mutating runtime state', async () => {

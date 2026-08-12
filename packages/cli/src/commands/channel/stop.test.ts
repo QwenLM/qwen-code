@@ -10,6 +10,17 @@ const mockStopChannelWorker = vi.hoisted(() => vi.fn());
 const mockDaemonClient = vi.hoisted(() =>
   vi.fn(() => ({ stopChannelWorker: mockStopChannelWorker })),
 );
+const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    readAll: vi.fn(() => ({})),
+    set: vi.fn(),
+    setMany: mockChannelStateStoreSetMany,
+  })),
+);
+const mockChannelRuntimeStatePath = vi.hoisted(() =>
+  vi.fn(() => '/tmp/qwen-home/channels/channel-state.json'),
+);
 
 vi.mock('@qwen-code/sdk/daemon', () => ({ DaemonClient: mockDaemonClient }));
 
@@ -18,6 +29,11 @@ vi.mock('./pidfile.js', () => ({
   signalService: mockSignalService,
   waitForExit: mockWaitForExit,
   removeServiceInfo: mockRemoveServiceInfo,
+}));
+
+vi.mock('./channel-state-store.js', () => ({
+  ChannelStateStore: mockChannelStateStore,
+  channelRuntimeStatePath: mockChannelRuntimeStatePath,
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -108,5 +124,46 @@ describe('stopCommand', () => {
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('records stopped channels so --channel all does not restart them', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram', 'feishu'],
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      'stopped',
+    );
+    expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
+  });
+
+  it('still stops the service when state persistence fails', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    mockChannelStateStoreSetMany.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
   });
 });

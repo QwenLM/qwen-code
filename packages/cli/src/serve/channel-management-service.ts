@@ -11,8 +11,10 @@ import {
   sanitizeLogText,
   type PairingRequest,
 } from '@qwen-code/channel-base';
+import { ChannelStateStore } from '../commands/channel/channel-state-store.js';
 import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
 import { getPlugin } from '../commands/channel/channel-registry.js';
+import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
 import type {
   ChannelSecretUpdate,
   ChannelSettingsMutationOptions,
@@ -520,6 +522,17 @@ export function createChannelManagementService(
         { name, workspaceCwd: opts.workspaceCwd },
         false,
       );
+      // An explicit stop must persist, so a later `--channel all` restart
+      // does not bring this channel back (#8975).
+      try {
+        new ChannelStateStore(
+          daemonChannelRuntimeStatePath(
+            canonicalizeWorkspace(opts.workspaceCwd),
+          ),
+        ).set(name, 'stopped');
+      } catch {
+        // State persistence is best-effort; never block the stop itself.
+      }
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },

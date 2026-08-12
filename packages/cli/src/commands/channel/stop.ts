@@ -1,6 +1,10 @@
 import type { CommandModule } from 'yargs';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
+  ChannelStateStore,
+  channelRuntimeStatePath,
+} from './channel-state-store.js';
+import {
   readServiceInfo,
   signalService,
   waitForExit,
@@ -83,6 +87,17 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     }
 
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
+
+    // An explicit stop must persist, so a later `--channel all` restart does
+    // not bring these channels back (#8975).
+    try {
+      new ChannelStateStore(channelRuntimeStatePath()).setMany(
+        info.channels,
+        'stopped',
+      );
+    } catch {
+      // State persistence is best-effort; never block the stop itself.
+    }
 
     if (!signalService(info.pid, 'SIGTERM')) {
       writeStderrLine(

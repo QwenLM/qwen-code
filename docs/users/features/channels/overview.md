@@ -516,6 +516,8 @@ This mode starts workspace-grouped channel worker processes owned by `qwen serve
 
 Without `--daemon-url`, `qwen channel status` and `qwen channel stop` retain standalone pidfile behavior. Their `--daemon-url` variants query or stop the daemon manager. Runtime selections are not written to settings and do not survive daemon restart. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
 
+Explicit stops are remembered across restarts: stopping channels (`qwen channel stop` for the standalone service, or the daemon's stop routes) records them as `stopped` in a daemon-managed state file, and a later `--channel all` start skips those channels while starting the rest. Starting a channel by name always starts it and records it as `active` again. When nothing remains to start — no channels configured, or every configured channel stopped — the service keeps running with 0 channels instead of exiting.
+
 ## Webhook-triggered tasks
 
 Daemon-managed channels can also accept authenticated webhook events. Qwen receives the event as context, summarizes and decides what matters, and then delivers the final response to the configured chat target. This is not a raw notification relay.

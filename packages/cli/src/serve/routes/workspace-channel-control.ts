@@ -6,8 +6,13 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
-import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  canonicalizeWorkspace,
+  MAX_WORKSPACE_PATH_LENGTH,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import { sanitizeLogText } from '@qwen-code/channel-base';
+import { ChannelStateStore } from '../../commands/channel/channel-state-store.js';
+import { daemonChannelRuntimeStatePath } from '../../commands/channel/runtime.js';
 import { normalizeServeChannelSelection } from '../channel-selection.js';
 import {
   MAX_CHANNEL_STARTUP_FAILURES,
@@ -277,6 +282,49 @@ function sendChannelControlError(
   return true;
 }
 
+/**
+ * Collect the channel names an explicit stop will tear down, grouped by
+ * workspace, so they can be recorded as `stopped` once the stop succeeds.
+ */
+function channelsToStopByWorkspace(
+  state: ChannelWorkerControlState,
+): Array<{ workspaceCwd: string; names: string[] }> {
+  const byWorkspace = new Map<string, Set<string>>();
+  for (const worker of state.workers) {
+    const names = worker.requestedChannels ?? worker.channels;
+    if (names.length === 0) continue;
+    const workspaceCwd = canonicalizeWorkspace(worker.workspaceCwd);
+    let collected = byWorkspace.get(workspaceCwd);
+    if (!collected) {
+      collected = new Set<string>();
+      byWorkspace.set(workspaceCwd, collected);
+    }
+    for (const name of names) collected.add(name);
+  }
+  return [...byWorkspace.entries()].map(([workspaceCwd, names]) => ({
+    workspaceCwd,
+    names: [...names],
+  }));
+}
+
+/**
+ * Best-effort persistence of an explicit stop: a later `--channel all`
+ * restart must not bring these channels back (#8975).
+ */
+function recordChannelsStopped(
+  groups: Array<{ workspaceCwd: string; names: string[] }>,
+): void {
+  for (const { workspaceCwd, names } of groups) {
+    try {
+      new ChannelStateStore(
+        daemonChannelRuntimeStatePath(workspaceCwd),
+      ).setMany(names, 'stopped');
+    } catch {
+      // State persistence is best-effort; never block the stop itself.
+    }
+  }
+}
+
 export function registerWorkspaceChannelControlRoutes(
   app: Application,
   deps: RegisterWorkspaceChannelControlRoutesDeps,
@@ -334,7 +382,12 @@ export function registerWorkspaceChannelControlRoutes(
           return;
         }
         try {
-          res.status(200).json(await deps.stopChannelWorker!());
+          const stopping = channelsToStopByWorkspace(
+            deps.getChannelWorkerControl(),
+          );
+          const result = await deps.stopChannelWorker!();
+          recordChannelsStopped(stopping);
+          res.status(200).json(result);
         } catch (error) {
           if (
             sendChannelControlError(res, error, deps.getChannelWorkerControl)

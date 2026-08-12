@@ -71,6 +71,7 @@ import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
   daemonChannelLoopPath,
+  daemonChannelRuntimeStatePath,
   daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
@@ -84,6 +85,7 @@ import {
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
+import { ChannelStateStore } from './channel-state-store.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 import {
   OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
@@ -278,11 +280,10 @@ function selectedChannelNames(
   channelsConfig: Record<string, unknown>,
   selection: ServeChannelSelection,
 ): string[] {
+  // An empty name list is legitimate for `--channel all` with no configured
+  // channels; the caller degrades to serving with 0 channels (#8975).
   const names =
     selection.mode === 'all' ? Object.keys(channelsConfig) : selection.names;
-  if (names.length === 0) {
-    throw new Error('No channels configured in settings.json.');
-  }
   for (const name of names) {
     if (!channelsConfig[name]) {
       throw new Error(`Channel "${name}" not found in settings.`);
@@ -450,8 +451,59 @@ export async function runChannelDaemonWorker(
   );
   const channelsConfig = loadChannelsConfig(daemonWorkspace, settings);
   const names = selectedChannelNames(channelsConfig, opts.selection);
+  const stateStore = new ChannelStateStore(
+    daemonChannelRuntimeStatePath(daemonWorkspace),
+  );
+  // Restore semantics (#8975): `--channel all` skips channels explicitly
+  // stopped before the last restart; channels without recorded state are
+  // treated as active. Explicit name selections force-start regardless of
+  // persisted state.
+  let selectedNames = names;
+  if (opts.selection.mode === 'all') {
+    const states = stateStore.readAll();
+    selectedNames = [];
+    for (const name of names) {
+      if (states[name] === 'stopped') {
+        writeStdoutLine(
+          `[Channel] "${sanitizeLogText(name, 128)}" skipped (stopped before restart)`,
+        );
+        continue;
+      }
+      selectedNames.push(name);
+    }
+  }
+  if (selectedNames.length === 0) {
+    writeStdoutLine(
+      names.length === 0
+        ? '[Channel] No channels configured; serving with 0 channels.'
+        : '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    opts.sendReady?.({
+      channels: [],
+      requestedChannels: [],
+      pid: process.pid,
+    });
+    return {
+      channels: [],
+      async deliverChannelMessage(request: ChannelDeliveryRequest) {
+        throw new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          `Channel "${request.channelName}" is not running.`,
+        );
+      },
+      validateWebhookTask(task: ChannelWebhookTask): void {
+        throw new Error(`Channel "${task.channelName}" is not running.`);
+      },
+      async runWebhookTask(task: ChannelWebhookTask) {
+        throw new Error(`Channel "${task.channelName}" is not running.`);
+      },
+      async close() {
+        // No runtime was started; nothing to tear down.
+      },
+    };
+  }
   const parsed = await abortableStartup(
-    parseConfiguredChannels(channelsConfig, names, {
+    parseConfiguredChannels(channelsConfig, selectedNames, {
       defaultCwd: daemonWorkspace,
     }),
     startupSignal,
@@ -581,6 +633,11 @@ export async function runChannelDaemonWorker(
       try {
         await abortableStartup(channel.connect(), startupSignal);
         connected.push(name);
+        try {
+          stateStore.set(name, 'active');
+        } catch {
+          // State persistence is best-effort; never fail a successful connect.
+        }
         writeStdoutLine(`[Channel] "${safeName}" connected.`);
       } catch (err) {
         if (startupSignal?.aborted) {

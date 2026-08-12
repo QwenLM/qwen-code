@@ -39,6 +39,19 @@ const mockDaemonChannelStateDir = vi.hoisted(() =>
       `/tmp/qwen/channels/daemon/${workspace === '/workspace' ? 'workspace-hash' : 'other-hash'}/instances/${channelName}-hash`,
   ),
 );
+const mockDaemonChannelRuntimeStatePath = vi.hoisted(() =>
+  vi.fn(() => '/tmp/qwen/channels/daemon/workspace-hash/channel-state.json'),
+);
+const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
+const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    readAll: mockChannelStateStoreReadAll,
+    set: mockChannelStateStoreSet,
+    setMany: mockChannelStateStoreSetMany,
+  })),
+);
 const mockObserveContact = vi.hoisted(() => vi.fn());
 const mockListContacts = vi.hoisted(() => vi.fn());
 const mockObservedContactStore = vi.hoisted(() =>
@@ -235,6 +248,7 @@ vi.mock('./proxy.js', () => ({
 vi.mock('./runtime.js', () => ({
   createChannel: mockCreateChannel,
   daemonChannelLoopPath: mockDaemonChannelLoopPath,
+  daemonChannelRuntimeStatePath: mockDaemonChannelRuntimeStatePath,
   daemonChannelStateDir: mockDaemonChannelStateDir,
   daemonObservedContactsPath: mockDaemonObservedContactsPath,
   daemonSessionRoutesPath: mockDaemonSessionRoutesPath,
@@ -247,6 +261,10 @@ vi.mock('./runtime.js', () => ({
   registerToolCallDispatch: mockRegisterToolCallDispatch,
   selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
+}));
+
+vi.mock('./channel-state-store.js', () => ({
+  ChannelStateStore: mockChannelStateStore,
 }));
 
 vi.mock('./observed-contact-store.js', () => ({
@@ -366,6 +384,7 @@ beforeEach(() => {
     feishu: { type: 'feishu' },
   });
   mockLoadChannelsFromExtensions.mockResolvedValue(0);
+  mockChannelStateStoreReadAll.mockReturnValue({});
   mockParseConfiguredChannels.mockResolvedValue([parsedTelegram]);
   mockChannelLoopStoreCreate.mockResolvedValue({ id: 'job-1' });
   mockChannelLoopStoreCreateForTarget.mockResolvedValue({ id: 'job-1' });
@@ -1228,9 +1247,145 @@ describe('runChannelDaemonWorker', () => {
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
   });
 
-  it('fails fast when no channels are configured', async () => {
+  it('serves with zero channels when no channels are configured (#8975)', async () => {
     const sdk = createSdk();
+    const ready = vi.fn();
     mockLoadChannelsConfig.mockReturnValueOnce({});
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(handle.channels).toEqual([]);
+    expect(ready).toHaveBeenCalledWith({
+      channels: [],
+      requestedChannels: [],
+      pid: process.pid,
+    });
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] No channels configured; serving with 0 channels.',
+    );
+    expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
+    expect(mockDaemonChannelBridge).not.toHaveBeenCalled();
+    expect(mockCreateChannel).not.toHaveBeenCalled();
+
+    await expect(
+      handle.deliverChannelMessage({
+        deliveryId: 'delivery-1',
+        channelName: 'telegram',
+        target: { type: 'chat', id: 'chat-1' },
+        text: 'hello',
+      }),
+    ).rejects.toThrow('Channel "telegram" is not running.');
+    await handle.close();
+  });
+
+  it('serves with zero channels when every configured channel is stopped (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockChannelStateStoreReadAll.mockReturnValueOnce({
+      telegram: 'stopped',
+      feishu: 'stopped',
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(handle.channels).toEqual([]);
+    expect(ready).toHaveBeenCalledWith({
+      channels: [],
+      requestedChannels: [],
+      pid: process.pid,
+    });
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "telegram" skipped (stopped before restart)',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "feishu" skipped (stopped before restart)',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
+    expect(mockCreateChannel).not.toHaveBeenCalled();
+  });
+
+  it('skips stopped channels when restoring --channel all (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStoreReadAll.mockReturnValueOnce({ feishu: 'stopped' });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "feishu" skipped (stopped before restart)',
+    );
+    expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
+      expect.any(Object),
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+    expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      parsedTelegram.config,
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    await handle.close();
+  });
+
+  it('force-starts explicitly selected channels even when stopped (#8975)', async () => {
+    const sdk = createSdk();
+    mockChannelStateStoreReadAll.mockReturnValueOnce({ telegram: 'stopped' });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('skipped (stopped before restart)'),
+    );
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      parsedTelegram.config,
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    await handle.close();
+  });
+
+  it('still fails fast for malformed channel config (#8975)', async () => {
+    const sdk = createSdk();
+    mockParseConfiguredChannels.mockRejectedValueOnce(
+      new Error('Error in channel "telegram": token is required.'),
+    );
 
     await expect(
       runChannelDaemonWorker({
@@ -1239,7 +1394,7 @@ describe('runChannelDaemonWorker', () => {
         selection: { mode: 'all' },
         loadDaemonSdk: async () => sdk,
       }),
-    ).rejects.toThrow('No channels configured in settings.json.');
+    ).rejects.toThrow('Error in channel "telegram": token is required.');
   });
 
   it('fails fast when daemon capabilities report a different workspace', async () => {

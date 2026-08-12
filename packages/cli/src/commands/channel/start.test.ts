@@ -35,6 +35,19 @@ const mockGetExtensionManager = vi.hoisted(() => vi.fn());
 const mockReadServiceInfo = vi.hoisted(() => vi.fn());
 const mockWriteServiceInfo = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
+const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(() => ({
+    readAll: mockChannelStateStoreReadAll,
+    set: mockChannelStateStoreSet,
+    setMany: mockChannelStateStoreSetMany,
+  })),
+);
+const mockChannelRuntimeStatePath = vi.hoisted(() =>
+  vi.fn(() => '/tmp/qwen-home/channels/channel-state.json'),
+);
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockFindCliEntryPath = vi.hoisted(() => vi.fn());
@@ -138,6 +151,11 @@ vi.mock('./pidfile.js', () => ({
   writeServiceInfo: mockWriteServiceInfo,
 }));
 
+vi.mock('./channel-state-store.js', () => ({
+  ChannelStateStore: mockChannelStateStore,
+  channelRuntimeStatePath: mockChannelRuntimeStatePath,
+}));
+
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
@@ -200,6 +218,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockBridgeStart.mockResolvedValue(undefined);
   mockChannelConnect.mockRejectedValue(new Error('stop after channel setup'));
+  mockChannelStateStoreReadAll.mockReturnValue({});
+  mockChannelStateStoreSet.mockImplementation(() => undefined);
+  mockChannelStateStoreSetMany.mockImplementation(() => undefined);
   mockCreateChannel.mockReturnValue(mockChannel);
   mockFindCliEntryPath.mockReturnValue('/tmp/qwen-cli-entry.js');
   mockGetExtensionManager.mockResolvedValue({ getLoadedExtensions: () => [] });
@@ -1377,5 +1398,201 @@ describe('startCommand.handler', () => {
       processOnSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  describe('empty effective channel set (#8975)', () => {
+    it('keeps serving instead of exiting when no channels are configured', async () => {
+      mockLoadSettings.mockReturnValue({ merged: { channels: {} } });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          '[Channel] No channels configured; serving with 0 channels.',
+        );
+        expect(mockWriteServiceInfo).toHaveBeenCalledWith([]);
+        expect(mockAcpBridge).not.toHaveBeenCalled();
+        expect(mockCreateChannel).not.toHaveBeenCalled();
+        // Startup no longer exits on an empty channel set.
+        expect(exitSpy).not.toHaveBeenCalled();
+
+        const sigint = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGINT',
+        )?.[1] as (() => void) | undefined;
+        expect(sigint).toBeDefined();
+        // The exit mock throws instead of terminating the process.
+        expect(() => sigint!()).toThrow('process.exit: 0');
+        expect(mockRemoveServiceInfo).toHaveBeenCalled();
+      } finally {
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it('keeps serving when every configured channel is stopped', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({
+        telegram: 'stopped',
+        feishu: 'stopped',
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          '[Channel] "telegram" skipped (stopped before restart)',
+        );
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          '[Channel] "feishu" skipped (stopped before restart)',
+        );
+        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+          '[Channel] All configured channels are stopped; serving with 0 channels.',
+        );
+        expect(mockCreateChannel).not.toHaveBeenCalled();
+        // Startup no longer exits when every channel is stopped.
+        expect(exitSpy).not.toHaveBeenCalled();
+
+        const sigterm = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGTERM',
+        )?.[1] as (() => void) | undefined;
+        expect(sigterm).toBeDefined();
+        // The exit mock throws instead of terminating the process.
+        expect(() => sigterm!()).toThrow('process.exit: 0');
+        expect(mockRemoveServiceInfo).toHaveBeenCalled();
+      } finally {
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it('skips stopped channels but still starts the rest', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({ feishu: 'stopped' });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        // Default connect rejection ends startAll at the connectedCount check.
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '[Channel] "feishu" skipped (stopped before restart)',
+      );
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+    });
+
+    it('records connected channels as active', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: { channels: { telegram: { type: 'telegram' } } },
+      });
+      mockChannelConnect.mockResolvedValue(undefined);
+      const err = new Error('EEXIST') as NodeJS.ErrnoException;
+      err.code = 'EEXIST';
+      mockWriteServiceInfo.mockImplementationOnce(() => {
+        throw err;
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      expect(mockChannelStateStoreSet).toHaveBeenCalledWith(
+        'telegram',
+        'active',
+      );
+    });
+  });
+
+  it('force-starts a named channel even when its state is stopped', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'stopped' });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.any(Object),
+    );
+  });
+
+  it('records a named channel as active after a successful connect', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelConnect.mockResolvedValue(undefined);
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
   });
 });

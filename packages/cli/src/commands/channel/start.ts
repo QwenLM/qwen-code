@@ -23,6 +23,10 @@ import type {
   ChannelBase,
   ChannelBaseOptions,
 } from '@qwen-code/channel-base';
+import {
+  ChannelStateStore,
+  channelRuntimeStatePath,
+} from './channel-state-store.js';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import { resolveProxy } from './proxy.js';
 import {
@@ -310,6 +314,33 @@ function checkDuplicateInstance(): void {
   }
 }
 
+/**
+ * Keep the process serving with zero channels instead of exiting. An empty
+ * effective channel set is a legitimate state (nothing configured, or every
+ * configured channel stopped before restart), not a startup failure (#8975).
+ */
+async function serveWithoutChannels(message: string): Promise<void> {
+  writeStdoutLine(message);
+  writeServiceInfoOrExit([], () => {});
+  const shutdown = () => {
+    writeStdoutLine('\n[Channel] Shutting down...');
+    removeServiceInfo();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<void>(() => {});
+}
+
+/** Best-effort: record a successfully connected channel as active. */
+function recordChannelActive(name: string): void {
+  try {
+    new ChannelStateStore(channelRuntimeStatePath()).set(name, 'active');
+  } catch {
+    // State persistence is best-effort; never fail a successful connect.
+  }
+}
+
 /** Start a single channel with its own bridge + crash recovery. */
 async function startSingle(
   name: string,
@@ -395,6 +426,7 @@ async function startSingle(
     bridge.stop();
     process.exit(1);
   }
+  recordChannelActive(name);
   writeServiceInfoOrExit([name], () =>
     cleanupStartedChannels([channel], bridge, router),
   );
@@ -442,20 +474,36 @@ async function startAll(
 
   await loadChannelsFromExtensions();
 
-  if (Object.keys(channelsConfig).length === 0) {
-    writeStderrLine(
-      'Error: No channels configured in settings.json. Add entries under "channels".',
+  const configuredNames = Object.keys(channelsConfig);
+  if (configuredNames.length === 0) {
+    await serveWithoutChannels(
+      '[Channel] No channels configured; serving with 0 channels.',
     );
-    process.exit(1);
+    return;
+  }
+
+  // Restore semantics (#8975): skip channels explicitly stopped before the
+  // last restart; channels without recorded state are treated as active.
+  const states = new ChannelStateStore(channelRuntimeStatePath()).readAll();
+  const selectedNames: string[] = [];
+  for (const name of configuredNames) {
+    if (states[name] === 'stopped') {
+      writeStdoutLine(`[Channel] "${name}" skipped (stopped before restart)`);
+      continue;
+    }
+    selectedNames.push(name);
+  }
+  if (selectedNames.length === 0) {
+    await serveWithoutChannels(
+      '[Channel] All configured channels are stopped; serving with 0 channels.',
+    );
+    return;
   }
 
   // Parse all configs upfront — fail fast on bad config
   let parsed;
   try {
-    parsed = await parseConfiguredChannels(
-      channelsConfig,
-      Object.keys(channelsConfig),
-    );
+    parsed = await parseConfiguredChannels(channelsConfig, selectedNames);
   } catch (err) {
     writeStderrLine(err instanceof Error ? err.message : String(err));
     process.exit(1);
@@ -517,6 +565,7 @@ async function startAll(
       await channel.connect();
       connectedChannels.set(name, channel);
       connectedCount++;
+      recordChannelActive(name);
       writeStdoutLine(`[Channel] "${name}" connected.`);
     } catch (err) {
       writeStderrLine(

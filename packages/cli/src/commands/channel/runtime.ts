@@ -57,6 +57,10 @@ export function daemonChannelLoopPath(workspaceCwd: string): string {
   return daemonChannelStatePath(workspaceCwd, 'cron.json');
 }
 
+export function daemonChannelRuntimeStatePath(workspaceCwd: string): string {
+  return daemonChannelStatePath(workspaceCwd, 'channel-state.json');
+}
+
 export function daemonChannelStateDir(
   workspaceCwd: string,
   channelName: string,
