@@ -20,17 +20,15 @@ conversation history:
 
 ```mermaid
 graph TB
-    A[Raw tool output] --> S{Starts with truncation sentinel?}
+    A[Raw tool output] --> S{Already truncated? (prefix, marker, or stub)}
     S -- yes --> J[Metadata appended after truncation, never bisected]
     S -- no --> G{Persistence gate: over configured threshold + 3k headroom, and not exempt?}
     G -- yes --> F[Full payload persisted to session temp file, mode 0o600]
     G -- no --> B{Per-tool budget declared?}
     B -- yes --> C[Scheduler per-tool bound, e.g. grep 20k]
     B -- no --> D[Scheduler gate: global threshold 25k chars + 1000 lines]
-    C --> E{Still oversized?}
-    D --> E
-    E -- no --> H[Enters history as-is]
-    E -- yes --> F
+    C --> H[Enters history as-is]
+    D --> H
     F --> I2[History retains preview + metadata + read_file pointer]
     I2 --> I[Model recovers full output on demand via read_file]
     H --> J
@@ -50,22 +48,24 @@ Key properties:
   truncation: any non-exempt result over the configured threshold + 3k headroom
   (default 28k) is persisted and stubbed to a preview right away. Exempt:
   `read_file`, `read_mcp_resource`, `enter_plan_mode` (self-managed).
-  Shell (30k) and MCP (500k) truncate in-tool during `execute()` before the
-  gate sees the result; the sentinel check at entry then routes them past the
-  gate. Consequently, per-tool budgets above 28k (agent 32k, web-search 102k)
-  are second-level bounds — the gate offloads first.
+  Shell output over 30k and MCP output over 500k truncate in-tool during
+  `execute()` before the gate sees the result; the sentinel check at entry
+  then routes them past the gate. Results below those in-tool thresholds
+  pass through the gate normally. Consequently, per-tool budgets above 28k
+  (agent 32k, web-search 102k) are second-level bounds — the gate offloads
+  first.
 - **Bounded before history.** Every layer acts before the result is recorded,
   so history never holds an unbounded payload.
 - **Recoverable, never dropped.** Oversized output is persisted to a session
   temp file: the gate writes `tool-results/<callId>.txt`, while in-tool
-  truncation (shell, MCP) writes `~/.qwen/tmp/<session-hash>/<tool>_<hex>.output`.
+  truncation (shell, MCP) writes `~/.qwen/tmp/<project-hash>/<tool>_<hex>.output`.
   The retained preview carries a pointer; the model can read the full payload
   back with `read_file`. Truncation keeps head and tail (`keep: 'both'`)
   because shell failure summaries appear at the end.
-- **Re-entrancy guard.** A truncated result starts with a sentinel prefix
-  (`TOOL_OUTPUT_TRUNCATED_PREFIX`); later passes detect it and skip
-  re-truncation, so injected copies of the phrase cannot bypass the budget and
-  truncation headers never nest.
+- **Re-entrancy guard.** A truncated result carries a sentinel — either the
+  `TOOL_OUTPUT_TRUNCATED_PREFIX` at the start, the `... [CONTENT TRUNCATED] ...`
+  marker within, or a `<persisted-output>` stub prefix. Later passes detect
+  any of these and skip re-truncation, so truncation headers never nest.
 - **Metadata integrity.** PostToolUse/skill metadata and system reminders are
   appended only after the raw body is bounded, then the assembled string is
   re-checked against a doubled budget — unless the body already carries the
@@ -81,7 +81,7 @@ Key properties:
 | Layer            | Budget                                                                                                  | Configurable                                                             |
 | ---------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | Persistence gate | configured threshold + 3k headroom (default 28k); exempt: read_file, read_mcp_resource, enter_plan_mode | `settings.tools.truncateToolOutputThreshold`                             |
-| Per-tool         | shell 30k, grep 20k, mcp 500k, agent 32k/tail, read-file self-managed                                   | No (declared by tool)                                                    |
+| Per-tool         | shell 30k, grep 20k, mcp 500k, agent 32k/tail, web-search 102k, read-file self-managed                  | No (declared by tool)                                                    |
 | Global           | 25k chars + 1000 lines                                                                                  | `settings.tools.truncateToolOutputThreshold` / `truncateToolOutputLines` |
 | Combined pass    | 2x of the applicable budget                                                                             | No                                                                       |
 | Per-message      | 200k chars                                                                                              | `settings.tools.toolOutputBatchBudget`                                   |
@@ -127,12 +127,12 @@ unbounded retention or data exposure):
 - Oversized results, counted against each result's own tool budget (resolved
   from the tool registry by canonicalized `functionResponse.name`, mirroring
   the scheduler; tools declaring none fall back to the configured global
-  threshold). Results already carrying the truncation sentinel are skipped —
-  a layer bounded them, and their retained preview can sit slightly above the
-  raw budget due to the spill envelope — and the remaining results are only
-  flagged beyond the combined-pass 2x tolerance, matching the headroom the
-  scheduler itself allows. A retained result past that bound means a
-  truncation layer was bypassed — the counter doubles as a regression alarm.
+  threshold). Results already carrying a truncation marker (prefix, in-body
+  marker, or `<persisted-output>` stub) are skipped — a layer bounded them —
+  and the remaining results are only flagged beyond the combined-pass 2x
+  tolerance plus a small envelope slack, matching the headroom the scheduler
+  itself allows. A retained result past that bound means a truncation layer
+  was bypassed — the counter doubles as a regression alarm.
 - Whether oversized outputs are also rendered in UI history (scanned in
   `tool_group` items' `resultDisplay`, compared per display against the same
   per-tool budget — UI history stores display names, not registry keys, so a

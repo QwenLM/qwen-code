@@ -908,8 +908,8 @@ describe('doctorCommand', () => {
     });
 
     it('should canonicalize legacy tool names when resolving budgets', async () => {
-      // History records the raw request name; 364 measured chars exceed
-      // 2x100 only when the alias resolves to grep_search's budget.
+      // History records the raw request name; 801 measured chars exceed
+      // 2x100+slack only when the alias resolves to grep_search's budget.
       const aliasedHistory: Content[] = [
         {
           role: 'user',
@@ -917,7 +917,7 @@ describe('doctorCommand', () => {
             {
               functionResponse: {
                 name: 'search_file_content',
-                response: { output: 'a'.repeat(300) },
+                response: { output: 'a'.repeat(801) },
               },
             },
           ],

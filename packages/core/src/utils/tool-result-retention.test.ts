@@ -10,7 +10,10 @@ import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   TOKEN_TO_CHAR_RATIO,
 } from '../services/compactionInputSlimming.js';
-import { TOOL_OUTPUT_TRUNCATED_PREFIX } from './truncation.js';
+import {
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+  TRUNCATION_FALLBACK_ENVELOPE_SLACK,
+} from './truncation.js';
 import {
   OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS,
   analyzeToolResultRetention,
@@ -80,7 +83,11 @@ describe('analyzeToolResultRetention', () => {
   });
 
   it('counts un-truncated results strictly above 2x their budget', () => {
-    const oversized = 'z'.repeat(OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS * 2 + 1);
+    const oversized = 'z'.repeat(
+      OVERSIZED_TOOL_RESULT_THRESHOLD_CHARS * 2 +
+        TRUNCATION_FALLBACK_ENVELOPE_SLACK +
+        1,
+    );
     const stats = analyzeToolResultRetention([
       toolResultContent(oversized),
       toolResultContent('small'),
@@ -105,9 +112,9 @@ describe('analyzeToolResultRetention', () => {
   });
 
   it('supports a custom threshold', () => {
-    // 11 raw chars > 2x5.
+    // 511 raw chars > 2x5 + slack.
     const stats = analyzeToolResultRetention(
-      [toolResultContent('z'.repeat(11))],
+      [toolResultContent('z'.repeat(511))],
       {
         thresholdChars: 5,
       },
@@ -125,8 +132,8 @@ describe('analyzeToolResultRetention', () => {
       [
         // Compliant high-budget result (e.g. MCP): not flagged.
         toolResultContent('m'.repeat(60_000), 'big_budget_tool'),
-        // 201 raw chars > 2x100: flagged under its own small budget.
-        toolResultContent('s'.repeat(201), 'small_budget_tool'),
+        // 801 raw chars > 2x100+slack: flagged under its own small budget.
+        toolResultContent('s'.repeat(801), 'small_budget_tool'),
         // Unknown tool falls back to the default threshold: not flagged.
         toolResultContent('u'.repeat(500), 'unknown_tool'),
       ],

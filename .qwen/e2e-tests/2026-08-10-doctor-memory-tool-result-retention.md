@@ -9,9 +9,11 @@ Sizes are measured with the compression pipeline's `estimatePartChars` model
 Oversized counts compare each result against its own tool's declared budget
 (resolved from the registry by canonicalized name; tools declaring none fall
 back to the configured global truncation threshold), skip results already
-carrying the truncation sentinel, and apply the scheduler's combined-pass 2x
-tolerance. The UI-history scan compares each `tool_group` display against the
-same per-tool budget at the same 2x tolerance.
+carrying a truncation marker (prefix, in-body marker, or `<persisted-output>`
+stub), and apply the scheduler's combined-pass 2x tolerance plus a small
+envelope slack for the token-aware fallback. The UI-history scan compares each
+`tool_group` display against the same per-tool budget at the same 2x
+tolerance.
 
 ## Scenario 1 — fresh session (baseline)
 
@@ -37,7 +39,7 @@ confirmation, then `/doctor memory`.
 Observed:
 
 - Tool output spilled to disk: `Output too long and was saved to:
-  ~/.qwen/tmp/<session-hash>/run_shell_command_928ba0eecdb5.output`, UI shows
+  ~/.qwen/tmp/<project-hash>/run_shell_command_928ba0eecdb5.output`, UI shows
   `... first 6573 lines hidden ...` plus the tail.
 - Report reflects only the retained preview stub:
 
@@ -113,22 +115,22 @@ Unreachable in normal operation (per-tool/global layers bound every result at
 or below its declared budget). Covered deterministically by unit tests:
 
 - `packages/core/src/utils/tool-result-retention.test.ts` (19 tests): counts,
-  max, raw-char measurement of newline-dense outputs, strict `>` boundary at
-  2x budget, sentinel skip (truncation prefix and `<persisted-output>` stubs
-  on both `output` and `error` keys), per-tool budget resolver
-  (high/low/unknown/`Infinity` budgets), nested media billing, missing
-  payload/parts, unserializable payloads, multiple functionResponse parts in
-  one Content.
-- `packages/cli/src/ui/commands/doctorCommand.test.ts` (11 retention tests):
+  max, raw-char measurement of newline-dense outputs, strict `>` boundary
+  at 2x budget + slack, sentinel skip (truncation prefix and
+  `<persisted-output>` stubs on both `output` and `error` keys), per-tool
+  budget resolver (high/low/unknown/`Infinity` budgets), nested media
+  billing, missing payload/parts, unserializable payloads, multiple
+  functionResponse parts in one Content.
+- `packages/cli/src/ui/commands/doctorCommand.test.ts` (12 retention tests):
   readable report with `Oversized results (above tool budget): 1` +
   compression input `yes (shared by reference, no extra copy)` + `/compress`
   hint; UI-history detection scoped to `tool_group` result displays with
   per-tool budgets at 2x tolerance (model text and compliant high-budget
   renders excluded); legacy-alias canonicalization; compliant-session shape
-  (zero oversized, no compression advice); `--json` fields; `--json` omits
-  the key without history; section omitted (rest of report intact) when
-  history reads throw; disabled-truncation guard (no false positives at
-  `Infinity` threshold); unresolvable-name fallback; interactive report.
+  (zero oversized, no compression advice); `--json` fields; `--json` omits the
+  key without history; section omitted (rest of report intact) when history
+  reads throw; disabled-truncation guard (no false positives at `Infinity`
+  threshold); unresolvable-name fallback; interactive report.
 
 ## Cleanup
 

@@ -12,6 +12,7 @@ import {
 import {
   COMBINED_PASS_TOLERANCE_FACTOR,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
+  TRUNCATION_FALLBACK_ENVELOPE_SLACK,
 } from './truncation.js';
 
 export { COMBINED_PASS_TOLERANCE_FACTOR } from './truncation.js';
@@ -52,6 +53,10 @@ export interface AnalyzeToolResultRetentionOptions {
    * (by its `functionResponse.name`), mirroring the scheduler's per-tool
    * limits. A result is oversized only if it exceeds its own tool's budget,
    * so compliant results from high-budget tools (e.g. MCP) are never flagged.
+   *
+   * Caveat: if the tool has been removed from the registry (e.g. an MCP
+   * server disconnected mid-session), the resolver misses and the fallback
+   * threshold applies, which may over-flag formerly high-budget results.
    */
   resolveToolBudgetChars?: (toolName: string) => number | undefined;
   /**
@@ -111,9 +116,9 @@ export function analyzeToolResultRetention(
         options.resolveToolBudgetChars?.(part.functionResponse.name ?? '') ??
         thresholdChars;
       // Results already carrying the truncation sentinel were bounded by a
-      // layer (their retained preview can sit slightly above the raw budget
-      // due to the spill envelope); only un-truncated results can signal a
-      // bypass, and only beyond the combined-pass 2x tolerance.
+      // layer; only un-truncated results can signal a bypass. The slack
+      // accounts for the token-aware fallback that returns the original
+      // (sentinel-less) when the wrapped form would not be smaller.
       const output =
         part.functionResponse.response?.['output'] ??
         part.functionResponse.response?.['error'];
@@ -127,7 +132,9 @@ export function analyzeToolResultRetention(
       if (
         !alreadyTruncated &&
         Number.isFinite(budget) &&
-        rawChars > budget * COMBINED_PASS_TOLERANCE_FACTOR
+        rawChars >
+          budget * COMBINED_PASS_TOLERANCE_FACTOR +
+            TRUNCATION_FALLBACK_ENVELOPE_SLACK
       ) {
         stats.oversizedResultCount += 1;
       }
