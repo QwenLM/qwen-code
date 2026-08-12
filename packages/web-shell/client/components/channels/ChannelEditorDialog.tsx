@@ -67,7 +67,6 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   dws: {
     dwsPath: 'channels.editor.field.dws.dwsPath',
     profile: 'channels.editor.field.dws.profile',
-    disableAtMessages: 'channels.editor.field.dws.disableAtMessages',
     imUserIds: 'channels.editor.field.dws.imUserIds',
     documentIds: 'channels.editor.field.dws.documentIds',
     wikiSpaceIds: 'channels.editor.field.dws.wikiSpaceIds',

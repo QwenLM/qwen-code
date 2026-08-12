@@ -16,7 +16,6 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'dwsPath',
       'profile',
-      'disableAtMessages',
       'imUserIds',
       'documentIds',
       'wikiSpaceIds',
@@ -50,33 +49,12 @@ describe('DWS channel plugin', () => {
     ).toBe('open');
   });
 
-  it('requires another source when @ message listening is disabled', () => {
-    expect(
-      plugin.management?.validateConfig?.({ disableAtMessages: true }),
-    ).toContain('at least one');
-    expect(
-      plugin.management?.validateConfig?.({
-        disableAtMessages: true,
-        documentIds: ['doc-1'],
-      }),
-    ).toBeUndefined();
-    expect(
-      plugin.management?.validateConfig?.({
-        disableAtMessages: true,
-        wikiSpaceIds: ['wiki-1'],
-      }),
-    ).toBeUndefined();
-    expect(
-      plugin.management?.validateConfig?.({
-        disableAtMessages: true,
-        imGroupIds: ['legacy-group'],
-      }),
-    ).toContain('at least one');
-  });
-
-  it('ignores the removed imGroupIds setting', () => {
+  it('ignores removed source settings', () => {
     expect(
       plugin.management?.validateConfig?.({ imGroupIds: 'legacy-group' }),
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({ disableAtMessages: 'legacy' }),
     ).toBeUndefined();
   });
 

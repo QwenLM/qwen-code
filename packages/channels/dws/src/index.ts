@@ -56,13 +56,6 @@ export const plugin: ChannelPlugin = {
           'Optional DWS profile. Leave empty to use the active profile',
       },
       {
-        key: 'disableAtMessages',
-        label: 'Disable @ message listening',
-        kind: 'boolean',
-        description:
-          'Turn off the default subscription for messages that mention the authenticated DWS user',
-      },
-      {
         key: 'imUserIds',
         label: 'Direct-message users',
         kind: 'string-list',
@@ -137,23 +130,10 @@ export const plugin: ChannelPlugin = {
       },
     ],
     validateConfig: (config) => {
-      if (
-        config['disableAtMessages'] !== undefined &&
-        typeof config['disableAtMessages'] !== 'boolean'
-      ) {
-        return 'DWS disableAtMessages must be a boolean.';
-      }
       for (const field of ['imUserIds', 'documentIds', 'wikiSpaceIds']) {
         if (!validStringList(config[field])) {
           return `DWS ${field} must contain non-empty strings.`;
         }
-      }
-      const hasAtSource = config['disableAtMessages'] !== true;
-      const hasListSource = ['imUserIds', 'documentIds', 'wikiSpaceIds'].some(
-        (field) => Array.isArray(config[field]) && config[field].length > 0,
-      );
-      if (!hasAtSource && !hasListSource) {
-        return 'DWS channel requires at least one message or document source.';
       }
       if (
         config['trigger'] !== undefined &&

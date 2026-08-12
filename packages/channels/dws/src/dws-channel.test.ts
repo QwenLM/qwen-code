@@ -37,7 +37,6 @@ function makeConfig(
     groupPolicy: 'open',
     dmPolicy: 'open',
     groups: { '*': {} },
-    disableAtMessages: false,
     documentIds: [],
     wikiSpaceIds: [],
     wikiDiscoveryInterval: 0,
@@ -276,12 +275,16 @@ async function readyPolicyChannel(
 }
 
 describe('DwsChannel', () => {
-  it('starts supported DWS message sources and ignores legacy groups', async () => {
+  it('always starts @ messages and ignores removed source switches', async () => {
     const client = new FakeDwsClient();
 
     await readyChannel(
       client,
-      makeConfig({ imUserIds: ['user-2'], imGroupIds: ['cid-2'] }),
+      makeConfig({
+        disableAtMessages: true,
+        imUserIds: ['user-2'],
+        imGroupIds: ['cid-legacy'],
+      }),
     );
 
     expect(client.assertAuthenticated).toHaveBeenCalledOnce();
@@ -291,15 +294,32 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('subscribes only to explicit groups that disable mention gating', async () => {
+    const client = new FakeDwsClient();
+
+    await readyChannel(
+      client,
+      makeConfig({
+        groups: {
+          '*': { requireMention: false },
+          'cid-mentioned': { requireMention: true },
+          'cid-ambient': { requireMention: false },
+        },
+      }),
+    );
+
+    expect(client.streams.map((item) => item.source)).toEqual([
+      { kind: 'at' },
+      { kind: 'group', conversationId: 'cid-ambient' },
+    ]);
+  });
+
   it('requires a DWS user ID when document mentions are enabled', async () => {
     const client = new FakeDwsClient();
     client.identity = { openDingTalkId: 'open-self' };
 
     await expect(
-      readyChannel(
-        client,
-        makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
-      ),
+      readyChannel(client, makeConfig({ wikiSpaceIds: ['wiki-1'] })),
     ).rejects.toThrow('user ID');
   });
 
@@ -334,7 +354,7 @@ describe('DwsChannel', () => {
     const bridge = makeBridge();
     const channel = new TestableDwsChannel(
       'test-dws',
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
       bridge,
       undefined,
       client,
@@ -353,7 +373,6 @@ describe('DwsChannel', () => {
       readyChannel(
         client,
         makeConfig({
-          disableAtMessages: true,
           documentIds: ['doc-1'],
           approvalMode: 'yolo',
         }),
@@ -421,11 +440,11 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, imUserIds: ['user-2'] }),
+      makeConfig({ imUserIds: ['user-2'] }),
     );
 
     await client.emit(
-      0,
+      1,
       message('user_im_message_receive_o2o', 'message-1', 'check my todo'),
     );
     await channel.sendMessage('cid-1', 'done');
@@ -440,6 +459,47 @@ describe('DwsChannel', () => {
       'done',
       expect.any(String),
     );
+  });
+
+  it('dispatches ambient messages from an explicit non-mention group', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'allowlist',
+        groups: { 'cid-1': { requireMention: false } },
+      }),
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_group', 'ambient', 'normal chat'),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('normal chat'),
+      expect.any(Object),
+    );
+  });
+
+  it('deduplicates a message delivered by both group and @ streams', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { 'cid-1': { requireMention: false } } }),
+    );
+    const event = message(
+      'user_im_message_receive_group',
+      'message-1',
+      'please help',
+    );
+
+    await client.emit(1, event);
+    await client.emit(0, { ...event, type: 'user_im_message_receive_at' });
+
+    expect(channel.inbound).toHaveLength(1);
   });
 
   it('requires both group and sender allowlists before dispatching', async () => {
@@ -504,19 +564,45 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('lets an @ event create pairing when its ambient copy arrives first', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'pairing',
+        groups: { 'cid-1': { requireMention: false } },
+      }),
+    );
+    const event = message(
+      'user_im_message_receive_group',
+      'pair-group',
+      'please help',
+    );
+
+    await client.emit(1, event);
+    await client.emit(0, { ...event, type: 'user_im_message_receive_at' });
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'group', conversationId: 'cid-1' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
+  });
+
   it('drops direct messages when direct-message access is disabled', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(
       client,
       makeConfig({
-        disableAtMessages: true,
         imUserIds: ['user-2'],
         dmPolicy: 'disabled',
       }),
     );
 
     await client.emit(
-      0,
+      1,
       message('user_im_message_receive_o2o', 'disabled-dm', 'please help'),
     );
 
@@ -529,7 +615,6 @@ describe('DwsChannel', () => {
     const { channel, bridge } = await readyPolicyChannel(
       client,
       makeConfig({
-        disableAtMessages: true,
         documentIds: ['doc-1', 'doc-2'],
         groupPolicy: 'allowlist',
         groups: { 'doc-2': {} },
@@ -678,7 +763,7 @@ describe('DwsChannel', () => {
     client.comments.set('doc-1', [comment('old', '/qwen old request')]);
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
 
     await channel.poll();
@@ -706,7 +791,7 @@ describe('DwsChannel', () => {
     client.comments.set('doc-1', [comment('existing', 'please review')]);
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
 
     await channel.poll();
@@ -726,7 +811,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
     await channel.poll();
     client.comments.set('doc-1', [
@@ -756,7 +841,7 @@ describe('DwsChannel', () => {
     );
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
 
     await channel.poll();
@@ -777,7 +862,7 @@ describe('DwsChannel', () => {
     );
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
     );
 
     const poll = channel.poll();
@@ -791,7 +876,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
     await channel.poll();
     client.comments.set('doc-1', [
@@ -814,7 +899,6 @@ describe('DwsChannel', () => {
     const channel = await readyChannel(
       client,
       makeConfig({
-        disableAtMessages: true,
         documentIds: ['doc-1'],
         wikiSpaceIds: ['wiki-1'],
       }),
@@ -828,7 +912,6 @@ describe('DwsChannel', () => {
     const channel = await readyChannel(
       client,
       makeConfig({
-        disableAtMessages: true,
         wikiSpaceIds: ['wiki-1'],
         wikiDiscoveryInterval: 300_000,
       }),
@@ -850,7 +933,7 @@ describe('DwsChannel', () => {
     ]);
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
     );
 
     await channel.poll();
@@ -878,7 +961,7 @@ describe('DwsChannel', () => {
     ]);
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
     );
     await channel.poll();
 
@@ -911,7 +994,7 @@ describe('DwsChannel', () => {
     client.wikiDocuments.set('wiki-1', documents);
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
     );
 
     await channel.poll();
@@ -939,7 +1022,6 @@ describe('DwsChannel', () => {
   it('persists successful document work across channel restarts', async () => {
     const client = new FakeDwsClient();
     const config = makeConfig({
-      disableAtMessages: true,
       documentIds: ['doc-1'],
     });
     const first = await readyChannel(client, config, 'persistent-doc');
@@ -959,7 +1041,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
     await channel.poll();
     const request = comment('new', '/qwen once');
@@ -977,7 +1059,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+      makeConfig({ documentIds: ['doc-1'] }),
     );
     channel.responseThreadId = 'root-1';
 
@@ -1000,7 +1082,6 @@ describe('DwsChannel', () => {
     const channel = await readyChannel(
       client,
       makeConfig({
-        disableAtMessages: true,
         wikiSpaceIds: ['https://alidocs.dingtalk.com/i/spaces/wiki-1/overview'],
       }),
     );
@@ -1033,7 +1114,6 @@ describe('DwsChannel', () => {
   it('discovers documents added to a knowledge base while the channel was stopped', async () => {
     const client = new FakeDwsClient();
     const config = makeConfig({
-      disableAtMessages: true,
       wikiSpaceIds: ['wiki-1'],
     });
     const first = await readyChannel(client, config, 'persistent-wiki');
@@ -1061,7 +1141,7 @@ describe('DwsChannel', () => {
     const client = new FakeDwsClient();
     const first = await readyChannel(
       client,
-      makeConfig({ disableAtMessages: true, wikiSpaceIds: ['wiki-1'] }),
+      makeConfig({ wikiSpaceIds: ['wiki-1'] }),
       'merged-sources',
     );
     await first.poll();
@@ -1077,7 +1157,6 @@ describe('DwsChannel', () => {
     const second = await readyChannel(
       client,
       makeConfig({
-        disableAtMessages: true,
         documentIds: ['doc-2'],
         wikiSpaceIds: ['wiki-1'],
       }),

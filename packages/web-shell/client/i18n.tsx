@@ -2598,9 +2598,6 @@ const EN: Messages = {
   'channels.editor.field.dws.profile': 'DWS profile',
   'channels.editor.field.dws.profile.description':
     'Optional profile name or corpId. Leave empty to use the active profile',
-  'channels.editor.field.dws.disableAtMessages': 'Disable @ message listening',
-  'channels.editor.field.dws.disableAtMessages.description':
-    'Turn off the default subscription for DingTalk messages that mention the authenticated DWS user',
   'channels.editor.field.dws.imUserIds':
     'Direct-message users (comma-separated)',
   'channels.editor.field.dws.imUserIds.description':
@@ -5311,9 +5308,6 @@ const ZH: Messages = {
   'channels.editor.field.dws.profile': 'DWS 身份',
   'channels.editor.field.dws.profile.description':
     '可选的 profile 名称或 corpId；留空时使用当前身份',
-  'channels.editor.field.dws.disableAtMessages': '关闭 @我的消息监听',
-  'channels.editor.field.dws.disableAtMessages.description':
-    '关闭默认启用的、提及当前 DWS 登录用户的钉钉消息订阅',
   'channels.editor.field.dws.imUserIds': '单聊用户（逗号分隔）',
   'channels.editor.field.dws.imUserIds.description':
     '这些钉钉用户 ID 发来的单聊消息会启动任务',

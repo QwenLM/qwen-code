@@ -40,7 +40,6 @@ const NO_REPLY_SENTINEL_PATTERN = /^\[NO_REPLY\][.!]?$/i;
 interface DwsConfig extends ChannelConfig {
   dwsPath?: unknown;
   profile?: unknown;
-  disableAtMessages?: unknown;
   imUserIds?: unknown;
   documentIds?: unknown;
   wikiSpaceIds?: unknown;
@@ -121,18 +120,6 @@ function configuredString(value: unknown, field: string): string | undefined {
     throw new Error(`DWS channel field ${field} must be a string.`);
   }
   return value.trim() || undefined;
-}
-
-function configuredBoolean(
-  value: unknown,
-  field: string,
-  fallback: boolean,
-): boolean {
-  if (value === undefined) return fallback;
-  if (typeof value !== 'boolean') {
-    throw new Error(`DWS channel field ${field} must be a boolean.`);
-  }
-  return value;
 }
 
 function configuredNonNegativeNumber(
@@ -218,7 +205,8 @@ function isNoReply(text: string): boolean {
 
 function sourceLabel(source: DwsImSource): string {
   if (source.kind === 'at') return '@ messages';
-  return 'direct messages';
+  if (source.kind === 'direct') return 'direct messages';
+  return 'group messages';
 }
 
 function isPersistedTarget(value: unknown): value is PersistedImTarget {
@@ -315,11 +303,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       DEFAULT_WIKI_DISCOVERY_INTERVAL_MS,
     );
     const imUserIds = configuredList(config.imUserIds, 'imUserIds');
-    const disableAtMessages = configuredBoolean(
-      config.disableAtMessages,
-      'disableAtMessages',
-      false,
-    );
     const configuredTrigger = configuredString(config.trigger, 'trigger');
     if (config.trigger !== undefined && configuredTrigger === undefined) {
       throw new Error('DWS channel field trigger must be a non-empty string.');
@@ -330,18 +313,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       ...(profile ? ['--profile', JSON.stringify(profile)] : []),
     ].join(' ');
     const imSources: DwsImSource[] = [
-      ...(!disableAtMessages ? ([{ kind: 'at' }] as const) : []),
+      { kind: 'at' },
       ...imUserIds.map((userId): DwsImSource => ({ kind: 'direct', userId })),
+      ...Object.entries(config.groups)
+        .filter(
+          ([conversationId, group]) =>
+            conversationId !== '*' &&
+            conversationId.trim().length > 0 &&
+            group.requireMention === false,
+        )
+        .map(
+          ([conversationId]): DwsImSource => ({
+            kind: 'group',
+            conversationId,
+          }),
+        ),
     ];
-    if (
-      imSources.length === 0 &&
-      documentIds.length === 0 &&
-      wikiSpaceIds.length === 0
-    ) {
-      throw new Error(
-        'DWS channel requires at least one message or document source.',
-      );
-    }
 
     const hasDocumentSources =
       documentIds.length > 0 || wikiSpaceIds.length > 0;
@@ -767,6 +754,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
   ): Promise<void> {
     if (!this.connected) return;
+    if (
+      source.kind === 'group' &&
+      this.config.groupPolicy === 'pairing' &&
+      !this.groupGate.isGroupApproved(message.conversationId)
+    ) {
+      return;
+    }
     const key = messageKey(message);
     while (true) {
       const existing = this.processingMessages.get(key);

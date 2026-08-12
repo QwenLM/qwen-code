@@ -181,18 +181,63 @@ describe('DwsClient', () => {
     });
   });
 
-  it('rejects legacy ambient group events', () => {
-    expect(() =>
-      parseDwsImEvent(
-        json({
-          type: 'user_im_message_receive_group',
-          message_id: 'message-1',
-          conversation_id: 'cid-1',
-          content: '/qwen check this',
-          sender_open_dingtalk_id: 'open-alice',
-        }),
-      ),
-    ).toThrow('Unsupported DWS event type');
+  it('subscribes to a selected group and normalizes ambient messages', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:user' },
+      vi.fn(),
+      eventStarter,
+    );
+    const onMessage = vi.fn();
+
+    await client.subscribeToIm(
+      { kind: 'group', conversationId: 'cid-1' },
+      onMessage,
+      vi.fn(),
+    );
+    await onLine(
+      json({
+        type: 'user_im_message_receive_group',
+        event_id: 'event-1',
+        message_id: 'message-1',
+        conversation_id: 'cid-1',
+        content: '{"content":"check this"}',
+        sender_open_dingtalk_id: 'open-alice',
+        sender: 'Alice',
+      }),
+    );
+
+    expect(eventStarter).toHaveBeenCalledWith(
+      '/opt/dws',
+      [
+        '--profile',
+        'corp:user',
+        'event',
+        'consume',
+        'user_im_message_receive_group',
+        '--format',
+        'compact',
+        '--group',
+        'cid-1',
+      ],
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(onMessage).toHaveBeenCalledWith({
+      type: 'user_im_message_receive_group',
+      eventId: 'event-1',
+      messageId: 'message-1',
+      conversationId: 'cid-1',
+      content: 'check this',
+      senderId: 'open-alice',
+      senderName: 'Alice',
+    });
   });
 
   it('uses DWS idempotency keys for message sends and replies', async () => {
