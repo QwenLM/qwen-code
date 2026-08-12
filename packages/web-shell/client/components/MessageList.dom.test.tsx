@@ -627,6 +627,30 @@ describe('MessageList — compact mode', () => {
       ).not.toBeNull();
     },
   );
+
+  it.each([
+    ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
+    ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
+    ['agent', agentMsg('special')],
+  ])('does not merge a leading %s group with later tools', (_name, special) => {
+    const container = mount(
+      [special, thinkingMsg('t1'), toolMsg('g2')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container.querySelector('[data-testid="msg-special"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-g2"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g2');
+  });
 });
 
 describe('MessageList — turn collapse (DOM)', () => {

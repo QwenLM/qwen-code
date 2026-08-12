@@ -1106,7 +1106,11 @@ export const ToolLine = memo(function ToolLine({
     isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
   const isRunningTool = isActiveToolStatus(tool.status);
-  const now = useSharedNow(isRunningTool);
+  const showsLiveElapsed =
+    isRunningTool &&
+    !isShellToolName(tool.toolName) &&
+    !isWebFetchToolName(tool.toolName);
+  const now = useSharedNow(showsLiveElapsed);
 
   // Collapse a regular tool to its one-line summary once it completes
   // successfully — unless the user explicitly toggled this row, in which case
