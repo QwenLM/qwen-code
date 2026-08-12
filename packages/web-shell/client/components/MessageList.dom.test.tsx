@@ -59,6 +59,11 @@ vi.mock('./MessageItem', async () => {
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
+          'data-timestamp': message.timestamp,
+          'data-tool-ids':
+            message.role === 'tool_group'
+              ? message.tools.map((tool) => tool.callId).join(',')
+              : undefined,
         },
         sendFailed
           ? React.createElement(
@@ -114,6 +119,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 }));
 
 const { MessageList } = await import('./MessageList');
+const { CompactModeContext } = await import('../App');
 type MessageListHandle = import('./MessageList').MessageListHandle;
 
 (
@@ -152,6 +158,7 @@ const mounted: Array<{
   root: Root;
   container: HTMLElement;
   transcriptRenderMode: TranscriptRenderMode;
+  compactMode: boolean;
 }> = [];
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
@@ -203,6 +210,11 @@ const agentMsg = (id: string): ToolGroupMessage => ({
       args: { subagent_type: 'explore', run_in_background: true },
     },
   ],
+});
+const standaloneToolMsg = (id: string, toolName: string): ToolGroupMessage => ({
+  id,
+  role: 'tool_group',
+  tools: [{ callId: `call-${id}`, toolName, status: 'completed' }],
 });
 const asstMsg = (id: string): AssistantMessage => ({
   id,
@@ -294,6 +306,7 @@ function mount(
     includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
+    compactMode?: boolean;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
   } = {},
@@ -305,35 +318,37 @@ function mount(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={opts.customization ?? {}}>
-          <TranscriptRenderModeProvider
-            value={opts.transcriptRenderMode ?? 'interactive'}
-          >
-            <MessageList
-              ref={ref}
-              messages={messages}
-              pendingApproval={null}
-              hideSessionTimeline={opts.hideSessionTimeline}
-              loadingTranscript={opts.loadingTranscript}
-              catchingUp={opts.catchingUp}
-              hasOlderHistory={opts.hasOlderHistory}
-              loadingOlderHistory={opts.loadingOlderHistory}
-              historyCapacityReached={opts.historyCapacityReached}
-              historyPaginationError={opts.historyPaginationError}
-              onLoadOlderHistory={opts.onLoadOlderHistory}
-              transcriptBlockCount={opts.transcriptBlockCount}
-              transcriptActivity={opts.transcriptActivity}
-              onReloadTranscript={opts.onReloadTranscript}
-              isResponding={opts.isResponding}
-              hideFirstUserMessage={opts.hideFirstUserMessage}
-              firstTurnMetrics={opts.firstTurnMetrics}
-              includeSubagentToolUsageInMetrics={
-                opts.includeSubagentToolUsageInMetrics
-              }
-              onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
-              failedPromptMessageId={opts.failedPromptMessageId}
-              onRetryFailedPrompt={opts.onRetryFailedPrompt}
-            />
-          </TranscriptRenderModeProvider>
+          <CompactModeContext.Provider value={opts.compactMode ?? false}>
+            <TranscriptRenderModeProvider
+              value={opts.transcriptRenderMode ?? 'interactive'}
+            >
+              <MessageList
+                ref={ref}
+                messages={messages}
+                pendingApproval={null}
+                hideSessionTimeline={opts.hideSessionTimeline}
+                loadingTranscript={opts.loadingTranscript}
+                catchingUp={opts.catchingUp}
+                hasOlderHistory={opts.hasOlderHistory}
+                loadingOlderHistory={opts.loadingOlderHistory}
+                historyCapacityReached={opts.historyCapacityReached}
+                historyPaginationError={opts.historyPaginationError}
+                onLoadOlderHistory={opts.onLoadOlderHistory}
+                transcriptBlockCount={opts.transcriptBlockCount}
+                transcriptActivity={opts.transcriptActivity}
+                onReloadTranscript={opts.onReloadTranscript}
+                isResponding={opts.isResponding}
+                hideFirstUserMessage={opts.hideFirstUserMessage}
+                firstTurnMetrics={opts.firstTurnMetrics}
+                includeSubagentToolUsageInMetrics={
+                  opts.includeSubagentToolUsageInMetrics
+                }
+                onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+                failedPromptMessageId={opts.failedPromptMessageId}
+                onRetryFailedPrompt={opts.onRetryFailedPrompt}
+              />
+            </TranscriptRenderModeProvider>
+          </CompactModeContext.Provider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -342,6 +357,7 @@ function mount(
     root,
     container,
     transcriptRenderMode: opts.transcriptRenderMode ?? 'interactive',
+    compactMode: opts.compactMode ?? false,
   });
   return container;
 }
@@ -361,15 +377,17 @@ function rerenderMessages(
     entry.root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={{}}>
-          <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
-            <MessageList
-              messages={messages}
-              pendingApproval={null}
-              loadingTranscript={opts.loadingTranscript}
-              catchingUp={opts.catchingUp}
-              isResponding={opts.isResponding}
-            />
-          </TranscriptRenderModeProvider>
+          <CompactModeContext.Provider value={entry.compactMode}>
+            <TranscriptRenderModeProvider value={entry.transcriptRenderMode}>
+              <MessageList
+                messages={messages}
+                pendingApproval={null}
+                loadingTranscript={opts.loadingTranscript}
+                catchingUp={opts.catchingUp}
+                isResponding={opts.isResponding}
+              />
+            </TranscriptRenderModeProvider>
+          </CompactModeContext.Provider>
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -484,6 +502,154 @@ describe('MessageList — failed prompt retry', () => {
         ?.click(),
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MessageList — compact mode', () => {
+  it('hides thinking rows without removing surrounding transcript content', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+
+    rerenderMessages(container, [
+      userMsg('u1'),
+      thinkingMsg('t1'),
+      thinkingMsg('t2'),
+      asstMsg('a1'),
+    ]);
+    expect(container.querySelector('[data-testid="msg-t2"]')).toBeNull();
+  });
+
+  it('merges tool groups separated only by hidden thinking', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        { ...toolMsg('g1'), timestamp: 1_000 },
+        thinkingMsg('t1'),
+        { ...toolMsg('g2'), timestamp: 2_000 },
+        asstMsg('a1'),
+        userMsg('u2'),
+        toolMsg('g3'),
+      ],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-g1"]')
+        ?.getAttribute('data-timestamp'),
+    ).toBe('1000');
+    expect(
+      container
+        .querySelector('[data-testid="msg-g1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1,call-g2');
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
+  });
+
+  it('keeps visible thinking and tool groups in transcript order', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        toolMsg('g1'),
+        thinkingMsg('t1'),
+        toolMsg('g2'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      { customization: { collapseCompletedTurns: false } },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-g2"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    expect(
+      Array.from(container.querySelectorAll('[data-testid^="msg-"]')).map(
+        (element) => element.getAttribute('data-testid'),
+      ),
+    ).toEqual(['msg-u1', 'msg-g1', 'msg-t1', 'msg-g2', 'msg-a1']);
+  });
+
+  it('keeps agent groups on their parallel-agent path', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        thinkingMsg('t1'),
+        agentMsg('agent-2'),
+      ],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(parallelAgentsSummary(container)).not.toBeNull();
+  });
+
+  it.each(['TodoWrite', 'AskUserQuestion'])(
+    'keeps %s groups separate across hidden thinking',
+    (toolName) => {
+      const container = mount(
+        [
+          toolMsg('g1'),
+          thinkingMsg('t1'),
+          standaloneToolMsg('special', toolName),
+        ],
+        undefined,
+        {
+          compactMode: true,
+          customization: { collapseCompletedTurns: false },
+        },
+      );
+
+      expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="msg-special"]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it.each([
+    ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
+    ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
+    ['agent', agentMsg('special')],
+  ])('does not merge a leading %s group with later tools', (_name, special) => {
+    const container = mount(
+      [special, thinkingMsg('t1'), toolMsg('g2')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container.querySelector('[data-testid="msg-special"]'),
+    ).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-g2"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g2');
   });
 });
 
