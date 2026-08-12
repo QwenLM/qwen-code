@@ -4502,23 +4502,31 @@ export class GeminiChat {
           textIndices[0] ?? 0,
           consolidatedHistoryParts.length,
         );
-        if (recovery.remainingText) {
-          consolidatedHistoryParts.splice(insertAt, 0, {
-            text: recovery.remainingText,
-          });
-        }
         // Third call site for the dangling-episode drop, and the only one
         // that can catch this path. The per-stream call above already ran
         // with `hasToolCall === false` (XML recovery's own gate requires
         // it), so it early-returned; appending functionCallParts below is
-        // what turns this into an active tool-use turn, and once they're
-        // appended the dangling episode is no longer trailing and the
-        // trailing-only check can never see it. Run it here, while the
-        // episode is still last, with the recovery-derived gate.
+        // what turns this into an active tool-use turn.
+        //
+        // Placement is load-bearing on BOTH sides. It must run after the
+        // consumed text parts are spliced out and BEFORE `remainingText` is
+        // re-inserted or the calls are appended -- this is the only window
+        // in which a dangling episode is guaranteed to be the last element.
+        // Re-inserting first would put the recovered text behind an episode
+        // that preceded the consumed XML, so the trailing-only check would
+        // see a text part last and no-op, persisting
+        // `[thought(unsigned), text, functionCall]` and wedging the turn.
         dropDanglingUnsignedTrailingThought(
           consolidatedHistoryParts,
           recovery.functionCallParts.some((p) => p.functionCall !== undefined),
         );
+        if (recovery.remainingText) {
+          consolidatedHistoryParts.splice(
+            Math.min(insertAt, consolidatedHistoryParts.length),
+            0,
+            { text: recovery.remainingText },
+          );
+        }
         consolidatedHistoryParts.push(...recovery.functionCallParts);
         // Recompute contentText so the post-recovery validation below
         // (and the recovery debug log) reflects the rewritten parts; the

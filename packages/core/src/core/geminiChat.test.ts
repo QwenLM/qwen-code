@@ -16563,6 +16563,58 @@ describe('GeminiChat', async () => {
       expect(parts.some((p) => p.text === 'cut off mid-thought')).toBe(false);
     });
 
+    it('drops a dangling unsigned episode that PRECEDES the consumed XML text, when remainingText is re-inserted after it', async () => {
+      // The drop is trailing-only, so it must run while the episode is
+      // actually last. If it runs after `remainingText` is spliced back in,
+      // the re-inserted text sits behind the episode, the trailing check
+      // sees a text part last and no-ops, and the appended functionCall
+      // wedges the turn exactly as if the drop were absent.
+      //
+      // Shape: an unsigned episode first, then a plain-text part carrying a
+      // stray `thoughtSignature` and no `thought` flag -- the wire shape
+      // isVisibleTextPart's doc calls out as real -- whose text holds the
+      // XML. `remainingText` is non-empty ('Sure.'), which is what makes
+      // the ordering observable.
+      const xml =
+        '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    { text: 'planning my read', thought: true },
+                    { text: 'Sure.\n' + xml, thoughtSignature: 'stray-sig' },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'read the file' },
+        'prompt-xml-fallback-preceding-episode',
+      );
+      for await (const event of stream) {
+        if (event.type === StreamEventType.CHUNK) {
+          // drain
+        }
+      }
+
+      const parts = chat.getHistory()[1]!.parts ?? [];
+      expect(parts.some((p) => p.functionCall)).toBe(true);
+      expect(parts.some((p) => p.text?.includes('<invoke'))).toBe(false);
+      // No unsigned thinking may share an active tool-use turn.
+      expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(false);
+      expect(parts.some((p) => p.text === 'planning my read')).toBe(false);
+    });
+
     it('keeps a SIGNED trailing reasoning episode when XML tool call recovery fires', async () => {
       // Complement to the drop above: the drop is scoped to UNSIGNED
       // trailing episodes. A signed trailing episode is a complete,
