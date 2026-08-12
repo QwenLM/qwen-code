@@ -223,6 +223,7 @@ export default {
   'toolDisplayName.ClipVideo': '剪辑视频',
   'toolDisplayName.ConvertImage': '转换图像',
   'toolDisplayName.TranscribeAudio': '转写音频',
+  'toolDisplayName.RecallMediaMemory': '召回媒体记忆',
   '[fixed-only: runs via media policies, not the model]':
     '［仅固定策略：由媒体策略调用，不开放给模型］',
   // ============================================================================
