@@ -4448,6 +4448,7 @@ export class GeminiChat {
     // ephemeral, so losing them across a truncate is safe (the
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
+    clearLoadedSkillTracking(this.config.getToolRegistry(), 'truncateHistory');
     this.clearPendingPartialState();
   }
 
@@ -4504,6 +4505,10 @@ export class GeminiChat {
     // `sendMessageStream` would otherwise leave a stale marker that
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
+    clearLoadedSkillTracking(
+      this.config.getToolRegistry(),
+      'stripOrphanedUserEntries',
+    );
     this.clearPendingPartialState();
     return strippedEntries;
   }
