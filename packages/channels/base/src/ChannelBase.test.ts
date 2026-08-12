@@ -12486,6 +12486,55 @@ describe('ChannelBase', () => {
       expect(bridge.discardSession).toHaveBeenCalledWith(shelledSessionId);
     });
 
+    it('reclaims the queue and generation of a rotated session', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      const maps = ch as unknown as {
+        sessionQueues: Map<string, unknown>;
+        sessionGenerations: Map<string, number>;
+      };
+      expect(maps.sessionQueues.has(retiredId)).toBe(true);
+      maps.sessionGenerations.set(retiredId, 1);
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+
+      // Rotation retires the ID permanently: without reclamation both
+      // entries leak for the gateway's lifetime.
+      expect(maps.sessionQueues.has(retiredId)).toBe(false);
+      expect(maps.sessionGenerations.has(retiredId)).toBe(false);
+    });
+
+    it('does not count shell commands against maxTurns', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 2 } });
+      const shellCommand = vi.fn().mockResolvedValue({
+        output: 'ok',
+        exitCode: 0,
+      });
+      (bridge as unknown as Record<string, unknown>)['shellCommand'] =
+        shellCommand;
+
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      // The shell command routes but starts no turn: it must give its
+      // resolve-time count back like the buffered and loop-drop paths.
+      await ch.handleInbound(envelope({ text: '!status' }));
+      expect(shellCommand).toHaveBeenCalledWith(sessionId, 'status');
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![0],
+      ).toBe(sessionId);
+
+      await ch.handleInbound(envelope({ text: 'third' }));
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[2]![0],
+      ).not.toBe(sessionId);
+    });
+
     it('collect: buffered messages count once against maxTurns', async () => {
       let settleFirst!: (value: string) => void;
       let callCount = 0;

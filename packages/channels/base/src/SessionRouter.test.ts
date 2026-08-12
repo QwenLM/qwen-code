@@ -2015,6 +2015,246 @@ describe('SessionRouter', () => {
       expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
     });
 
+    it('drains a routing lease released while a restore holds the route wiped', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 2,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
+
+      // A message routes onto the restored session and holds its lease
+      // across an unsettled shell command when a reconnect restore wipes
+      // the route.
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-alice');
+
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+
+      // The command settles in the wipe window: its release must net
+      // against the carry instead of being swallowed by the wipe and
+      // re-added as a phantom lease that defers rotation forever.
+      router.releaseRoutingLease('old-alice');
+
+      loadResolvers[1]!('old-alice');
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      expect(routingLeases(router).has('old-alice')).toBe(false);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
+        'old-alice',
+      );
+    });
+
+    it('nets a turn uncounted mid-restore instead of rewinding to the snapshot', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 1,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await expect(first).resolves.toEqual({ restored: 1, failed: 0 });
+
+      // A message resolves the restored session, then buffers (collect
+      // mode) and settles without a turn while the next restore wipes it.
+      expect(await router.resolve('ch', 'alice', 'chat1')).toBe('old-alice');
+
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      router.uncountTurn('ch', 'old-alice');
+      router.releaseRoutingLease('old-alice');
+
+      loadResolvers[1]!('old-alice');
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      // The give-back survived the wipe window: one counted message, not
+      // the snapshot's pre-decrement count re-counted by the drain.
+      expect(rotationCounters(router).toTurns.get('old-alice')).toBe(1);
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1'].turns).toBe(1);
+    });
+
+    it('does not resurrect a route cleared before an overlapping restore', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+
+      // /clear lands while the first restore still loads bob; the removal
+      // is suspended with everything else. A reconnect READY then fires a
+      // second restore against the stale pre-clear snapshot.
+      router.removeSession('ch', 'alice', 'chat1');
+
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      expect(loadResolvers).toHaveLength(3);
+
+      loadResolvers[1]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[2]!('old-bob');
+
+      await expect(first).resolves.toEqual({ restored: 2, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBeUndefined();
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1']).toBeUndefined();
+      expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
+    });
+
+    it('does not resurrect a rotated route when a second restore overlaps', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 3,
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const restoring = router.restoreSessions();
+      await drainMicrotasks();
+      const waiter = router.resolve('ch', 'alice', 'chat1');
+      loadResolvers[0]!('old-alice');
+
+      // The restored session is at its bound: the waiter rotates it
+      // mid-restore, retiring the key while persistence stays suspended.
+      const successor = await waiter;
+      router.releaseRoutingLease(successor);
+      expect(successor).not.toBe('old-alice');
+
+      // A reconnect READY fires a second restore against the stale
+      // snapshot that still lists the rotated route.
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      expect(loadResolvers).toHaveLength(3);
+
+      loadResolvers[1]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[2]!('old-bob');
+
+      await expect(restoring).resolves.toEqual({ restored: 2, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 1, failed: 0 });
+
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(successor);
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1'].sessionId).toBe(successor);
+      expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
+    });
+
     it('flushes the whole store when an earlier finisher dropped a key', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
       tempDirs.push(dir);
@@ -2524,18 +2764,19 @@ describe('SessionRouter', () => {
       expect(rotationCounters(router).toStartedAt.size).toBe(0);
     });
 
-    it('never uncounts a session below its seed turn', async () => {
+    it('gives the seed count back when the first message never prompts', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 2 });
 
       const first = await router.resolve('ch', 'alice', 'chat1');
       router.releaseRoutingLease(first);
       // The first firing is dropped before it prompts (a skipped loop
-      // firing): the uncount must not eat the seed turn creation paid for,
-      // or the bound would consume a slot nothing ever used.
+      // firing): the uncount must give the seed count back, or the session
+      // would rotate one turn early for the rest of its life.
       router.uncountTurn('ch', first);
-      expect(rotationCounters(router).toTurns.get(first)).toBe(1);
+      expect(rotationCounters(router).toTurns.has(first)).toBe(false);
 
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
       expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
       expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
     });

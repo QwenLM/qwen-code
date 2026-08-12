@@ -111,7 +111,7 @@ By default a route keeps the same session forever, so a long-lived route — a b
 }
 ```
 
-- **`maxTurns`** — Rotate once this many messages have used the current session.
+- **`maxTurns`** — Rotate once this many messages have started a turn on the current session. Messages that settle without one (a `!` shell command, a dropped loop firing) do not count.
 - **`maxAgeHours`** — Rotate once the current session is older than this.
 
 Set either, both, or neither; whichever bound is hit first rotates. `maxTurns` must be a positive integer and `maxAgeHours` a positive number. Omitting `sessionRotation` keeps the previous behavior of never rotating. In `collect` dispatch mode, messages buffered while a turn runs are coalesced into one turn and count once against `maxTurns`.

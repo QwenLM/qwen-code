@@ -2317,6 +2317,12 @@ export abstract class ChannelBase {
   ): void {
     if (target?.channelName !== this.name) return;
     this.purgeSessionState(sessionId);
+    // Rotation retires the ID permanently and defers until no turn is
+    // running or queued, so it reclaims what the death path must keep: a
+    // dead ID can be re-attached by lazy recovery with a queued turn still
+    // holding the chain, a rotated one cannot.
+    this.sessionQueues.delete(sessionId);
+    this.sessionGenerations.delete(sessionId);
     void this.sendThreadMessage(
       target.chatId,
       target.threadId,
@@ -5231,6 +5237,9 @@ export abstract class ChannelBase {
             `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         } finally {
+          // No turn started for this message: give the resolve-time count
+          // back like the other no-turn paths, then release the lease.
+          this.router.uncountTurn(this.name, sessionId);
           this.router.releaseRoutingLease(sessionId);
         }
         return;

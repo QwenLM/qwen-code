@@ -82,6 +82,18 @@ export class SessionRouter {
   private persistPath: string | undefined;
   private persistSuspendDepth = 0;
   private persistRequestedWhileSuspended = false;
+  // Rotation-state writes (countTurn, uncountTurn, leaseSession,
+  // releaseRoutingLease) that land while a restore's reservation pass holds
+  // the session wiped, keyed by the wiped session ID. The restore's carry
+  // nets them against the captured baseline instead of overwriting them.
+  private readonly rotationDeltas = new Map<
+    string,
+    { turns: number; leases: number }
+  >();
+  // Routing keys removed while persistence is suspended: the removal only
+  // reaches disk at the last restore's flush, and any restore reading the
+  // stale snapshot until then must skip them instead of resurrecting them.
+  private readonly suspendedDeletionKeys = new Set<string>();
   private readonly recoveryMode: SessionRecoveryMode;
 
   constructor(
@@ -214,6 +226,7 @@ export class SessionRouter {
   ): void {
     this.invalidateRouteOperation(key);
     this.deleteByKey(key);
+    this.tombstoneSuspendedKey(key);
     // Persist the retirement now: if the successor creation fails before its
     // own persist, a restart must not restore the stale route and re-fire the
     // whole rotation (a second notice and discard for what was one rotation).
@@ -254,6 +267,11 @@ export class SessionRouter {
   }
 
   private leaseSession(sessionId: string): void {
+    const delta = this.rotationDeltas.get(sessionId);
+    if (delta) {
+      delta.leases += 1;
+      return;
+    }
     this.sessionRoutingLeases.set(
       sessionId,
       (this.sessionRoutingLeases.get(sessionId) ?? 0) + 1,
@@ -273,6 +291,11 @@ export class SessionRouter {
    * registered its turn.
    */
   releaseRoutingLease(sessionId: string): void {
+    const delta = this.rotationDeltas.get(sessionId);
+    if (delta) {
+      delta.leases -= 1;
+      return;
+    }
     const leases = this.sessionRoutingLeases.get(sessionId) ?? 0;
     if (leases <= 1) {
       this.sessionRoutingLeases.delete(sessionId);
@@ -288,22 +311,38 @@ export class SessionRouter {
   private countTurn(channelName: string, sessionId: string): void {
     const rotation = this.channelRotations.get(channelName);
     if (rotation?.maxTurns === undefined) return;
+    const delta = this.rotationDeltas.get(sessionId);
+    if (delta) {
+      delta.turns += 1;
+      this.persist();
+      return;
+    }
     this.toTurns.set(sessionId, (this.toTurns.get(sessionId) ?? 0) + 1);
     this.persist();
   }
 
   /**
-   * Reverse countTurn for a routed message that was buffered instead of
-   * becoming a turn (collect mode): the drain re-enters and counts the
-   * coalesced message, so the buffered routing must not also count. Never
-   * drops below the seed value of one while the session exists.
+   * Reverse countTurn for a routed message that settled without starting a
+   * turn (buffered in collect mode, dropped loop firing, shell command):
+   * the bound counts turns actually started. Zero is an absent counter, so
+   * a session whose only count was given back rotates exactly on schedule.
    */
   uncountTurn(channelName: string, sessionId: string): void {
     const rotation = this.channelRotations.get(channelName);
     if (rotation?.maxTurns === undefined) return;
+    const delta = this.rotationDeltas.get(sessionId);
+    if (delta) {
+      delta.turns -= 1;
+      this.persist();
+      return;
+    }
     const turns = this.toTurns.get(sessionId);
-    if (turns === undefined || turns <= 1) return;
-    this.toTurns.set(sessionId, turns - 1);
+    if (turns === undefined) return;
+    if (turns <= 1) {
+      this.toTurns.delete(sessionId);
+    } else {
+      this.toTurns.set(sessionId, turns - 1);
+    }
     this.persist();
   }
 
@@ -700,6 +739,7 @@ export class SessionRouter {
       this.invalidateRouteOperation(key);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
+      this.tombstoneSuspendedKey(key);
     } else if (scope === 'single') {
       return removedIds;
     } else {
@@ -713,6 +753,7 @@ export class SessionRouter {
           this.invalidateRouteOperation(k);
           const sessionId = this.deleteByKey(k);
           if (sessionId) removedIds.push(sessionId);
+          this.tombstoneSuspendedKey(k);
         }
       }
       for (const [key, operation] of [...this.creatingSessions]) {
@@ -721,6 +762,7 @@ export class SessionRouter {
           operation.target.senderId === senderId
         ) {
           this.invalidateRouteOperation(key);
+          this.tombstoneSuspendedKey(key);
         }
       }
     }
@@ -735,6 +777,7 @@ export class SessionRouter {
       if (mappedSessionId === sessionId) {
         this.invalidateRouteOperation(key);
         this.toSession.delete(key);
+        this.tombstoneSuspendedKey(key);
         removed = true;
       }
     }
@@ -780,6 +823,7 @@ export class SessionRouter {
     this.toTurns.delete(sessionId);
     this.toStartedAt.delete(sessionId);
     this.sessionRoutingLeases.delete(sessionId);
+    this.rotationDeltas.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     return sessionId;
   }
@@ -856,6 +900,7 @@ export class SessionRouter {
       {
         reservation: SessionReservation;
         operation: SessionOperation;
+        liveSessionId?: string;
         liveRotation?: {
           turns?: number;
           startedAt?: number;
@@ -879,6 +924,10 @@ export class SessionRouter {
       // Reserve every persisted key up front so inbound messages during restart
       // wait for restore instead of returning stale IDs or creating duplicates.
       for (const key of Object.keys(entries)) {
+        // A route removed while persistence stays suspended only reaches
+        // disk at the last restore's flush; until then this restore reads
+        // the stale pre-deletion snapshot and must not resurrect the key.
+        if (this.suspendedDeletionKeys.has(key)) continue;
         const liveSessionId = this.toSession.get(key);
         // A route already back in memory can have routed messages newer than
         // the persisted snapshot (persists stay suspended across the restore
@@ -892,6 +941,9 @@ export class SessionRouter {
             }
           : undefined;
         this.deleteByKey(key);
+        if (liveSessionId) {
+          this.rotationDeltas.set(liveSessionId, { turns: 0, leases: 0 });
+        }
         const reservation = this.createSessionReservation();
         reservation.promise.catch(() => undefined);
         const operation = this.createSessionOperation(
@@ -901,7 +953,12 @@ export class SessionRouter {
         );
         operation.promise.catch(() => undefined);
         this.creatingSessions.set(key, operation);
-        reservations.set(key, { reservation, operation, liveRotation });
+        reservations.set(key, {
+          reservation,
+          operation,
+          liveSessionId,
+          liveRotation,
+        });
       }
 
       const loadWindow = this.beginSessionLoad();
@@ -935,8 +992,12 @@ export class SessionRouter {
             this.toTarget.set(sessionId, entry.target);
             this.toCwd.set(sessionId, entry.cwd);
             this.restoreRotationState(sessionId, entry);
-            if (reserved.liveRotation) {
-              this.carryLiveRotationState(sessionId, reserved.liveRotation);
+            if (reserved.liveRotation && reserved.liveSessionId) {
+              this.carryLiveRotationState(
+                sessionId,
+                reserved.liveRotation,
+                reserved.liveSessionId,
+              );
             }
             reservation.resolve(sessionId);
             if (sessionId !== entry.sessionId) {
@@ -951,6 +1012,9 @@ export class SessionRouter {
             reservation.reject(
               new Error('Session restore failed', { cause: err }),
             );
+            if (reserved.liveSessionId) {
+              this.rotationDeltas.delete(reserved.liveSessionId);
+            }
             // The drop must reach disk even when an overlapping restore
             // flushes last: the last finisher only reads its own `changed`.
             this.persistRequestedWhileSuspended = true;
@@ -983,6 +1047,7 @@ export class SessionRouter {
         restoreGeneration === this.lifecycleGeneration
       ) {
         this.persistRequestedWhileSuspended = false;
+        this.suspendedDeletionKeys.clear();
         this.persist();
       }
     }
@@ -1001,10 +1066,12 @@ export class SessionRouter {
     this.toTurns.clear();
     this.toStartedAt.clear();
     this.sessionRoutingLeases.clear();
+    this.rotationDeltas.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
     this.routeTokens.clear();
+    this.suspendedDeletionKeys.clear();
   }
 
   /** Clear in-memory state and delete persist file. Used on clean shutdown. */
@@ -1095,7 +1162,11 @@ export class SessionRouter {
   /**
    * Re-apply the rotation state a route had live in memory when a restore
    * reserved it: routed messages made it newer than the persisted snapshot
-   * the restore reads, so it wins over restoreRotationState's seed.
+   * the restore reads, so it wins over restoreRotationState's seed. Writes
+   * that landed between the reservation's wipe and this carry waited in
+   * rotationDeltas; net them so a mid-restore release or uncount cannot
+   * resurface as a phantom lease or count. Zero turns stay absent, matching
+   * uncountTurn's representation.
    */
   private carryLiveRotationState(
     sessionId: string,
@@ -1104,18 +1175,24 @@ export class SessionRouter {
       startedAt?: number;
       leases?: number;
     },
+    wipedSessionId: string,
   ): void {
-    if (liveRotation.turns !== undefined) {
-      this.toTurns.set(sessionId, liveRotation.turns);
+    const delta = this.rotationDeltas.get(wipedSessionId);
+    this.rotationDeltas.delete(wipedSessionId);
+    const turns = (liveRotation.turns ?? 0) + (delta?.turns ?? 0);
+    if (turns > 0) {
+      this.toTurns.set(sessionId, turns);
+    } else {
+      this.toTurns.delete(sessionId);
     }
     if (liveRotation.startedAt !== undefined) {
       this.toStartedAt.set(sessionId, liveRotation.startedAt);
     }
-    if (liveRotation.leases) {
-      this.sessionRoutingLeases.set(
-        sessionId,
-        (this.sessionRoutingLeases.get(sessionId) ?? 0) + liveRotation.leases,
-      );
+    const leases = (liveRotation.leases ?? 0) + (delta?.leases ?? 0);
+    if (leases > 0) {
+      this.sessionRoutingLeases.set(sessionId, leases);
+    } else {
+      this.sessionRoutingLeases.delete(sessionId);
     }
   }
 
@@ -1141,6 +1218,18 @@ export class SessionRouter {
       (typedTarget['isGroup'] === undefined ||
         typeof typedTarget['isGroup'] === 'boolean')
     );
+  }
+
+  /**
+   * Record a route removed while persistence is suspended mid-restore, and
+   * ask the last restore's flush to write the removal out. Without the
+   * record an overlapping restore reading the stale snapshot would re-add
+   * the route and the flush would persist it again.
+   */
+  private tombstoneSuspendedKey(key: string): void {
+    if (this.persistSuspendDepth === 0) return;
+    this.suspendedDeletionKeys.add(key);
+    this.persist();
   }
 
   private persist(): void {
