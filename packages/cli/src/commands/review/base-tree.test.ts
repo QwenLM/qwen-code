@@ -543,6 +543,31 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('models the empty-string workspace glob as the root package, like the disk twin', () => {
+    // `"workspaces": [""]` names the root itself as a member: on disk the
+    // manifest probe joins `<root>//package.json` and applies() accepts it.
+    // The blob twin probed the unresolvable `<sha>:/package.json` instead
+    // and misread the base as Maven-only, permanently disabling A/B there.
+    mkdirSync(join(repo, 'app'), { recursive: true });
+    writeFileSync(join(repo, 'app', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ name: '@x/root', workspaces: [''] }),
+    );
+    git(repo, 'add', 'app', 'package.json');
+    git(repo, 'commit', '-qam', 'root-as-member glob + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
   it('does NOT count an unreadable member manifest as an npm package', () => {
     // applies() requires at least one readable package: a manifest that
     // does not parse lands in `skipped` on disk, so counting it on blob

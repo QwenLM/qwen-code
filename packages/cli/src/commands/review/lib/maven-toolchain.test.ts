@@ -458,9 +458,11 @@ describe('maven toolchain adapter', () => {
       1,
     ],
     ['Error: The JAVA_HOME environment variable is not defined correctly', 1],
+    // mvn.cmd/mvnw.cmd on Windows when JAVA_HOME is UNSET names the failure
+    // differently than the POSIX wrapper's "not defined correctly".
+    ['Error: JAVA_HOME not found in your environment.', 1],
     // mvn.cmd/mvnw.cmd on Windows, when JAVA_HOME points at an invalid
-    // directory — the only JAVA_HOME failure wording the Windows launcher
-    // emits for it.
+    // directory.
     ['ERROR: JAVA_HOME is set to an invalid directory: C:\\old\\jdk', 1],
     ['Unable to locate a Java Runtime', 1],
   ])(
@@ -1811,6 +1813,20 @@ describe('maven toolchain adapter', () => {
     expect(failed.ok).toBe(true);
     expect(failed.note).toContain('Dependency warm-up');
     expect(failed.note).toContain('exited 1');
+
+    // A spawn death without a deadline is its own arm: the note must not
+    // read "ran out of time" for a warm-up the deadline never touched.
+    const spawnDied = runAdapter(['core/src/Main.java'], {
+      budget: 600,
+      install: true,
+      exec: (command) =>
+        command.includes('dependency:go-offline')
+          ? result(command, { exitCode: null })
+          : result(command),
+    });
+    expect(spawnDied.ok).toBe(true);
+    expect(spawnDied.note).toContain('Dependency warm-up');
+    expect(spawnDied.note).toContain('ended without an exit code');
   });
 
   it('widens to the full reactor when the -pl selector exceeds the launch-safe length', () => {
@@ -2008,7 +2024,11 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(report.ok).toBe(true);
+    // The garbage ends in an opener whose `>` never comes: the interrupted
+    // header walk discards every later body, so the report is rejected and
+    // the run fails closed instead of reading the surviving prefix green.
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
   }, 20_000);
 
   it('fails closed past the fresh-report evidence cap, and discloses the omission', () => {
@@ -2891,20 +2911,303 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.infrastructure).toBe(true);
   });
 
-  it('classifies a silent wget bootstrap death as infrastructure', () => {
+  it('classifies a silent bootstrap download death as infrastructure', () => {
     // Both wrapper generations try wget before curl, and the distribution
     // download runs it quiet: a DNS failure dies exit 4 with EMPTY output —
-    // no wording to match. The absence of any Maven-framed line pins the
-    // death to bootstrap.
+    // no wording to match. The curl fallback dies the same way on its own
+    // codes (resolve, connect, HTTP error, timeout). The absence of any
+    // Maven-framed line pins the death to bootstrap.
+    writeReactor();
+    writeWrapper();
+
+    for (const exitCode of [4, 6, 7, 8, 22, 28]) {
+      const report = runAdapter(['core/src/Main.java'], {
+        exec: (command) => result(command, { exitCode, output: '' }),
+      });
+
+      expect(report.ok).toBe(false);
+      expect(report.test[0]?.infrastructure).toBe(true);
+      expect(report.note).toContain('infrastructure evidence');
+    }
+  });
+
+  it('classifies the curl bootstrap die message as infrastructure', () => {
+    // Hosts without wget fall back to `curl --silent`, which suppresses
+    // curl's own `curl: (N)` line; the wrapper's die wording is all the
+    // output the death leaves.
     writeReactor();
     writeWrapper();
     const report = runAdapter(['core/src/Main.java'], {
-      exec: (command) => result(command, { exitCode: 4, output: '' }),
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            'curl: Failed to fetch https://archive.apache.org/dist/maven/' +
+            'maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.zip',
+        }),
     });
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.infrastructure).toBe(true);
-    expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it('classifies the wrapper-jar SHA-256 wording as infrastructure', () => {
+    // The jar-mode wrapper names the WRAPPER where the distribution mode
+    // names the distribution; both are checksum verdicts this run's
+    // launcher printed before Maven existed.
+    writeReactor();
+    writeWrapper();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            'Error: Failed to validate Maven wrapper SHA-256, your Maven ' +
+            'wrapper might be compromised.',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+  });
+
+  it('classifies the missing checksum-tool message as infrastructure', () => {
+    // Both wrapper generations print this verbatim and exit 1 when a
+    // checksum was requested and neither sha256sum nor shasum exists.
+    writeReactor();
+    writeWrapper();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            'Checksum validation was requested but neither ' +
+            "'sha256sum' or 'shasum' are available.",
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.infrastructure).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'classifies a localized wrapper launch failure as infrastructure',
+    () => {
+      // bash/dash localize the 126/127 diagnostics under a non-English
+      // LANG; the classification keys on the shape — an unmodified wrapper
+      // dying at a launch exit code with no Maven-framed output — not the
+      // wording.
+      writeReactor();
+      writeWrapper();
+
+      for (const [output, exitCode] of [
+        ['/bin/sh: 1: ./mvnw: Keine Berechtigung', 126],
+        ['sh: ./mvnw: Datei oder Verzeichnis nicht gefunden', 127],
+      ] as const) {
+        const report = runAdapter(['core/src/Main.java'], {
+          exec: (command) => result(command, { exitCode, output }),
+        });
+        expect(report.note).toContain('infrastructure evidence');
+      }
+    },
+  );
+
+  it('reads a PR-modified stub wrapper printing fake framing as never run', () => {
+    // A wrapper the PR itself modifies is executed deliberately and can
+    // print `[INFO] BUILD SUCCESS` itself: framed output alone cannot
+    // prove Maven ran there — fresh reports must, or the run fails closed.
+    writeReactor();
+    writeWrapper();
+
+    const report = runAdapter(['mvnw', 'core/src/Main.java'], {
+      exec: (command) =>
+        result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.neverRan).toBe(true);
+    expect(report.note).toContain('changed by the diff');
+  });
+
+  it('treats single-dash long settings spellings in maven.config as dependency inputs', () => {
+    // commons-cli accepts `-settings <path>` exactly like `--settings`;
+    // reading the token through the `-s` prefix regex recorded `ettings`
+    // and let the PR's own breakage launder into infrastructure.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    mkdirSync(join(root, 'ci'));
+    writeFileSync(join(root, 'ci', 'conf.xml'), '<settings/>\n');
+
+    const withConfig = (config: string) => {
+      writeFileSync(join(root, '.mvn', 'maven.config'), config);
+      return runAdapter(['ci/conf.xml'], {
+        exec: (command) =>
+          result(command, {
+            exitCode: 1,
+            output:
+              '[ERROR] Could not resolve dependencies for project example:core',
+          }),
+      });
+    };
+
+    const paired = withConfig('-settings\nci/conf.xml\n');
+    expect(paired.note).toContain('Correlate compiler or test errors');
+    expect(paired.note).not.toContain('infrastructure evidence');
+
+    const attached = withConfig('-settings=ci/conf.xml\n');
+    expect(attached.note).toContain('Correlate compiler or test errors');
+    expect(attached.note).not.toContain('infrastructure evidence');
+  });
+
+  it('splits -Dmaven.repo.local.tail on comma only, never on |', () => {
+    // Maven parses the chain with `split(",")`: a `|` is part of a path.
+    // Reading it as a separator recorded a phantom input that could
+    // withdraw the infrastructure carve-out for an unrelated outage.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-Dmaven.repo.local.tail=cache|warm\n',
+    );
+    mkdirSync(join(root, 'cache|warm'));
+
+    const own = runAdapter(['cache|warm/corrupt.jar'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+    expect(own.note).toContain('Correlate compiler or test errors');
+    expect(own.note).not.toContain('infrastructure evidence');
+
+    // The phantom half of the old split must NOT record as an input: a
+    // change under `cache/` alone keeps the carve-out.
+    mkdirSync(join(root, 'cache'));
+    const phantom = runAdapter(['cache/corrupt.jar'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+    expect(phantom.note).toContain('infrastructure evidence');
+  });
+
+  it('widens the run to the full reactor for a root-level miscellaneous file', () => {
+    // A root file no exemption claims is the unknown-input case: it must
+    // widen the run, not drop it.
+    writeReactor();
+    const calls: string[] = [];
+
+    const report = runAdapter(['checkstyle.xml'], {
+      exec: (command) => {
+        calls.push(command);
+        return result(command);
+      },
+    });
+
+    expect(calls).toEqual(['mvn --batch-mode --no-transfer-progress test']);
+    expect(report.affected).toEqual(['.']);
+  });
+
+  it('parses a failing case whose classname carries İ through the fallback scan', () => {
+    // `İ`.toLowerCase() lengthens UTF-16 text, which switches
+    // xmlOpenTagHeaders to its case-insensitive fallback scan; the parse
+    // must still attribute the failure body to its case.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Ilk.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="İlk" name="fails">' +
+            '<failure>boom</failure>' +
+            '</testcase>' +
+            '</testsuite>',
+        );
+        return result(command, {
+          exitCode: 1,
+          output: 'There are test failures.',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.output).toContain('İlk#fails');
+  });
+
+  it('rejects a report whose unclosed attribute quote hides failure bodies', () => {
+    // A greenwash shape: the suite header says zero failures, an opener's
+    // quote never closes, and every `<failure>` body sits after the hole.
+    // The interrupted walk discards those bodies, so the report must be
+    // rejected — reading the surviving prefix would greenwash the run.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="example.CoreTest" name="passes"/>' +
+            '<testcase classname="example.Hidden" name="broken' +
+            '<failure>boom</failure>' +
+            '</testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
+  });
+
+  it('discloses captured source failures when an interrupted run recorded them', () => {
+    // Under fail-never a PR-caused compile failure does not end the build:
+    // it runs on to the deadline, and the interruption must not launder
+    // the captured failure into pure infrastructure.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      timeout: 2,
+      exec: (command) =>
+        result(command, {
+          exitCode: null,
+          timedOut: true,
+          seconds: 2,
+          output: '[ERROR] COMPILATION ERROR : something the diff broke',
+        }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('ran out of time');
+    expect(report.note).toContain('records source or goal failures');
+    expect(report.note).not.toContain('not a defect in the diff');
+  });
+
+  it('still scans the queue backlog when the fan-out bound truncates', () => {
+    // The memory guard caps the DIRECTORY QUEUE, not the scan count: ten
+    // children with a budget of three scan the root plus two children,
+    // and the reports those two hold must still be read even though the
+    // sweep truncates. A truncation that stopped the scan instead of the
+    // enqueue would read none — evidence the budget could have kept.
+    for (let i = 0; i < 10; i++) {
+      const reportDir = join(root, `m${i}`, 'target', 'surefire-reports');
+      mkdirSync(reportDir, { recursive: true });
+      writeFileSync(join(reportDir, 'TEST-M.xml'), '<testsuite tests="1"/>');
+    }
+
+    const sweep = reportPaths(root, 3);
+    expect(sweep.truncated).toBe(true);
+    expect(sweep.paths).toHaveLength(2);
   });
 
   it('reads an unframed selector-rejection wording from test stdout as evidence, not rejection', () => {

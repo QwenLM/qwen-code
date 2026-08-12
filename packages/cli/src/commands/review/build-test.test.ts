@@ -1108,6 +1108,22 @@ describe('runBuildTest', () => {
     expect(trimmed.length).toBeLessThan(hostile.length / 4);
   });
 
+  it('discloses when rescued lines outgrow the rescue cap', () => {
+    // The omission marker claims every category was kept; once the cap
+    // drops matching lines it must say so instead of asserting the
+    // impossible.
+    const input =
+      'h'.repeat(2500) +
+      '\n' +
+      Array.from({ length: 50 }, (_, i) => `Tests: ${i} failed`).join('\n') +
+      '\n' +
+      't'.repeat(6500);
+    const trimmed = trimOutput(input);
+    expect(trimmed).toContain(
+      'runner summaries kept — first 40 matching lines only, 10 more omitted',
+    );
+  });
+
   it('buildOnly builds the same set but runs NO tests', () => {
     // For the merge-base tree an A/B probe compares against: base's suite was
     // green before this PR existed, so running it measures nothing about the

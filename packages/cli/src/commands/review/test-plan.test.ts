@@ -932,9 +932,12 @@ describe('runTestPlan', () => {
       } = opts;
       // Selectors are rendered BY the adapter's own shellSelector: quoting
       // each module and joining would emit a line the adapter can never
-      // produce (it joins first, then wraps the whole selector).
-      const selector =
-        modules === null ? null : (shellSelector(modules) ?? modules.join(','));
+      // produce (it joins first, then wraps the whole selector). A selector
+      // shellSelector refuses is widened to a reactor-wide run exactly like
+      // the adapter does — fabricating a `-pl` line it cannot launch would
+      // pair an impossible (command, facts) shape.
+      const selector = modules === null ? null : shellSelector(modules);
+      const widened = modules !== null && selector === null;
       const narrowing =
         selector === null ? '' : ` -pl ${selector}${alsoMake ? ' -am' : ''}`;
       return {
@@ -943,7 +946,9 @@ describe('runTestPlan', () => {
         seconds: 3,
         timedOut: false,
         output: '',
-        maven: { lifecycle, modules, alsoMake },
+        maven: widened
+          ? { lifecycle, modules: null, alsoMake: false }
+          : { lifecycle, modules, alsoMake },
         ...overrides,
       };
     };
@@ -1186,9 +1191,20 @@ describe('runTestPlan', () => {
         '../../mvnw test',
         '..\\..\\mvnw test',
         '../../mvnw.cmd test',
-        // The Maven daemon and the debug launcher are Maven too.
+        // The Maven daemon and the debug launcher are Maven too, with the
+        // platform suffixes their Windows distributions ship.
         'mvnd test',
+        'mvnd.cmd test',
+        'mvnd.exe test',
         'mvnDebug test',
+        'mvnDebug.cmd test',
+        'mvnDebug.exe test',
+        // Bare system Maven from a module directory — same relative hops
+        // as the wrapper, same rule.
+        './mvn test',
+        './mvn.cmd test',
+        '../mvn test',
+        '..\\mvn test',
       ]) {
         const claims = extractClaims(`## Test Plan\n\nRan \`${command}\``);
         expect(claims.some((claim) => claim.text === command)).toBe(true);
@@ -1250,6 +1266,156 @@ describe('runTestPlan', () => {
       expect(claim?.verdict).toBe('unchecked');
       expect(claim?.note).toContain('ended without an exit code');
       expect(claim?.note).not.toContain('not run');
+    });
+
+    it('does not settle a claim whose quoted flag consumes the phase token', () => {
+      // `"-l"` is the `-l` flag once its quote layer is stripped: `test`
+      // is its VALUE, not a phase. Matching the raw token let the claim
+      // settle on a lifecycle it never named.
+      const bt = {
+        build: [],
+        test: [mavenCmd()],
+      } as unknown as BuildTestReport;
+
+      const quoted = run(
+        '## Test Plan\n\nRan `./mvnw verify "-l" test`',
+        [],
+        bt,
+      );
+      expect(verdictOf(quoted.claims, './mvnw verify "-l" test')).toBe(
+        'unchecked',
+      );
+
+      // The unquoted control means the same thing either way.
+      const unquoted = run(
+        '## Test Plan\n\nRan `./mvnw verify -l test`',
+        [],
+        bt,
+      );
+      expect(verdictOf(unquoted.claims, './mvnw verify -l test')).toBe(
+        'unchecked',
+      );
+    });
+
+    it('detects -am through a quoted flag spelling', () => {
+      // A quoted `"-am"` is the same flag: missing it discarded the
+      // failing `-am` run and left the claim unchecked.
+      const bt = {
+        build: [],
+        test: [
+          mavenCmd({ exitCode: 1, output: 'There are test failures.' }),
+          mavenCmd({ modules: ['sibling'], exitCode: 0 }),
+        ],
+      } as unknown as BuildTestReport;
+
+      const r = run('## Test Plan\n\nRan `./mvnw -pl core "-am" test`', [], bt);
+      expect(verdictOf(r.claims, './mvnw -pl core "-am" test')).toBe(
+        'contradicted',
+      );
+    });
+
+    it('does not settle a fail-never claim on a run that can exit non-zero', () => {
+      // fail-never makes Maven exit 0 over failures it would otherwise die
+      // on: a run without it recorded exit codes the claimed command
+      // cannot produce. All three spellings carry the same scope.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ exitCode: 1, output: '[ERROR] COMPILATION ERROR' })],
+      } as unknown as BuildTestReport;
+
+      for (const command of [
+        'mvn -fn test',
+        'mvn --fail-never test',
+        'mvn -fail-never test',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${command}\``, [], bt);
+        expect(verdictOf(r.claims, command)).toBe('unchecked');
+      }
+
+      // The unflagged control still contradicts.
+      const control = run('## Test Plan\n\nRan `mvn test`', [], bt);
+      expect(verdictOf(control.claims, 'mvn test')).toBe('contradicted');
+    });
+
+    it('reads a quote spanning a flag=value pair as one word', () => {
+      // `"-settings=my settings.xml"` is one shell word; the whitespace
+      // split broke it and the fragments slipped past the scope guards.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+
+      const r = run(
+        '## Test Plan\n\nRan `./mvnw "-settings=my settings.xml" test`',
+        [],
+        bt,
+      );
+      expect(
+        verdictOf(r.claims, './mvnw "-settings=my settings.xml" test'),
+      ).toBe('unchecked');
+    });
+
+    it('still contradicts on never-ran and suppressed -am runs', () => {
+      // A wrapper that never started Maven and a global skip setting
+      // cannot live in an upstream module: the `-am` exclusion must not
+      // discard either run.
+      const neverRanBt = {
+        build: [],
+        test: [
+          mavenCmd({
+            exitCode: 0,
+            output: '[INFO] BUILD SUCCESS',
+            neverRan: true,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run(
+        '## Test Plan\n\nRan `./mvnw -pl core test`',
+        [],
+        neverRanBt,
+      );
+      const claim = r.claims.find((c) => c.text === './mvnw -pl core test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toContain('Maven never started');
+
+      const suppressedBt = {
+        build: [],
+        test: [
+          mavenCmd({
+            exitCode: 0,
+            output: 'Tests are skipped.',
+            testsSuppressed: true,
+            // The adapter's own invariant: suppression is one of the
+            // swallowed-failure shapes, so the two flags always travel
+            // together on a real result.
+            swallowedFailure: true,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const s = run(
+        '## Test Plan\n\nRan `./mvnw -pl core test`',
+        [],
+        suppressedBt,
+      );
+      const sClaim = s.claims.find((c) => c.text === './mvnw -pl core test');
+      expect(sClaim?.verdict).toBe('contradicted');
+      expect(sClaim?.observed).toContain('skip setting');
+    });
+
+    it('keeps exit-0 never-ran evidence definitive under the evidence cap', () => {
+      // The capped arm's sub-check must name neverRan exactly like the
+      // finished path does: the cap withholds certification of a pass, it
+      // does not weaken the evidence that DID surface.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ exitCode: 0, neverRan: true, evidenceCapped: true })],
+      } as unknown as BuildTestReport;
+
+      const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw -pl core test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toContain('Maven never started');
+      expect(claim?.note).toContain('never read');
     });
 
     it('does not settle a claim on an infrastructure-classified Maven run', () => {
@@ -2553,6 +2719,22 @@ describe('runTestPlan', () => {
       } as unknown as BuildTestReport;
       const u = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], upstream);
       expect(verdictOf(u.claims, './mvnw -pl core test')).toBe('unchecked');
+    });
+
+    it('contradicts a -pl . claim when the -am run failed compiling the root project', () => {
+      // failureInsideClaim's root-module arm keys on `<worktree>/src/`: a
+      // compile failure in the root project's own sources must defeat the
+      // `-am` carve-out exactly like a module failure does, or the claim
+      // stands unchecked on evidence the review's own run contradicts.
+      const output =
+        `[ERROR] ${join(dir, 'src/main/java/Foo.java')}:[10,5] cannot find symbol\n` +
+        '[INFO] BUILD FAILURE';
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: ['.'], exitCode: 1, output })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw -pl . test`', [], bt);
+      expect(verdictOf(r.claims, './mvnw -pl . test')).toBe('contradicted');
     });
 
     it('treats relative mvnd/mvnDebug spellings as command claims', () => {

@@ -105,10 +105,12 @@ export interface CommandResult {
    */
   swallowedFailure?: boolean;
   /**
-   * The command exited 0 but part of its fresh test-report evidence was
-   * never read (past the parse cap, rejected by the parser, or unseen past
-   * a truncated sweep), so the adapter refused to certify the run:
-   * `test-plan` must not settle a Test Plan claim against it.
+   * Part of the command's fresh test-report evidence was never read (past
+   * the parse cap, rejected by the parser, or unseen past a truncated
+   * sweep), so the adapter refused to certify the run: `test-plan` must
+   * not settle a Test Plan claim against it. Exit-code independent — on an
+   * exit-0 run it withholds a pass; on a non-zero exit the exit remains
+   * definitive.
    */
   evidenceCapped?: boolean;
   /**
@@ -234,41 +236,39 @@ export function trimOutput(s: string): string {
   // `Test <n>: …` prose (measured in review — 1.6 MB in, 1.6 MB out). Past the
   // cap the trim's bounded-output contract wins and the rest stays omitted.
   const RESCUE_MAX = 40;
-  const rescued = middle
-    .split('\n')
-    .filter(
-      (l) =>
-        MODULE_ERROR_RE.test(l) ||
-        RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')) ||
-        // Maven infra classification runs on this trimmed output; a
-        // dependency-failure line lost to the trim would file a network
-        // outage against the PR, a source-failure line lost there would
-        // launder a compile error into infrastructure, a goal-failure line
-        // lost there would read a fail-never plugin failure green, and a
-        // disk-failure line lost there would file an ENOSPC death against
-        // the PR (or, under fail-never, read the run green) — the exact
-        // errors this command prevents.
-        isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-        isSourceFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-        isGoalFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-        isDiskFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-        // The adapter's testsSuppressed guard reads the skip marker from
-        // this trimmed output; a large reactor's trailing Reactor Summary
-        // pushes every `Tests are skipped.` line into the omitted middle,
-        // and losing it certifies a run that tested zero.
-        isTestsSkippedLine(l.replace(ANSI_SGR_RE, '')) ||
-        // The adapter's exit-0 stdout cross-check reads Surefire's framed
-        // `Tests run:` summaries from this trimmed output — the ONE defense
-        // for relocated-`<reportsDirectory>` runs. A large reactor's
-        // trailing Reactor Summary pushes them into the omitted middle
-        // exactly like the skip marker above, and losing them certifies a
-        // failing run green.
-        isSurefireSummaryLine(l.replace(ANSI_SGR_RE, '')),
-    )
-    .slice(0, RESCUE_MAX);
+  const matching = middle.split('\n').filter(
+    (l) =>
+      MODULE_ERROR_RE.test(l) ||
+      RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')) ||
+      // Maven infra classification runs on this trimmed output; a
+      // dependency-failure line lost to the trim would file a network
+      // outage against the PR, a source-failure line lost there would
+      // launder a compile error into infrastructure, a goal-failure line
+      // lost there would read a fail-never plugin failure green, and a
+      // disk-failure line lost there would file an ENOSPC death against
+      // the PR (or, under fail-never, read the run green) — the exact
+      // errors this command prevents.
+      isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+      isSourceFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+      isGoalFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+      isDiskFailureLine(l.replace(ANSI_SGR_RE, '')) ||
+      // The adapter's testsSuppressed guard reads the skip marker from
+      // this trimmed output; a large reactor's trailing Reactor Summary
+      // pushes every `Tests are skipped.` line into the omitted middle,
+      // and losing it certifies a run that tested zero.
+      isTestsSkippedLine(l.replace(ANSI_SGR_RE, '')) ||
+      // The adapter's exit-0 stdout cross-check reads Surefire's framed
+      // `Tests run:` summaries from this trimmed output — the ONE defense
+      // for relocated-`<reportsDirectory>` runs. A large reactor's
+      // trailing Reactor Summary pushes them into the omitted middle
+      // exactly like the skip marker above, and losing them certifies a
+      // failing run green.
+      isSurefireSummaryLine(l.replace(ANSI_SGR_RE, '')),
+  );
+  const rescued = matching.slice(0, RESCUE_MAX);
   const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept${matching.length > RESCUE_MAX ? ` — first ${RESCUE_MAX} matching lines only, ${matching.length - RESCUE_MAX} more omitted` : ''}] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
   return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
 }
@@ -477,8 +477,8 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
 export const buildTestCommand: CommandModule = {
   command: 'build-test',
   describe:
-    'Build the workspaces the diff changes (and what they compile against), ' +
-    'test those plus their dependents, with a deadline the commands can ' +
+    'Build what the diff changes (npm: plus their dependents; Maven: plus ' +
+    'their upstream closure), test it, with a deadline the commands can ' +
     'actually meet',
   builder: (yargs) =>
     yargs

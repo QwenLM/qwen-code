@@ -55,8 +55,9 @@ import {
 const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
 
 /**
- * The exact shapes `build-test` emits for a test command — and the only ones
- * this command will hand to a shell.
+ * The exact shapes this command will hand to a shell: build-test's npm test
+ * commands. Maven lifecycle commands build-test ALSO records are skipped and
+ * disclosed, never re-executed in the base worktree.
  *
  * The report is a FILE this reads and then executes from, with `shell: true`,
  * in the base worktree. Nothing else in the pipeline re-executes a string it
@@ -65,10 +66,10 @@ const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
  * pull request can choose: `packages/x";curl …|sh;"` is a legal path in git
  * and on Linux, and it round-trips through the report into a shell.
  *
- * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched here —
- * and anything outside it is skipped and disclosed rather than run, which is
- * the same treatment every other thing this command cannot do gets.
+ * Restricting to the npm grammar costs nothing real — `build-test` produces
+ * `npm test` and `npm test --workspace="<dir>"`, both matched here — and
+ * anything outside it is skipped and disclosed rather than run, which is the
+ * same treatment every other thing this command cannot do gets.
  */
 const RERUNNABLE_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
 
@@ -399,7 +400,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   }
   if (skippedUnrecognised.length) {
     parts.push(
-      `${skippedUnrecognised.length} failed command(s) were not rerun because they are not the shape \`build-test\` emits (${skippedUnrecognised.join(', ')}) — this command executes what the report names, so it executes only that grammar; their failures stay unattributed, judge them by the diff`,
+      `${skippedUnrecognised.length} failed command(s) were not rerun because they are outside the npm rerun grammar (${skippedUnrecognised.join(', ')}) — build-test also records Maven lifecycle commands, which this command deliberately never re-runs in the base worktree; their failures stay unattributed, judge them by the diff`,
     );
   }
   if (truncated) {

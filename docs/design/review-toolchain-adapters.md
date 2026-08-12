@@ -173,6 +173,11 @@ P1 changes:
 - `packages/cli/src/commands/review/build-test.ts`
   - Widens the `toolchain` discriminant, registers the Maven adapter, and
     fails closed on mixed-root ambiguity.
+- `packages/cli/src/commands/review/lib/toolchain.ts`
+  - Widens the `install` contract's documented semantics to cover Maven's
+    best-effort `dependency:go-offline` warm-up alongside `npm ci`.
+- `packages/cli/src/commands/review/lib/npm-toolchain.ts`
+  - Names the Maven adapter in the mixed-root selection guard's rationale.
 - `packages/cli/src/commands/review/lib/maven-toolchain.ts`
   - Owns Maven reactor discovery, changed-file ownership, the scoped
     lifecycle run, and the Surefire/Failsafe evidence.
@@ -192,6 +197,9 @@ P1 changes:
   - Keeps the base-side rerun grammar npm-only: Maven lifecycle commands
     the Maven adapter records are skipped and disclosed, never re-executed
     in the base worktree.
+- Test pins: `build-test.test.ts`, `base-tree.test.ts`, `test-plan.test.ts`,
+  `agent-prompt.test.ts`, and `test-delta.test.ts` grow the Maven branches
+  beside `lib/maven-toolchain.test.ts`.
 
 ## Testing
 
@@ -319,11 +327,13 @@ it:
    also aggregate a real module under a bare `src/` path
    (`<module>src/core</module>`). `src/test/` and `src/it/` are the
    principled fixture shapes. Fail closed to reactor-wide when the walk
-   skipped a src-nested POM that is not one of those fixture shapes, or when
-   it would collapse to the ROOT project: the skipped POM may be a real
-   module, `-pl .` compiles only the root, and `-pl <target> -am` adds only
-   UPSTREAM projects, so a mis-skipped collapse leaves the changed module
-   untested under a green verdict.
+   skipped a src-nested POM and either that POM is not one of those fixture
+   shapes or the walk would collapse to the ROOT project: the skipped POM
+   may be a real module, `-pl .` compiles only the root, and
+   `-pl <target> -am` adds only UPSTREAM projects, so a mis-skipped
+   collapse leaves the changed module untested under a green verdict. A
+   root collapse with NO skipped POM is trusted: root-owned `src/` changes
+   narrow to `-pl . -am`.
 3. Use repository-relative project paths as the `-pl` selectors, and fail
    closed to the full reactor when a directory name cannot be expressed in one
    (`,` and `:` change what a selector means to Maven; `%` expands in cmd.exe;
@@ -403,10 +413,12 @@ Command results carry five optional classification flags consumed by
   records failures Maven did not fail on (a fail-never setting, or a
   skip-tests setting that suppressed the whole test phase), so a Test Plan
   claim must not be ruled reproduced against it.
-- `CommandResult.evidenceCapped`: the command exited 0 but part of its fresh
-  report evidence was never read (past the parse cap, rejected by the parser,
-  or unseen past a truncated sweep), so the adapter refused to certify the
-  run and a Test Plan claim must not be settled against it.
+- `CommandResult.evidenceCapped`: part of the command's fresh report
+  evidence was never read (past the parse cap, rejected by the parser, or
+  unseen past a truncated sweep), so the adapter refused to certify the run
+  and a Test Plan claim must not be settled against it. The flag is
+  exit-code independent: on an exit-0 run it withholds a pass; on a
+  non-zero exit the exit remains definitive.
 - `CommandResult.testsSuppressed`: a skip setting suppressed the entire test
   phase (`Tests are skipped.`) — zero tests ran, so count claims must not
   adjudicate against the run and a contradiction is worded as suppression,
@@ -435,10 +447,12 @@ line; once Maven is talking, those words in a test's own stdout cannot
 launder a source failure into infrastructure. Timeout and spawn
 death are always infrastructure — no input exception exists for them — but
 when the interrupted run still produced fresh failing reports, those failures
-stay visible as test evidence instead of being framed as purely
-environmental. Compiler and test failures remain deterministic build/test
-evidence, and a zero exit that Maven's own `[ERROR]`/`[FATAL]` framing
-contradicts (a fail-never setting) counts as a failure, not a pass.
+stay visible as test evidence, and when its captured output ALSO records
+source or goal failures a fail-never setting never exited on, the note
+discloses them — neither is framed as purely environmental. Compiler and
+test failures remain deterministic build/test evidence, and a zero exit that
+Maven's own `[ERROR]`/`[FATAL]` framing contradicts (a fail-never setting)
+counts as a failure, not a pass.
 Classification uses both command output and whether the current invocation
 produced fresh Surefire/Failsafe reports; a resolution failure with no fresh
 reports is filed as a source defect only when the diff changed the

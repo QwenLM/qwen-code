@@ -204,7 +204,15 @@ function blobIsNpmProject(blob: string, cwd: string, sha: string): boolean {
             // A directory a negation excludes is not a workspace — the same
             // check readWorkspacePackages applies on disk.
             workspaceDirFor(`${dir}/package.json`, globs) === dir &&
-            hasUsableManifestAt(cwd, sha, `${dir}/package.json`),
+            hasUsableManifestAt(
+              cwd,
+              sha,
+              // The root-as-member shape (`"workspaces": [""]`): the disk
+              // twin joins `<root>//package.json` and applies; the blob ref
+              // must drop the leading slash or `<sha>:/package.json` is
+              // unresolvable and the twins diverge.
+              dir === '' ? 'package.json' : `${dir}/package.json`,
+            ),
         )
       );
     }

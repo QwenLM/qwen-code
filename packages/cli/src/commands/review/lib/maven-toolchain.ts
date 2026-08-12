@@ -377,6 +377,11 @@ function readDirBounded(
       if (entry === null) break;
       entries.push(entry);
     }
+  } catch {
+    // A mid-read throw (EIO/ESTALE on a network-backed worktree) is the
+    // same epistemic state as an unreadable directory: join the fail-closed
+    // truncation path instead of escaping the sweep.
+    return null;
   } finally {
     handle.closeSync();
   }
@@ -550,11 +555,16 @@ const XML_WORD_CHAR = /[A-Za-z0-9_]/;
  * made every later tag start scan to EOF (a 2 MiB report of `<testcase x `
  * openers measured minutes per file — a denial of service through the very
  * evidence this parser exists to read). Here each byte is examined once:
- * locate a `<name` start, then advance to the next `>` outside quotes. An
- * opener with no `>` before EOF ends the scan — the truncated-XML branch in
- * parseTestReport handles what was seen until then.
+ * locate a `<name` start, then advance to the next `>` outside quotes.
+ * An opener with no `>` before EOF ends the scan and reports truncation:
+ * every later header — and every `<failure>`/`<error>` body after it — was
+ * discarded, so parseTestReport fails closed on such a report instead of
+ * reading the surviving prefix as the whole truth.
  */
-function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
+function xmlOpenTagHeaders(
+  xml: string,
+  name: string,
+): { headers: XmlOpenTagHeader[]; truncated: boolean } {
   const tag = `<${name.toLowerCase()}`;
   // toLowerCase() can lengthen UTF-16 text (`İ` → `i` + U+0307), so offsets
   // located in a lowercased copy would misindex the original xml past the
@@ -581,7 +591,7 @@ function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
   let from = 0;
   for (;;) {
     const start = indexOfTag(from);
-    if (start === -1) return headers;
+    if (start === -1) return { headers, truncated: false };
     from = start + 1;
     // `\b` semantics: `<testsuite` must not match `<testsuites`.
     const next = xml[start + tag.length];
@@ -599,7 +609,7 @@ function xmlOpenTagHeaders(xml: string, name: string): XmlOpenTagHeader[] {
         break;
       }
     }
-    if (end === -1) return headers;
+    if (end === -1) return { headers, truncated: true };
     headers.push({
       attributes: xml.slice(start + tag.length, end),
       index: start,
@@ -779,7 +789,12 @@ function parseTestReport(
   let errors = 0;
   let skipped = 0;
   let suites = 0;
-  for (const suite of xmlOpenTagHeaders(xml, 'testsuite')) {
+  const suiteWalk = xmlOpenTagHeaders(xml, 'testsuite');
+  // An interrupted walk discarded every later header (and every failure
+  // body after it): the report's failure status is unknown — reject it
+  // like the other unreadable shapes instead of reading the prefix.
+  if (suiteWalk.truncated) return null;
+  for (const suite of suiteWalk.headers) {
     const attributes = xmlAttributes(suite.attributes);
     suites += 1;
     tests += numberAttribute(attributes, 'tests');
@@ -794,7 +809,13 @@ function parseTestReport(
   const failedCases: string[] = [];
   let droppedCases = 0;
   let consumedUntil = 0;
-  for (const header of xmlOpenTagHeaders(xml, 'testcase')) {
+  const caseWalk = xmlOpenTagHeaders(xml, 'testcase');
+  // The same fail-closed rule as the suite walk: an unclosed opener ends
+  // the walk here and silently discards every later `<failure>`/`<error>`
+  // body — the anti-greenwash body-evidence check must not lose parsed
+  // proof of failure into a green read.
+  if (caseWalk.truncated) return null;
+  for (const header of caseWalk.headers) {
     const bodyStart = header.index + header.text.length;
     let body = '';
     if (!header.text.endsWith('/>')) {
@@ -1088,9 +1109,9 @@ function appendTestSummaries(
   }
   if (gaps.truncated) {
     lines.push(
-      '[maven-test-report] the report sweep was truncated (the ' +
-        `${MAX_SCANNED_DIRS}-directory cap or the ${MAX_DIR_ENTRIES}-entry ` +
-        'fan-out bound was reached): some fresh reports may be unseen',
+      '[maven-test-report] the report sweep was truncated (a scan cap was ' +
+        'reached or a directory could not be read), so some fresh reports ' +
+        'may be unseen',
     );
   }
 
@@ -1179,7 +1200,7 @@ function isLaunchFailure(output: string): boolean {
         ) ||
         /The term '?(?:mvn|java)'? is not recognized/i.test(line) ||
         /Unknown command: (?:mvn|java)\b/i.test(line) ||
-        /JAVA_HOME.*(?:not defined|incorrectly|invalid directory)/i.test(
+        /JAVA_HOME.*(?:not defined|not found|incorrectly|invalid directory)/i.test(
           line,
         ) ||
         /Unable to locate a Java Runtime/i.test(line) ||
@@ -1191,11 +1212,19 @@ function isLaunchFailure(output: string): boolean {
         // try wget BEFORE curl): apache prints the SHA-256 message verbatim
         // on a checksum mismatch, and downloader errors carry curl's
         // `curl: (N)` or wget's `wget: …` shapes.
-        /Failed to validate Maven distribution/i.test(line) ||
+        /Failed to validate Maven (?:distribution|wrapper)/i.test(line) ||
         /Maven distribution.*(?:checksum|corrupt|compromised|invalid)/i.test(
           line,
         ) ||
         /Failed to download Maven distribution/i.test(line) ||
+        // The checksum-tool message both wrapper generations print when a
+        // checksum was requested and neither sha256sum nor shasum exists.
+        /^Checksum validation was requested but neither/i.test(line) ||
+        // The curl fallback's die message — `curl --silent` suppresses
+        // curl's own `curl: (N)` line, so the wrapper's die wording is the
+        // only one on hosts without wget (every macOS host, slim Linux
+        // containers).
+        /^curl: Failed to fetch/i.test(line) ||
         /^(?:curl: \(\d+\)|wget: )/.test(line),
     ) || lines.some(isDiskFailureLine)
   );
@@ -1345,43 +1374,6 @@ function hasFreshTestFailure(summaries: MavenTestSummary[]): boolean {
 const SELECTOR_REJECTED_RE =
   /^\[(?:ERROR|FATAL)\] Could not find the selected project in the reactor:\s*([^\n]*)/m;
 
-/**
- * Shell diagnostics for a wrapper that cannot start. `Permission denied` is
- * the missing executable bit; `bad interpreter` / `No such file or directory`
- * on the `./mvnw` line is a CRLF-committed shebang dying on Linux. bash >=
- * 5.2 reports the same death as `cannot execute: required file not found`
- * and dash as a bare `not found`; a `#!/usr/bin/env sh\r` shebang names
- * `/usr/bin/env`, not the wrapper, so that line gets its own alternant.
- * Win32 is known-uncovered: a broken `mvnw.cmd` (missing, CRLF, ACL) matches
- * none of these POSIX shapes and stays attributed to the diff.
- */
-function isWrapperLaunchFailure(output: string): boolean {
-  for (const line of output.split('\n')) {
-    if (
-      line.includes('/usr/bin/env:') &&
-      line.includes('No such file or directory')
-    ) {
-      return true;
-    }
-    const wrapper = line.indexOf('./mvnw');
-    if (wrapper === -1) continue;
-    // indexOf-based wording match after the first `./mvnw`: the regex this
-    // replaces nested unbounded quantifiers over attacker-influenced build
-    // output and went quadratic on a non-matching line with many `./mvnw`
-    // occurrences — a denial of service through the very output it reads.
-    const rest = line.slice(wrapper).toLowerCase();
-    if (
-      rest.includes('permission denied') ||
-      rest.includes('bad interpreter') ||
-      rest.includes('no such file or directory') ||
-      rest.includes('not found')
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function summaryTotals(summaries: MavenTestSummary[]) {
   return summaries.reduce(
     (sum, item) => {
@@ -1479,11 +1471,6 @@ export function mavenExecutable(
 }
 
 /**
- * Resolution inputs named by `.mvn/maven.config`: the launcher injects them
- * into the very command this adapter runs, so a settings or local-repository
- * location referenced there is a dependency input the PR can change.
- */
-/**
  * The argument tokens of `.mvn/maven.config`. Maven reads it line-by-line —
  * each non-empty, non-`#` line is ONE argument (MavenCli:
  * `Files.lines(...).filter(arg -> !arg.isEmpty() && !arg.startsWith("#"))`),
@@ -1513,9 +1500,25 @@ function mavenConfigTokens(root: string): string[] {
     .filter((line) => line !== '' && !line.startsWith('#'));
 }
 
+/**
+ * Resolution inputs named by `.mvn/maven.config`: the launcher injects them
+ * into the very command this adapter runs, so a settings or local-repository
+ * location referenced there is a dependency input the PR can change.
+ */
 function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
   const inputs: string[] = [];
-  const pairedFlags = new Set(['-s', '--settings', '-gs', '--global-settings']);
+  // commons-cli also accepts the single-dash LONG spellings (`-settings`,
+  // `-global-settings`) exactly like their `--` twins; they must pair with
+  // the next line BEFORE the attached-short regexes read them —
+  // `-settings` starts with `-s`.
+  const pairedFlags = new Set([
+    '-s',
+    '--settings',
+    '-settings',
+    '-gs',
+    '--global-settings',
+    '-global-settings',
+  ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     // Maven 3.9's chained local repositories: EVERY entry is a local-
@@ -1523,9 +1526,12 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
     // `-Dmaven.repo.local.tail=` diverges from `-Dmaven.repo.local=` at
     // `.tail`, not `=` — so the check ordering does not matter; keep both.
     if (token.startsWith('-Dmaven.repo.local.tail=')) {
+      // Maven splits this property on COMMA only
+      // (DefaultRepositorySystemSessionFactory: `localRepoTail.split(",")`);
+      // a `|` is part of a path here, not a separator.
       for (const part of token
         .slice('-Dmaven.repo.local.tail='.length)
-        .split(/[,|]/)) {
+        .split(',')) {
         if (!part) continue;
         const path = normalizedChangedPath(root, part);
         if (path !== null) inputs.push(path);
@@ -1540,6 +1546,12 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
       value = token.slice('--global-settings='.length);
     else if (token.startsWith('-Dmaven.repo.local='))
       value = token.slice('-Dmaven.repo.local='.length);
+    // The single-dash long spellings' attached forms — checked BEFORE the
+    // attached-short regexes, because `-settings=…` also starts with `-s`.
+    else if (token.startsWith('-settings='))
+      value = token.slice('-settings='.length);
+    else if (token.startsWith('-global-settings='))
+      value = token.slice('-global-settings='.length);
     // commons-cli also accepts the attached short forms (`-s<path>`): the
     // remainder of a token whose option bears an argument becomes the value.
     // The `=` of an attached `-s=<path>` spelling is part of the separator,
@@ -1918,7 +1930,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !result.timedOut &&
     summaries.length === 0 &&
     !testsSuppressed &&
-    !hasMavenFramedLine(result.output);
+    // Framed output proves Maven ran ONLY when the launcher is not the
+    // diff's own: a PR-modified wrapper is executed deliberately and can
+    // print `[INFO]` lines itself, so there it takes fresh reports — the
+    // one evidence a stub cannot fake into this result — to prove the
+    // build started.
+    (executedWrapperChanged || !hasMavenFramedLine(result.output));
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -1960,18 +1977,24 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       !executedWrapperChanged &&
       !(executable === 'mvn' && platformWrapperChanged)) ||
       (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
+      // Shape-classified, not wording-classified: bash/dash localize
+      // these diagnostics under a non-English LANG, so the match keys on
+      // the structure — an unmodified wrapper dying at a launch exit code
+      // with no Maven-framed output — like the silent bootstrap arm below.
       (executable === './mvnw' &&
         !executedWrapperChanged &&
         (result.exitCode === 126 || result.exitCode === 127) &&
-        isWrapperLaunchFailure(result.output)) ||
+        !hasMavenFramedLine(result.output)) ||
       // Wrapper bootstrap download deaths with NO wording to match: wget
       // (both wrapper generations try it before curl) runs `--quiet` in the
       // distribution download, so a DNS failure exits 4 and a server error
-      // exits 8 with an EMPTY unframed output. If Maven's JVM had started,
-      // framed output would exist — its absence pins the death to bootstrap.
+      // exits 8 with an EMPTY unframed output; the curl fallback dies on
+      // its codes 6/7/22/28 (resolve, connect, HTTP error, timeout) the
+      // same way. If Maven's JVM had started, framed output would exist —
+      // its absence pins the death to bootstrap.
       (executedWrapper !== null &&
         !executedWrapperChanged &&
-        (result.exitCode === 4 || result.exitCode === 8) &&
+        [4, 6, 7, 8, 22, 28].includes(result.exitCode) &&
         !hasMavenFramedLine(result.output)));
   const recorded = {
     ...result,
@@ -2026,6 +2049,22 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       'captured output records Surefire test failures (`Tests run: …` summaries ' +
       'with non-zero Failures/Errors): treat those as test failures, not as ' +
       'purely environmental.';
+  } else if (
+    (result.timedOut || result.exitCode === null) &&
+    (isSourceFailure(result.output) || isGoalFailure(result.output))
+  ) {
+    // The sibling arms' principle, applied to source/goal evidence: under
+    // fail-never/fail-at-end a PR-caused compile or goal failure does not
+    // end the build — it runs on to the deadline, and the interruption
+    // must not launder the captured failure into pure infrastructure.
+    const cause = result.timedOut
+      ? `ran out of time (${deadlineSecs(result)}s)`
+      : 'ended without an exit code (a spawn failure or signal outside the deadline)';
+    report.note =
+      `\`${result.command}\` ${cause} — that part is infrastructure. But its ` +
+      'captured output records source or goal failures (`[ERROR]`-framed ' +
+      'compile or plugin-goal errors) the run never exited on: correlate them ' +
+      'with the changed files before treating this as purely environmental.';
   } else if (result.timedOut) {
     report.note =
       `\`${result.command}\` ran out of time (${deadlineSecs(result)}s). This is an infrastructure result, ` +
@@ -2099,8 +2138,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         : '');
   } else if (!ok && result.exitCode === 0 && neverRan) {
     report.note =
-      `\`${result.command}\` exited 0 without starting Maven — no fresh reports and no ` +
-      'Maven output at all, so the build never ran and nothing was verified (an empty or ' +
+      `\`${result.command}\` exited 0 without starting Maven — no fresh reports` +
+      (executedWrapperChanged
+        ? ', and the wrapper this run executed is changed by the diff, so its own ' +
+          'output cannot prove a build ran'
+        : ' and no Maven output at all') +
+      ', so the build never ran and nothing was verified (an empty or ' +
       'stub wrapper passes the launch gates and exits 0' +
       (quietConfig
         ? ', or a `-q`/`--quiet` setting in `.mvn/maven.config` suppressed every line ' +

@@ -201,11 +201,14 @@ export function extractTestPlanSection(
 // levels deep) — are command claims exactly like the bare runner; without
 // the deeper hops such claims are silently never extracted and never ruled.
 // They are modeled for the WHOLE runner vocabulary, not `mvnw` alone:
-// `./mvnd test` is a command claim exactly like `./mvnw test`.
+// `./mvnd test` is a command claim exactly like `./mvnw test`, and `./mvn`
+// exactly like `mvn`. Platform suffixes follow each runner's Windows
+// distribution: `mvn.cmd`/`mvnw.cmd` ship as `.cmd`, `mvnd` additionally
+// as `.exe`, and `mvnDebug` as `mvnDebug.cmd` beside `mvn.cmd`.
 const MAVEN_RUNNER_SOURCE =
-  'mvn(?:\\.cmd)?|mvnd|mvnDebug|mvnw(?:\\.cmd)?' +
-  '|(?:\\.\\.[/\\\\])*\\.[/\\\\](?:mvnw(?:\\.cmd)?|mvnd|mvnDebug)' +
-  '|(?:\\.\\.[/\\\\])+(?:mvnw(?:\\.cmd)?|mvnd|mvnDebug)';
+  'mvn(?:\\.cmd)?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?|mvnw(?:\\.cmd)?' +
+  '|(?:\\.\\.[/\\\\])*\\.[/\\\\](?:mvn(?:\\.cmd)?|mvnw(?:\\.cmd)?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?)' +
+  '|(?:\\.\\.[/\\\\])+(?:mvn(?:\\.cmd)?|mvnw(?:\\.cmd)?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?)';
 
 /** Runners whose presence makes a backticked span a command, not prose. */
 const RUNNER_RE = new RegExp(
@@ -720,37 +723,40 @@ const MAVEN_SINGLE_DASH_LONGS = new Set([
   'fail-at-end',
 ]);
 
-function normalizeMavenSingleDashLongs(command: string): string {
-  return command
-    .split(/\s+/)
-    .map((token) => {
-      // One layer of surrounding quotes hides the flag from the head check
-      // exactly like it hides it from the scope guards below.
-      const inner = unquoteToken(token);
-      const eq = inner.indexOf('=');
-      const head = eq === -1 ? inner : inner.slice(0, eq);
-      if (
-        head.length > 2 &&
-        head.startsWith('-') &&
-        !head.startsWith('--') &&
-        MAVEN_SINGLE_DASH_LONGS.has(head.slice(1))
-      ) {
-        return `-${inner}`;
-      }
-      return token;
-    })
-    .join(' ');
+function normalizeMavenSingleDashLongTokens(tokens: string[]): string[] {
+  return tokens.map((token) => {
+    // One layer of surrounding quotes hides the flag from the head check
+    // exactly like it hides it from the scope guards below; the rewrite
+    // returns the UNQUOTED word, so a quote spanning a flag=value pair
+    // with a space survives as one token for every walker downstream.
+    const inner = unquoteToken(token);
+    const eq = inner.indexOf('=');
+    const head = eq === -1 ? inner : inner.slice(0, eq);
+    if (
+      head.length > 2 &&
+      head.startsWith('-') &&
+      !head.startsWith('--') &&
+      MAVEN_SINGLE_DASH_LONGS.has(head.slice(1))
+    ) {
+      return `-${inner}`;
+    }
+    return inner;
+  });
 }
 
 /**
  * The tokens of a Maven command line that are not consumed as flag values —
  * quote-aware like mavenPlModules, so a quoted selector is one value.
  */
-function mavenPositionalTokens(command: string): string[] {
-  const tokens = command.trim().split(/\s+/);
+function mavenPositionalTokens(tokens: string[]): string[] {
   const positional: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
+    // A quoted flag (`"-l"`) is the same flag once its quote layer is
+    // stripped: matching raw tokens let it bypass value consumption and
+    // its value would be read as a positional phase. Positionals are
+    // pushed unquoted for the same reason — `"clean"` names the same
+    // phase as `clean`.
+    const token = unquoteToken(tokens[i]);
     if (MAVEN_VALUE_FLAGS.has(token)) {
       i += 1;
       const raw = tokens[i];
@@ -778,14 +784,13 @@ function mavenPositionalTokens(command: string): string[] {
   return positional;
 }
 
-function mavenLifecycle(command: string): string | null {
-  const trimmed = command.trim();
-  if (!MAVEN_RUNNER_RE.test(trimmed)) return null;
+function mavenLifecycle(tokens: string[]): string | null {
+  if (!MAVEN_RUNNER_RE.test(tokens[0] ?? '')) return null;
   // The LAST phase token that is not a flag value: that reads a phase-first
   // spelling (`mvnw test -pl core`) correctly and never mistakes a
   // phase-named `-pl` VALUE (`-pl test`) for the command's lifecycle.
   let lifecycle: string | null = null;
-  for (const token of mavenPositionalTokens(trimmed)) {
+  for (const token of mavenPositionalTokens(tokens)) {
     if (MAVEN_PHASE_RE.test(token)) lifecycle = token;
   }
   return lifecycle;
@@ -800,10 +805,12 @@ function bareMavenLifecycle(command: string): string | null {
 }
 
 /** True when a command carries `-am`/`--also-make` (upstream closure). */
-function mavenHasAlsoMake(command: string): boolean {
-  const tokens = command.trim().split(/\s+/);
+function mavenHasAlsoMake(tokens: string[]): boolean {
   for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
+    // A quoted flag (`"-am"`, `"-pl"`) is the same flag once its quote
+    // layer is stripped: comparing raw tokens let a quoted `-am` escape
+    // detection entirely.
+    const token = unquoteToken(tokens[i]);
     // A quoted `-pl` selector can carry `-am` inside a module dir name
     // (`-pl 'foo -am bar'` — spaces pass the POM entry gate); consume the
     // whole selector so the split inside it is not read as the flag. The
@@ -847,8 +854,7 @@ function unquoteToken(token: string): string {
 }
 
 /** The module set of a command's `-pl`/`--projects` selector, sorted. */
-function mavenPlModules(command: string): string[] | null {
-  const tokens = command.trim().split(/\s+/);
+function mavenPlModules(tokens: string[]): string[] | null {
   // Maven ACCUMULATES repeated `-pl` (commons-cli `getOptionValues`):
   // `mvn -pl m1 -pl m2` builds both modules, so every occurrence joins the
   // set — keeping only the last read a claim that covered m1 as scoped to
@@ -934,6 +940,32 @@ function mavenPlModules(command: string): string[] | null {
   return modules.length > 0 ? modules : null;
 }
 
+/**
+ * Collapse tokens a quote spans back into one shell word: the whitespace
+ * split broke `"-settings=my settings.xml"` into three, and normalization
+ * plus every scope walker below model the UNBROKEN word. The same rejoin
+ * the `-pl` value walkers apply, applied to the whole claim once.
+ */
+function rejoinQuotedTokens(tokens: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const quote =
+      token.startsWith("'") || token.startsWith('"') ? token[0] : null;
+    if (quote === null || (token.length > 1 && token.endsWith(quote))) {
+      out.push(token);
+      continue;
+    }
+    const parts = [token];
+    while (i + 1 < tokens.length && !parts[parts.length - 1].endsWith(quote)) {
+      i += 1;
+      parts.push(tokens[i]);
+    }
+    out.push(parts.join(' '));
+  }
+  return out;
+}
+
 function sameModuleSet(a: string[] | null, b: string[] | null): boolean {
   if (a === null || b === null || a.length !== b.length) return false;
   // Sorted here rather than assumed: only the CLAIM side comes back sorted
@@ -953,14 +985,24 @@ function ruleCommand(
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
   const rawClaimed = text.trim();
-  // Maven's commons-cli accepts single-dash spellings of its long options;
-  // normalize them to the `--` forms so they cannot bypass the grammar
-  // below. Applied to Maven claims only — the comparison against recorded
-  // commands is unaffected, because the adapter never renders those
-  // spellings.
-  const claimed = MAVEN_RUNNER_RE.test(rawClaimed)
-    ? normalizeMavenSingleDashLongs(rawClaimed)
-    : rawClaimed;
+  // A quote spanning a flag=value pair with a space (`"-settings=my
+  // settings.xml"`, `"-Dfoo=bar baz"`) is ONE shell word; the whitespace
+  // split broke it, and normalization plus every scope walker below would
+  // read the fragments past their guards. Rejoin before anything parses
+  // the claim, and hand the TOKEN LIST to every walker — rejoining into a
+  // string and re-splitting would break the word again at its inner
+  // space. Maven's commons-cli ALSO accepts single-dash spellings of its
+  // long options; normalize them to the `--` forms so they cannot bypass
+  // the grammar below. Both applied to Maven claims only — the comparison
+  // against recorded commands is unaffected, because the adapter never
+  // renders those spellings.
+  const mavenClaim = MAVEN_RUNNER_RE.test(rawClaimed);
+  const claimTokenList = mavenClaim
+    ? normalizeMavenSingleDashLongTokens(
+        rejoinQuotedTokens(rawClaimed.split(/\s+/)),
+      )
+    : rawClaimed.split(/\s+/);
+  const claimed = mavenClaim ? claimTokenList.join(' ') : rawClaimed;
   // A workspace-scoped run (`npm run build --workspace=...`) still settles
   // the plan's bare command. Maven scopes before the lifecycle
   // (`./mvnw -pl core -am test`), so compare lifecycle phases there — but the
@@ -971,7 +1013,7 @@ function ruleCommand(
   // conservative treatment, because one scoped run cannot settle a
   // differently scoped claim.
   const mavenRunnerClaim = MAVEN_RUNNER_RE.test(claimed);
-  const claimedLifecycle = mavenLifecycle(claimed);
+  const claimedLifecycle = mavenLifecycle(claimTokenList);
   // Maven flags that scope a run to less — or other — than the full reactor.
   // A claim carrying one can only be settled by a run of the SAME scope: one
   // scoped run cannot settle a differently scoped claim.
@@ -1036,6 +1078,12 @@ function ruleCommand(
     token === '--offline' ||
     token === '-U' ||
     token === '--update-snapshots' ||
+    // fail-never makes Maven exit 0 over failures it would otherwise die
+    // on: a claim carrying it cannot settle on a run that never used it —
+    // the run's recorded exit codes are ones the claimed command cannot
+    // produce. The single-dash long spelling is normalized above.
+    token === '-fn' ||
+    token === '--fail-never' ||
     // commons-cli also accepts separator-less ATTACHED short forms
     // (`-fother/pom.xml`, `-rf:core`, `-ssettings.xml`, `-plcore`); the
     // exact-token and `=`-attached matches alone let them bypass the
@@ -1055,7 +1103,7 @@ function ruleCommand(
   // One layer of surrounding quotes is stripped before the scope checks:
   // `mvn "-pl" core test` carries the same scoping as the unquoted spelling,
   // and comparing raw tokens let a quoted flag bypass every guard here.
-  const claimTokens = claimed.split(/\s+/).map(unquoteToken);
+  const claimTokens = claimTokenList.map(unquoteToken);
   // Lifecycle phases the claim names, in order: a multi-phase claim
   // (`clean test`) runs phases the recorded single-phase run never did.
   // Flag values are excluded: a module dir named `test` handed to `-pl` is
@@ -1063,7 +1111,7 @@ function ruleCommand(
   // (`mvn deploy test`, a leading plugin goal): it never ran here, and
   // settling the trailing phase without disclosing the reduction would
   // overstate the evidence.
-  const claimPhases = mavenPositionalTokens(claimed).filter(
+  const claimPhases = mavenPositionalTokens(claimTokenList).filter(
     (token) =>
       MAVEN_PHASE_RE.test(token) ||
       MAVEN_UNRUN_WORK_RE.test(token) ||
@@ -1083,10 +1131,10 @@ function ruleCommand(
   // phase alone would read undisclosed — unlike `mvn clean test`, which
   // discloses its phase reduction. Trailing flag tokens (`-B`, attached
   // `-D…`) name no work of their own.
-  const claimFinalWork = mavenPositionalTokens(claimed)
+  const claimFinalWork = mavenPositionalTokens(claimTokenList)
     .filter((token) => !token.startsWith('-'))
     .at(-1);
-  const claimPlModules = mavenPlModules(claimed);
+  const claimPlModules = mavenPlModules(claimTokenList);
   // A claim scoped by `-pl` ALONE can settle on a recorded run with the same
   // module set and final lifecycle — that is the SAME scope, and discarding
   // the evidence would assert the review never ran what it did. Claims also
@@ -1259,9 +1307,14 @@ function ruleCommand(
     return !(
       settledBySameScope(c) &&
       c.maven?.alsoMake === true &&
-      !mavenHasAlsoMake(claimed) &&
+      !mavenHasAlsoMake(claimTokenList) &&
       (finished(c) || c.evidenceCapped === true) &&
       ranFailed(c) &&
+      // A wrapper that never started Maven and a global skip setting
+      // cannot live in an upstream module: both apply to the claim's own
+      // command at any scope, so the exclusion must not discard them.
+      !c.neverRan &&
+      c.testsSuppressed !== true &&
       !failureInsideClaim(c)
     );
   });
@@ -1288,7 +1341,7 @@ function ruleCommand(
           !(
             settledBySameScope(c) &&
             c.maven?.alsoMake === true &&
-            !mavenHasAlsoMake(claimed) &&
+            !mavenHasAlsoMake(claimTokenList) &&
             !failureInsideClaim(c)
           ),
       )
@@ -1429,20 +1482,36 @@ function ruleCommand(
       // not flip just because the cap also fired.
       if (
         capped.exitCode === 0 &&
-        (freshTestFailures(capped) || capped.swallowedFailure === true)
+        (freshTestFailures(capped) ||
+          capped.swallowedFailure === true ||
+          capped.neverRan === true)
       ) {
+        // The observed/note split mirrors the finished path's exit-0 arm:
+        // the cap must not change WHICH failure the evidence records.
+        const observed = freshTestFailures(capped)
+          ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
+          : capped.testsSuppressed
+            ? 'exit 0, but a skip setting suppressed the test phase — nothing was tested'
+            : capped.neverRan
+              ? 'exit 0, but Maven never started — nothing was built or tested'
+              : 'exit 0, but the output records failures the exit code did not fail on';
+        const cause = freshTestFailures(capped)
+          ? 'fresh test reports record failures despite the zero exit'
+          : capped.testsSuppressed
+            ? 'a skip setting suppressed the test phase — nothing was tested'
+            : capped.neverRan
+              ? 'the wrapper exited 0 without starting Maven — nothing was built or tested'
+              : 'the run recorded failures despite the zero exit';
         return {
           kind: 'command',
           text,
           verdict: 'contradicted',
-          observed: freshTestFailures(capped)
-            ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
-            : 'exit 0, but the output records failures the exit code did not fail on',
+          observed,
           note:
-            `${runForm(capped).howItRan}, and the failure evidence it DID ` +
-            'record is definitive — part of its fresh report evidence was never ' +
-            'read (cap, parse rejection, or a truncated sweep), but that ' +
-            'withholds certification of a pass, it does not excuse a recorded failure',
+            `${runForm(capped).howItRan}, and ${cause} — part of its fresh ` +
+            'report evidence was never read (cap, parse rejection, or a ' +
+            'truncated sweep), but that withholds certification of a pass, ' +
+            'it does not excuse what the run DID record',
         };
       }
       return {

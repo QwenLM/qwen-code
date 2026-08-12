@@ -348,7 +348,7 @@ describe('runTestDelta', () => {
     expect(ran).toEqual([]);
     expect(r.entries).toEqual([]);
     expect(r.netNew).toEqual([]);
-    expect(r.note).toContain('not the shape');
+    expect(r.note).toContain('outside the npm rerun grammar');
     expect(r.note).toContain('judge them by the diff');
   });
 
@@ -374,7 +374,9 @@ describe('runTestDelta', () => {
     );
     expect(ran).toEqual([]);
     expect(r.entries).toEqual([]);
-    expect(r.note).toContain('not the shape');
+    expect(r.note).toContain('outside the npm rerun grammar');
+    // The disclosure names the deliberate exclusion, not a grammar accident.
+    expect(r.note).toContain('Maven lifecycle commands');
   });
 
   it('reruns both shapes build-test actually emits', () => {
