@@ -1447,6 +1447,51 @@ export class ShellExecutionService {
 
         child.on('exit', exitHandler);
 
+        // Strip a trailing incomplete UTF-8 sequence from a buffer so that
+        // encoding detection doesn't misclassify a genuinely UTF-8 buffer as
+        // non-UTF-8 when the last character was split by a cancel/timeout or
+        // capture limit. Walks back ≤3 continuation bytes (0x80-0xBF) plus
+        // their lead byte; if the lead byte indicates a multi-byte sequence
+        // but the continuation bytes are incomplete, strips the whole
+        // sequence. Returns the trimmed buffer (or the original if complete).
+        function stripTrailingIncompleteUtf8(buffer: Buffer): Buffer {
+          if (buffer.length === 0) return buffer;
+
+          let i = buffer.length - 1;
+
+          // Skip continuation bytes (0x80-0xBF)
+          while (i >= 0 && (buffer[i]! & 0xc0) === 0x80) {
+            i--;
+          }
+
+          if (i < 0) return buffer;
+
+          const leadByte = buffer[i]!;
+
+          // ASCII byte (0x00-0x7F) — complete, nothing to strip
+          if ((leadByte & 0x80) === 0) return buffer;
+
+          let expectedLength: number;
+          if ((leadByte & 0xe0) === 0xc0) {
+            expectedLength = 2;
+          } else if ((leadByte & 0xf0) === 0xe0) {
+            expectedLength = 3;
+          } else if ((leadByte & 0xf8) === 0xf0) {
+            expectedLength = 4;
+          } else {
+            // Invalid lead byte — strip it
+            return buffer.subarray(0, i);
+          }
+
+          const actualLength = buffer.length - i;
+          if (actualLength < expectedLength) {
+            // Incomplete sequence — strip it
+            return buffer.subarray(0, i);
+          }
+
+          return buffer;
+        }
+
         function cleanup() {
           exited = true;
           abortSignal.removeEventListener('abort', abortHandler);
@@ -1459,18 +1504,27 @@ export class ShellExecutionService {
           // differ) and the labels are captured for the background-promote
           // handoff to reuse. Deliberate extra concat: decoding requires one
           // additional full-output-sized allocation at cleanup peak
-          // (bounded, GC-eligible after return). Detection CPU stays bounded
-          // — chardet's O(n) statistical pass runs on a capped head+tail
-          // sample (at most 2 × CHARDET_SAMPLE_BYTES), so even a max-size
-          // buffer pays only a constant detection cost in the 'exit' handler.
+          // (bounded, GC-eligible after return). Chardet's O(n) statistical
+          // pass runs on a capped head+tail sample (at most 2 ×
+          // CHARDET_SAMPLE_BYTES), so chardet pays only a constant cost in
+          // the 'exit' handler; isUtf8() and the replacement-ratio heuristic
+          // still scan the full buffer once.
           if (stdoutChunks.length > 0) {
             const concatenated = Buffer.concat(stdoutChunks);
-            detectedStdoutEncoding = getCachedEncodingForBuffer(concatenated);
+            // Strip trailing incomplete UTF-8 before detection — a cancel/timeout
+            // or capture limit can split a multi-byte character, causing isUtf8()
+            // to fail and the system gate to return the OEM code page for a
+            // genuinely UTF-8 buffer. Detection runs on the trimmed view; decode
+            // runs on the full buffer (TextDecoder substitutes U+FFFD for the
+            // incomplete tail).
+            const trimmedStdout = stripTrailingIncompleteUtf8(concatenated);
+            detectedStdoutEncoding = getCachedEncodingForBuffer(trimmedStdout);
             stdout = decodeProcessOutput(concatenated, detectedStdoutEncoding);
           }
           if (stderrChunks.length > 0) {
             const concatenated = Buffer.concat(stderrChunks);
-            detectedStderrEncoding = getCachedEncodingForBuffer(concatenated);
+            const trimmedStderr = stripTrailingIncompleteUtf8(concatenated);
+            detectedStderrEncoding = getCachedEncodingForBuffer(trimmedStderr);
             stderr = decodeProcessOutput(concatenated, detectedStderrEncoding);
           }
 

@@ -145,10 +145,10 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe(null);
     });
 
-    it('should sample both head and tail for buffers larger than the chardet sample cap', () => {
-      // A buffer larger than CHARDET_SAMPLE_BYTES must feed chardet a
-      // bounded head+tail sample, not a head-only one, so a pure-ASCII head
-      // followed by foreign-encoded bulk is still detected correctly. The
+    it('should sample head, middle, and tail for buffers larger than 2x the chardet sample cap', () => {
+      // A buffer larger than 2 × CHARDET_SAMPLE_BYTES must feed chardet a
+      // bounded head+middle+tail sample, not just head+tail, so foreign content
+      // concentrated in the middle of large buffers is still detected. The
       // foreign bytes are placed inside the tail window the sample actually
       // reaches, and the assertion checks the sample CONTAINS them (not just
       // the call shape), so a regression that drops the tail window turns red.
@@ -162,8 +162,11 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       detectEncodingFromBuffer(buffer);
 
+      const middleStart =
+        Math.floor(buffer.length / 2) - Math.floor((64 * 1024) / 2);
       const expectedSample = Buffer.concat([
         buffer.subarray(0, 64 * 1024),
+        buffer.subarray(middleStart, middleStart + 64 * 1024),
         buffer.subarray(buffer.length - 64 * 1024),
       ]);
       expect(mockedChardetDetect).toHaveBeenCalledWith(expectedSample);
@@ -312,8 +315,10 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
     it('should treat ANSI_X3.4-1968 charmap (C locale) as no encoding', () => {
       // LANG unset falls back to `locale charmap`, which on a C/POSIX host
-      // reports 'ANSI_X3.4-1968' (plain ASCII). That is not a WHATWG
-      // TextDecoder label, so it must become null to fall through to chardet.
+      // reports 'ANSI_X3.4-1968' (plain ASCII). ASCII-family names either
+      // have no decodable foreign codepage or resolve to windows-1252 via
+      // WHATWG normalization; returning one would make the system gate force
+      // a windows-1252 decode of genuinely foreign bytes.
       mockedExecSync.mockReturnValue('ANSI_X3.4-1968\n');
 
       const result = getSystemEncoding();

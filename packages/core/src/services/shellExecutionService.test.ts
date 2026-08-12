@@ -123,9 +123,10 @@ vi.mock('../utils/systemEncoding.js', () => ({
   getSystemEncoding: mockGetSystemEncoding,
   // Mirror the real decodeProcessOutput contracts: the Buffer.isBuffer
   // string guard, the optional pre-detected encoding, and the try/catch
-  // utf-8 fallback for labels WHATWG TextDecoder rejects (cp437/cp850/cp852).
-  // A bare `new TextDecoder(...)` here throws RangeError out of cleanup()
-  // during the 'exit' emit and leaves the execution promise unsettled.
+  // utf-8 fallback for labels WHATWG TextDecoder rejects (unvalidated
+  // Unix codesets and chardet guesses). A bare `new TextDecoder(...)`
+  // here throws RangeError out of cleanup() during the 'exit' emit and
+  // leaves the execution promise unsettled.
   decodeProcessOutput: (buffer: Buffer | string, encoding?: string) => {
     if (!Buffer.isBuffer(buffer)) return String(buffer);
     if (buffer.length === 0) return '';

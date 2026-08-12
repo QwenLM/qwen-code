@@ -140,10 +140,11 @@ export function decodeProcessOutput(
   try {
     return new TextDecoder(label).decode(buffer);
   } catch {
-    // The detected label may be a Windows OEM code page (cp437/cp850/cp852)
-    // that Node's WHATWG TextDecoder rejects with RangeError. Fall back to
-    // utf-8 so a throw never escapes into an 'exit'/'data' handler, which
-    // would otherwise leave the shell-execution promise unsettled.
+    // The detected label may be a Unix locale codeset the blocklist does not
+    // cover, or a chardet guess, that Node's WHATWG TextDecoder rejects with
+    // RangeError. Fall back to utf-8 so a throw never escapes into an
+    // 'exit'/'data' handler, which would otherwise leave the shell-execution
+    // promise unsettled.
     debugLogger.debug(
       `TextDecoder rejected encoding label "${label}"; falling back to utf-8`,
     );
@@ -228,11 +229,35 @@ export function getSystemEncoding(): string | null {
 
   if (!codeset) return null;
   if (codeset === 'utf8') return 'utf-8';
-  if (codeset === 'c' || codeset === 'posix' || codeset === 'ansi_x3.4-1968') {
+  // ASCII-family names either have no decodable foreign codepage or resolve
+  // to windows-1252 via WHATWG normalization; returning one would make the
+  // system gate force a windows-1252 decode of genuinely foreign bytes.
+  if (
+    codeset === 'c' ||
+    codeset === 'posix' ||
+    codeset === 'ansi_x3.4-1968' ||
+    codeset === 'us-ascii' ||
+    codeset === 'ascii' ||
+    codeset === 'iso646-us' ||
+    codeset === 'iso_646.irv:1991'
+  ) {
     return null;
   }
 
-  return codeset;
+  // Probe-validate the codeset through TextDecoder before returning — Unix
+  // locale codesets like eucjp, euckr, tis620, big5hkscs, koi8u are rejected
+  // by WHATWG TextDecoder with RangeError. Normalise common glibc spellings
+  // to their WHATWG-accepted forms first.
+  const normalised = codeset
+    .replace(/^eucjp$/, 'euc-jp')
+    .replace(/^euckr$/, 'euc-kr');
+  try {
+    new TextDecoder(normalised);
+  } catch {
+    return null;
+  }
+
+  return normalised;
 }
 
 /**
@@ -307,7 +332,19 @@ export function detectEncodingFromBuffer(buffer: Buffer): string | null {
   // OEM/GBK content), which a head-only sample would misdetect as Latin-1.
   try {
     let sample = buffer;
-    if (buffer.length > CHARDET_SAMPLE_BYTES) {
+    if (buffer.length > CHARDET_SAMPLE_BYTES * 2) {
+      // Head + middle + tail sampling for large buffers — foreign content
+      // concentrated in the middle of buffers >128 KiB would be missed by
+      // head+tail only (e.g. a 300 KiB file with ASCII head/tail and
+      // windows-1251 middle).
+      const middleStart =
+        Math.floor(buffer.length / 2) - Math.floor(CHARDET_SAMPLE_BYTES / 2);
+      sample = Buffer.concat([
+        buffer.subarray(0, CHARDET_SAMPLE_BYTES),
+        buffer.subarray(middleStart, middleStart + CHARDET_SAMPLE_BYTES),
+        buffer.subarray(buffer.length - CHARDET_SAMPLE_BYTES),
+      ]);
+    } else if (buffer.length > CHARDET_SAMPLE_BYTES) {
       sample = Buffer.concat([
         buffer.subarray(0, CHARDET_SAMPLE_BYTES),
         buffer.subarray(buffer.length - CHARDET_SAMPLE_BYTES),

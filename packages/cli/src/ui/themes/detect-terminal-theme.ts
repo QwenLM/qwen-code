@@ -116,8 +116,12 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
 
     const timer = setTimeout(() => finish(undefined), OSC11_TIMEOUT_MS);
 
-    const onData = (data: Buffer) => {
-      bufferChunks.push(data);
+    const onData = (data: Buffer | string) => {
+      // Ink sets stdin.setEncoding('utf8') in raw mode and never resets it,
+      // so data can arrive as a string. Buffer.concat throws ERR_INVALID_ARG_TYPE
+      // on string chunks — normalise to Buffer before pushing.
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      bufferChunks.push(chunk);
       // Decode the accumulated buffer (not the raw chunk) so a chunk that
       // splits a multi-byte sequence doesn't mojibake. The OSC response is
       // tiny, so re-decoding the whole buffer per chunk is cheap.
