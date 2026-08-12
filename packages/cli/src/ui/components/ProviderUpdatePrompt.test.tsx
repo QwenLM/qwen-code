@@ -43,4 +43,26 @@ describe('ProviderUpdatePrompt', () => {
     expect(frame).not.toContain('will switch');
     expect(frame).not.toContain('undefined');
   });
+
+  it('does not show the removed-model warning when the selected model is unaffected', () => {
+    const { lastFrame } = renderWithProviders(
+      <ProviderUpdatePrompt
+        entries={[
+          {
+            providerLabel: 'Coding Plan',
+            diff: {
+              added: ['new-model'],
+              removed: [],
+              currentModelAffected: false,
+            },
+          },
+        ]}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    expect(lastFrame() ?? '').not.toContain(
+      'Your selected model is being removed',
+    );
+  });
 });
