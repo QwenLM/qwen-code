@@ -47,7 +47,11 @@ export async function* livePromptEvents(
   signal?: AbortSignal,
   options?: LivePromptOptions,
 ): AsyncGenerator<OpenTuiStreamEvent> {
-  await config.initialize();
+  try {
+    await config.initialize();
+  } catch {
+    /* already initialized by command loading / startup */
+  }
   const client = config.getGeminiClient();
   const promptId = `opentui-${Date.now()}`;
   const map = createEventMapper();
