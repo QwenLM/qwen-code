@@ -753,6 +753,7 @@ describe('tool row rendering', () => {
     );
 
     expect(container.textContent).toContain('5s');
+    expect(container.textContent).toContain('1.2k tokens');
     if (reason) expect(container.textContent).toContain(reason);
   });
 
