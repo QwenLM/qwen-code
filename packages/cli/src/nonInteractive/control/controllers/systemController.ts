@@ -32,6 +32,7 @@ import {
   normalizeReasoningEffort,
   loadUsageDashboard,
   type MCPOAuthConfig,
+  type ReasoningEffortOverride,
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
@@ -162,6 +163,14 @@ export class SystemController extends BaseController {
     }
 
     this.context.config.setSdkMode(true);
+    let effortStatus:
+      | {
+          effort: string;
+          applied: boolean;
+          override: ReasoningEffortOverride | null;
+          reason?: string;
+        }
+      | undefined;
 
     const canUseToolTimeout = payload.timeout?.canUseTool;
     if (
@@ -177,13 +186,30 @@ export class SystemController extends BaseController {
       const normalized = normalizeReasoningEffort(payload.effort);
       if (normalized) {
         try {
-          if (applyReasoningEffort(this.context.config, normalized)) {
-            debugLogger.info(
-              `[SystemController] Set reasoning effort to: ${normalized}`,
+          const effortMatches = applyReasoningEffort(
+            this.context.config,
+            normalized,
+          );
+          const override =
+            this.context.config.getReasoningEffortOverride?.() ?? null;
+          const applied = effortMatches && override === null;
+          const reason = applied
+            ? undefined
+            : [
+                ...(effortMatches ? [] : ['thinking may be disabled']),
+                ...(override
+                  ? [`${override.source}.${override.field} takes precedence`]
+                  : []),
+              ].join('; ');
+          effortStatus = { effort: normalized, applied, override, reason };
+
+          if (!applied) {
+            debugLogger.warn(
+              `[SystemController] Effort '${normalized}' was not applied (${reason})`,
             );
           } else {
-            debugLogger.warn(
-              `[SystemController] Effort '${normalized}' was not applied (thinking may be disabled)`,
+            debugLogger.info(
+              `[SystemController] Set reasoning effort to: ${normalized}`,
             );
           }
         } catch (error) {
@@ -310,6 +336,7 @@ export class SystemController extends BaseController {
       subtype: 'initialize',
       session_id: this.context.config.getSessionId(),
       capabilities,
+      ...(effortStatus ? { effort_status: effortStatus } : {}),
     };
   }
 
@@ -532,7 +559,13 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const applied = applyReasoningEffort(this.context.config, normalized);
+      const effortMatches = applyReasoningEffort(
+        this.context.config,
+        normalized,
+      );
+      const override =
+        this.context.config.getReasoningEffortOverride?.() ?? null;
+      const applied = effortMatches && override === null;
 
       debugLogger.info(
         `[SystemController] Reasoning effort set to: ${normalized} (applied: ${applied})`,
@@ -542,6 +575,7 @@ export class SystemController extends BaseController {
         subtype: 'set_effort',
         effort: normalized,
         applied,
+        override,
       };
     } catch (error) {
       const errorMessage =
