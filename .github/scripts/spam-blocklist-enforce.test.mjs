@@ -374,7 +374,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       issue: { number: 5, user: { login: 'legit' }, state: 'open' },
     });
     assert.deepEqual(names(calls), []);
-    assert.ok(core.logs.info.some((m) => /No blocklisted author/.test(m)));
+    assert.ok(core.logs.info.some((m) => /No actions taken/.test(m)));
   });
 
   it('does not close an innocent PR that merely received spam', async () => {
@@ -471,8 +471,22 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
   it('leaves a legitimate review comment author alone', async () => {
     const { calls } = await enforce('pull_request_review_comment', {
       comment: { id: 5, user: { login: 'legit' } },
+      pull_request: { number: 60, user: { login: 'legit' }, state: 'open' },
     });
     assert.deepEqual(names(calls), []);
+  });
+
+  it('closes the PR of a blocklisted author on a legitimate review comment', async () => {
+    const { calls } = await enforce('pull_request_review_comment', {
+      comment: { id: 5, user: { login: 'legit' } },
+      pull_request: {
+        number: 60,
+        user: { login: 'spamuser' },
+        state: 'open',
+      },
+    });
+    assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
+    assert.equal(calls[0].params.pull_number, 60);
   });
 
   it('minimizes a review body, which has no REST delete', async () => {
@@ -488,8 +502,22 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
   it('leaves a legitimate review author alone', async () => {
     const { calls } = await enforce('pull_request_review', {
       review: { id: 6, node_id: 'PRR_ok', user: { login: 'legit' } },
+      pull_request: { number: 61, user: { login: 'legit' }, state: 'open' },
     });
     assert.deepEqual(names(calls), []);
+  });
+
+  it('closes the PR of a blocklisted author on a legitimate review', async () => {
+    const { calls } = await enforce('pull_request_review', {
+      review: { id: 6, node_id: 'PRR_ok', user: { login: 'legit' } },
+      pull_request: {
+        number: 61,
+        user: { login: 'spamuser' },
+        state: 'open',
+      },
+    });
+    assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
+    assert.equal(calls[0].params.pull_number, 61);
   });
 
   it('ignores an issues event, which this workflow no longer subscribes to', async () => {
@@ -529,6 +557,24 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         issue: { number: 5, user: { login: 'legit' }, state: 'open' },
       },
       { fail: () => new HttpError(404, 'Not Found') },
+    );
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
+  });
+
+  it('treats a 422 on issues.lock as already-done', async () => {
+    // issues.lock answers 422 when the thread is already locked — a
+    // concurrent run won the race, and the desired end state is reached.
+    const { core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'spamuser' } },
+        issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.lock' ? new HttpError(422, 'Already locked') : null,
+      },
     );
     assert.deepEqual(core.logs.failed, []);
     assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
@@ -800,6 +846,18 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
     assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
   });
 
+  it('treats a sweep 422 on lock as already-done', async () => {
+    // A concurrent run locking the thread between listForRepo and
+    // issues.lock must not read as a sweep failure.
+    const { core } = await sweep({
+      threads: [{ number: 11, user: { login: 'spamuser' }, state: 'open' }],
+      fail: (name) =>
+        name === 'issues.lock' ? new HttpError(422, 'Already locked') : null,
+    });
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
+  });
+
   it('keeps sweeping when a listing fails', async () => {
     // The listings run through run() like everything else: a rate-limit 403
     // on one of them must not abort the lane before a single mutation.
@@ -847,15 +905,22 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
 });
 
 describe('spam-blocklist-enforce: blocklist file', () => {
-  it('embeds the same parser in both lanes', () => {
+  it('embeds the same parser and isBlocked helper in both lanes', () => {
     // Compare the two definitions, not just their presence: one-sided drift
     // would make the lanes disagree about who is blocklisted.
-    const parserOf = (job) => {
+    const helperOf = (job, name) => {
       const script = scriptStepOf(job).with.script;
-      const start = script.indexOf('const parseBlocklist =');
+      const start = script.indexOf(`const ${name} =`);
       return script.slice(start, script.indexOf(';', start) + 1);
     };
-    assert.equal(parserOf(doc.jobs.enforce), parserOf(doc.jobs.sweep));
+    assert.equal(
+      helperOf(doc.jobs.enforce, 'parseBlocklist'),
+      helperOf(doc.jobs.sweep, 'parseBlocklist'),
+    );
+    assert.equal(
+      helperOf(doc.jobs.enforce, 'isBlocked'),
+      helperOf(doc.jobs.sweep, 'isBlocked'),
+    );
   });
 
   it('checks in a well-formed blocklist', () => {

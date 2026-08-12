@@ -154,9 +154,10 @@ jobs:
                 core.info(`ok: ${label}`);
               } catch (error) {
                 // 404 means someone (a maintainer, the spammer, a concurrent
-                // run of this workflow) already removed it. That is the
-                // desired end state, so it is not a failure.
-                if (error?.status === 404) {
+                // run of this workflow) already removed it; 422 is what
+                // issues.lock returns when a concurrent run already locked
+                // the thread. Both are the desired end state, not a failure.
+                if (error?.status === 404 || error?.status === 422) {
                   core.info(`already gone: ${label}`);
                   return;
                 }
@@ -233,6 +234,13 @@ jobs:
                   }),
                 );
               }
+              // Same thread-author close as issue_comment: a legitimate
+              // review on a blocklisted author's PR still closes the PR,
+              // instead of leaving it to the sweep.
+              const pull = payload.pull_request;
+              if (pull && !pull.locked && isBlocked(pull.user?.login)) {
+                await closeThread(pull.number, true, pull.state);
+              }
             } else if (eventName === 'pull_request_review') {
               const review = payload.review;
               if (isBlocked(review?.user?.login)) {
@@ -248,6 +256,10 @@ jobs:
                   ),
                 );
               }
+              const pull = payload.pull_request;
+              if (pull && !pull.locked && isBlocked(pull.user?.login)) {
+                await closeThread(pull.number, true, pull.state);
+              }
             } else if (eventName === 'pull_request_target') {
               const pull = payload.pull_request;
               if (isBlocked(pull?.user?.login)) {
@@ -255,12 +267,14 @@ jobs:
               }
             }
 
-            // Both empty means the author was not blocklisted. Checking
-            // `failures` too matters: when the single action attempted is the
-            // one that failed, `actions` is still empty, and returning here
-            // would skip the setFailed below and report the run green.
+            // Both empty means either no blocklisted author was involved or
+            // every needed action was already done (a 404/422 tolerated
+            // above). Checking `failures` too matters: when the single action
+            // attempted is the one that failed, `actions` is still empty, and
+            // returning here would skip the setFailed below and report the
+            // run green.
             if (actions.length === 0 && failures.length === 0) {
-              core.info('No blocklisted author on this event.');
+              core.info('No actions taken; any needed work was already done.');
               return;
             }
 
@@ -337,7 +351,9 @@ jobs:
                 core.info(`ok: ${label}`);
                 return result;
               } catch (error) {
-                if (error?.status === 404) {
+                // 404 = already removed; 422 = issues.lock on a thread a
+                // concurrent run already locked. Desired end state both ways.
+                if (error?.status === 404 || error?.status === 422) {
                   core.info(`already gone: ${label}`);
                   return undefined;
                 }

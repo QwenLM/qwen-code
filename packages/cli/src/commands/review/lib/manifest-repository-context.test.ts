@@ -185,7 +185,7 @@ describe('manifest repository context provider', () => {
     // so the total across rules — not each rule's array — is capped.
     const worktree = temp();
     const rules = [
-      { paths: Array.from({ length: 128 }, (_, index) => `area-${index}.ts`) },
+      { paths: Array.from({ length: 256 }, (_, index) => `area-${index}.ts`) },
       { paths: ['src/**'] },
     ];
     expect(() =>
@@ -195,7 +195,7 @@ describe('manifest repository context provider', () => {
 
   it('fails closed when merged fields or glob lists outgrow the wire bound', () => {
     const worktree = temp();
-    // Every single rule honors the 128-item bound; the MERGE does not.
+    // Every single rule honors the 256-item bound; the MERGE does not.
     expect(() =>
       provide(
         worktree,
@@ -205,14 +205,14 @@ describe('manifest repository context provider', () => {
             {
               paths: ['src/**'],
               domains: Array.from(
-                { length: 128 },
+                { length: 256 },
                 (_, index) => `domain-a-${String(index).padStart(3, '0')}`,
               ),
             },
             {
               paths: ['src/**'],
               domains: Array.from(
-                { length: 128 },
+                { length: 256 },
                 (_, index) => `domain-b-${String(index).padStart(3, '0')}`,
               ),
             },
@@ -225,12 +225,12 @@ describe('manifest repository context provider', () => {
         worktree,
         ['src/change.ts'],
         manifest({
-          rules: Array.from({ length: 65 }, (_, index) => ({
+          rules: Array.from({ length: 2 }, (_, rule) => ({
             paths: ['src/**'],
-            verificationNotes: [
-              `note-a-${String(index).padStart(3, '0')}`,
-              `note-b-${String(index).padStart(3, '0')}`,
-            ],
+            verificationNotes: Array.from(
+              { length: 129 },
+              (_, index) => `note-${rule}-${String(index).padStart(3, '0')}`,
+            ),
           })),
         }),
       ),
@@ -247,14 +247,14 @@ describe('manifest repository context provider', () => {
               {
                 paths: ['src/**'],
                 relatedPaths: Array.from(
-                  { length: 128 },
+                  { length: 256 },
                   (_, index) => `p-a/${index}.ts`,
                 ),
               },
               {
                 paths: ['src/**'],
                 relatedPaths: Array.from(
-                  { length: 128 },
+                  { length: 256 },
                   (_, index) => `p-b/${index}.ts`,
                 ),
               },
@@ -381,14 +381,14 @@ describe('manifest repository context provider', () => {
   );
 
   it('accepts a scan sitting exactly at the resolved-file bound', () => {
-    // The reject side pins 129 matches; this accept pin sits exactly at
-    // 128, where a `>` → `>=` regression would fail a legal manifest
-    // closed at the source's own calibration point. 127 wildcard matches
+    // The reject side pins 257 matches; this accept pin sits exactly at
+    // 256, where a `>` → `>=` regression would fail a legal manifest
+    // closed at the source's own calibration point. 255 wildcard matches
     // plus one static entry also exercise the cap check in BOTH branches.
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    for (let index = 0; index < 127; index++) {
+    for (let index = 0; index < 255; index++) {
       writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
     write(join(worktree, 'zz', 'extra.ts'));
@@ -405,7 +405,7 @@ describe('manifest repository context provider', () => {
           ],
         }),
       )?.relatedPaths,
-    ).toHaveLength(128);
+    ).toHaveLength(256);
   });
 
   it('accepts a scan visiting exactly the visited-entry ceiling', () => {
@@ -434,7 +434,7 @@ describe('manifest repository context provider', () => {
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    for (let index = 0; index < 129; index++) {
+    for (let index = 0; index < 257; index++) {
       writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
     expect(() =>
@@ -449,13 +449,13 @@ describe('manifest repository context provider', () => {
   });
 
   it('fails closed on the static branch when merged matches exceed the bound', () => {
-    // 128 wildcard matches sit exactly at the bound, then a static root adds
+    // 256 wildcard matches sit exactly at the bound, then a static root adds
     // one more — the static-file branch enforces the same cap the directory
     // branch does, or the wire validator reports a schema shape error instead.
     const worktree = temp();
     const source = join(worktree, 'src');
     mkdirSync(source);
-    for (let index = 0; index < 128; index++) {
+    for (let index = 0; index < 256; index++) {
       writeFileSync(join(source, `${String(index).padStart(3, '0')}.ts`), '');
     }
     write(join(worktree, 'zz', 'extra.ts'));
@@ -566,8 +566,8 @@ describe('manifest repository context provider', () => {
   });
 
   it('deduplicates related patterns before applying the merge bound', () => {
-    // 128 rules each contribute the same two patterns: 256 pre-dedup
-    // (OVER the cap) and 2 post-dedup (under it). A cap-before-dedup
+    // 86 rules each contribute the same three patterns: 258 pre-dedup
+    // (OVER the cap) and 3 post-dedup (under it). A cap-before-dedup
     // regression throws here; under it, two matching rules sharing one
     // 100-pattern list would reject a legal, human-authored manifest.
     const worktree = temp();
@@ -577,13 +577,16 @@ describe('manifest repository context provider', () => {
     for (let index = 0; index < 4; index++) {
       write(join(worktree, 'docs', `${index}.ts`));
     }
-    const rules = Array.from({ length: 128 }, () => ({
+    for (let index = 0; index < 2; index++) {
+      write(join(worktree, 'misc', `${index}.ts`));
+    }
+    const rules = Array.from({ length: 86 }, () => ({
       paths: ['src/**'],
-      relatedPaths: ['src/**', 'docs/**'],
+      relatedPaths: ['src/**', 'docs/**', 'misc/**'],
     }));
     expect(
       provide(worktree, ['src/change.ts'], manifest({ rules }))?.relatedPaths,
-    ).toHaveLength(9);
+    ).toHaveLength(11);
   });
 
   it('fails closed when cumulative matching work exceeds the budget', () => {
