@@ -6092,6 +6092,20 @@ exit 1
         { encoding: 'utf8', cwd: dir },
       );
       expect(measured).toBe('22 18 4');
+      // Fail-open: an orphan-history branch has no merge base, the three-dot
+      // diff exits 128, and under the workflow's real shell options the
+      // block must still complete with zero nets (brake skipped) instead of
+      // killing the prepare step every round.
+      git('update-ref', '-d', 'refs/remotes/origin/main');
+      const orphan = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphan).toBe('0 0 0');
       expect(measureBlock).toContain(
         "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
       );
@@ -6111,22 +6125,22 @@ exit 1
       {
         user: { login: 'mallory' },
         created_at: '2026-01-01T00:00:00Z',
-        body: '<!-- autofix-growth-base src=1 test=1 win=WIN1 -->',
+        body: '<!-- autofix-growth-base src=1 test=1 key=WIN1 -->',
       },
       {
         user: { login: 'qwen-code-dev-bot' },
         created_at: '2026-01-01T01:00:00Z',
-        body: 'report\n\n<!-- autofix-eval ts=2026-01-01T00:59:00Z acted=true round=1 win=WIN0 -->\n<!-- autofix-growth-base src=7 test=8 win=WIN0 -->',
+        body: 'report\n\n<!-- autofix-eval ts=2026-01-01T00:59:00Z acted=true round=1 win=WIN0 -->\n<!-- autofix-growth-base src=7 test=8 key=WIN0 -->',
       },
       {
         user: { login: 'qwen-code-dev-bot' },
         created_at: '2026-01-01T02:00:00Z',
-        body: 'report\n\n<!-- autofix-growth-base src=50 test=-60 win=WIN1 -->',
+        body: 'report\n\n<!-- autofix-growth-base src=50 test=-60 key=WIN1 -->',
       },
       {
         user: { login: 'qwen-code-dev-bot' },
         created_at: '2026-01-01T03:00:00Z',
-        body: 'report\n\n<!-- autofix-growth-base src=100 test=200 win=WIN1 -->',
+        body: 'report\n\n<!-- autofix-growth-base src=100 test=200 key=WIN1 -->',
       },
     ];
     const baselineFor = (key) =>
@@ -6155,7 +6169,7 @@ exit 1
     expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
     expect(
       pushAndReportStep.split(
-        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
+        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
       ).length - 1,
     ).toBe(2);
     expect(
@@ -6232,6 +6246,144 @@ exit 1
     expect(both[0]).toContain('rounds are complete and');
     expect(both[0]).toContain('src 900 / test 20');
     expect(both[1]).toContain('轮次，且');
+
+    // The batch-budget sentence must describe the policy actually in force:
+    // the OVER_BUDGET census only builds spans in round-brake territory, so
+    // a growth-only engagement has no enforceable budget and must say so.
+    const budgetBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ "\$\{CRITICAL_ONLY_ROUNDS\}" == 'true' \]\]; then\n\s+BUDGET_EN=[\s\S]*?BUDGET_ZH="纯增长[\s\S]*?fi)/,
+    )?.[1];
+    expect(budgetBlock).toBeTruthy();
+    const budgetFor = (rounds) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_HUMAN_BATCHES=2\nCRITICAL_ONLY_AFTER_ROUND=5\n${budgetBlock}\nprintf '%s\\n%s' "$BUDGET_EN" "$BUDGET_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const roundsBudget = budgetFor('true');
+    expect(roundsBudget[0]).toContain('used 2 regular feedback batches');
+    expect(roundsBudget[1]).toContain('2 批常规反馈预算');
+    const growthBudget = budgetFor('false');
+    expect(growthBudget[0]).toContain('continues to flow unaffected');
+    expect(growthBudget[0]).not.toContain('named below');
+    expect(growthBudget[1]).toContain('照常流动');
+
+    // Baseline wiring: the BASH_REMATCH split, fresh-anchor fallback, and
+    // growth subtractions — the producer (measurement/jq) and consumer
+    // (mode block) are replayed elsewhere; this replays the middle.
+    const wiringBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_BASE_NEW='false'[\s\S]*?GROWTH_TEST=\$\(\( NET_TEST - BASE_TEST \)\))/,
+    )?.[1];
+    expect(wiringBlock).toBeTruthy();
+    const wire = (baseline, netSrc, netTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BASELINE='${baseline}'\nNET_SRC=${netSrc}\nNET_TEST=${netTest}\n${wiringBlock}\nprintf '%s %s %s %s %s' "$GROWTH_BASE_NEW" "$BASE_SRC" "$BASE_TEST" "$GROWTH_SRC" "$GROWTH_TEST"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    // Parseable baseline: growth = net − base, marker not re-written.
+    expect(wire('50 -60', 120, 40)).toBe('false 50 -60 70 100');
+    // Empty baseline: THIS round anchors — marker written, growth zero.
+    expect(wire('', 120, 40)).toBe('true 120 40 0 0');
+    // Malformed baseline falls to the fresh anchor too.
+    expect(wire('garbage', 120, 40)).toBe('true 120 40 0 0');
+
+    // Writer↔scanner round-trip: render the report step's ACTUAL marker
+    // template (negative src, explicit window key) and require the prepare
+    // step's scan() to parse it back — the two sides are otherwise pinned
+    // only separately, so format drift would ship green while the baseline
+    // never parses in production.
+    const markerTemplate = pushAndReportStep.match(
+      /echo "(<!-- autofix-growth-base src=[^"]+-->)"/,
+    )?.[1];
+    expect(markerTemplate).toBeTruthy();
+    const rendered = execFileSync(
+      'bash',
+      [
+        '-c',
+        `GROWTH_BASE_SRC=-5\nGROWTH_BASE_TEST=0\nGROWTH_BASE_WIN=WINX\necho "${markerTemplate}"`,
+      ],
+      { encoding: 'utf8' },
+    ).trim();
+    const roundTrip = execFileSync(
+      'jq',
+      [
+        '-r',
+        '--arg',
+        'ab',
+        'qwen-code-dev-bot',
+        '--arg',
+        'key',
+        'WINX',
+        baselineJq,
+      ],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:00:00Z',
+            body: `report\n\n${rendered}`,
+          },
+        ]),
+      },
+    ).trimEnd();
+    expect(roundTrip).toBe('-5 0');
+    // The marker's window field is `key=`, never `win=`: three censuses
+    // attribute comments to windows by the whole-body substring
+    // `win=<key> -->`, and this marker can carry a different window than
+    // its comment's autofix-eval marker.
+    expect(rendered).not.toContain('win=');
+
+    // The report-post retry loop carries the round's entire persisted
+    // state: replay it with a stubbed gh — a success posts exactly once;
+    // a full outage attempts exactly three times, ends with "giving up"
+    // (not a fourth "retrying"), and fails the step.
+    const retryBlock = pushAndReportStep.match(
+      /(REPORT_POSTED='false'[\s\S]*?\[\[ "\$\{REPORT_POSTED\}" == 'true' \]\] \|\| exit 1)/,
+    )?.[1];
+    expect(retryBlock).toBeTruthy();
+    const retry = (ghExit) => {
+      const calls = mkdtempSync(join(tmpdir(), 'autofix-retry-'));
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'PR=1 REPO=o/r WORKDIR=.',
+            'sleep() { :; }',
+            `gh() { echo x >> "$1/calls"; return ${ghExit}; }`.replace(
+              '$1',
+              calls,
+            ),
+            retryBlock,
+            'echo POSTED_OK',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      const count = existsSync(join(calls, 'calls'))
+        ? readFileSync(join(calls, 'calls'), 'utf8').split('\n').filter(Boolean)
+            .length
+        : 0;
+      rmSync(calls, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status: res.status, count };
+    };
+    const posted = retry(0);
+    expect(posted.count).toBe(1);
+    expect(posted.out).toContain('POSTED_OK');
+    const outage = retry(1);
+    expect(outage.count).toBe(3);
+    expect(outage.status).toBe(1);
+    expect(outage.out).toContain('giving up');
+    expect(outage.out.split('retrying').length - 1).toBe(2);
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
