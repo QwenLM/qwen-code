@@ -8075,14 +8075,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // transport-closed race rejects only when the channel exits — a
           // branch whose channel died cannot be observed or delivered anyway —
           // so a slow-but-alive fork still waits for its real outcome.
-          const result = (await Promise.race([
-            mutation,
-            getTransportClosedReject(entry),
-          ])) as {
+          let result: {
             newSessionId: string;
             title?: string;
             displayName?: string;
           };
+          try {
+            result = (await Promise.race([
+              mutation,
+              getTransportClosedReject(entry),
+            ])) as typeof result;
+          } catch (err) {
+            const data = (err as { data?: unknown })?.data;
+            if (
+              !isSideTask &&
+              data &&
+              typeof data === 'object' &&
+              (data as { errorKind?: unknown }).errorKind === 'session_busy'
+            ) {
+              const msg =
+                (err as { message?: string })?.message ?? 'Branch failed';
+              throw new SessionBusyError(sessionId, msg);
+            }
+            throw err;
+          }
 
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
@@ -10092,7 +10108,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // after the prompt's `finally` clears the busy flags, and client-side
       // timeouts cannot cancel queued work — the rewind would truncate
       // history after the caller was told it failed. The agent-side
-      // `isIdle()` guard never fires because the queue guarantees the turn
+      // `isTurnIdle()` guard never fires because the queue guarantees the turn
       // is over before the rewind reaches the agent. Reject synchronously,
       // matching branchSession and launchSessionForkAgent.
       if (entry.pendingPromptCount > 0 || entry.promptActive) {

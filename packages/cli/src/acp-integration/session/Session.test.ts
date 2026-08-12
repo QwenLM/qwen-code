@@ -910,6 +910,7 @@ describe('Session', () => {
       );
       expect(holdIds('agent')).toEqual(['agent-cancelled']);
       expect(session.isIdle()).toBe(false);
+      expect(session.isTurnIdle()).toBe(true);
 
       mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
         [],
@@ -2073,6 +2074,7 @@ describe('Session', () => {
     const releaseMutation = session.beginHistoryMutation();
 
     expect(session.isIdle()).toBe(false);
+    expect(session.isTurnIdle()).toBe(false);
     await expect(
       session.prompt({
         sessionId: 'test-session-id',
@@ -2083,6 +2085,7 @@ describe('Session', () => {
 
     releaseMutation();
     expect(session.isIdle()).toBe(true);
+    expect(session.isTurnIdle()).toBe(true);
   });
 
   it('rejects a prompt when a history mutation begins during writer admission', async () => {

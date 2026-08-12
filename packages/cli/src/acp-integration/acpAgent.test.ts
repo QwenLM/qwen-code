@@ -1923,6 +1923,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
         isIdle: ReturnType<typeof vi.fn>;
+        isTurnIdle: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -3657,6 +3658,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         hardSuspendTodoStopGuard: vi.fn(),
         releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
         isIdle: vi.fn().mockReturnValue(true),
+        isTurnIdle: vi.fn().mockReturnValue(true),
         prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
       };
       lastSessionMock = sessionMock;
@@ -12471,7 +12473,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
   });
 
-  it('rewindSession extension method rewinds the active session', async () => {
+  it('rewinds while only non-turn background work remains', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.getProjectRoot.mockReturnValue('/tmp/after-cd');
@@ -12505,6 +12507,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.isIdle.mockReturnValue(false);
     const response = await agent.extMethod('rewindSession', {
       sessionId,
       targetTurnIndex: 1,
@@ -12716,7 +12719,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // Simulate an active turn (e.g. a cron/notification drain holding the
     // history-mutation gate): admission must reject instead of queueing a
     // rewind the bridge timeout cannot cancel.
-    lastSessionMock!.isIdle.mockReturnValue(false);
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
 
     await expect(
       agent.extMethod('rewindSession', {
@@ -12775,7 +12778,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalled(),
     );
 
-    lastSessionMock!.isIdle.mockReturnValue(false);
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
     await expect(
       agent.extMethod('rewindSession', {
         sessionId,
@@ -13517,6 +13520,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
   let liveReleaseCloseGate: ReturnType<typeof vi.fn>;
   let liveBeginClose: ReturnType<typeof vi.fn>;
   let liveIsIdle: ReturnType<typeof vi.fn>;
+  let liveIsTurnIdle: ReturnType<typeof vi.fn>;
   let liveAssertCanStartTurn: ReturnType<typeof vi.fn>;
   let liveBeginHistoryMutation: ReturnType<typeof vi.fn>;
   let liveReleaseHistoryMutation: ReturnType<typeof vi.fn>;
@@ -13536,6 +13540,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     liveReleaseCloseGate = vi.fn();
     liveBeginClose = vi.fn().mockReturnValue(liveReleaseCloseGate);
     liveIsIdle = vi.fn().mockReturnValue(true);
+    liveIsTurnIdle = vi.fn().mockReturnValue(true);
     liveAssertCanStartTurn = vi.fn().mockResolvedValue(undefined);
     liveReleaseHistoryMutation = vi.fn();
     liveBeginHistoryMutation = vi
@@ -13651,6 +13656,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
           waitForActiveTurnsToSettle: liveWaitForActiveTurnsToSettle,
           isIdle: liveIsIdle,
+          isTurnIdle: liveIsTurnIdle,
           assertCanStartTurn: liveAssertCanStartTurn,
           beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -14090,7 +14096,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     innerConfig.getSessionService.mockReturnValue(
       sessionService as unknown as SessionService,
     );
-    liveIsIdle.mockReturnValue(false);
+    liveIsTurnIdle.mockReturnValue(false);
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -14149,7 +14155,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
-  it('branches a live session through its pinned SessionService', async () => {
+  it('branches through its pinned SessionService while only non-turn work remains', async () => {
     const recording = makeRecordingService();
     const sessionService = {
       forkSession: vi.fn().mockResolvedValue(undefined),
@@ -14166,6 +14172,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     const { agent, agentPromise } = await bootAgent(innerConfig);
 
     await agent.newSession({ cwd: '/workspace-source', mcpServers: [] });
+    liveIsIdle.mockReturnValue(false);
     const result = await agent.extMethod(
       SERVE_CONTROL_EXT_METHODS.sessionBranch,
       {

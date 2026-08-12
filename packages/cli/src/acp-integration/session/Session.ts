@@ -2410,12 +2410,12 @@ export class Session implements SessionContext {
     }
   }
 
+  isTurnIdle(): boolean {
+    return !this.closing && !this.#hasActiveTurn();
+  }
+
   isIdle(): boolean {
-    return (
-      !this.closing &&
-      !this.#hasActiveTurn() &&
-      this.collectActiveWorkHolds().length === 0
-    );
+    return this.isTurnIdle() && this.collectActiveWorkHolds().length === 0;
   }
 
   /**

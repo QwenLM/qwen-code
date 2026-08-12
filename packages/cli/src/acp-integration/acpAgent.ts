@@ -10899,7 +10899,7 @@ class QwenAgent implements Agent {
         // admitted behind an active turn would still truncate history after
         // the client was told it failed. rewindToTurn re-checks inside the
         // gate.
-        if (!session.isIdle()) {
+        if (!session.isTurnIdle()) {
           throw new RequestError(
             -32602,
             'Cannot rewind while a prompt is running',
@@ -11194,7 +11194,7 @@ class QwenAgent implements Agent {
         }
 
         if (!isSideTask) {
-          if (!sourceSession.isIdle()) {
+          if (!sourceSession.isTurnIdle()) {
             throw new RequestError(
               -32602,
               'Cannot branch while a prompt is running',

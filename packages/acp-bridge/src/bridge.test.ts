@@ -10551,6 +10551,32 @@ describe('createAcpSessionBridge', () => {
       },
     );
 
+    it('maps an agent-side branch busy response to SessionBusyError', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            throw new RequestError(
+              -32602,
+              'Session is busy processing a turn',
+              {
+                errorKind: 'session_busy',
+              },
+            );
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(session.sessionId, {}),
+      ).rejects.toBeInstanceOf(SessionBusyError);
+      await bridge.shutdown();
+    });
+
     it('dispatches branchSession on the source channel without restoring it', async () => {
       // Overlap construction: channel A hosts two sessions; killing the
       // first one fails at the agent close, so the bridge marks A dying
