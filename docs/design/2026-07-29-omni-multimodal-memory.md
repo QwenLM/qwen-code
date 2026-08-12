@@ -568,6 +568,12 @@ interface MediaMemoryRecallResult {
     kind: 'metadata' | 'derived_media' | 'policy_result' | 'execution';
     role?: string;
     content?: string;
+    /** content 是 memory 所存文本的前缀时为 true（被 recall.maxTextChars 截断）。
+     * coverage 讲的是"处理过什么"，所以一条被截断的转写仍合法地报 complete；
+     * 没有这个标记，模型看到前缀 + 完整覆盖 + 无 gap，就会对它从未读到的后半段
+     * 音频作答。默认值本身就会撞上：maxTextChars（24000 字符）小于收集期界
+     * （65536 字节），任何长转写都在读取期被切。 */
+    contentTruncated?: boolean;
     resourceId?: string;
     scope: MediaScope;
     channels: MediaChannel[];
@@ -595,6 +601,10 @@ interface MediaMemoryRecallResult {
     arguments: Record<string, unknown>;
     reason: string;
   }>;
+  /** 匹配总数，仅当条目预算把列表截短时出现。没有它，一页被截断的结果与穷尽结果
+   * 无法区分：真实审计在 limit: 12 下读到 6 段 clip，就得出"从未抽过关键帧"，
+   * 而库里有 72 条——读的人没有说谎，它只是无从知道自己看到的是一页。 */
+  matchedEntries?: number;
 }
 ```
 
