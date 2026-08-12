@@ -17,7 +17,7 @@ const stubs = vi.hoisted(() => ({
     })),
     isGitRepository: vi.fn(async () => true),
     getRepoTopLevel: vi.fn(async () => '/repo'),
-    getMainWorktreePath: vi.fn(async () => '/repo'),
+    getMainWorktreePath: vi.fn(async (): Promise<string | null> => '/repo'),
     isRegisteredLinkedWorktree: vi.fn(async () => true),
     getRegisteredWorktreeBranch: vi.fn(async () => ({ branch: 'pr-7' })),
   }),
