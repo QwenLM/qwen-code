@@ -14,10 +14,6 @@ export default defineConfig({
     // extraction) blow 5s purely under contention, not from any logic fault.
     // Assertions still fail instantly; only the timeout ceiling grows.
     testTimeout: 15000,
-    // Load-sensitive tests (real subprocesses, tempdir I/O, WASM load) flake
-    // when a load spike starves them; a retry rides the spike out, while a
-    // real deterministic regression fails every attempt.
-    retry: 2,
     reporters: ['default', 'junit'],
     silent: true,
     setupFiles: ['./test-setup.ts'],
