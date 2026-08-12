@@ -167,4 +167,85 @@ describe('resolveExternalWorktreeDir', () => {
     expect((asTool as { error: string }).error).toMatch(/^working_dir "/);
     expect((asOpt as { error: string }).error).toMatch(/^workingDir "/);
   });
+
+  // Canonicalise both sides or NEITHER: under a symlinked repo ancestor, an
+  // ABSENT pin target used to compare the canonical root against the
+  // verbatim spelling — manufacturing "resolves outside this repository
+  // (/canonical/root)" and hiding the real cause. The verbatim comparison
+  // lets the path reach the registration gate, which names the absence.
+  it('reports an absent target via the registration gate under a symlinked root', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-pin-'));
+    try {
+      const realRoot = path.join(root, 'real');
+      const repoDir = path.join(realRoot, 'repo');
+      await fs.mkdir(repoDir, { recursive: true });
+      const linkRoot = path.join(root, 'link');
+      await fs.symlink(realRoot, linkRoot);
+      svc.getMainWorktreePath.mockResolvedValue(path.join(linkRoot, 'repo'));
+      svc.isRegisteredLinkedWorktree.mockResolvedValue(false);
+      const localConfig = {
+        getTargetDir: () => path.join(linkRoot, 'repo'),
+      } as unknown as Config;
+
+      const result = await resolveExternalWorktreeDir(localConfig, 'wt-x');
+      expect(result).toEqual({
+        error: expect.stringContaining('is not a registered linked worktree'),
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // When the main-tree anchor is unavailable (worktree list unreadable or
+  // malformed), containment degrades to the CURRENT worktree's root, which
+  // from inside a linked worktree over-refuses legitimate sibling pins. The
+  // refusal must say so instead of asserting a containment problem the
+  // caller then retries against.
+  it('names the degraded anchor when the main worktree is undeterminable', async () => {
+    svc.getMainWorktreePath.mockResolvedValue(null);
+    svc.getRepoTopLevel.mockResolvedValue('/repo/.qwen/tmp/review-pr-1');
+    const insideWorktree = {
+      getTargetDir: () => '/repo/.qwen/tmp/review-pr-1',
+    } as unknown as Config;
+
+    const result = await resolveExternalWorktreeDir(
+      insideWorktree,
+      '../review-pr-2',
+    );
+    expect(result).toEqual({
+      error: expect.stringContaining(
+        'main working tree could not be determined',
+      ),
+    });
+  });
+
+  // Resolve once and thread the single resolution: the gates must see — and
+  // the result must bind — the exact directory object that was validated,
+  // not a lexical spelling a re-pointed symlink could swap out afterwards.
+  it('threads the canonical resolution through the gates and the result', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-pin-'));
+    try {
+      const repoDir = path.join(root, 'repo');
+      const wtIn = path.join(repoDir, 'wt-in');
+      await fs.mkdir(wtIn, { recursive: true });
+      await fs.symlink(wtIn, path.join(repoDir, 'link'));
+      svc.getMainWorktreePath.mockResolvedValue(repoDir);
+      const localConfig = {
+        getTargetDir: () => repoDir,
+      } as unknown as Config;
+
+      const result = await resolveExternalWorktreeDir(localConfig, 'link');
+      const canonical = await fs.realpath(wtIn);
+      expect(result).toEqual({
+        path: canonical,
+        branch: 'pr-7',
+        slug: path.basename(canonical),
+        repoRoot: repoDir,
+      });
+      expect(svc.isRegisteredLinkedWorktree).toHaveBeenCalledWith(canonical);
+      expect(svc.getRegisteredWorktreeBranch).toHaveBeenCalledWith(canonical);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

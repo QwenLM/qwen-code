@@ -3478,6 +3478,38 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(helper.calls).toHaveLength(0);
   });
 
+  it('workingDir rejects whitespace-only values at the entrance', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '  ' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The sandbox gate names this contradiction too, but it reads the raw opts
+  // BEFORE the JSON revival — an enumerable getter can withhold `isolation`
+  // during validation and surface it at stringify time. The orchestrator sees
+  // the revived plain object, so its refusal is the one that cannot be
+  // evaded; without it, isolation would silently win and workingDir would be
+  // dropped — the opposite of AgentTool's documented working_dir-wins rule.
+  it('workingDir + isolation throws instead of letting one silently win', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+        isolation: 'worktree',
+      }),
+    ).rejects.toThrow(/incompatible options/);
+    expect(helper.calls).toHaveLength(0);
+    expect(worktreeStubs.instances).toHaveLength(0);
+  });
+
   // A refused pin must abort the dispatch, not fall through to an agent
   // running in the parent tree — the failure mode the pin exists to prevent.
   it('workingDir surfaces the resolver refusal and dispatches nothing', async () => {

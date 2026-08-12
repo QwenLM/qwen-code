@@ -1403,7 +1403,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // about who owns the directory's lifetime, so name it here rather than
         // silently letting one win.
         if (agentOpts.workingDir !== undefined) {
-          if (typeof agentOpts.workingDir !== 'string' || agentOpts.workingDir.length === 0) {
+          if (typeof agentOpts.workingDir !== 'string' || agentOpts.workingDir.trim().length === 0) {
             throw new Error(
               "agent({workingDir}): must be a non-empty string naming an existing " +
               "git worktree of this repository."

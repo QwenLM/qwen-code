@@ -300,4 +300,40 @@ describe('GitWorktreeService.getMainWorktreePath() (real git)', () => {
       expect(await svc.getRepoTopLevel()).toBe(nlRepo);
     },
   );
+
+  // The parse check catches a remainder that is NOT attribute-shaped, but a
+  // remainder that itself is a record attribute (`detached`) — or a path
+  // ending right at a newline — parses cleanly. The anchor is only trusted
+  // after the round-trip: `rev-parse --git-common-dir` run at the truncated
+  // prefix must agree with this repository's common dir. Here the prefix
+  // falls inside the enclosing repository (first arm) or nowhere at all
+  // (second arm), so both anchors are refused and the `--show-toplevel`
+  // fallback keeps the path intact.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a truncated anchor whose remainder is attribute-shaped',
+    async () => {
+      const outer = initRepo('qwen-mainpath-attr-');
+      const nlRepo = path.join(outer, 'sub', '\ndetached');
+      fs.mkdirSync(path.dirname(nlRepo), { recursive: true });
+      execFileSync('git', ['clone', '-q', outer, nlRepo], { cwd: outer });
+
+      const svc = new GitWorktreeService(nlRepo);
+      expect(await svc.getMainWorktreePath()).toBeNull();
+      expect(await svc.getRepoTopLevel()).toBe(nlRepo);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a truncated anchor when the main-tree path ends with a newline',
+    async () => {
+      const outer = initRepo('qwen-mainpath-trailnl-');
+      const nlRepo = path.join(outer, 'sub', 'tree\n');
+      fs.mkdirSync(path.dirname(nlRepo), { recursive: true });
+      execFileSync('git', ['clone', '-q', outer, nlRepo], { cwd: outer });
+
+      const svc = new GitWorktreeService(nlRepo);
+      expect(await svc.getMainWorktreePath()).toBeNull();
+      expect(await svc.getRepoTopLevel()).toBe(nlRepo);
+    },
+  );
 });

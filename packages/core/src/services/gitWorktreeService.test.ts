@@ -619,6 +619,11 @@ describe('GitWorktreeService', () => {
           'HEAD abc123\n' +
           'branch refs/heads/wt\n',
       );
+      // Round-trip validation: `--git-common-dir` answers absolute from a
+      // linked worktree and relative from the main tree; both resolve to the
+      // same common dir.
+      hoistedMockRaw.mockResolvedValueOnce('/repo/.git');
+      hoistedMockRaw.mockResolvedValueOnce('.git');
       const service = new GitWorktreeService('/repo/.qwen/worktrees/wt');
 
       await expect(service.getMainWorktreePath()).resolves.toBe('/repo');
@@ -631,6 +636,8 @@ describe('GitWorktreeService', () => {
 
     it('accepts a bare-repository first entry', async () => {
       hoistedMockRaw.mockResolvedValueOnce('worktree /srv/repo.git\nbare\n');
+      hoistedMockRaw.mockResolvedValueOnce('.');
+      hoistedMockRaw.mockResolvedValueOnce('.');
       const service = new GitWorktreeService('/srv/repo.git');
 
       await expect(service.getMainWorktreePath()).resolves.toBe(
@@ -675,6 +682,60 @@ describe('GitWorktreeService', () => {
       const service = new GitWorktreeService('/outer/sub/\nR1');
 
       await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+
+    // The attribute-shape backstop: a remainder that is itself a record
+    // attribute (`detached`, `HEAD …`, …) — or a path ending right at a
+    // newline — parses cleanly, so the parse check alone cannot catch the
+    // truncation. The round-trip refuses the anchor: probed at the truncated
+    // prefix, `--git-common-dir` resolves against a DIFFERENT repository.
+    it('returns null when the truncated prefix belongs to another repository', async () => {
+      hoistedMockRaw.mockResolvedValueOnce(
+        'worktree /outer/sub/\n' +
+          'detached\n' +
+          'HEAD abc123\n' +
+          'branch refs/heads/main\n',
+      );
+      hoistedMockRaw.mockResolvedValueOnce('.git');
+      // git -C /outer/sub walks up into the enclosing repository.
+      hoistedMockRaw.mockResolvedValueOnce('/outer/.git');
+      const service = new GitWorktreeService('/outer/sub/\ndetached');
+
+      await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+
+    it('returns null when the anchor probe fails', async () => {
+      hoistedMockRaw.mockResolvedValueOnce(
+        'worktree /gone/repo\n' + 'HEAD abc123\n' + 'branch refs/heads/main\n',
+      );
+      hoistedMockRaw.mockResolvedValueOnce('.git');
+      hoistedMockRaw.mockRejectedValueOnce(new Error('not a git repository'));
+      const service = new GitWorktreeService('/gone/repo');
+
+      await expect(service.getMainWorktreePath()).resolves.toBeNull();
+    });
+
+    // git preserves a path's leading/trailing whitespace verbatim in the
+    // porcelain output; the parse must not mutate the anchor (a trim would
+    // aim every subsequent gate at a different directory).
+    it('preserves whitespace in the main worktree path', async () => {
+      hoistedMockRaw.mockResolvedValueOnce(
+        'worktree /srv/proj \n' + 'HEAD abc123\n' + 'branch refs/heads/main\n',
+      );
+      hoistedMockRaw.mockResolvedValueOnce('.git');
+      hoistedMockRaw.mockResolvedValueOnce('.git');
+      const service = new GitWorktreeService('/srv/proj ');
+
+      await expect(service.getMainWorktreePath()).resolves.toBe('/srv/proj ');
+    });
+  });
+
+  describe('getRepoTopLevel', () => {
+    it('preserves whitespace in the repository top-level path', async () => {
+      hoistedMockRaw.mockResolvedValueOnce('/srv/proj \n');
+      const service = new GitWorktreeService('/srv/proj ');
+
+      await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj ');
     });
   });
 });

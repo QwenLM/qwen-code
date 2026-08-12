@@ -787,6 +787,18 @@ async function runOverridePath(
   // resolve cwd-related getters via the prototype chain.
   let worktreeIsolation: WorkflowWorktreeIsolation | null = null;
   let effectiveContext: Config = config;
+  // Same contradiction the sandbox gate names, re-checked here: the sandbox
+  // gate reads the raw opts BEFORE the JSON revival, so an enumerable getter
+  // can withhold `isolation` during validation and surface it at stringify
+  // time. The host sees the revived plain object, so this check is the one
+  // that cannot be evaded.
+  if (opts.isolation !== undefined && opts.workingDir !== undefined) {
+    throw new Error(
+      'agent({workingDir, isolation}): incompatible options. workingDir ' +
+        'pins the agent to a worktree you already own; isolation creates ' +
+        'a fresh one and removes it afterwards. Pass one.',
+    );
+  }
   if (opts.isolation === 'worktree') {
     worktreeIsolation = await provisionWorkflowWorktree(config);
     effectiveContext = createDirScopedConfigOverride(
@@ -794,7 +806,10 @@ async function runOverridePath(
       worktreeIsolation.path,
     );
   } else if (opts.workingDir !== undefined) {
-    if (typeof opts.workingDir !== 'string' || !opts.workingDir) {
+    if (
+      typeof opts.workingDir !== 'string' ||
+      opts.workingDir.trim().length === 0
+    ) {
       throw new Error(
         'agent({workingDir}): must be a non-empty string naming an existing git worktree of this repository.',
       );

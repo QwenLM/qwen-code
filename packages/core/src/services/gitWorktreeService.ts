@@ -318,8 +318,13 @@ export class GitWorktreeService {
    */
   async getRepoTopLevel(): Promise<string | null> {
     try {
-      const out = await (await this.getGit()).revparse(['--show-toplevel']);
-      const top = out.trim();
+      // `raw` rather than `revparse`: the latter trims the output, silently
+      // mutating a path that legitimately carries leading/trailing whitespace
+      // into a different anchor. Strip only the line terminator.
+      const out = await (
+        await this.getGit()
+      ).raw(['rev-parse', '--show-toplevel']);
+      const top = out.replace(/\r?\n$/, '');
       return top.length > 0 ? top : null;
     } catch (error) {
       // Caller falls back to its cwd via `?? cwd`. Log so a corrupt
@@ -344,13 +349,18 @@ export class GitWorktreeService {
    *
    * The porcelain format is newline-delimited, so a main-tree path that
    * itself contains a newline splits across lines and the first entry
-   * truncates. The remainder then appears where a record attribute belongs;
-   * it is not one, which is how the truncation is detected — this method
-   * returns `null` and callers fall back to `getRepoTopLevel()`, whose
-   * single-value `--show-toplevel` answer keeps interior newlines intact.
-   * (`--porcelain -z` would be immune but needs Git >= 2.36.) A truncated
-   * anchor is not merely wrong: it can resolve inside a DIFFERENT repository
-   * whose worktree registry the gate below would then consult.
+   * truncates. The remainder then appears where a record attribute belongs
+   * — it is not one, which detects most truncations. Not all: a remainder
+   * that is itself attribute-shaped (`detached`, `HEAD …`, …) — or a path
+   * ending right at a newline, whose blank remainder ends the record — still
+   * parses. The parsed anchor is therefore round-trip-validated below:
+   * `rev-parse --git-common-dir` run AT the anchor must agree with this
+   * repository's own common dir, otherwise this method returns `null` and
+   * callers fall back to `getRepoTopLevel()`, whose single-value
+   * `--show-toplevel` answer keeps interior newlines intact. (`--porcelain
+   * -z` would be immune but needs Git >= 2.36.) A truncated anchor is not
+   * merely wrong: it can resolve inside a DIFFERENT repository whose
+   * worktree registry the caller's gate would then consult.
    */
   async getMainWorktreePath(): Promise<string | null> {
     try {
@@ -358,15 +368,42 @@ export class GitWorktreeService {
         await this.getGit()
       ).raw(['worktree', 'list', '--porcelain']);
       const lines = out.split('\n');
-      const firstLine = lines[0]?.trim() ?? '';
+      // Strip only the line terminator (a CRLF carriage return included):
+      // git preserves a path's leading/trailing whitespace verbatim, and a
+      // trim would silently mutate it into a different, wrong anchor.
+      const firstLine = (lines[0] ?? '').replace(/\r$/, '');
       if (!firstLine.startsWith('worktree ')) return null;
       for (const line of lines.slice(1)) {
         const attr = line.trim();
         if (attr === '') break; // blank line ends the first record
         if (!isWorktreeListPorcelainAttribute(attr)) return null;
       }
-      const mainPath = firstLine.slice('worktree '.length).trim();
-      return mainPath.length > 0 ? mainPath : null;
+      const mainPath = firstLine.slice('worktree '.length);
+      if (mainPath.length === 0) return null;
+      // Round-trip validation (see the doc block): `--git-common-dir` answers
+      // `.git` (relative) from a main tree and an absolute path from a linked
+      // worktree, so resolve both sides. realpath both so a symlinked
+      // ancestor on either side (macOS /tmp -> /private/tmp) cannot
+      // manufacture a mismatch. A probe failure at the anchor fails closed.
+      const realpathOr = async (p: string): Promise<string> => {
+        try {
+          return await fs.realpath(p);
+        } catch {
+          return p;
+        }
+      };
+      const { simpleGit } = await loadSimpleGit();
+      const [ourRaw, anchorRaw] = await Promise.all([
+        (await this.getGit()).raw(['rev-parse', '--git-common-dir']),
+        simpleGit(mainPath).raw(['rev-parse', '--git-common-dir']),
+      ]);
+      const ourCommonDir = await realpathOr(
+        path.resolve(this.sourceRepoPath, ourRaw.trim()),
+      );
+      const anchorCommonDir = await realpathOr(
+        path.resolve(mainPath, anchorRaw.trim()),
+      );
+      return ourCommonDir === anchorCommonDir ? mainPath : null;
     } catch (error) {
       debugLogger.warn(
         `getMainWorktreePath failed at ${this.sourceRepoPath}: ${error}`,

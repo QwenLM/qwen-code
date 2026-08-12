@@ -52,6 +52,12 @@ export interface ResolvedWorktreePin {
  * label; it is deliberately NOT a gate, since it returns null for a legitimate
  * detached-HEAD worktree.
  *
+ * The pin path is resolved ONCE and that single resolution is threaded
+ * through both gates and returned as `path`: re-resolving inside the gates —
+ * or returning the lexical spelling for the child to bind while the gates saw
+ * the canonical one — lets a symlink re-pointed after validation land the
+ * child somewhere neither gate checked.
+ *
  * @param label how to name the offending parameter in error text — `working_dir`
  *   for the tool, `workingDir` for the workflow opt.
  * @returns the resolved absolute path + labels, or `{ error }` with a
@@ -89,10 +95,8 @@ export async function resolveExternalWorktreeDir(
   // when the worktree list cannot be read; either anchor also keeps the
   // common-dir comparison inside getRegisteredWorktreeBranch against the
   // repository, not a monorepo subdirectory the parent launched from.
-  const repoRoot =
-    (await probe.getMainWorktreePath()) ??
-    (await probe.getRepoTopLevel()) ??
-    parentCwd;
+  const mainTreePath = await probe.getMainWorktreePath();
+  const repoRoot = mainTreePath ?? (await probe.getRepoTopLevel()) ?? parentCwd;
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
 
@@ -101,21 +105,41 @@ export async function resolveExternalWorktreeDir(
   // must not silently move the file tools' boundary outside the repository.
   // (`isolation: 'worktree'` has this property implicitly — it always
   // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
-  // paths so a symlink cannot straddle the boundary.
-  const realRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
-  const realResolved = await fs
-    .realpath(resolvedPath)
-    .catch(() => resolvedPath);
-  const relToRepo = path.relative(realRepoRoot, realResolved);
+  // paths so a symlink cannot straddle the boundary — but canonicalise BOTH
+  // sides or NEITHER: when only one realpath succeeds (typically the pin
+  // target is absent), comparing a canonical root against the verbatim
+  // spelling manufactures a refusal that names a root the caller never typed
+  // and hides the real cause. The verbatim comparison lets the path reach the
+  // registration gate, whose message names the absence accurately.
+  const realRepoRoot = await fs.realpath(repoRoot).catch(() => null);
+  const realResolved = await fs.realpath(resolvedPath).catch(() => null);
+  const canonical = realRepoRoot !== null && realResolved !== null;
+  const containRoot = canonical ? realRepoRoot : repoRoot;
+  const relToRepo = path.relative(
+    containRoot,
+    canonical ? realResolved : resolvedPath,
+  );
   if (
     relToRepo === '..' ||
     relToRepo.startsWith(`..${path.sep}`) ||
     path.isAbsolute(relToRepo)
   ) {
+    // When the main-tree anchor was unavailable the containment check ran
+    // against the CURRENT worktree's root, which from inside a linked
+    // worktree over-refuses legitimate sibling pins and hands the caller
+    // guidance that cannot be satisfied — say so instead of asserting a
+    // containment problem that does not exist.
+    const degradedAnchor =
+      mainTreePath === null
+        ? ` The repository's main working tree could not be determined ` +
+          `(\`git worktree list\` unreadable or its path malformed), so ` +
+          `containment was checked against the current worktree root.`
+        : '';
     return {
       error:
         `${label} "${resolvedPath}" resolves outside this repository ` +
-        `(${realRepoRoot}). Pass a worktree that lives inside the repository.`,
+        `(${containRoot}).${degradedAnchor} Pass a worktree that lives ` +
+        `inside the repository.`,
     };
   }
 
@@ -125,7 +149,9 @@ export async function resolveExternalWorktreeDir(
   // check rejects the main tree, a plain sub-directory (including a stale
   // registry record whose directory was recreated), a worktree belonging to
   // another repo, and a hand-crafted directory carrying a copied `.git` file.
-  if (!(await wtService.isRegisteredLinkedWorktree(resolvedPath))) {
+  // Thread the single resolution (see the doc block).
+  const pinnedPath = realResolved ?? resolvedPath;
+  if (!(await wtService.isRegisteredLinkedWorktree(pinnedPath))) {
     // Fails closed (returns false) on a git error too, so the cause is either
     // "not a registered linked worktree" (main tree / unregistered) or "its
     // git metadata could not be read" — name both rather than assert one.
@@ -144,11 +170,11 @@ export async function resolveExternalWorktreeDir(
   // returns null for it. `branch` is unused for caller-owned worktrees anyway
   // (cleanup short-circuits on `externallyManaged`); it is carried only for
   // parity with the isolation path.
-  const info = await wtService.getRegisteredWorktreeBranch(resolvedPath);
+  const info = await wtService.getRegisteredWorktreeBranch(pinnedPath);
   return {
-    path: resolvedPath,
+    path: pinnedPath,
     branch: info?.branch ?? '',
-    slug: path.basename(resolvedPath),
+    slug: path.basename(pinnedPath),
     repoRoot,
   };
 }

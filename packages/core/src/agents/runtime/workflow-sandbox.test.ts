@@ -1681,6 +1681,12 @@ describe('createWorkflowSandbox security', () => {
     await expect(
       sandbox.run(`return agent("x", { workingDir: "" });`),
     ).rejects.toThrow(/workingDir.*non-empty string/);
+    // Whitespace-only used to clear both entrance gates and was refused only
+    // deep in the registration gate with a message blaming the directory
+    // instead of the argument.
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: " " });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
   });
 
   // The two options make opposite claims about who owns the directory's
