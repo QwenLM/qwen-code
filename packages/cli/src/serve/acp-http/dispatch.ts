@@ -351,6 +351,7 @@ const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
   'session/new',
   'session/load',
   'session/resume',
+  'session/fork',
   `${QWEN_METHOD_NS}workspace/init`,
   `${QWEN_METHOD_NS}workspace/trust/request`,
   `${QWEN_METHOD_NS}workspace/permissions/set`,
@@ -1032,6 +1033,8 @@ export class AcpDispatcher {
   ): DeliveryReceipt {
     let settled = false;
     const ownershipIdentity = conn.captureSessionOwnershipIdentity(sessionId);
+    const releaseIdentity = () =>
+      conn.releaseSessionOwnershipIdentity(sessionId, ownershipIdentity);
     const rollback = () => {
       if (settled) return;
       settled = true;
@@ -1052,6 +1055,7 @@ export class AcpDispatcher {
           // Best-effort rollback; teardown must continue settling other receipts.
         }
       }
+      releaseIdentity();
     };
     return {
       delivered: () => {
@@ -1067,6 +1071,7 @@ export class AcpDispatcher {
           conn.markInitialReplayPending(sessionId);
         }
         conn.ownSession(sessionId);
+        releaseIdentity();
       },
       discarded: rollback,
     };
@@ -2180,7 +2185,8 @@ export class AcpDispatcher {
           await this.withMutableOwned(conn, sessionId, id, async () => {
             const sessionRuntime = this.getSessionRuntimeContext();
             const ctx = this.sessionCtx(conn, sessionId, loopback);
-            const result = (await this.bridge.branchSession(
+            assertGenerationOpen?.();
+            const result = (await sessionRuntime.bridge.branchSession(
               sessionId,
               {
                 name:
@@ -2199,13 +2205,16 @@ export class AcpDispatcher {
               { removePersisted: true },
             );
             try {
+              assertGenerationOpen?.();
               if (conn.destroyed) {
                 ownership.discarded();
                 return;
               }
               const configOptions = await this.configOptionsFor(
                 result.sessionId,
+                sessionRuntime.bridge,
               );
+              assertGenerationOpen?.();
               const models = this.extractModelState(configOptions);
               const modes = this.extractModeState(configOptions);
               this.replyOwnership(

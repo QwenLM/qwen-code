@@ -387,6 +387,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
         DaemonStatusReport['full']
       >['acpConnections'][number]['preAttachOwnedFrames']
     >().toEqualTypeOf<number | undefined>();
+    const legacyAcpConnections: NonNullable<
+      DaemonStatusReport['full']
+    >['acpConnections'] = [{}];
+    expect(legacyAcpConnections).toHaveLength(1);
+    expectTypeOf<
+      NonNullable<
+        DaemonStatusReport['full']
+      >['acpConnections'][number]['connectionIdPrefix']
+    >().toEqualTypeOf<string | undefined>();
     expectTypeOf<undefined>().toMatchTypeOf<
       NonNullable<DaemonStatusReport['full']>['acpMounts']
     >();

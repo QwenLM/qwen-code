@@ -890,7 +890,7 @@ export interface DaemonStatusReport {
       preAttachGuardFailures: number;
     }>;
     acpConnections: Array<{
-      connectionIdPrefix: string;
+      connectionIdPrefix?: string;
       workspaceId?: string | null;
       workspaceCwd?: string;
       primary?: boolean;

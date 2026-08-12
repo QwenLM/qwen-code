@@ -87,6 +87,8 @@ export interface SessionBinding {
   clientId?: string;
   /** Session-scoped SSE stream (the client's `GET /acp` with both headers). */
   stream?: TransportStream;
+  /** Stable across a transport detach while `stream` is temporarily absent. */
+  usesConnectionStream?: boolean;
   /**
    * Frames emitted before the session stream attached, flushed on attach.
    * Each keeps its bus event id (when it has one) so the SSE `id:` resume
@@ -156,6 +158,12 @@ export interface PendingClientRequest {
 
 export interface SessionOwnershipIdentity {
   binding: SessionBinding | undefined;
+  generation: number;
+}
+
+interface SessionOwnershipState {
+  generation: number;
+  captures: number;
 }
 
 export interface PendingClientRequestRef {
@@ -214,6 +222,10 @@ export class AcpConnection {
   private ownedBytes = 0;
   private connOwnedFrames = 0;
   private readonly pendingReceipts = new Set<DeliveryReceipt>();
+  private readonly sessionOwnershipStates = new Map<
+    string,
+    SessionOwnershipState
+  >();
   readonly sessions = new Map<string, SessionBinding>();
   /**
    * Sessions this connection created (`session/new`) or explicitly
@@ -317,7 +329,16 @@ export class AcpConnection {
   }
 
   captureSessionOwnershipIdentity(sessionId: string): SessionOwnershipIdentity {
-    return { binding: this.sessions.get(sessionId) };
+    let state = this.sessionOwnershipStates.get(sessionId);
+    if (!state) {
+      state = { generation: 0, captures: 0 };
+      this.sessionOwnershipStates.set(sessionId, state);
+    }
+    state.captures += 1;
+    return {
+      binding: this.sessions.get(sessionId),
+      generation: state.generation,
+    };
   }
 
   canCommitSessionOwnership(
@@ -327,8 +348,22 @@ export class AcpConnection {
     return (
       !this.destroyed &&
       !this.closingSessions.has(sessionId) &&
+      this.sessionOwnershipStates.get(sessionId)?.generation ===
+        ownership.generation &&
       this.sessions.get(sessionId) === ownership.binding
     );
+  }
+
+  releaseSessionOwnershipIdentity(
+    sessionId: string,
+    ownership: SessionOwnershipIdentity,
+  ): void {
+    const state = this.sessionOwnershipStates.get(sessionId);
+    if (!state || state.generation < ownership.generation) return;
+    state.captures -= 1;
+    if (state.captures === 0) {
+      this.sessionOwnershipStates.delete(sessionId);
+    }
   }
 
   getOrCreateSession(sessionId: string): SessionBinding {
@@ -620,6 +655,7 @@ export class AcpConnection {
     // the prompt must survive. CONTRACT: that identity guard and this ordering
     // must stay in lockstep.
     binding.stream = stream;
+    binding.usesConnectionStream = stream === this.connStream;
     if (prevStream && prevStream !== stream && prevStream !== this.connStream) {
       prevStream.close();
     }
@@ -843,9 +879,16 @@ export class AcpConnection {
 
   closeSessionStream(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
-    if (!binding) return;
     this.sessions.delete(sessionId);
     this.ownedSessions.delete(sessionId);
+    const ownershipState = this.sessionOwnershipStates.get(sessionId);
+    if (ownershipState) {
+      ownershipState.generation += 1;
+      if (ownershipState.captures === 0) {
+        this.sessionOwnershipStates.delete(sessionId);
+      }
+    }
+    if (!binding) return;
     this.teardownBinding(binding);
   }
 
@@ -873,6 +916,7 @@ export class AcpConnection {
         );
       }
     }
+    this.sessionOwnershipStates.clear();
     this.pending.clear();
     this.connStream?.close(reason);
   }
@@ -1166,8 +1210,10 @@ export class AcpConnection {
     writeStderrLine(`qwen serve: /acp resource guard: ${message}`);
     if (
       !binding ||
-      (binding.stream !== undefined && binding.stream === this.connStream) ||
-      (binding.stream === undefined && this.connStream?.kind === 'ws')
+      binding.usesConnectionStream === true ||
+      (binding.usesConnectionStream === undefined &&
+        binding.stream === undefined &&
+        this.connStream?.kind === 'ws')
     ) {
       this.retireConnection(message);
       return;

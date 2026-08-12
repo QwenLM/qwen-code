@@ -656,6 +656,32 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('rejects a deferred ownership grant after the same session was closed', () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const first = conn.captureSessionOwnershipIdentity('sess-1');
+      const deferred = conn.captureSessionOwnershipIdentity('sess-1');
+
+      expect(conn.canCommitSessionOwnership('sess-1', first)).toBe(true);
+      conn.getOrCreateSession('sess-1');
+      conn.ownSession('sess-1');
+      conn.releaseSessionOwnershipIdentity('sess-1', first);
+      conn.closeSessionStream('sess-1');
+
+      expect(conn.canCommitSessionOwnership('sess-1', deferred)).toBe(false);
+      conn.releaseSessionOwnershipIdentity('sess-1', deferred);
+
+      const replacement = conn.captureSessionOwnershipIdentity('sess-1');
+      expect(conn.canCommitSessionOwnership('sess-1', replacement)).toBe(true);
+      expect(replacement.generation).toBe(0);
+      conn.releaseSessionOwnershipIdentity('sess-1', replacement);
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('rejects an ownership commit while session/close is in flight', () => {
     const registry = new ConnectionRegistry();
     try {
@@ -707,6 +733,30 @@ describe('ConnectionRegistry.getSnapshot', () => {
       await expect(conn.sendSession('sess-1', frame)).resolves.toBe('failed');
       expect(conn.sessions.has('sess-1')).toBe(false);
       expect(registry.get(conn.connectionId)).toBe(conn);
+      expect(conn.destroyed).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('limits a detached SSE session without closing its WebSocket connection', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const connectionStream = new FakeStream('ws');
+      conn.attachConnStream(connectionStream);
+      conn.ownSession('sess-1');
+      const sessionStream = new FakeStream('sse');
+      conn.attachSessionStream('sess-1', sessionStream, new AbortController());
+      conn.detachSessionStream('sess-1', sessionStream, 10_000);
+      const frame: { self?: unknown } = {};
+      frame.self = frame;
+
+      await expect(conn.sendSession('sess-1', frame)).resolves.toBe('failed');
+      expect(conn.sessions.has('sess-1')).toBe(false);
+      expect(registry.get(conn.connectionId)).toBe(conn);
+      expect(connectionStream.isClosed).toBe(false);
       expect(conn.destroyed).toBe(false);
     } finally {
       registry.dispose();
