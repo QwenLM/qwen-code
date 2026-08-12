@@ -37,14 +37,16 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { gh, ghWithInputRetried, setGhHost } from './lib/gh.js';
+import { gh, ghWithInputRetried, resolveGhHost, setGhHost } from './lib/gh.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
 import {
+  ASSET_HEADER_BYTES,
   assetsBranch,
   parseAssetsRepo,
   rawAssetUrl,
   remoteAssetPath,
   validateAssetBatch,
+  validateAssetContent,
   type AssetsManifest,
   type PublishedAsset,
 } from './lib/assets.js';
@@ -232,14 +234,10 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   const repo = repoResult.repo;
 
   // ONE effective host, resolved BEFORE the gate: the gate must bind the
-  // host the write will actually route at — --host, else an operator-exported
-  // GH_HOST, else github.com — not merely the flag. Binding args.host while
-  // routing at effectiveHost let a GH_HOST-driven Enterprise write pass a
-  // github.com authorisation; caught by this skill's own review.
-  // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
-  // `??`, being non-nullish) must read as "no host".
-  const effectiveHost =
-    args.host ?? (process.env['GH_HOST']?.trim() || undefined);
+  // host the write will actually route at, not merely the flag. Binding
+  // args.host while routing at effectiveHost let a GH_HOST-driven Enterprise
+  // write pass a github.com authorisation; caught by this skill's own review.
+  const effectiveHost = resolveGhHost(args.host);
 
   // ── Gate 2: an authorised run — the same gate as `submit` ─────────────────
   // The PR identity used for authorisation binding is the PR the evidence is
@@ -386,6 +384,17 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      return;
+    }
+    // The batch ruling above admitted the file by name and size; this one
+    // admits it by CONTENT — an extension is a claim anyone can make, and
+    // the allowlist is only as strong as the bytes behind it.
+    const contentRuling = validateAssetContent(
+      st.basename,
+      content.subarray(0, ASSET_HEADER_BYTES),
+    );
+    if (!contentRuling.ok) {
+      refuse(`${JSON.stringify(st.file)}: ${contentRuling.reason}`);
       return;
     }
     const sha256 = createHash('sha256').update(content).digest('hex');

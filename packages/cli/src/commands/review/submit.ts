@@ -48,7 +48,12 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
-import { ghWithInput, setGhHost } from './lib/gh.js';
+import {
+  ghWithInput,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
@@ -59,6 +64,11 @@ import {
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
+import {
+  REVIEW_FOOTER_RE,
+  footerVersion,
+  reviewFooter,
+} from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
@@ -123,6 +133,26 @@ interface ReviewPayload {
   body?: unknown;
 }
 
+function normalizeInlineComments(
+  comments: ReviewComment[],
+  modelId: unknown,
+  cliVersion: string,
+): ReviewComment[] {
+  if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
+  const footer = reviewFooter(modelId, cliVersion);
+  return comments.map((comment) =>
+    // An empty body stays empty: this runs BEFORE the consistency check, and
+    // a footer pasted onto '' would hide the emptiness from the refusal that
+    // names it ('has no body — an empty comment').
+    typeof comment.body === 'string' && comment.body.trim() !== ''
+      ? {
+          ...comment,
+          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+        }
+      : comment,
+  );
+}
+
 // The severity prefixes and the counting live in `lib/inline-counts.ts`,
 // shared with `compose-review`: the Step 6 verdict line and the Step 7 posted
 // verdict must be the same computation on the same source, and two counting
@@ -145,12 +175,8 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
     repo: args.repo,
     // The EFFECTIVE host, not merely the flag: with --host absent the gh
     // child inherits an operator-exported GH_HOST, so that is where this
-    // write would route — and what the gate must bind. Same resolution as
-    // publish-assets.
-    // `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
-    // `??`, being non-nullish) must read as "no host", not as a host named
-    // "" that fails every comparison.
-    host: args.host ?? (process.env['GH_HOST']?.trim() || undefined),
+    // write would route — and what the gate must bind.
+    host: resolveGhHost(args.host),
   });
 }
 
@@ -220,6 +246,28 @@ function structuralProblems(payload: ReviewPayload): string[] {
   const problems: string[] = [];
 
   if (!payload.commit_id) problems.push('`commit_id` is missing');
+
+  // The review JSON is a document the model writes, and `comments` reaches
+  // `.map` in the normalisation below — OUTSIDE `compose`'s try/catch. Any
+  // other shape is refused here as the structured refusal the re-compose
+  // loop parses, not a bare TypeError.
+  if (payload.comments !== undefined && !Array.isArray(payload.comments)) {
+    problems.push(
+      '`comments` is not an array — it is the list of findings this post ' +
+        'carries; any other shape is not a list of findings.',
+    );
+  }
+  if (
+    Array.isArray(payload.comments) &&
+    (payload.comments as unknown[]).some(
+      (c) => c === null || typeof c !== 'object',
+    )
+  ) {
+    problems.push(
+      '`comments` entries must each be an object — a finding is a path, ' +
+        'a line and a body; any other shape is not a finding.',
+    );
+  }
 
   // The verdict is not the caller's to write. Refusing is deliberate: silently
   // ignoring a hand-written `event` would let a run believe it had posted the
@@ -325,28 +373,12 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-/**
- * `owner/repo` — and neither half may be a dot segment.
- *
- * The character class alone admits `../repo`, `owner/..` and `./repo`: `.` and
- * `..` are made of legal characters and mean something else entirely once they
- * reach a URL path.
- */
-const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
-function isRepo(repo: string): boolean {
-  const parts = repo.split('/');
-  return (
-    parts.length === 2 &&
-    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
-  );
-}
-
 export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
-  if (!isRepo(args.repo)) {
+  if (!isOwnerRepo(args.repo)) {
     throw new Error(
       `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
     );
@@ -399,6 +431,15 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
         structural.map((p) => `  - ${p}`).join('\n'),
     );
   }
+
+  payload = {
+    ...payload,
+    comments: normalizeInlineComments(
+      payload.comments ?? [],
+      payload.state?.modelId,
+      cliVersion,
+    ),
+  };
 
   // The verdict, computed here. It was never in the payload.
   let event: string;
@@ -459,6 +500,21 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     '--input',
     '-',
   );
+  // GitHub's answer, read best-effort: `id` feeds the bypass-audit receipt
+  // below; `html_url` is the deep link to the review just created, surfaced in
+  // both output channels so the summary the user reads can carry it — without
+  // it, "view what was posted" means hand-assembling a PR URL.
+  let reviewId: number | undefined;
+  let reviewUrl: string | undefined;
+  try {
+    const parsed = JSON.parse(response) as { id?: number; html_url?: string };
+    if (typeof parsed.id === 'number') reviewId = parsed.id;
+    if (typeof parsed.html_url === 'string' && parsed.html_url.trim() !== '') {
+      reviewUrl = parsed.html_url;
+    }
+  } catch {
+    /* response metadata only — the post itself succeeded */
+  }
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
@@ -473,7 +529,6 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   // add this one, dedupe, write back. Best-effort: a receipt failure must
   // never fail a review that DID post.
   try {
-    const reviewId = (JSON.parse(response) as { id?: number }).id;
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath);
@@ -490,7 +545,8 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
-      '.',
+      '.' +
+      (reviewUrl ? ` ${reviewUrl}` : ''),
   );
   writeStdoutLine(
     JSON.stringify(
@@ -499,6 +555,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
         event,
         cappedBy,
         inlineComments: post.comments.length,
+        ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,
       2,
@@ -549,6 +606,10 @@ export const submitCommand: CommandModule = {
         describe: 'Check authorisation and payload consistency, then stop.',
       }),
   handler: async (argv) => {
-    runSubmit(argv as unknown as SubmitArgs, await getCliVersion());
+    // Do not use CLI_VERSION here: esbuild replaces it with a build-time value.
+    const cliVersion =
+      footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
+      (await getCliVersion());
+    runSubmit(argv as unknown as SubmitArgs, cliVersion);
   },
 };

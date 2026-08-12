@@ -377,6 +377,15 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('normalizes node-pty clean-exit signal 0 to null', async () => {
+      const { result } = await simulateExecution('echo clean', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.signal).toBeNull();
+    });
+
     it('disposes PTY terminal resources on natural exit', async () => {
       const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
@@ -1051,13 +1060,14 @@ describe('ShellExecutionService', () => {
       );
       expect(result.promoted).toBe(true);
       // After promote, drive the PTY's onExit to simulate natural
-      // completion. The service attaches a new exit listener for
+      // completion with its raw clean-exit signal metadata. The service
+      // attaches a new exit listener for
       // post-promote settle — find the most-recently-registered.
       const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
       expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
       const postPromoteExitHandler =
         onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      postPromoteExitHandler({ exitCode: 0, signal: 0 });
       expect(settleCalls).toHaveLength(1);
       expect(settleCalls[0].exitCode).toBe(0);
       expect(settleCalls[0].signal).toBeNull();

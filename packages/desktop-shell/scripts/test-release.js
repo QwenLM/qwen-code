@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
@@ -39,8 +40,11 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
+  testDesktopReleaseSigningWorkflow();
+  testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
@@ -49,6 +53,138 @@ try {
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+async function testBootstrapWorkspaceVisibility() {
+  const bootstrapHtml = fs.readFileSync(
+    path.join(packageDir, 'bootstrap', 'index.html'),
+    'utf8',
+  );
+  assert.match(bootstrapHtml, /class="mark" src="qwen-code-logo\.svg"/);
+  assert.ok(
+    fs.existsSync(path.join(packageDir, 'bootstrap', 'qwen-code-logo.svg')),
+    'The bootstrap splash mark must ship with the frontendDist directory.',
+  );
+  assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
+  const primary = await createBootstrapHarness();
+  const { body, commands, element, listeners, resolveBootstrapState } = primary;
+
+  listeners['runtime-starting']({
+    payload: '/Users/example/Projects/qwen-code',
+  });
+  assert.equal(body.dataset.state, 'starting');
+  assert.equal(element('#workspace').hidden, true);
+
+  listeners['runtime-failed']({ payload: 'runtime failed' });
+  assert.equal(body.dataset.state, 'error');
+  assert.equal(element('#workspace').hidden, false);
+  assert.equal(
+    element('#workspace').textContent,
+    '/Users/example/Projects/qwen-code',
+  );
+  await element('#logs').listeners.click();
+  assert.equal(element('#workspace').hidden, false);
+
+  element('#retry').listeners.click();
+  assert.equal(commands.at(-1), 'restart_runtime');
+  assert.equal(body.dataset.state, 'starting');
+  assert.equal(element('#workspace').hidden, true);
+
+  resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'starting',
+    workspace: '/Users/example/Documents',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('#title').textContent, 'Restarting Qwen Code');
+  assert.equal(
+    element('#workspace').hidden,
+    true,
+    'A stale bootstrap snapshot must not overwrite a newer recovery action.',
+  );
+
+  const failed = await createBootstrapHarness();
+  failed.listeners['runtime-failed']({ payload: 'runtime failed' });
+  failed.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'runtime failed',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(failed.element('#workspace').hidden, false);
+  assert.equal(
+    failed.element('#workspace').textContent,
+    '/Users/example/Documents/Qwen',
+  );
+
+  const cancelled = await createBootstrapHarness();
+  cancelled.listeners['runtime-starting']({
+    payload: '/Users/example/Documents/Qwen',
+  });
+  cancelled.listeners['runtime-failed']({ payload: 'runtime failed' });
+  await cancelled.element('#choose').listeners.click();
+  assert.equal(cancelled.body.dataset.state, 'idle');
+  assert.equal(cancelled.element('#workspace').hidden, false);
+  assert.equal(
+    cancelled.element('#workspace').textContent,
+    '/Users/example/Documents/Qwen',
+  );
+}
+
+async function createBootstrapHarness() {
+  const elements = {};
+  const element = (selector) => {
+    elements[selector] ??= {
+      addEventListener(event, listener) {
+        this.listeners ??= {};
+        this.listeners[event] = listener;
+      },
+      style: {},
+    };
+    return elements[selector];
+  };
+  const listeners = {};
+  const commands = [];
+  const body = { dataset: {} };
+  let resolveBootstrapState;
+  const tauri = {
+    core: {
+      invoke: async (command) => {
+        commands.push(command);
+        if (command === 'bootstrap_state') {
+          return new Promise((resolve) => {
+            resolveBootstrapState = resolve;
+          });
+        }
+        if (command === 'open_logs') throw new Error('no file handler');
+        if (command === 'choose_workspace') return null;
+        if (command === 'restart_runtime') return new Promise(() => {});
+        throw new Error(`Unexpected desktop command: ${command}`);
+      },
+    },
+    event: {
+      listen: async (event, listener) => {
+        listeners[event] = listener;
+      },
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(packageDir, 'bootstrap', 'bootstrap.js'), 'utf8'),
+    {
+      document: { body, querySelector: element },
+      window: { __TAURI__: tauri },
+    },
+    { timeout: 5000 },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    body,
+    commands,
+    element,
+    listeners,
+    resolveBootstrapState: (state) => resolveBootstrapState(state),
+  };
 }
 
 function testLegacyApplicationIdentity() {
@@ -79,6 +215,144 @@ function testElectronBridgeWorkflow() {
   }
 }
 
+function testDesktopReleaseSigningWorkflow() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  const primaryIncomplete =
+    '$primaryIncomplete = ([bool]$env:WINDOWS_CERTIFICATE) -ne ' +
+    '([bool]$env:WINDOWS_CERTIFICATE_PASSWORD)';
+  const legacyIncomplete =
+    '$legacyIncomplete = ([bool]$env:LEGACY_WIN_CSC_LINK) -ne ' +
+    '([bool]$env:LEGACY_WIN_CSC_KEY_PASSWORD)';
+  assert.ok(
+    workflow.includes(primaryIncomplete),
+    'Windows signing must fail closed when the primary certificate pair is incomplete',
+  );
+  assert.ok(
+    workflow.includes(legacyIncomplete),
+    'Windows signing must fail closed when the legacy certificate pair is incomplete',
+  );
+  assert.ok(
+    workflow.includes(
+      'elif [ "$RUNNER_OS" = \'Windows\' ] && [ -n "$WINDOWS_CONFIG" ]; then',
+    ),
+    'Windows builds must only pass a Tauri config when signing config exists',
+  );
+  assert.ok(
+    workflow.includes(
+      "$signature.Status -eq 'NotSigned' -and -not $env:WINDOWS_CONFIG",
+    ),
+    'Unsigned Windows installers are only allowed when no signing config exists',
+  );
+  const ripgrepStart = workflow.indexOf('# ripgrep vendor binaries');
+  const ripgrepEnd = workflow.indexOf('# Node.js runtime binary');
+  assert.ok(
+    ripgrepStart !== -1 && ripgrepEnd > ripgrepStart,
+    'the vendor signing step must keep its ripgrep/Node section markers',
+  );
+  const ripgrepSigningBlock = workflow.slice(ripgrepStart, ripgrepEnd);
+  assert.doesNotMatch(
+    ripgrepSigningBlock,
+    /--entitlements/,
+    'ripgrep must not inherit the app entitlements',
+  );
+  assert.match(
+    workflow,
+    /--options runtime --timestamp \\\n\s+\{\} \+/,
+    'ripgrep codesign failures must fail the signing step',
+  );
+  assert.ok(
+    workflow.includes(
+      '--entitlements src-tauri/NodeEntitlements.plist "$node_bin"',
+    ),
+    'Node.js must use its minimal helper entitlements',
+  );
+  const nodeEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'NodeEntitlements.plist'),
+    'utf8',
+  );
+  const appEntitlements = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Entitlements.plist'),
+    'utf8',
+  );
+  assert.match(
+    appEntitlements,
+    /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/,
+    'the app bundle must keep microphone access for voice dictation',
+  );
+  const infoPlist = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'Info.plist'),
+    'utf8',
+  );
+  assert.match(
+    infoPlist,
+    /NSMicrophoneUsageDescription<\/key>\s*<string>.+<\/string>/,
+    'the app bundle must declare a non-empty microphone usage description',
+  );
+  assert.match(
+    nodeEntitlements,
+    /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/,
+    'the bundled Node.js runtime must keep its JIT entitlement',
+  );
+  assert.doesNotMatch(
+    nodeEntitlements,
+    /com\.apple\.security\.device\.audio-input/,
+    'Node.js must not receive microphone access',
+  );
+  assert.match(
+    workflow,
+    /Ripgrep vendor directory not found at \$rg_dir/,
+    'missing ripgrep binaries must be visible in release logs',
+  );
+  assert.match(
+    workflow,
+    /Node\.js runtime binary not found at \$node_bin/,
+    'missing Node.js runtime binary must be visible in release logs',
+  );
+  assert.match(
+    workflow,
+    /Print :com\.apple\.security\.device\.audio-input/,
+    'the macOS signature check must keep verifying the audio-input entitlement',
+  );
+  assert.match(
+    workflow,
+    /Print :NSMicrophoneUsageDescription/,
+    'the packaged smoke must keep verifying the microphone usage description',
+  );
+  assert.ok(
+    workflow.indexOf("name: 'Prepare bundled runtime'") <
+      workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'"),
+    'vendor binaries must be signed after the runtime is prepared',
+  );
+  assert.ok(
+    workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'") <
+      workflow.indexOf("name: 'Build desktop installers'"),
+    'vendor binaries must be signed before Tauri builds installers',
+  );
+}
+
+function testUpdaterMirrorConfiguration() {
+  assert.deepEqual(tauriConfig.plugins?.updater?.endpoints, [
+    'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/desktop/latest/desktop-latest.json',
+    'https://github.com/QwenLM/qwen-code/releases/download/desktop-latest/desktop-latest.json',
+  ]);
+  const main = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'main.rs'),
+    'utf8',
+  );
+  assert.match(
+    main,
+    /const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs\(3\);/,
+  );
+  assert.match(
+    main,
+    /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
+  );
+  assert.equal((main.match(/check_for_update\(&app\)/g) ?? []).length, 2);
+}
+
 function testBootstrapBridgeConfiguration() {
   assert.equal(
     tauriConfig.app?.withGlobalTauri,
@@ -96,7 +370,7 @@ function testBootstrapBridgeConfiguration() {
       'utf8',
     ),
   );
-  assert.deepEqual(capability.windows, ['main']);
+  assert.deepEqual(capability.windows, ['main', 'local-control']);
   assert.equal(
     capability.remote,
     undefined,
@@ -264,6 +538,34 @@ function testUpdateManifest(directory) {
     assert.equal(
       manifest.platforms[platform].url,
       `https://github.com/QwenLM/qwen-code/releases/download/desktop-v0.1.0/${encodeURIComponent(artifact)}`,
+    );
+  }
+
+  execFileSync(process.execPath, [
+    manifestScript,
+    '--assets',
+    assets,
+    '--repository',
+    'QwenLM/qwen-code',
+    '--tag',
+    'desktop-v0.1.0',
+    '--version',
+    '0.1.0',
+    '--base-url',
+    'https://mirror.example/desktop/v0.1.0/',
+    '--output',
+    output,
+  ]);
+  const mirrorManifest = JSON.parse(fs.readFileSync(output, 'utf8'));
+  for (const [platform, artifact] of [
+    ['darwin-aarch64', artifacts[0]],
+    ['darwin-x86_64', artifacts[1]],
+    ['windows-x86_64', artifacts[2]],
+    ['linux-x86_64', artifacts[3]],
+  ]) {
+    assert.equal(
+      mirrorManifest.platforms[platform].url,
+      `https://mirror.example/desktop/v0.1.0/${encodeURIComponent(artifact)}`,
     );
   }
 

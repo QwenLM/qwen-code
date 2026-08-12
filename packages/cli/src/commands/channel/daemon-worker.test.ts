@@ -40,9 +40,11 @@ const mockDaemonChannelStateDir = vi.hoisted(() =>
   ),
 );
 const mockObserveContact = vi.hoisted(() => vi.fn());
+const mockListContacts = vi.hoisted(() => vi.fn());
 const mockObservedContactStore = vi.hoisted(() =>
   vi.fn(() => ({
     observe: mockObserveContact,
+    list: mockListContacts,
   })),
 );
 const mockLoadSettings = vi.hoisted(() =>
@@ -64,6 +66,7 @@ const mockResolveProxyUrl = vi.hoisted(() =>
   vi.fn((_cliProxy?: string, settingsProxy?: string) => settingsProxy),
 );
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLineSafe = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSelectFirstModel = vi.hoisted(() =>
   vi.fn(
@@ -217,6 +220,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: mockWriteStderrLineSafe,
   writeStdoutLine: mockWriteStdoutLine,
 }));
 
@@ -246,6 +250,7 @@ vi.mock('./runtime.js', () => ({
 }));
 
 vi.mock('./observed-contact-store.js', () => ({
+  OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS: 365 * 24 * 60 * 60,
   ObservedChannelContactStore: mockObservedContactStore,
 }));
 
@@ -798,6 +803,7 @@ describe('runChannelDaemonWorker', () => {
         channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
         observedContacts: {
           observe: expect.any(Function),
+          list: expect.any(Function),
         },
         stateDir:
           '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
@@ -814,6 +820,7 @@ describe('runChannelDaemonWorker', () => {
     const channelOptions = mockCreateChannel.mock.calls[0]![3] as {
       observedContacts: {
         observe(channelName: string, observation: unknown): unknown;
+        list(): unknown;
       };
     };
     const observation = {
@@ -822,6 +829,10 @@ describe('runChannelDaemonWorker', () => {
     };
     channelOptions.observedContacts.observe('telegram', observation);
     expect(mockObserveContact).toHaveBeenCalledWith('telegram', observation);
+    channelOptions.observedContacts.list();
+    expect(mockListContacts).toHaveBeenCalledWith({
+      freshWithinSeconds: 365 * 24 * 60 * 60,
+    });
     expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
       bridgeFacade,
       mockSessionRouter.mock.results[0]!.value,
@@ -1973,6 +1984,7 @@ describe('daemonWorkerCommand', () => {
     vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'daemon-token');
     vi.stubEnv('QWEN_SERVER_TOKEN', 'server-token');
+    vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
     vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
 
@@ -1986,11 +1998,48 @@ describe('daemonWorkerCommand', () => {
 
     expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_URL']).toBeUndefined();
     expect(process.env['QWEN_DAEMON_WORKSPACE']).toBeUndefined();
     expect(process.env['QWEN_CHANNEL_DAEMON_WORKER']).toBeUndefined();
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       '[Channel] daemon worker failed: --channel requires a non-empty channel name.',
+    );
+  });
+
+  // Regression for #8653: in dev mode the supervisor spawns the worker with
+  // the daemon's loader-carrying base env (the harness tsx loader must reach
+  // the worker's .ts entry). The worker must self-scrub like the ACP child
+  // so nothing it spawns inherits them into another workspace. Production
+  // base envs are scrubbed before the freeze, making this a no-op there.
+  it('scrubs inherited loader env vars before starting channels', async () => {
+    mockProcessExit();
+    const restoreSend = stubProcessSend(vi.fn() as NodeJS.Process['send']);
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    vi.stubEnv('NODE_OPTIONS', '--import file:///other-checkout/register.mjs');
+    vi.stubEnv(
+      'npm_config_node-options',
+      '--import file:///other-checkout/hook.mjs',
+    );
+
+    try {
+      await expect(
+        daemonWorkerCommand.handler({ channel: [' '], _: [], $0: 'qwen' }),
+      ).rejects.toThrow('process.exit 1');
+    } finally {
+      restoreSend();
+    }
+
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+    expect(process.env['npm_config_node-options']).toBeUndefined();
+    // Pin the channel-boundary breadcrumb, not just the removal: a refactor
+    // onto the silent scrubInheritedLoaderEnv variant deletes the keys the
+    // same way but drops the operator diagnostic — the reason the *AndReport*
+    // helper exists.
+    expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+      expect.stringContaining('scrubbed inherited loader env vars'),
     );
   });
 

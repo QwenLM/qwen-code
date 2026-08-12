@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.21.5",
+  "version": "0.21.10",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -24,6 +24,10 @@
     "./memoryScopes": {
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
+    },
+    "./toolWriteOrigin": {
+      "types": "./dist/src/services/tool-write-origin.d.ts",
+      "import": "./dist/src/services/tool-write-origin.js"
     },
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",

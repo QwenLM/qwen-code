@@ -55,7 +55,7 @@ import {
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -197,14 +197,13 @@ function syncFunctionCallsField(
 }
 
 /**
- * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
- * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
- * aliases so the load-side plan redaction keeps matching sessions recorded
- * under a pre-migration name, in lockstep with the write-side scheduler.
+ * Resolves legacy tool-name aliases via the shared `canonicalToolName` so
+ * the load-side plan redaction keeps matching sessions recorded under a
+ * pre-migration name, in lockstep with the write-side scheduler.
  */
 function canonicalPlanToolName(toolName: string | undefined): string {
   if (!toolName) return '';
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+  return canonicalToolName(toolName);
 }
 
 /**
@@ -455,9 +454,10 @@ interface TryCompressOptions {
    */
   pendingUserMessage?: Content;
   /**
-   * Pre-computed `estimatePromptTokens` value from the caller. When set,
-   * the cheap-gate uses this instead of recomputing — avoids a second
-   * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
+   * Pre-computed all-inclusive effective prompt count from the caller. When
+   * set, the cheap-gate uses this instead of recomputing — avoids a second
+   * `getHistory(true)` clone per send and prevents provider-reported overflow
+   * counts from double-counting the previous model output.
    */
   precomputedEffectiveTokens?: number;
   /** Per-request overrides needed to preserve the main request cache prefix. */
@@ -503,16 +503,20 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
 };
 
 /**
- * Pad added to the first-send prompt estimate when sizing the output clamp
- * (`lastPromptTokenCount === 0` — fresh session, --continue restore, or
- * subagent inheritance). The char/4 history walk misses the system prompt,
- * tool definitions, and skill content — estimatePromptTokens documents this
- * as "typically ~15-20K of under-estimate" — and an under-counted prompt is
- * the one way `prompt + max_tokens` can overflow the window (issue #5950).
- * Sized to the documented worst case; costs nothing on large windows (the
- * output ceiling binds long before the pad matters).
+ * Pad added when sizing the output clamp from an estimate-derived prompt
+ * count. This includes a fresh session (`lastPromptTokenCount === 0`) and
+ * counts propagated through compression or resume before provider usage is
+ * available. A history-derived count can miss the system prompt, tool
+ * definitions, and skill content — estimatePromptTokens documents this as
+ * "typically ~15-20K of under-estimate" — so pad conservatively until
+ * provider usage arrives. Counts derived from an API baseline may already
+ * preserve some non-visible overhead; double-counting it is accepted because
+ * the error direction is safe and provider usage self-corrects it. An
+ * under-counted prompt is the one way `prompt + max_tokens` can overflow the
+ * window (issue #5950). Sized to the documented worst case; costs nothing on
+ * large windows (the output ceiling binds long before the pad matters).
  */
-const FIRST_SEND_CLAMP_OVERHEAD_PAD = 20_000;
+const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
 
 /**
  * Max recovery attempts when the escalated response is also truncated.
@@ -829,6 +833,27 @@ function getRecoveryContinuationSuffix(
   }
 
   return continuationText;
+}
+
+/**
+ * Join already-delivered text to the continuation that resumes it, dropping
+ * any tail the model replayed.
+ *
+ * The single definition of "merged turn text" for the transport-continuation
+ * path. Both the durable JSONL record and in-memory history are built from one
+ * call to this (see `processStreamResponse`), so the two storage layers cannot
+ * drift apart if the dedup rule ever changes — the same reason the
+ * `willPersistToHistory` gate is a shared binding rather than two copies of
+ * one expression.
+ */
+function mergeDeliveredPrefix(
+  deliveredText: string,
+  continuationText: string,
+): string {
+  return (
+    deliveredText +
+    getRecoveryContinuationSuffix(deliveredText, continuationText)
+  );
 }
 
 function isPlainTextPart(part: Part | undefined): part is Part & {
@@ -1697,6 +1722,7 @@ export class GeminiChat {
    * still make compaction decisions based on their *own* context size.
    */
   private lastPromptTokenCount = 0;
+  private lastPromptTokenCountIsEstimated = false;
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -1827,6 +1853,11 @@ export class GeminiChat {
     return this.lastPromptTokenCount;
   }
 
+  /** Previous model-response tokens used by the next prompt estimate. */
+  getLastOutputTokenCount(): number {
+    return this.lastOutputTokenCount;
+  }
+
   /**
    * Builds request contents for the content generator without deep-cloning the
    * whole chat history. This is an internal hot path: long sessions can make a
@@ -1889,24 +1920,37 @@ export class GeminiChat {
    * comes from a different chat instance and should not inherit this chat's
    * last response size.
    */
-  setLastPromptTokenCount(count: number): void {
+  setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.lastPromptTokenCount = count;
+    this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+  }
+
+  isLastPromptTokenCountEstimated(): boolean {
+    return this.lastPromptTokenCountIsEstimated;
+  }
+
+  private promptCountIsEstimateDerived(): boolean {
+    return (
+      this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated
+    );
   }
 
   /**
    * Seed the restored prompt and previous-response output token counts in one
-   * step. Resume restores chat history plus both counters from the same
-   * assistant usage record, so callers must avoid the normal
+   * step. Resume restores chat history plus both counters and their provenance
+   * from the same checkpoint, so callers must avoid the normal
    * setLastPromptTokenCount() clearing behavior.
    */
   seedResumeTokenCounts(
     promptTokenCount: number,
     outputTokenCount: number,
+    isEstimated = false,
   ): void {
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
+    this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
@@ -1929,14 +1973,31 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    const originalTokenCountIsEstimated =
+      options?.originalTokenCountOverride === undefined &&
+      this.promptCountIsEstimateDerived();
+    const originalTokenCount = originalTokenCountIsEstimated
+      ? (options?.precomputedEffectiveTokens ??
+        estimateContentTokens(
+          options?.pendingUserMessage
+            ? [...this.getHistoryShallow(true), options.pendingUserMessage]
+            : this.getHistoryShallow(true),
+          resolveSlimmingConfig(this.config.getChatCompression())
+            .imageTokenEstimate,
+        ))
+      : (options?.originalTokenCountOverride ?? this.lastPromptTokenCount);
+    debugLogger.debug(
+      `[compaction] token-count provenance: prompt_id=${promptId}, ` +
+        `originalTokenCount=${originalTokenCount}, ` +
+        `estimated=${originalTokenCountIsEstimated}`,
+    );
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
       force,
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
-      originalTokenCount:
-        options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      originalTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       requestGenerationConfig: options?.requestGenerationConfig,
@@ -1946,6 +2007,10 @@ export class GeminiChat {
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
+      // ChatCompressionService owns provenance. Keep a conservative fallback
+      // for older/custom implementations that omit the field, but preserve an
+      // explicit authoritative `false`.
+      info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
         this.chatRecordingService?.recordChatCompression({
           info,
@@ -1955,8 +2020,10 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      this.lastPromptTokenCount = info.newTokenCount;
-      this.lastOutputTokenCount = 0;
+      this.setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated,
+      );
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2030,11 +2097,18 @@ export class GeminiChat {
 
     const reduction = beforeEstimate - afterEstimate;
     const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+    const baselineIsEstimated = this.promptCountIsEstimateDerived();
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
+
+    debugLogger.debug(
+      `[compaction] fast token-count provenance: ` +
+        `originalTokenCount=${apiBaseline}, estimated=${baselineIsEstimated}`,
+    );
 
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
+      newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',
     };
@@ -2052,6 +2126,7 @@ export class GeminiChat {
     );
     this.setHistory(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
+    this.lastPromptTokenCountIsEstimated = true;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2278,6 +2353,8 @@ export class GeminiChat {
         ? this.getHistoryShallow()
         : undefined;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+      const lastPromptTokenCountWasEstimatedBeforeHardRescue =
+        this.lastPromptTokenCountIsEstimated;
       const hardRescueFailureCountBeforeHardRescue =
         this.hardRescueFailureCount;
       if (shouldForceFromHard) {
@@ -2352,6 +2429,8 @@ export class GeminiChat {
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+          this.lastPromptTokenCountIsEstimated =
+            lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );
@@ -2449,17 +2528,17 @@ export class GeminiChat {
       // on every main-turn request (issue #5950).
       //
       // When lastPromptTokenCount > 0 (steady state, or refreshed to
-      // newTokenCount by a compression), re-estimate from the counts — cheap,
-      // no history walk. When it is still 0 (first send, compression NOOPed),
-      // reuse the pre-push gate estimate: userContent is already in history
-      // here, so a fresh history walk would double-count it. That fallback
-      // estimate misses the system prompt, tool definitions, and skill
-      // content (see estimatePromptTokens — "typically ~15-20K of
-      // under-estimate"), and an under-count is the ONE way
-      // `prompt + max_tokens` can still overflow the window, so pad it by
-      // the documented worst case. The pad only trims output on the very
-      // first send of small-window sessions; from the second send on the
-      // API-authoritative count takes over.
+      // newTokenCount by compression/resume), re-estimate from the counts —
+      // cheap, no history walk. When it is still 0, reuse the pre-push gate
+      // estimate: userContent is already in history here, so a fresh history
+      // walk would double-count it. Estimate-derived counts can omit the
+      // system prompt, tool definitions, and skill content (see
+      // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
+      // counts based on prior API usage already preserve part of that
+      // overhead, but conservatively double-counting it is safe and
+      // self-corrects when provider usage arrives. An under-count is the ONE
+      // way `prompt + max_tokens` can still overflow the window, so keep the
+      // pad until provider usage replaces the estimate.
       promptTokensForClamp =
         this.lastPromptTokenCount > 0
           ? estimatePromptTokens(
@@ -2470,7 +2549,16 @@ export class GeminiChat {
               imageTokenEstimate,
               /* conservative= */ true,
             )
-          : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+          : effectiveTokens;
+      if (this.promptCountIsEstimateDerived()) {
+        promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
+        debugLogger.debug(
+          `[clamp] estimate-derived prompt count; padded by ` +
+            `${ESTIMATE_CLAMP_OVERHEAD_PAD}: ` +
+            `promptTokensForClamp=${promptTokensForClamp}, ` +
+            `count=${this.lastPromptTokenCount}`,
+        );
+      }
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
         contextWindowForClamp,
@@ -2694,6 +2782,12 @@ export class GeminiChat {
               prompt_id,
               requestOverrides,
               turnGoalContext,
+              // Captured by value, so the attempt records exactly the prefix
+              // `buildAttemptContents()` just asked the model to resume from,
+              // even if a later branch resets the continuation.
+              transportContinuationPrefix.length > 0
+                ? transportContinuationPrefix
+                : undefined,
             );
 
             lastFinishReason = undefined;
@@ -2722,10 +2816,13 @@ export class GeminiChat {
             }
 
             lastError = null;
-            if (transportContinuationPrefix.length > 0) {
-              self.prependTextToLastModelTurn(transportContinuationPrefix);
-              transportContinuationPrefix = '';
-            }
+            // The merge itself now happens inside `processStreamResponse`,
+            // which folds the prefix into the parts before it writes either
+            // the JSONL record or the history turn (issue #8094). Merging
+            // again here would risk double-applying it: the dedup helper only
+            // strips a replayed prefix that clears its significance floor, so
+            // a short prefix would survive the second pass and be doubled.
+            transportContinuationPrefix = '';
             break;
           } catch (error) {
             lastError = error;
@@ -2981,6 +3078,7 @@ export class GeminiChat {
                     params.config?.abortSignal,
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
+                      precomputedEffectiveTokens: reactiveOriginalTokenCount,
                       requestGenerationConfig: params.config,
                       trigger: 'auto',
                     },
@@ -3410,7 +3508,7 @@ export class GeminiChat {
               estimateContentTokens(
                 recoveryContents,
                 recoveryImageTokenEstimate,
-              ) + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+              ) + ESTIMATE_CLAMP_OVERHEAD_PAD;
             const recoveryPromptEstimate = Math.max(
               countBasedRecoveryEstimate,
               walkRecoveryEstimate,
@@ -3788,6 +3886,7 @@ export class GeminiChat {
       retryErrorCodes?: readonly number[];
     },
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3864,7 +3963,12 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse, goalContext);
+    return this.processStreamResponse(
+      model,
+      streamResponse,
+      goalContext,
+      transportContinuationPrefix,
+    );
   }
 
   private async *makeFallbackStream(
@@ -4326,10 +4430,19 @@ export class GeminiChat {
     }
   }
 
+  /**
+   * @param transportContinuationPrefix - Text a previous attempt already
+   *   delivered before a socket cut, which this attempt was asked to resume
+   *   from (issue #7832). On success it is folded into the response parts
+   *   before either durable write, so the JSONL transcript and in-memory
+   *   history carry the same merged turn (issue #8094). Undefined on every
+   *   non-continuation send.
+   */
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4535,6 +4648,7 @@ export class GeminiChat {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
+            this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
               ? getUsageOutputTokenCountForPromptEstimate({
                   promptTokenCount,
@@ -4779,6 +4893,62 @@ export class GeminiChat {
       streamError === null ||
       (hasToolCall &&
         (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    // Transport-continuation merge (issue #8094). `allModelParts` is
+    // per-attempt, so a continuation's parts carry the resumed remainder only.
+    // Fold the already-delivered prefix back in HERE — into the parts
+    // themselves, before either durable write — so the JSONL record below and
+    // the `this.history.push` further down are derived from the same data and
+    // cannot disagree. Otherwise `--resume` rehydrates a turn that starts
+    // mid-sentence while the live session shows a coherent answer.
+    //
+    // Merging in one place is load-bearing, not tidiness:
+    //   - Computing the record's text and history's text from separate
+    //     expressions lets them drift. They already would: `contentText` is
+    //     trimmed (see its definition above) while the pushed parts are raw,
+    //     so deduping the record against the trimmed text fuses words when the
+    //     remainder opens with whitespace ("The result is" + " 42." →
+    //     "The result is42.").
+    //   - Writing them at different times opens a window. The record is
+    //     appended below, the history push happens after it, and a
+    //     `deferredFinishReason` chunk is yielded after that — a suspension
+    //     point. A consumer abandoning iteration there (an abort inside
+    //     `Turn.run`) would strand a merged record against a remainder-only
+    //     history, and the JSONL is append-only so nothing reconciles it.
+    //
+    // Placed after the stream-validation throws above so an empty continuation
+    // still fails validation on its own merits rather than being masked by the
+    // prefix.
+    //
+    // Success only. On `streamError !== null` the parts must keep matching the
+    // remainder-only partial that survives in history (the
+    // `pendingPartialAssistantRecord` path below) — the prefix belongs to an
+    // attempt that did not survive, and a fresh-restart retry discards it via
+    // `resetTransportContinuation`.
+    if (streamError === null && transportContinuationPrefix) {
+      const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
+      if (textIndex < 0) {
+        // Continuation returned no text of its own (e.g. only a functionCall).
+        // `thoughtContentPart` is prepended separately at the push below, so
+        // index 0 here is already "after any leading thought part".
+        consolidatedHistoryParts.unshift({ text: transportContinuationPrefix });
+      } else {
+        const remainderPart = consolidatedHistoryParts[textIndex] as Part & {
+          text: string;
+        };
+        consolidatedHistoryParts[textIndex] = {
+          ...remainderPart,
+          text: mergeDeliveredPrefix(
+            transportContinuationPrefix,
+            remainderPart.text,
+          ),
+        };
+      }
+      contentText = consolidatedHistoryParts
+        .filter((part) => part.text)
+        .map((part) => part.text)
+        .join('')
+        .trim();
+    }
     if (
       willPersistToHistory &&
       (thoughtContentPart || contentText || hasToolCall || usageMetadata)
@@ -4899,53 +5069,6 @@ export class GeminiChat {
         usageMetadata,
       } as GenerateContentResponse;
     }
-  }
-
-  /**
-   * Prepend already-delivered text to the trailing model turn.
-   *
-   * Used by the transport-continuation path (issue #7832): after a socket cut
-   * mid-response, the caller has seen text that `processStreamResponse`
-   * deliberately did not persist, and the continuation attempt's own turn
-   * carries only the resumed remainder. Without this, durable history would
-   * hold an answer that starts mid-sentence — visibly wrong on `/compress`,
-   * `--resume`, and every later turn's context.
-   *
-   * The delivered text is merged into the turn's first plain-text part (kept
-   * after any leading thought part, matching the
-   * `[thoughtPart?, ...text]` shape `processStreamResponse` produces), or
-   * inserted as a new part when the continuation returned no text of its own.
-   * Overlap is deduped by the same helper the output-recovery merge uses, so a
-   * model that replays part of its previous tail does not double it.
-   */
-  private prependTextToLastModelTurn(deliveredText: string): void {
-    if (deliveredText.length === 0) return;
-    const lastEntry = this.history.at(-1);
-    if (lastEntry?.role !== 'model') {
-      debugLogger.warn(
-        '[TRANSPORT_CONTINUATION] Trailing entry is not a model turn; ' +
-          'dropping the delivered-text merge.',
-        { role: lastEntry?.role ?? 'undefined' },
-      );
-      return;
-    }
-    const parts = [...(lastEntry.parts ?? [])];
-    const textIndex = parts.findIndex(isPlainTextPart);
-    if (textIndex < 0) {
-      const insertAt = parts.findIndex((part) => !part.thought);
-      parts.splice(insertAt < 0 ? parts.length : insertAt, 0, {
-        text: deliveredText,
-      });
-    } else {
-      const continuationPart = parts[textIndex] as Part & { text: string };
-      parts[textIndex] = {
-        ...continuationPart,
-        text:
-          deliveredText +
-          getRecoveryContinuationSuffix(deliveredText, continuationPart.text),
-      };
-    }
-    lastEntry.parts = parts;
   }
 
   /**

@@ -34,6 +34,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
   session_resume: { since: 'v1' },
@@ -52,6 +53,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
+  // Daemon-owned reconciliation surface for mid-turn messages:
+  // `GET /session/:id/mid-turn-messages` returns the messages still waiting
+  // in the queue plus bounded settled/promoted id rings. Clients pre-flight
+  // this tag before calling the route; an
+  // older daemon without it leaves them on the legacy client-fallback
+  // behavior. Client-generated message ids make retries idempotent.
+  session_mid_turn_message_query: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -122,6 +130,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `mcp_budget_warning` and `mcp_child_refused_batch`. Always-on;
   // orthogonal to `mcp_guardrails` (the snapshot surface).
   mcp_guardrail_events: { since: 'v1' },
+  // Managed ACP invokes an authenticated external policy provider exactly once
+  // at the final tool-execution boundary. Advertised only after the required
+  // provider completed its startup handshake.
+  external_tool_guard: { since: 'v1', modes: ['required'] },
   // Always-on. Daemon supports runtime MCP server mutation via
   // `POST /workspace/mcp/servers` (add) and
   // `DELETE /workspace/mcp/servers/:name` (remove). SDK clients
@@ -166,6 +178,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_toggle: { since: 'v1' },
+  workspace_skill_batch_toggle: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
@@ -404,6 +417,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // would make the envelope depend on the user's home config). `modes`
   // enumerates the two transcription paths (realtime vs. on-stop batch).
   voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
+  // Process-global Live Voice control plane. Advertisement requires a macOS
+  // WebShell daemon with native Host integration and the hot-applied enabled
+  // gate. `/live/status` remains the dynamic readiness surface for the Host,
+  // permissions, self-checks, and provider reachability.
+  realtime_voice: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -416,6 +434,7 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
+  externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
@@ -460,6 +479,7 @@ export interface AdvertiseFeatureToggles {
    * QWEN_SERVE_ACP_HTTP=0). Workspace-qualified ACP is only advertised when on.
    */
   acpHttpEnabled?: boolean;
+  realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
 }
 
@@ -502,6 +522,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['require_auth', (toggles) => toggles.requireAuth === true],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  [
+    'external_tool_guard',
+    (toggles) => toggles.externalToolGuardActive === true,
+  ],
   ['allow_origin', (toggles) => toggles.allowOriginActive === true],
   [
     'prompt_absolute_deadline',
@@ -617,6 +641,11 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     // upgrade listener verifies (see acp-http/index.ts).
     'voice_transcribe',
     (toggles) => toggles.voiceWsAvailable !== false,
+  ],
+  [
+    'realtime_voice',
+    (toggles) =>
+      toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
   ],
 ]);
 

@@ -24,14 +24,18 @@ const ghWithInputMock = vi.hoisted(() =>
 const ghWithInputPlainMock = vi.hoisted(() =>
   vi.fn((_input: string, ..._rest: string[]) => ''),
 );
-vi.mock('./lib/gh.js', () => ({
-  gh: ghMock,
-  // Two DISTINCT mocks: aliasing them hid which function a write actually
-  // used, and the retry-vs-not split is the point of having two.
-  ghWithInput: ghWithInputPlainMock,
-  ghWithInputRetried: ghWithInputMock,
-  setGhHost: setGhHostMock,
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+    // Two DISTINCT mocks: aliasing them hid which function a write actually
+    // used, and the retry-vs-not split is the point of having two.
+    ghWithInput: ghWithInputPlainMock,
+    ghWithInputRetried: ghWithInputMock,
+    setGhHost: setGhHostMock,
+  };
+});
 
 const setGhHostMock = vi.hoisted(() => vi.fn((_h: string) => {}));
 
@@ -288,6 +292,67 @@ describe('publish-assets', () => {
     expect(stdoutSpy).toHaveBeenCalledWith(
       JSON.stringify({ published: false }),
     );
+  });
+
+  it('refuses bytes that are not the image their name claims — exit 3, nothing pushed', () => {
+    // The extension allowlist is only as strong as the bytes behind it: a
+    // shell script named evidence.png must refuse on CONTENT, before any
+    // upload happens.
+    happyGh();
+    const impostor = join(dir, 'evidence.png');
+    writeFileSync(impostor, '#!/bin/sh\necho pwned\n');
+    run({ files: [impostor] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    expect(why).toContain('not a recognized image');
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
+  it('refuses the whole batch when one file fails the CONTENT ruling', () => {
+    // The extension gate has its two-file twin above; the content gate needs
+    // the same shape, or a future edit that ruled content for only the first
+    // prepared file would publish an impostor riding behind a good file.
+    happyGh();
+    const good = join(dir, 'a.png');
+    writeFileSync(
+      good,
+      Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const impostor = join(dir, 'impostor.png');
+    writeFileSync(impostor, '#!/bin/sh\n');
+    run({ files: [good, impostor] });
+    expect(process.exitCode).toBe(3);
+    const why = (stderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+    // The full path names the file exactly once — the validator's reason
+    // carries no basename of its own, so there is no stuttered duplicate,
+    // and two same-named files from different directories stay tellable
+    // apart.
+    expect(why).toContain(`${JSON.stringify(impostor)}: content is`);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(stdoutSpy).toHaveBeenCalledWith(
+      JSON.stringify({ published: false }),
+    );
+  });
+
+  it('publishes a webp whose bytes match — the slice covers the WEBP signature', () => {
+    // The content ruling sniffs a 16-byte slice, and WEBP's signature runs
+    // to its fourcc at bytes 12-15: a slice shorter than 16 would
+    // false-refuse every real WEBP at publish time while the unit tests
+    // (full headers) stayed green.
+    happyGh();
+    const shot = join(dir, 'shot.webp');
+    writeFileSync(
+      shot,
+      Uint8Array.from(
+        [...'RIFF\u0000\u0000\u0000\u0000WEBPVP8 '].map((c) => c.charCodeAt(0)),
+      ),
+    );
+    run({ files: [shot] });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
   });
 
   it('refuses an unreadable file the same way', () => {

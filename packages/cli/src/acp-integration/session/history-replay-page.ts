@@ -6,15 +6,18 @@
 
 import {
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   type ChatRecord,
   type Config,
   type GoalSnapshotV2,
+  type GoalStateCause,
   type HistoryGap,
   type SessionTranscriptCursorState,
   type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
+import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -93,6 +96,7 @@ function parseTranscriptReplayState(
   pendingToolCalls: PendingReplayToolCall[];
   cumulativeUsage: CumulativeUsage;
   goalState?: GoalSnapshotV2;
+  goalCause?: GoalStateCause;
 } {
   if (!isObjectRecord(replay)) {
     return {
@@ -141,10 +145,17 @@ function parseTranscriptReplayState(
   if (logger && rawGoalState !== undefined && !goalState) {
     logger.warn('[transcript] replay state dropped a malformed Goal state');
   }
+  const rawGoalCause = replay['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (logger && rawGoalCause !== undefined && !goalCause) {
+    logger.warn('[transcript] replay state dropped a malformed Goal cause');
+  }
   return {
     pendingToolCalls,
     cumulativeUsage,
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 
@@ -158,11 +169,12 @@ function replayContext(
   return {
     sessionId,
     sendUpdate: async (update) => {
+      const projectedUpdate = projectAcpToolResultUpdate(update);
       if (activeRecordId === null) {
-        updates.push(update);
+        updates.push(projectedUpdate);
         return;
       }
-      const record = update as unknown as Record<string, unknown>;
+      const record = projectedUpdate as unknown as Record<string, unknown>;
       const meta = isObjectRecord(record['_meta']) ? record['_meta'] : {};
       updates.push({
         ...record,
@@ -184,7 +196,6 @@ export async function collectHistoryReplayUpdates({
   gaps,
   cumulativeUsage,
   logger,
-  supersedeUnrestorableGoal,
 }: {
   sessionId: string;
   config?: Config;
@@ -192,18 +203,11 @@ export async function collectHistoryReplayUpdates({
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
   logger?: ReplayLogger;
-  /**
-   * Forwarded to `HistoryReplayer`. Only the resume path, where
-   * `#restoreGoalOnResume` follows, sets this. Reading another session's
-   * history must render it as it was, not editorialize a goal it won't restore.
-   */
-  supersedeUnrestorableGoal?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config),
-      { supersedeUnrestorableGoal },
     ).replay(records, gaps);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);
@@ -247,12 +251,14 @@ export async function replayTranscriptRecordPage({
   config,
   encodeCursor,
   logger,
+  finalizeDangling = true,
 }: {
   sessionId: string;
   page: SessionTranscriptRecordPage;
   config?: Config;
   encodeCursor: (state: SessionTranscriptCursorState) => string;
   logger?: ReplayLogger;
+  finalizeDangling?: boolean;
 }): Promise<ReplayedTranscriptPage> {
   const state = parseTranscriptReplayState(page.replay, logger);
   const updates: SessionUpdate[] = [];
@@ -265,9 +271,11 @@ export async function replayTranscriptRecordPage({
     const replayPageState = await replayer.replayPage(page.records, {
       pendingToolCalls:
         page.direction === 'backward' ? [] : state.pendingToolCalls,
-      finalizeDangling: page.direction === 'backward' || !page.hasMore,
+      finalizeDangling:
+        finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
       ...(state.goalState ? { goalState: state.goalState } : {}),
+      ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });
     replayState = replayPageState.replay;
   } catch (error) {

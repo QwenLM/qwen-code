@@ -16,6 +16,7 @@ import {
   ExtensionStore,
   ExtensionStoreCorruptError,
 } from './extension-store.js';
+import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
 describe('ExtensionStore', () => {
   let root: string;
@@ -53,6 +54,18 @@ describe('ExtensionStore', () => {
       'utf8',
     );
   };
+
+  it('derives a stable contained Agent Plugin data directory', () => {
+    const store = makeStore();
+    const extensionId = 'a'.repeat(64);
+
+    expect(store.agentPluginDataRoot(extensionId)).toBe(
+      path.join(storeDir, 'plugin-data', 'agent-plugins', extensionId),
+    );
+    expect(() => store.agentPluginDataRoot('../escape')).toThrow(
+      'Invalid extension id',
+    );
+  });
 
   it('imports V1 rules without materializing workspace overrides', async () => {
     await fsp.writeFile(
@@ -267,6 +280,21 @@ describe('ExtensionStore', () => {
         [identity.id]: { defaultActivation: 'disabled' },
       },
     });
+  });
+
+  it('registers a lock-compromised handler and completes when the store lock is compromised', async () => {
+    const store = makeStore();
+    const identity = { id: 'd4'.repeat(32), name: 'demo' };
+    const { lockSpy, getOnCompromised } = mockCompromisedLock();
+
+    try {
+      await expect(store.ensureInitialized([identity])).resolves.toMatchObject({
+        generation: 0,
+      });
+      expect(getOnCompromised()).toBeTypeOf('function');
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it('serializes mutations from two Node processes sharing QWEN_HOME', async () => {

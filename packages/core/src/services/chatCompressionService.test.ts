@@ -19,11 +19,15 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type {
+  BaseLlmClient,
+  GenerateTextOptions,
+} from '../core/baseLlmClient.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import * as postCompactModule from './postCompactAttachments.js';
+import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
@@ -2173,12 +2177,34 @@ describe('ChatCompressionService.compress cache sharing', () => {
     }));
   }
 
+  function makeMediaHistory(): Content[] {
+    return [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: 'image-bytes' } },
+          {
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: 'pdf-bytes',
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'media received' }] },
+    ];
+  }
+
   function makeFixture(options?: {
     history?: Content[];
     authType?: AuthType;
     baseUrl?: string;
     compactionModel?: string;
     enableCacheControl?: boolean;
+    contextWindowSize?: number | null;
+    lastPromptTokenCount?: number;
+    lastPromptTokenCountIsEstimated?: boolean;
+    lastOutputTokenCount?: number;
   }): {
     chat: GeminiChat;
     config: Config;
@@ -2205,6 +2231,15 @@ describe('ChatCompressionService.compress cache sharing', () => {
         tools,
         thinkingConfig: { includeThoughts: true },
       }),
+      getLastPromptTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCount ?? 180_000),
+      isLastPromptTokenCountEstimated: vi
+        .fn()
+        .mockReturnValue(options?.lastPromptTokenCountIsEstimated ?? false),
+      getLastOutputTokenCount: vi
+        .fn()
+        .mockReturnValue(options?.lastOutputTokenCount ?? 0),
     } as unknown as GeminiChat;
     const config = {
       getChatCompression: vi.fn(),
@@ -2214,7 +2249,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
         model: 'test-model',
         authType: options?.authType ?? AuthType.USE_ANTHROPIC,
         baseUrl: options?.baseUrl,
-        contextWindowSize: 200_000,
+        ...(options?.contextWindowSize === null
+          ? {}
+          : { contextWindowSize: options?.contextWindowSize ?? 220_000 }),
         enableCacheControl: options?.enableCacheControl ?? true,
       }),
       getHookSystem: vi.fn().mockReturnValue({
@@ -2247,19 +2284,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(generateText).toHaveBeenCalledTimes(1);
-    const request = generateText.mock.calls[0]![0] as {
-      contents: Content[];
-      systemInstruction?: string;
-      config?: {
-        tools?: unknown;
-        thinkingConfig?: {
-          includeThoughts?: boolean;
-          thinkingBudget?: number;
-        };
-        maxOutputTokens?: number;
-      };
-    };
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
     expect(request.systemInstruction).toBe(mainSystemInstruction);
+    expect(request.promptCacheSharing).toBe(true);
     expect(request.config?.tools).toBe(tools);
     expect(request.config?.thinkingConfig?.includeThoughts).toBe(true);
     expect(request.config?.thinkingConfig?.thinkingBudget).toBe(
@@ -2306,6 +2333,31 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(request.config?.tools).toBe(requestTools);
   });
 
+  it('attempts cache sharing with media still in the history', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({ history });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    const request = generateText.mock.calls[0]![0] as {
+      contents: Content[];
+    };
+    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(JSON.stringify(request.contents)).toContain('image-bytes');
+    expect(JSON.stringify(request.contents)).toContain('pdf-bytes');
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(slimSpy).not.toHaveBeenCalled();
+  });
+
   it.each([AuthType.QWEN_OAUTH, AuthType.USE_OPENAI])(
     'uses cache sharing for DashScope through %s',
     async (authType) => {
@@ -2321,6 +2373,76 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
 
       expect(generateText).toHaveBeenCalledTimes(1);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([AuthType.USE_GEMINI, AuthType.USE_VERTEX_AI])(
+    'uses cache sharing for Google GenAI through %s',
+    async (authType) => {
+      const { chat, config, generateText } = makeFixture({ authType });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as {
+        config?: { thinkingConfig?: { includeThoughts?: boolean } };
+      };
+      expect(request.config?.thinkingConfig?.includeThoughts).toBe(false);
+      expect(coldSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps implicit Google cache sharing enabled when explicit cache control is disabled', async () => {
+    const { chat, config, generateText } = makeFixture({
+      authType: AuthType.USE_GEMINI,
+      enableCacheControl: false,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'https://api.openai.com/v1',
+    'https://api.deepseek.com/v1',
+    'https://proxy.example/v1',
+  ])(
+    'uses cache sharing for OpenAI-compatible endpoint %s',
+    async (baseUrl) => {
+      const { chat, config, generateText } = makeFixture({
+        authType: AuthType.USE_OPENAI,
+        baseUrl,
+      });
+      const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      });
+
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+      expect(request.promptCacheSharing).toBe(true);
       expect(coldSpy).not.toHaveBeenCalled();
     },
   );
@@ -2390,6 +2512,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCountIsEstimated).toBe(true);
     expect(result.info.newTokenCount).toBeGreaterThan(100_000);
   });
 
@@ -2556,56 +2679,233 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(coldSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('slims media only after the cache-sharing request fails', async () => {
+    const history = makeMediaHistory();
+    const { chat, config, generateText } = makeFixture({ history });
+    generateText.mockRejectedValue(new Error('provider failed'));
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(slimSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+      { text: '[image: image/png]' },
+      { text: '[document: application/pdf]' },
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'provider prompt count',
+      originalTokenCount: 179_999,
+      precomputedEffectiveTokens: undefined,
+    },
+    {
+      name: 'hard-tier effective count',
+      originalTokenCount: 160_000,
+      precomputedEffectiveTokens: 180_001,
+    },
+  ])(
+    'skips a shared request when the $name cannot fit its output reserve',
+    async ({ originalTokenCount, precomputedEffectiveTokens }) => {
+      const history = makeMediaHistory();
+      const { chat, config, generateText } = makeFixture({
+        history,
+        contextWindowSize: 200_000,
+      });
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockResolvedValue({
+          text: '<state_snapshot>cold summary</state_snapshot>',
+          usage: {
+            promptTokenCount: 170_000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 170_500,
+          },
+        } as never);
+
+      await new ChatCompressionService().compress(chat, {
+        promptId: 'p',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount,
+        precomputedEffectiveTokens,
+      });
+
+      expect(generateText).not.toHaveBeenCalled();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(coldSpy.mock.calls[0]![1].contents[0]?.parts).toEqual([
+        { text: '[image: image/png]' },
+        { text: '[document: application/pdf]' },
+      ]);
+      expect(logChatCompression).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          cache_sharing_attempted: false,
+          cache_sharing_used: false,
+        }),
+      );
+    },
+  );
+
+  it('uses the default context window when the provider omits its size', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: null,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 150_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+    expect(logChatCompression).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({
+        cache_sharing_attempted: true,
+        cache_sharing_used: true,
+      }),
+    );
+  });
+
+  it('includes the previous model output in the shared-request window check', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not add previous output to an all-inclusive prompt count', async () => {
+    const { chat, config, generateText } = makeFixture({
+      contextWindowSize: 200_000,
+      lastPromptTokenCount: 170_000,
+      lastOutputTokenCount: 20_000,
+    });
+    const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 170_000,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(coldSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips cache sharing when the chat has no provider token-count anchor', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 0,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 0,
+      precomputedEffectiveTokens: 170_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips cache sharing when the token-count anchor is estimate-derived', async () => {
+    const { chat, config, generateText } = makeFixture({
+      lastPromptTokenCount: 180_000,
+      lastPromptTokenCountIsEstimated: true,
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       name: 'a distinct compaction model',
       options: { compactionModel: 'compact-model' },
     },
     {
-      name: 'a provider without explicit cache support',
-      options: { authType: AuthType.USE_GEMINI },
-    },
-    {
-      name: 'a non-DashScope OpenAI-compatible provider',
-      options: {
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://api.openai.com/v1',
-      },
-    },
-    {
       name: 'disabled cache control',
       options: { enableCacheControl: false },
-    },
-    {
-      name: 'media-bearing history',
-      options: {
-        history: [
-          {
-            role: 'user',
-            parts: [{ inlineData: { mimeType: 'image/png', data: 'base64' } }],
-          },
-          { role: 'model', parts: [{ text: 'image received' }] },
-        ],
-      },
-    },
-    {
-      name: 'document-bearing history',
-      options: {
-        history: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'application/pdf',
-                  data: 'base64',
-                },
-              },
-            ],
-          },
-          { role: 'model', parts: [{ text: 'document received' }] },
-        ],
-      },
     },
   ])('keeps $name on the cold path', async ({ options }) => {
     const { chat, config, generateText } = makeFixture(options);

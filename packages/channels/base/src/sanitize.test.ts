@@ -5,6 +5,7 @@ import {
   sanitizeQuotedText,
   sanitizePromptPath,
   sanitizeLogText,
+  truncateCodePoints,
 } from './sanitize.js';
 
 // Unicode line/paragraph separators and bidi override/isolate controls, built
@@ -36,6 +37,16 @@ const EMOJI = String.fromCharCode(0xd83c, 0xdf89);
 function isHighSurrogate(unit: number): boolean {
   return unit >= 0xd800 && unit <= 0xdbff;
 }
+
+describe('truncateCodePoints', () => {
+  it('truncates astral characters without splitting surrogate pairs', () => {
+    const out = truncateCodePoints('a' + EMOJI.repeat(10), 8);
+
+    expect(out).toBe('a' + EMOJI.repeat(7));
+    expect(Array.from(out)).toHaveLength(8);
+    expect(isHighSurrogate(out.charCodeAt(out.length - 1))).toBe(false);
+  });
+});
 
 describe('sanitizeSenderName', () => {
   it('passes through a plain name unchanged', () => {

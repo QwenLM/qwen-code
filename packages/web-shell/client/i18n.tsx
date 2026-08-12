@@ -416,6 +416,88 @@ const EN: Messages = {
   'voice.noSpeechRetry': 'No speech detected — click to retry',
   'voice.startDictation': 'Start voice dictation',
   'voice.error': 'Voice error',
+  'live.title': 'Live Voice',
+  'live.open': 'Open Live Voice',
+  'live.manage': 'Manage active Live Voice',
+  'live.readyDescription':
+    'Qwen Live Host and every required permission are ready.',
+  'live.setupDescription':
+    'Install Qwen Live Host and complete every permission before Live Voice can start.',
+  'live.noFallback':
+    'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
+  'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'settings.liveShortcut.capture': 'Press shortcut',
+  'settings.liveShortcut.clear': 'Clear',
+  'settings.liveShortcut.off': 'Off',
+  'settings.liveSetup.title': 'Qwen Live',
+  'settings.liveSetup.experimental': 'Experimental',
+  'settings.liveSetup.description':
+    'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.enable': 'Enable Qwen Live',
+  'settings.liveSetup.apiKey': 'DashScope Realtime API key',
+  'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
+  'settings.liveSetup.apiKeyReplace': 'Enter a new key to replace it',
+  'settings.liveSetup.configured': 'Configured',
+  'settings.liveSetup.notConfigured': 'Required',
+  'settings.liveSetup.save': 'Save',
+  'settings.liveSetup.removeKey': 'Remove key',
+  'settings.liveSetup.shortcut': 'Global shortcut',
+  'settings.liveSetup.host': 'Qwen Live Host',
+  'settings.liveSetup.openHost': 'Open Host',
+  'settings.liveSetup.retry': 'Retry',
+  'settings.liveSetup.permission.microphone': 'Microphone',
+  'settings.liveSetup.permission.accessibility': 'Accessibility',
+  'settings.liveSetup.permission.screenRecording': 'Screen recording',
+  'settings.liveSetup.permissionHint':
+    'Complete any pending permission prompts in Qwen Live Host. Live stays unavailable until every permission is ready.',
+  'settings.liveSetup.requirement.ready': 'Ready',
+  'settings.liveSetup.requirement.missing': 'Missing',
+  'settings.liveSetup.requirement.denied': 'Not allowed',
+  'settings.liveSetup.requirement.unavailable': 'Unavailable',
+  'settings.liveSetup.requirement.checking': 'Checking',
+  'settings.liveSetup.install.missing': 'Waiting to install',
+  'settings.liveSetup.install.checking': 'Checking installation…',
+  'settings.liveSetup.install.downloading': 'Downloading signed Host…',
+  'settings.liveSetup.install.verifying': 'Verifying signature and checksum…',
+  'settings.liveSetup.install.installing': 'Installing…',
+  'settings.liveSetup.install.launching': 'Opening Host…',
+  'settings.liveSetup.install.installed': 'Installed',
+  'settings.liveSetup.install.error': 'Setup needs attention',
+  'settings.liveSetup.confirmTitle': 'Enable experimental Qwen Live?',
+  'settings.liveSetup.confirmDescription':
+    'Qwen Code will download, verify, install, and open the signed Qwen Live Host app. macOS will then ask you to grant Microphone, Accessibility, and Screen Recording access.',
+  'settings.liveSetup.cancel': 'Cancel',
+  'settings.liveSetup.confirm': 'Enable and install',
+  'live.refresh': 'Refresh status',
+  'live.startOrResume': 'Start or resume',
+  'live.newConversation': 'New conversation',
+  'live.stop': 'Stop Live',
+  'live.muteInput': 'Mute microphone',
+  'live.unmuteInput': 'Unmute microphone',
+  'live.muteOutput': 'Mute speaker',
+  'live.unmuteOutput': 'Unmute speaker',
+  'live.state.unavailable': 'Voice chat unavailable',
+  'live.state.idle': 'Ready for voice chat',
+  'live.state.starting': 'Starting voice chat…',
+  'live.state.listening': 'Listening',
+  'live.state.thinking': 'Thinking',
+  'live.state.speaking': 'Speaking',
+  'live.state.stopping': 'Stopping…',
+  'live.state.error': 'Voice chat stopped',
+  'live.requirement.host': 'Qwen Live Host',
+  'live.requirement.microphone': 'Microphone',
+  'live.requirement.accessibility': 'Accessibility',
+  'live.requirement.screenRecording': 'Screen Recording',
+  'live.requirement.audioInput': 'Audio input',
+  'live.requirement.audioOutput': 'Audio output',
+  'live.requirement.globalShortcut': 'Global shortcut',
+  'live.requirement.appshot': 'Appshot',
+  'live.requirement.provider': 'Realtime provider',
+  'live.requirementState.ready': 'Ready',
+  'live.requirementState.missing': 'Missing',
+  'live.requirementState.denied': 'Not allowed',
+  'live.requirementState.unavailable': 'Unavailable',
+  'live.requirementState.checking': 'Checking',
   'resume.failedToLoad': 'Failed to load sessions',
   'toast.dismiss': 'Dismiss notification',
   'toast.dismissShort': 'Dismiss',
@@ -479,6 +561,22 @@ const EN: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'askUser.shortcuts.previous': '← previous',
+  'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
+  'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
+  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.multiNext':
+    '↑↓ move · Space select/deselect · Enter select & next',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ move · Enter edit',
+  'askUser.shortcuts.inputEmpty': 'Type an answer · Esc stop editing',
+  'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
+  'askUser.shortcuts.inputNext': 'Enter next · Esc stop editing',
+  'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
     'No matching inline LaTeX expression found in the last AI output.',
@@ -619,6 +717,8 @@ const EN: Messages = {
   'contextUsage.contextWindow': 'Context window',
   'contextUsage.detailHint': 'Run /context detail for per-item breakdown.',
   'contextUsage.estimatedOverhead': 'Estimated pre-conversation overhead',
+  'contextUsage.estimatedUntilProviderUsage':
+    'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
@@ -896,6 +996,12 @@ const EN: Messages = {
   'history.retry': 'Retry',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
+  'editor.imagesSkipped': (v) =>
+    `${v?.count ?? 0} unsupported image file(s) were skipped.`,
+  'editor.imagesReadFailed': (v) =>
+    `${v?.count ?? 0} image file(s) could not be read.`,
+  'editor.imagesTooLarge': (v) =>
+    `${v?.count ?? 0} image file(s) exceeded the attachment size limit.`,
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -1046,6 +1152,7 @@ const EN: Messages = {
     "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
+  'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
   // Key keeps its historical `review` name; the label moved to "Changes" when
   // the code-review result view (`codeReview.*`) took over the word.
@@ -1107,6 +1214,7 @@ const EN: Messages = {
   'sidebar.newWorktreeTask': 'New worktree task',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.live': 'Live',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.workspaceSelectLabel': 'Workspace',
@@ -1266,6 +1374,18 @@ const EN: Messages = {
   'queue.editing': 'Editing...',
   'queue.removing': 'Updating...',
   'queue.submittingDisabled': 'Submitting queued message...',
+  'queue.summaryEditDisabled':
+    'This restored queue summary cannot recover its original attachments.',
+  'queue.admissionUnknown':
+    'Delivery is uncertain. Check the session before trying again.',
+  'queue.mayCorrespond':
+    'The uncertain local copy and server queue entry may be the same prompt.',
+  'queue.restoreUnknown': 'Restore local copy',
+  'queue.discardUnknown': 'Discard local copy',
+  'queue.continueEditing': 'Continue editing',
+  'queue.continueEditingConfirm':
+    'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
+  'queue.localCopyDiscarded': 'Local copy discarded',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
@@ -1340,7 +1460,6 @@ const EN: Messages = {
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
-  'compact.hint': 'Press Ctrl+O to show full tool output',
   'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
@@ -1388,7 +1507,8 @@ const EN: Messages = {
   'local.lsp': 'Show LSP server status',
   'local.remember': 'Save a durable memory to the memory system',
   'local.summary': 'Generate a project summary file',
-  'local.workflows': 'List active and completed workflow runs',
+  'local.workflows':
+    'List workflow runs or cooperatively pause/resume a live run',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -1581,7 +1701,17 @@ const EN: Messages = {
     `Enabling extension "${v?.name ?? 'extension'}"…`,
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
-    'Enter a GitHub, Git, or npm extension source.',
+    'Enter a GitHub, Git, or npm source, or upload an Extension archive.',
+  'extensions.manage.sourceTab': 'Source',
+  'extensions.manage.archiveTab': 'Archive',
+  'extensions.manage.archiveSelect': 'Select a .zip or .tar.gz archive.',
+  'extensions.manage.archiveSelected': (v) =>
+    `Selected archive: ${v?.name ?? 'extension archive'}`,
+  'extensions.manage.archiveTooLarge':
+    'Extension archives must be 10 MB or smaller.',
+  'extensions.manage.archiveEmpty': 'The selected Extension archive is empty.',
+  'extensions.manage.archiveInvalid':
+    'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `Choose a plugin from "${v?.marketplace ?? 'this marketplace'}".`,
   'extensions.manage.installTitle': 'Add Extension',
@@ -1831,6 +1961,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
   'goal.check': 'Goal check',
   'goal.cleared': 'Goal cleared',
@@ -2359,9 +2490,9 @@ const EN: Messages = {
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
-    `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `Running ${v?.count ?? 0} tools: ${v?.name ?? 'tool'}`
+      : `Running ${v?.name ?? 'tool'}`,
   'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
@@ -2484,13 +2615,17 @@ const EN: Messages = {
   'channels.editor.field.feishu.clientSecret': 'App Secret',
   'channels.editor.field.github.token': 'Personal Access Token',
   'channels.editor.field.github.token.description':
-    'Classic PAT with "notifications" scope',
+    'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+  'channels.editor.field.github.useLocalGh':
+    'Use local GitHub CLI authentication',
+  'channels.editor.field.github.useLocalGh.description':
+    'Explicitly reuse the daemon host’s account-wide gh login when no token is configured',
   'channels.editor.field.github.baseUrl': 'API Base URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
-    'Must be "Open" for notifications to flow',
+    'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.senderPolicy': 'Sender Policy',
   'channels.editor.field.github.senderPolicy.description':
     'Use "Allowlist" with allowed users on public repos',
@@ -2509,7 +2644,7 @@ const EN: Messages = {
     'Self-hosted instance URL (e.g. https://gitlab.example.com). Leave empty for gitlab.com',
   'channels.editor.field.gitlab.groupPolicy': 'Group Policy',
   'channels.editor.field.gitlab.groupPolicy.description':
-    'Must be "Open" or "Allowlist" for todos to be processed',
+    'Must be "Open", "Allowlist", or "Pairing" for todos to be processed',
   'channels.editor.field.gitlab.senderPolicy': 'Sender Policy',
   'channels.editor.field.gitlab.senderPolicy.description':
     'Use "Allowlist" with allowed users on public projects',
@@ -2551,7 +2686,11 @@ const EN: Messages = {
     'People receive a pairing code and can chat after you approve them.',
   'channels.editor.pairing.title': 'Pending requests',
   'channels.editor.pairing.description':
-    'Match the code shared by the person before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+    'Match the shared code before approving access. Approvals take effect immediately; Save and Cancel do not undo them.',
+  'channels.editor.pairing.subject.group': (v) =>
+    `Group: ${v?.name ?? 'Unknown'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `Requested by ${v?.sender ?? 'Unknown'}`,
   'channels.editor.pairing.refresh': 'Refresh pairing requests',
   'channels.editor.pairing.approve': 'Approve',
   'channels.editor.pairing.approveFor': (v) =>
@@ -2570,7 +2709,7 @@ const EN: Messages = {
     'Pending requests will appear here after this Channel is saved in pairing mode.',
   'channels.editor.pairing.approvals.title': 'Pairing approvals',
   'channels.editor.pairing.approvals.description':
-    'Sender IDs approved through pairing for this Channel.',
+    'User and group IDs approved through pairing for this Channel.',
   'channels.editor.pairing.approvals.refresh': 'Refresh pairing approvals',
   'channels.editor.pairing.approvals.revoke': 'Revoke',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
@@ -2583,7 +2722,7 @@ const EN: Messages = {
     'Pairing approvals are temporarily unavailable. Try again.',
   'channels.editor.pairing.approvals.empty.title': 'No pairing approvals',
   'channels.editor.pairing.approvals.empty.description':
-    'Approved sender IDs will appear here.',
+    'Approved user and group IDs will appear here.',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `Revoke pairing approval for ${v?.senderId || 'this sender'}?`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -2597,12 +2736,16 @@ const EN: Messages = {
     'Anyone who can reach the bot can start a conversation.',
   'channels.editor.validation.required': (v) =>
     `${v?.label ?? 'This field'} is required.`,
+  'channels.editor.validation.credential':
+    'Enter a token or enable local GitHub CLI authentication.',
   'channels.editor.validation.duplicate':
     'A Channel with this name already exists.',
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
+  'channels.editor.validation.outOfRange': (v) =>
+    `Enter a number greater than ${v?.min ?? 0}.`,
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -3111,6 +3254,87 @@ const ZH: Messages = {
   'voice.noSpeechRetry': '未检测到语音 — 点击重试',
   'voice.startDictation': '开始语音输入',
   'voice.error': '语音错误',
+  'live.title': '实时语音',
+  'live.open': '打开实时语音',
+  'live.manage': '管理正在进行的实时语音',
+  'live.readyDescription': 'Qwen Live Host 和所有必需权限均已就绪。',
+  'live.setupDescription':
+    '安装 Qwen Live Host 并完成全部授权后，才能使用实时语音。',
+  'live.noFallback':
+    '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
+  'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'settings.liveShortcut.capture': '请按下快捷键',
+  'settings.liveShortcut.clear': '清除',
+  'settings.liveShortcut.off': '关闭',
+  'settings.liveSetup.title': 'Qwen Live',
+  'settings.liveSetup.experimental': '实验性',
+  'settings.liveSetup.description':
+    '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.enable': '启用 Qwen Live',
+  'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
+  'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
+  'settings.liveSetup.apiKeyReplace': '输入新 Key 以替换当前配置',
+  'settings.liveSetup.configured': '已配置',
+  'settings.liveSetup.notConfigured': '必填',
+  'settings.liveSetup.save': '保存',
+  'settings.liveSetup.removeKey': '移除 Key',
+  'settings.liveSetup.shortcut': '全局快捷键',
+  'settings.liveSetup.host': 'Qwen Live Host',
+  'settings.liveSetup.openHost': '打开 Host',
+  'settings.liveSetup.retry': '重试',
+  'settings.liveSetup.permission.microphone': '麦克风',
+  'settings.liveSetup.permission.accessibility': '辅助功能',
+  'settings.liveSetup.permission.screenRecording': '屏幕录制',
+  'settings.liveSetup.permissionHint':
+    '请在 Qwen Live Host 中完成尚未授权的项目；全部权限就绪前 Live 不可使用。',
+  'settings.liveSetup.requirement.ready': '已就绪',
+  'settings.liveSetup.requirement.missing': '缺失',
+  'settings.liveSetup.requirement.denied': '未授权',
+  'settings.liveSetup.requirement.unavailable': '不可用',
+  'settings.liveSetup.requirement.checking': '检查中',
+  'settings.liveSetup.install.missing': '等待安装',
+  'settings.liveSetup.install.checking': '正在检查安装…',
+  'settings.liveSetup.install.downloading': '正在下载已签名 Host…',
+  'settings.liveSetup.install.verifying': '正在校验签名和校验和…',
+  'settings.liveSetup.install.installing': '正在安装…',
+  'settings.liveSetup.install.launching': '正在打开 Host…',
+  'settings.liveSetup.install.installed': '已安装',
+  'settings.liveSetup.install.error': '安装需要处理',
+  'settings.liveSetup.confirmTitle': '启用实验性 Qwen Live？',
+  'settings.liveSetup.confirmDescription':
+    'Qwen Code 将自动下载、校验、安装并打开已签名的 Qwen Live Host。之后 macOS 会要求授予麦克风、辅助功能和屏幕录制权限。',
+  'settings.liveSetup.cancel': '取消',
+  'settings.liveSetup.confirm': '启用并安装',
+  'live.refresh': '刷新状态',
+  'live.startOrResume': '开始或继续',
+  'live.newConversation': '新建对话',
+  'live.stop': '停止实时语音',
+  'live.muteInput': '麦克风静音',
+  'live.unmuteInput': '取消麦克风静音',
+  'live.muteOutput': '扬声器静音',
+  'live.unmuteOutput': '取消扬声器静音',
+  'live.state.unavailable': '实时语音不可用',
+  'live.state.idle': '可以开始语音对话',
+  'live.state.starting': '正在开始语音对话…',
+  'live.state.listening': '正在聆听',
+  'live.state.thinking': '思考中',
+  'live.state.speaking': '正在回答',
+  'live.state.stopping': '正在停止…',
+  'live.state.error': '语音对话已停止',
+  'live.requirement.host': 'Qwen Live Host',
+  'live.requirement.microphone': '麦克风',
+  'live.requirement.accessibility': '辅助功能',
+  'live.requirement.screenRecording': '屏幕录制',
+  'live.requirement.audioInput': '音频输入',
+  'live.requirement.audioOutput': '音频输出',
+  'live.requirement.globalShortcut': '全局快捷键',
+  'live.requirement.appshot': 'Appshot',
+  'live.requirement.provider': 'Realtime 模型服务',
+  'live.requirementState.ready': '已就绪',
+  'live.requirementState.missing': '未安装',
+  'live.requirementState.denied': '未授权',
+  'live.requirementState.unavailable': '不可用',
+  'live.requirementState.checking': '检查中',
   'resume.failedToLoad': '加载会话失败',
   'toast.dismiss': '关闭通知',
   'toast.dismissShort': '关闭',
@@ -3173,6 +3397,22 @@ const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
+  'askUser.shortcuts.previous': '← 上一步',
+  'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
+  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.multiNext':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并下一步',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ 移动 · Enter 编辑',
+  'askUser.shortcuts.inputEmpty': '输入答案 · Esc 退出编辑',
+  'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
+  'askUser.shortcuts.inputNext': 'Enter 下一步 · Esc 退出编辑',
+  'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
   'copy.latexMissing': '最后一条 AI 输出中没有匹配的 LaTeX 块。',
@@ -3295,6 +3535,8 @@ const ZH: Messages = {
   'contextUsage.contextWindow': '上下文窗口',
   'contextUsage.detailHint': '运行 /context detail 查看逐项明细。',
   'contextUsage.estimatedOverhead': '预估的对话前开销',
+  'contextUsage.estimatedUntilProviderUsage':
+    'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
@@ -3561,6 +3803,10 @@ const ZH: Messages = {
   'history.retry': '重试',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
+  'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不支持的图片文件。`,
+  'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个图片文件读取失败。`,
+  'editor.imagesTooLarge': (v) =>
+    `${v?.count ?? 0} 个图片文件超过附件大小限制。`,
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -3703,6 +3949,7 @@ const ZH: Messages = {
     '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
   // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
   // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
@@ -3762,6 +4009,7 @@ const ZH: Messages = {
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.live': 'Live',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.workspaceSelectLabel': '工作区',
@@ -3914,6 +4162,16 @@ const ZH: Messages = {
   'queue.editing': '编辑中...',
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
+  'queue.summaryEditDisabled': '恢复的队列摘要无法还原原始附件。',
+  'queue.admissionUnknown': '消息是否送达尚不确定，请先检查会话再重试。',
+  'queue.mayCorrespond':
+    '送达不确定的本地副本与服务器队列项可能对应同一条消息。',
+  'queue.restoreUnknown': '恢复本地副本',
+  'queue.discardUnknown': '丢弃本地副本',
+  'queue.continueEditing': '继续编辑',
+  'queue.continueEditingConfirm':
+    '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
+  'queue.localCopyDiscarded': '本地副本已丢弃',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
@@ -3979,7 +4237,6 @@ const ZH: Messages = {
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
-  'compact.hint': '按 Ctrl+O 显示完整工具输出',
   'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
@@ -4023,7 +4280,7 @@ const ZH: Messages = {
   'local.lsp': '显示 LSP 服务器状态',
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
-  'local.workflows': '列出进行中和已完成的工作流运行',
+  'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
@@ -4199,7 +4456,17 @@ const ZH: Messages = {
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
   'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
   'extensions.manage.install': '安装',
-  'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
+  'extensions.manage.installDescription':
+    '输入 GitHub、Git 或 npm 扩展来源，或上传 Extension 压缩包。',
+  'extensions.manage.sourceTab': '来源',
+  'extensions.manage.archiveTab': '压缩包',
+  'extensions.manage.archiveSelect': '选择 .zip 或 .tar.gz 压缩包。',
+  'extensions.manage.archiveSelected': (v) =>
+    `已选择压缩包：${v?.name ?? 'Extension 压缩包'}`,
+  'extensions.manage.archiveTooLarge': 'Extension 压缩包不能超过 10 MB。',
+  'extensions.manage.archiveEmpty': '所选 Extension 压缩包为空。',
+  'extensions.manage.archiveInvalid':
+    '请选择文件名有效且不超过 255 字节的 .zip 或 .tar.gz Extension 压缩包。',
   'extensions.manage.installSelectPluginDescription': (v) =>
     `从「${v?.marketplace ?? '此市场'}」中选择插件。`,
   'extensions.manage.installTitle': '添加扩展',
@@ -4426,6 +4693,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
   'goal.check': '目标检查',
   'goal.cleared': '目标已清除',
@@ -4919,9 +5187,9 @@ const ZH: Messages = {
   'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
-    `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `正在执行 ${v?.count ?? 0} 个工具：${v?.name ?? '工具'}`
+      : `正在执行 ${v?.name ?? '工具'}`,
   'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
@@ -5038,13 +5306,16 @@ const ZH: Messages = {
   'channels.editor.field.feishu.clientSecret': 'App Secret',
   'channels.editor.field.github.token': '个人访问令牌',
   'channels.editor.field.github.token.description':
-    '需要 "notifications" 权限的经典 PAT',
+    '可选。填写具有 "notifications" 权限的经典 PAT；优先于本地 gh 认证',
+  'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
+  'channels.editor.field.github.useLocalGh.description':
+    '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
   'channels.editor.field.github.baseUrl': 'API 基础 URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
-    '必须设为 "Open" 才能接收通知',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.senderPolicy': '发送者策略',
   'channels.editor.field.github.senderPolicy.description':
     '公开仓库建议使用 "Allowlist" 并指定允许的用户',
@@ -5062,7 +5333,7 @@ const ZH: Messages = {
     '自托管实例地址（如 https://gitlab.example.com），gitlab.com 留空',
   'channels.editor.field.gitlab.groupPolicy': '群组策略',
   'channels.editor.field.gitlab.groupPolicy.description':
-    '必须设为 "Open" 或 "Allowlist" 才能处理 Todo',
+    '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能处理 Todo',
   'channels.editor.field.gitlab.senderPolicy': '发送者策略',
   'channels.editor.field.gitlab.senderPolicy.description':
     '公开项目建议使用 "Allowlist" 并指定允许的用户',
@@ -5102,7 +5373,11 @@ const ZH: Messages = {
     '用户会收到配对码，经您批准后才能开始对话。',
   'channels.editor.pairing.title': '待处理的配对请求',
   'channels.editor.pairing.description':
-    '批准前，请核对用户提供的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+    '批准前，请核对收到的配对码是否一致。批准会立即生效，保存或取消都不会撤销已批准的访问。',
+  'channels.editor.pairing.subject.group': (v) =>
+    `群聊：${v?.name ?? '未知群聊'}`,
+  'channels.editor.pairing.requestedBy': (v) =>
+    `由 ${v?.sender ?? '未知用户'} 发起`,
   'channels.editor.pairing.refresh': '刷新配对请求',
   'channels.editor.pairing.approve': '批准',
   'channels.editor.pairing.approveFor': (v) =>
@@ -5118,21 +5393,21 @@ const ZH: Messages = {
   'channels.editor.pairing.saveFirst.title': '请先保存配对模式',
   'channels.editor.pairing.saveFirst.description':
     '频道以配对模式保存后，待处理请求会显示在这里。',
-  'channels.editor.pairing.approvals.title': '已配对用户',
+  'channels.editor.pairing.approvals.title': '已配对对象',
   'channels.editor.pairing.approvals.description':
-    '通过配对获得此频道访问权限的用户 ID。',
-  'channels.editor.pairing.approvals.refresh': '刷新已配对用户',
+    '通过配对获得此频道访问权限的用户和群聊 ID。',
+  'channels.editor.pairing.approvals.refresh': '刷新已配对对象',
   'channels.editor.pairing.approvals.revoke': '撤销',
   'channels.editor.pairing.approvals.revokeFor': (v) =>
     `撤销 ${v?.senderId ?? '该用户'} 的配对授权`,
   'channels.editor.pairing.approvals.revoked': (v) =>
     `已撤销 ${v?.senderId ?? '该用户'} 的配对授权。`,
-  'channels.editor.pairing.approvals.error': '未能更新已配对用户',
+  'channels.editor.pairing.approvals.error': '未能更新已配对对象',
   'channels.editor.pairing.approvals.unavailable':
-    '暂时无法获取已配对用户，请重试。',
-  'channels.editor.pairing.approvals.empty.title': '暂无已配对用户',
+    '暂时无法获取已配对对象，请重试。',
+  'channels.editor.pairing.approvals.empty.title': '暂无已配对对象',
   'channels.editor.pairing.approvals.empty.description':
-    '批准配对请求后，用户 ID 会显示在这里。',
+    '批准配对请求后，用户或群聊 ID 会显示在这里。',
   'channels.editor.pairing.approvals.confirm.title': (v) =>
     `撤销 ${v?.senderId || '该用户'} 的配对授权？`,
   'channels.editor.pairing.approvals.confirm.description':
@@ -5146,10 +5421,14 @@ const ZH: Messages = {
     '所有能够访问机器人的用户均可直接开始对话。',
   'channels.editor.validation.required': (v) =>
     `${v?.label ?? '此字段'}为必填项。`,
+  'channels.editor.validation.credential':
+    '请输入令牌，或开启本地 GitHub CLI 认证。',
   'channels.editor.validation.duplicate': '已存在同名频道。',
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
+  'channels.editor.validation.outOfRange': (v) =>
+    `请输入大于 ${v?.min ?? 0} 的数字。`,
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',
