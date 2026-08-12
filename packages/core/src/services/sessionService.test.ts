@@ -156,6 +156,107 @@ describe('SessionService', () => {
       expect(result.nextCursor).toBeUndefined();
     });
 
+    it('yields after 128 directory entries and stops statting after cancellation', async () => {
+      const fileNames = Array.from(
+        { length: 129 },
+        (_, index) => `${index.toString(16).padStart(32, '0')}.jsonl`,
+      );
+      readdirSyncSpy.mockReturnValue(
+        fileNames as unknown as Array<fs.Dirent<Buffer>>,
+      );
+      const controller = new AbortController();
+      const reason = Object.assign(new Error('catalog request disconnected'), {
+        code: 'ENOENT',
+      });
+      setImmediate(() => controller.abort(reason));
+
+      await expect(
+        sessionService.listSessions({ signal: controller.signal }),
+      ).rejects.toBe(reason);
+      expect(statSyncSpy).toHaveBeenCalledTimes(128);
+      expect(jsonl.readLines).not.toHaveBeenCalled();
+    });
+
+    it('does not yield during directory enumeration without a signal', async () => {
+      const fileNames = Array.from(
+        { length: 129 },
+        (_, index) => `${index.toString(16).padStart(32, '0')}.jsonl`,
+      );
+      readdirSyncSpy.mockReturnValue(
+        fileNames as unknown as Array<fs.Dirent<Buffer>>,
+      );
+      const setImmediateSpy = vi.spyOn(globalThis, 'setImmediate');
+
+      await sessionService.listSessions({ size: 0 });
+
+      expect(statSyncSpy).toHaveBeenCalledTimes(129);
+      expect(setImmediateSpy).not.toHaveBeenCalled();
+    });
+
+    it('passes cancellation to the per-file JSONL read', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      const controller = new AbortController();
+      const reason = new Error('cancelled during session JSONL read');
+      let readSignal: AbortSignal | undefined;
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (_filePath, _count, options) => {
+          readSignal = options?.signal;
+          await new Promise<void>((_resolve, reject) => {
+            readSignal?.addEventListener(
+              'abort',
+              () => reject(readSignal?.reason),
+              { once: true },
+            );
+          });
+          return [];
+        },
+      );
+
+      const result = sessionService.listSessions({
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(readSignal).toBe(controller.signal));
+      controller.abort(reason);
+
+      await expect(result).rejects.toBe(reason);
+      expect(jsonl.readLines).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.jsonl`),
+        expect.any(Number),
+        { signal: controller.signal },
+      );
+    });
+
+    it('passes cancellation through migrated-session membership reads', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      const migratedRecord = { ...recordA1, cwd: '/old/project' };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      const controller = new AbortController();
+
+      await sessionService.listSessions({ signal: controller.signal });
+
+      expect(readRuntimeStatus).toHaveBeenCalledWith(expect.any(String), {
+        signal: controller.signal,
+      });
+    });
+
     it('should return empty list when chats directory does not exist', async () => {
       const error = new Error('ENOENT') as NodeJS.ErrnoException;
       error.code = 'ENOENT';
@@ -364,6 +465,114 @@ describe('SessionService', () => {
       expect(result.items[0].gitBranch).toBe('main');
     });
 
+    it('should use recorded display text for the session list prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions\n\nhello' }],
+          },
+          systemPayload: { displayText: 'hello', hookContext: '' },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('hello');
+    });
+
+    it('should keep an intentionally empty display prompt empty', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('');
+    });
+
+    it('should use a later prompt after an empty display prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
+    });
+
+    it('should skip internal user-subtype records after an empty projection', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'cron',
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: 'internal cron prompt' }] },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
+    });
+
     it('should NOT populate messageCount during listing', async () => {
       // Listing must avoid the full-file readline that counting requires
       // — message counts are now lazy and provided by
@@ -406,6 +615,28 @@ describe('SessionService', () => {
 
       expect(result.items[0].prompt.length).toBe(203); // 200 + '...'
       expect(result.items[0].prompt.endsWith('...')).toBe(true);
+    });
+
+    it('should truncate long prompts on code-point boundaries', async () => {
+      const longPrompt = '😀'.repeat(300);
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: { role: 'user', parts: [{ text: longPrompt }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(Array.from(result.items[0].prompt)).toHaveLength(203);
+      expect(result.items[0].prompt).toBe(`${'😀'.repeat(200)}...`);
     });
 
     it('should paginate with size parameter', async () => {
@@ -2255,6 +2486,21 @@ describe('SessionService', () => {
     });
   });
 
+  describe('findSessionIdIgnoringCase', () => {
+    it('finds a legacy mixed-case transcript', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy.mockReturnValue([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (sessionId) =>
+          sessionId === legacySessionId ? 'active' : undefined,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
@@ -2314,6 +2560,82 @@ describe('SessionService', () => {
       );
 
       expect(exists).toBe(false);
+    });
+
+    it('does not convert cancellation into a missing session', async () => {
+      const controller = new AbortController();
+      const reason = new Error('existence check cancelled');
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (_filePath, _count, options) => {
+          controller.abort(reason);
+          options?.signal?.throwIfAborted();
+          return [];
+        },
+      );
+
+      await expect(
+        sessionService.sessionExists(sessionIdA, {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(jsonl.readLines).toHaveBeenCalledWith(expect.any(String), 1, {
+        signal: controller.signal,
+      });
+    });
+
+    it('observes cancellation after the project-membership await', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const controller = new AbortController();
+      const reason = new Error('cancelled after membership resolved');
+
+      const exists = sessionService.sessionExists(sessionIdA, {
+        signal: controller.signal,
+      });
+      queueMicrotask(() => controller.abort(reason));
+
+      await expect(exists).rejects.toBe(reason);
+    });
+
+    it('passes cancellation to migrated-session runtime status reads', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+      const controller = new AbortController();
+      const reason = new Error('cancelled during runtime status read');
+      let runtimeStatusSignal: AbortSignal | undefined;
+      vi.mocked(readRuntimeStatus).mockImplementation(
+        async (_filePath, options) => {
+          runtimeStatusSignal = options?.signal;
+          await new Promise<void>((_resolve, reject) => {
+            runtimeStatusSignal?.addEventListener(
+              'abort',
+              () => reject(runtimeStatusSignal?.reason),
+              { once: true },
+            );
+          });
+          return null;
+        },
+      );
+
+      const exists = sessionService.sessionExists(sessionIdA, {
+        signal: controller.signal,
+      });
+      await vi.waitFor(() =>
+        expect(runtimeStatusSignal).toBe(controller.signal),
+      );
+      controller.abort(reason);
+
+      await expect(exists).rejects.toBe(reason);
+      expect(readRuntimeStatus).toHaveBeenCalledWith(expect.any(String), {
+        signal: controller.signal,
+      });
     });
 
     it('should return false for session from different project', async () => {

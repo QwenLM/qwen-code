@@ -100,6 +100,194 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('uploads an Extension archive from the manager @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  let uploadUrl = '';
+  let uploadHeaders: Record<string, string> = {};
+  let uploadBody: Buffer | null = null;
+  let rejectUpload = false;
+  await page.route(
+    '**/workspace/extensions/install-archive?*',
+    async (route) => {
+      uploadUrl = route.request().url();
+      uploadHeaders = route.request().headers();
+      uploadBody = route.request().postDataBuffer();
+      await route.fulfill({
+        contentType: 'application/json',
+        status: rejectUpload ? 400 : 202,
+        body: JSON.stringify(
+          rejectUpload
+            ? { error: 'Archive rejected for test' }
+            : { accepted: true, operationId: 'op-upload' },
+        ),
+      });
+    },
+  );
+  await page.route(
+    '**/workspace/extensions/operations/op-upload',
+    async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          v: 1,
+          operationId: 'op-upload',
+          operation: 'install',
+          status: 'succeeded',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          result: {
+            status: 'installed',
+            source: 'upload:demo.zip',
+            name: 'demo',
+            version: '1.0.0',
+          },
+        }),
+      });
+    },
+  );
+
+  await gotoSession(page, scenario, daemon);
+  await submitLocalCommand(page, '/extensions');
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
+  await archiveInput.setInputFiles({
+    name: 'stale.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('stale-archive'),
+  });
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'backup.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'扩'.repeat(84)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(
+    page.getByText(
+      'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  for (const name of ['bad\\name.zip', 'bad\u007fname.zip']) {
+    await archiveInput.setInputFiles({
+      name,
+      mimeType: 'application/zip',
+      buffer: Buffer.from('archive-content'),
+    });
+    await expect(
+      page.getByText(
+        'Select a .zip or .tar.gz Extension archive with a valid filename up to 255 bytes.',
+      ),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+  }
+
+  await archiveInput.setInputFiles({
+    name: 'empty.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(0),
+  });
+  await expect(
+    page.getByText('The selected Extension archive is empty.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: `${'a'.repeat(251)}.zip`,
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'exact.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024),
+  });
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'large.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.alloc(10 * 1024 * 1024 + 1),
+  });
+  await expect(
+    page.getByText('Extension archives must be 10 MB or smaller.'),
+  ).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+
+  await archiveInput.setInputFiles({
+    name: 'demo.tar.gz',
+    mimeType: 'application/gzip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.tar.gz')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  await archiveInput.setInputFiles({
+    name: 'demo.zip',
+    mimeType: 'application/zip',
+    buffer: Buffer.from('archive-content'),
+  });
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  rejectUpload = true;
+  await page.getByRole('button', { name: 'Install' }).click();
+  await expect(page.getByText('Archive rejected for test')).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toBeVisible();
+  await expect(page.getByText('Selected archive: demo.zip')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install' })).toBeEnabled();
+
+  uploadUrl = '';
+  uploadHeaders = {};
+  uploadBody = null;
+  rejectUpload = false;
+  await page.getByRole('button', { name: 'Install' }).click();
+
+  await expect
+    .poll(() => uploadUrl)
+    .toContain(
+      '/workspace/extensions/install-archive?filename=demo.zip&consent=true',
+    );
+  expect(uploadHeaders['content-type']).toBe('application/octet-stream');
+  expect(uploadHeaders['x-qwen-client-id']).toBe(scenario.clientId);
+  expect(uploadBody?.toString()).toBe('archive-content');
+  await expect(
+    page.getByRole('heading', { name: 'Add Extension' }),
+  ).toHaveCount(0);
+  await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
+  await page.getByRole('button', { name: 'Add' }).click();
+  await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.getByRole('tab', { name: 'Archive' }).click();
+  await expect(page.getByText('Selected archive: demo.zip')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
+});
+
 test('pastes long plain text as editable composer content @smoke', async ({
   page,
 }, testInfo) => {
@@ -640,6 +828,9 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
         return panelBox.y + panelBox.height - surfaceBox.y;
       })
       .toBeLessThanOrEqual(-7);
+    // The search input takes focus asynchronously after Ctrl+R; Escape only
+    // dismisses the panel when it lands on that input, so pin focus first.
+    await expect(historySearch).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(historySearch).toHaveCount(0);
 
@@ -796,6 +987,56 @@ test('lets a pasted image grow the composer without collapsing the text viewport
   await expect.poll(() => composerHeight(page)).toBe(initialHeight);
 });
 
+test('drops ordered PNG and BMP images and submits them without text @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const surface = page.locator('[data-web-shell-composer-surface]');
+  await dragComposerFileOver(surface);
+  await expect(surface).toHaveAttribute('data-image-drag-active', 'true');
+
+  await dropComposerImages(surface);
+  await expect(surface).not.toHaveAttribute('data-image-drag-active');
+  await expect(surface).not.toHaveAttribute('aria-busy');
+  const images = surface.locator(
+    '[data-web-shell-composer-attachments] img[src^="data:image/"]',
+  );
+  await expect(images).toHaveCount(2);
+  await expectImagesDecoded(images);
+
+  const submit = page.locator('[data-web-shell-composer-submit]');
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const prompt = requestBodyRecord(firstRequest(daemon.promptRequests()))[
+    'prompt'
+  ];
+  expect(Array.isArray(prompt)).toBe(true);
+  const blocks = prompt as Array<Record<string, unknown>>;
+  expect(blocks[0]).toMatchObject({ type: 'text', text: '' });
+  expect(blocks.slice(1)).toEqual([
+    {
+      type: 'image',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      mimeType: 'image/png',
+    },
+    {
+      type: 'image',
+      data: 'Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAD/AA==',
+      mimeType: 'image/bmp',
+    },
+  ]);
+  const transcriptImages = page.locator(
+    '[data-web-shell-message-list] img[src^="data:image/"]',
+  );
+  await expect(transcriptImages).toHaveCount(2);
+  await expectImagesDecoded(transcriptImages);
+});
+
 async function installScenario(
   page: Page,
   scenario: WebShellDaemonScenario,
@@ -902,6 +1143,64 @@ async function pasteComposerImages(page: Page, count: number): Promise<void> {
       }),
     );
   }, count);
+}
+
+async function dragComposerFileOver(surface: Locator): Promise<void> {
+  await surface.evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([new Uint8Array([0])], 'dragged.png', { type: 'image/png' }),
+    );
+    element.dispatchEvent(
+      new DragEvent('dragenter', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
+}
+
+async function dropComposerImages(surface: Locator): Promise<void> {
+  await surface.evaluate((element) => {
+    const pngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const binary = atob(pngBase64);
+    const pngBytes = Uint8Array.from(binary, (byte) => byte.charCodeAt(0));
+    const bmpBytes = new Uint8Array(58);
+    const view = new DataView(bmpBytes.buffer);
+    bmpBytes.set([0x42, 0x4d]);
+    view.setUint32(2, bmpBytes.length, true);
+    view.setUint32(10, 54, true);
+    view.setUint32(14, 40, true);
+    view.setInt32(18, 1, true);
+    view.setInt32(22, 1, true);
+    view.setUint16(26, 1, true);
+    view.setUint16(28, 24, true);
+    view.setUint32(34, 4, true);
+    bmpBytes.set([0x00, 0x00, 0xff, 0x00], 54);
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File([pngBytes], 'first.png', { type: 'image/png' }),
+    );
+    transfer.items.add(
+      new File([bmpBytes], 'second.bmp', { type: 'image/bmp' }),
+    );
+    element.dispatchEvent(
+      new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+    element.dispatchEvent(
+      new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
 }
 
 async function expectImagesDecoded(images: Locator): Promise<void> {

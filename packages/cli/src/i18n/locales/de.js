@@ -1532,7 +1532,16 @@ export default {
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',
+  Pausing: 'Wird pausiert',
   Paused: 'Pausiert',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Das Pausieren ist kooperativ; laufende Arbeiten werden möglicherweise abgeschlossen, bevor der Workflow pausiert ist. Ein Agentenaufruf, der auf eine Tool-Genehmigung wartet, hält den Lauf in diesem Zustand und zählt weiter gegen das Aktive-Zeit-Limit, bis die Genehmigung beantwortet wird.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausiert: Es werden keine neuen Agenten gestartet; Skriptcode zwischen Agentenaufrufen läuft weiter. Drücke p, um fortzufahren. /clear, /branch und ein Sitzungswechsel beenden pausierte Läufe.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pausieren/Fortsetzen wurde abgelehnt; der Workflow-Status hat sich geändert. Versuche es erneut.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tipp: Verwende `/workflows p <runId>` oder Hintergrundaufgaben + p, um einen Lauf kooperativ zu pausieren/fortzusetzen; mit `/workflows <runId>` siehst du Details.',
   Completed: 'Abgeschlossen',
   Failed: 'Fehlgeschlagen',
   Stopped: 'Gestoppt',
@@ -2307,4 +2316,5 @@ export default {
     'Änderungen durch den Auto-Skill-Kurator sind im Sicherheitsmodus deaktiviert.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
+  'Kept model as {{model}}': 'Modell als {{model}} beibehalten',
 };

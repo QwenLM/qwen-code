@@ -255,3 +255,12 @@
   object-fit: contain;
   border: 1px solid var(--border);
 }
+
+.chatImageThumbInteractive {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.chatImageThumbInteractive:hover {
+  opacity: 0.85;
+}

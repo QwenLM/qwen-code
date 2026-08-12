@@ -1593,7 +1593,16 @@ export default {
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
   Running: 'En execució',
+  Pausing: 'Pausant',
   Paused: 'En pausa',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pausa és cooperativa; el treball en curs pot acabar abans que el flux de treball es posi en pausa. Una crida d'agent que espera una aprovació d'eina manté l'execució en aquest estat i continua comptant per al límit de temps actiu fins que es respongui l'aprovació.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pausa: no s'iniciaran agents nous; el codi de l'script entre crides d'agent continua executant-se. Prem p per reprendre. /clear, /branch i el canvi de sessió cancel·len les execucions en pausa.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La pausa o la represa ha estat rebutjada; l'estat del flux de treball ha canviat. Torna-ho a provar.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Consell: usa `/workflows p <runId>` o Tasques en segon pla + p per posar en pausa/reprendre cooperativament; usa `/workflows <runId>` per veure els detalls.',
   Completed: 'Completada',
   Failed: 'Fallida',
   Stopped: 'Aturada',
@@ -2622,6 +2631,7 @@ export default {
     'Ctrl+Q per posar a la cua · ↑ per editar els missatges en cua',
   'Enter to steer · Ctrl+Q to queue':
     'Return per redirigir · Ctrl+Q per posar a la cua',
+  '{{count}} queued': '{{count}} a la cua',
   'Queue message for the next turn':
     'Posar el missatge a la cua per al torn següent',
   '{{count}} session': '{{count}} sessió',
@@ -2825,4 +2835,5 @@ export default {
     "Els canvis del gestor d'habilitats automàtiques estan desactivats en mode segur.",
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
+  'Kept model as {{model}}': 'Model mantingut com a {{model}}',
 };

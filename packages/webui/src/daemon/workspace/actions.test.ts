@@ -55,6 +55,32 @@ describe('workspace actions', () => {
     expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
   });
 
+  it('allows the SDK archive timeout to run before the wrapper timeout', async () => {
+    vi.useFakeTimers();
+    const installExtensionArchive = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ installExtensionArchive }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    const result = actions
+      .installExtensionArchive({
+        archive: new Blob(['archive']),
+        filename: 'demo.zip',
+        consent: true,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    await vi.advanceTimersByTimeAsync(130_000);
+
+    await expect(result).resolves.toMatchObject({
+      message: 'Install extension timed out after 130000ms',
+    });
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));

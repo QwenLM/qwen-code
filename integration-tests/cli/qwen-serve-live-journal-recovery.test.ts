@@ -35,17 +35,65 @@ function updateKind(event: DaemonEvent): unknown {
 }
 
 describe('qwen serve live journal recovery', () => {
+  it('keeps a compatible live chunk stream within the replay entry cap', async () => {
+    const workspace = makeTempWorkspace('live-journal-aggregation');
+    try {
+      activeDaemon = await spawnDaemon({
+        workspaceCwd: workspace,
+        extraArgs: ['--max-journal-events', '3'],
+        env: {
+          QWEN_CLI_ENTRY: MOCK_AGENT_PATH,
+          MOCK_ACP_MODE: 'echo',
+          MOCK_ACP_EMIT_CHUNKS: '20',
+          MOCK_ACP_PROMPT_DELAY_MS: '1500',
+        },
+      });
+      const created = await activeDaemon.client.createOrAttachSession({
+        sessionScope: 'thread',
+      });
+      const prompt = activeDaemon.client.prompt(created.sessionId, {
+        prompt: [{ type: 'text', text: 'aggregate this live turn' }],
+      });
+
+      let duringTurn: DaemonSessionClient | undefined;
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const loaded = await DaemonSessionClient.load(
+          activeDaemon.client,
+          created.sessionId,
+          {},
+          'live-journal-observer',
+        );
+        const replayText = JSON.stringify(loaded.replaySnapshot.liveJournal);
+        if (replayText.includes('chunk-19')) {
+          duringTurn = loaded;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(duringTurn).toBeDefined();
+      expect(duringTurn!.replaySnapshot.liveJournal).not.toContainEqual(
+        expect.objectContaining({ type: 'history_truncated' }),
+      );
+      const replayText = JSON.stringify(duringTurn!.replaySnapshot.liveJournal);
+      expect(replayText).toContain('chunk-0');
+      expect(replayText).toContain('chunk-19');
+
+      await prompt;
+    } finally {
+      await activeDaemon?.dispose();
+      activeDaemon = undefined;
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('attributes a truncated live tail and exposes the complete turn after terminal', async () => {
     const workspace = makeTempWorkspace('live-journal-recovery');
     try {
       activeDaemon = await spawnDaemon({
         workspaceCwd: workspace,
-        extraArgs: [
-          '--max-journal-events',
-          '3',
-          '--max-journal-bytes',
-          String(8 * 1024 * 1024),
-        ],
+        extraArgs: ['--max-journal-events', '3', '--max-journal-bytes', '300'],
         env: {
           QWEN_CLI_ENTRY: MOCK_AGENT_PATH,
           MOCK_ACP_MODE: 'echo',
@@ -89,19 +137,19 @@ describe('qwen serve live journal recovery', () => {
         data: {
           scope: 'live_journal',
           maxEvents: 3,
+          truncatedEvents: expect.any(Number),
           fullTranscriptAvailable: true,
         },
       });
-      expect(duringTurn!.replaySnapshot.liveJournal).not.toContainEqual(
-        expect.objectContaining({
-          type: 'session_update',
-          data: expect.objectContaining({
-            update: expect.objectContaining({
-              content: expect.objectContaining({ text: 'chunk-0' }),
-            }),
-          }),
-        }),
-      );
+      expect(
+        (marker?.data as { truncatedEvents?: number } | undefined)
+          ?.truncatedEvents,
+      ).toBeGreaterThan(0);
+      // Merged entries concatenate up to 256 source chunks, so an exact
+      // per-entry match can never hold; assert on the serialized tail.
+      expect(
+        JSON.stringify(duringTurn!.replaySnapshot.liveJournal),
+      ).not.toContain('chunk-0');
 
       await prompt;
       const repaired = await DaemonSessionClient.load(

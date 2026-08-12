@@ -21,6 +21,7 @@ import type {
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import {
@@ -127,6 +128,8 @@ export interface ListSessionsOptions {
    * @default 'active'
    */
   archiveState?: SessionArchiveState;
+  /** Aborts an in-progress catalog scan. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -240,6 +243,7 @@ export interface ResumedSessionData {
  * This is a safety limit to prevent performance issues with very large chat directories.
  */
 const MAX_FILES_TO_PROCESS = 10000;
+const SESSION_LIST_CANCEL_YIELD_INTERVAL = 128;
 
 /**
  * Maximum character length for a session custom title.
@@ -402,7 +406,9 @@ export class SessionService {
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    signal?.throwIfAborted();
     if (getProjectHash(recordCwd) === this.projectHash) {
       return true;
     }
@@ -425,9 +431,11 @@ export class SessionService {
       }
     }
 
-    const status = await readRuntimeStatus(
-      this.storage.getRuntimeStatusPath(sessionId),
-    );
+    const runtimeStatusPath = this.storage.getRuntimeStatusPath(sessionId);
+    const status = signal
+      ? await readRuntimeStatus(runtimeStatusPath, { signal })
+      : await readRuntimeStatus(runtimeStatusPath);
+    signal?.throwIfAborted();
     return (
       status?.sessionId === sessionId &&
       getProjectHash(status.workDir) === this.projectHash
@@ -538,6 +546,33 @@ export class SessionService {
     if (active && archived) return 'conflict';
     if (active) return 'active';
     if (archived) return 'archived';
+    return undefined;
+  }
+
+  /**
+   * Finds a persisted session whose UUID filename differs only by case.
+   * Legacy CLI sessions may have been written with `uuidgen`'s uppercase
+   * spelling, while daemon-facing caller IDs are canonicalized to lowercase.
+   */
+  async findSessionIdIgnoringCase(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+    for (const state of ['active', 'archived'] as const) {
+      let fileNames: string[];
+      try {
+        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      for (const fileName of fileNames) {
+        if (fileName.toLowerCase() !== expectedFileName) continue;
+        const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
+        const location = await this.getSessionLocation(candidateSessionId);
+        if (location !== undefined) return candidateSessionId;
+      }
+    }
     return undefined;
   }
 
@@ -829,8 +864,7 @@ export class SessionService {
       if ('text' in part) {
         const textPart = part as { text: string };
         const text = textPart.text;
-        // Truncate long prompts for display
-        return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+        return this.truncatePromptForDisplay(text);
       }
     }
     return '';
@@ -842,11 +876,34 @@ export class SessionService {
    */
   private extractFirstPromptFromRecords(records: ChatRecord[]): string {
     for (const record of records) {
-      if (record.type !== 'user') continue;
+      if (record.type !== 'user' || record.subtype !== undefined) continue;
+      const payload = record.systemPayload as
+        | UserPromptRecordPayload
+        | undefined;
+      if (payload?.displayText !== undefined) {
+        const displayText = payload.displayText;
+        if (displayText) {
+          return this.truncatePromptForDisplay(displayText);
+        }
+        continue;
+      }
       const prompt = this.extractPromptText(record.message);
-      if (prompt) return prompt;
+      if (prompt) {
+        return prompt;
+      }
     }
     return '';
+  }
+
+  private truncatePromptForDisplay(text: string): string {
+    const codePoints: string[] = [];
+    for (const codePoint of text) {
+      if (codePoints.length === 200) {
+        return `${codePoints.join('')}...`;
+      }
+      codePoints.push(codePoint);
+    }
+    return text;
   }
 
   /**
@@ -943,35 +1000,44 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20, archiveState = 'active' } = options;
+    const { cursor, size = 20, archiveState = 'active', signal } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
+    signal?.throwIfAborted();
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
     try {
       const fileNames = fs.readdirSync(chatsDir);
-      for (const name of fileNames) {
-        // Only process files matching session file pattern
-        if (!SESSION_FILE_PATTERN.test(name)) continue;
-        const filePath = path.join(chatsDir, name);
-        try {
-          const stats = fs.statSync(filePath);
-          files.push({ name, mtime: stats.mtimeMs });
-        } catch {
-          // Skip files we can't stat
-          continue;
+      signal?.throwIfAborted();
+      for (const [index, name] of fileNames.entries()) {
+        if (SESSION_FILE_PATTERN.test(name)) {
+          const filePath = path.join(chatsDir, name);
+          try {
+            const stats = fs.statSync(filePath);
+            files.push({ name, mtime: stats.mtimeMs });
+          } catch {
+            // Skip files we can't stat
+          }
+        }
+        if (signal && (index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+          signal.throwIfAborted();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
         }
       }
     } catch (error) {
+      signal?.throwIfAborted();
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { items: [], hasMore: false };
       }
       throw error;
     }
+    signal?.throwIfAborted();
 
     // Sort by mtime descending (most recent first)
     files.sort((a, b) => b.mtime - a.mtime);
+    signal?.throwIfAborted();
 
     // Apply cursor filter (items with mtime < cursor)
     if (cursor !== undefined) {
@@ -994,6 +1060,7 @@ export class SessionService {
     const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const file of files) {
+      signal?.throwIfAborted();
       // Safety limit to prevent performance issues
       if (filesProcessed >= MAX_FILES_TO_PROCESS) {
         hasMoreFiles = true;
@@ -1010,10 +1077,12 @@ export class SessionService {
       lastProcessedMtime = file.mtime;
 
       const filePath = path.join(chatsDir, file.name);
-      const records = await jsonl.readLines<ChatRecord>(
-        filePath,
-        MAX_PROMPT_SCAN_LINES,
-      );
+      const records = signal
+        ? await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES, {
+            signal,
+          })
+        : await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES);
+      signal?.throwIfAborted();
 
       if (records.length === 0) continue;
       const firstRecord = records[0];
@@ -1022,6 +1091,7 @@ export class SessionService {
         !(await this.sessionBelongsToCurrentProject(
           firstRecord.sessionId,
           firstRecord.cwd,
+          signal,
         ))
       ) {
         continue;
@@ -1029,7 +1099,9 @@ export class SessionService {
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
+      signal?.throwIfAborted();
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      signal?.throwIfAborted();
       const source = this.extractCreationMetadataFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
@@ -1051,6 +1123,7 @@ export class SessionService {
         isArchived,
       });
     }
+    signal?.throwIfAborted();
 
     // Determine next cursor (mtime of last processed file)
     // Only set if there are more files to process
@@ -2077,7 +2150,11 @@ export class SessionService {
    * @remarks Only checks active sessions. Use `getSessionLocation()` or
    * `sessionExistsInAnyState()` for archive-aware lookups.
    */
-  async sessionExists(sessionId: string): Promise<boolean> {
+  async sessionExists(
+    sessionId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    options.signal?.throwIfAborted();
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
@@ -2085,12 +2162,22 @@ export class SessionService {
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      const records = options.signal
+        ? await jsonl.readLines<ChatRecord>(filePath, 1, options)
+        : await jsonl.readLines<ChatRecord>(filePath, 1);
+      options.signal?.throwIfAborted();
       if (records.length === 0) {
         return false;
       }
-      return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
+      const belongsToCurrentProject = await this.sessionBelongsToCurrentProject(
+        sessionId,
+        records[0].cwd,
+        options.signal,
+      );
+      options.signal?.throwIfAborted();
+      return belongsToCurrentProject;
     } catch {
+      options.signal?.throwIfAborted();
       return false;
     }
   }

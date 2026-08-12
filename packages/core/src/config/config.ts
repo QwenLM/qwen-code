@@ -45,6 +45,11 @@ import {
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
+import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
+import {
+  DashScopeOpenAICompatibleProvider,
+  selectDashScopeThinkingKnob,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -129,6 +134,7 @@ import {
   shutdownTelemetry,
   refreshSessionContext,
   logStartSession,
+  logSessionEnd,
   logRipgrepFallback,
   RipgrepFallbackEvent,
   StartSessionEvent,
@@ -166,6 +172,7 @@ import {
   type GoalRuntime,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import { createGoalCheckpointVerifier } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
@@ -672,7 +679,12 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   };
 }
 
-export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
 export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
@@ -680,6 +692,8 @@ export interface ExtensionInstallMetadata {
   type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
+  gitCommit?: string; // Commit recorded when the installation source was cloned.
+  externalContent?: boolean; // Installed content came from a source nested outside the recorded source.
   registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
@@ -841,6 +855,7 @@ export class MCPServerConfig {
      */
     readonly scope?: McpServerScope,
     readonly alwaysLoadTools?: boolean,
+    readonly agentPluginV1?: boolean,
   ) {}
 }
 
@@ -1695,6 +1710,15 @@ export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
 
+/**
+ * A higher-priority static DashScope thinking knob that shadows the global
+ * reasoning-effort tier on the wire (see getReasoningEffortOverride).
+ */
+export type ReasoningEffortOverride = {
+  source: 'extra_body' | 'samplingParams';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+};
+
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
 function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
@@ -1931,6 +1955,19 @@ export class Config {
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private goalRuntime: GoalRuntime | undefined;
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  /**
+   * A Goal restore held back because the session writer is not accepting
+   * writes yet. Settled by {@link startPendingGoalRestore} once the
+   * recorder has its lease, or by {@link settlePendingGoalRestore} when the
+   * writer never arrives.
+   */
+  private pendingGoalRestore:
+    | {
+        readonly runtime: GoalRuntime;
+        readonly resolve: (runtime: GoalRuntime) => void;
+        readonly reject: (error: unknown) => void;
+      }
+    | undefined;
   private goalTurnHost: GoalTurnHost | undefined;
   private goalTurnHostUnbind: (() => void) | undefined;
   private goalTurnHostGeneration = 0;
@@ -3165,6 +3202,11 @@ export class Config {
       recorder.activate(lease, authoritative, persistedTitleInfo);
       this.pendingSessionWriterLease = undefined;
       lease = undefined;
+      // The recorder can take writes now, so the restore the constructor
+      // held back can finally run — against `authoritative`, which is
+      // fresher than what the constructor had. Not awaited: activation
+      // latency is unchanged, and `getGoalRuntimeReady()` is what waits.
+      this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
       if (
@@ -3206,6 +3248,10 @@ export class Config {
           });
         }
       }
+      // The writer never became available, so the deferred restore can never
+      // run. Fail it with the activation error instead of leaving every
+      // `getGoalRuntimeReady()` caller pending forever.
+      this.settlePendingGoalRestore(failure);
       throw failure;
     }
   }
@@ -3794,7 +3840,15 @@ export class Config {
     });
 
     const previousSessionId = this.sessionId;
-    this.sessionId = sessionId ?? randomUUID();
+    const nextSessionId = sessionId ?? randomUUID();
+    // Resuming the session the user is already in keeps the same id. That is
+    // not a lifecycle transition: ending it here would record session.end for
+    // a live session and pair it with a duplicate session.start.
+    const isSessionTransition = nextSessionId !== previousSessionId;
+    if (isSessionTransition) {
+      logSessionEnd(this);
+    }
+    this.sessionId = nextSessionId;
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
     // correctly updates the env var to reflect the new active session.
@@ -3840,7 +3894,11 @@ export class Config {
     // one, and the "N-shotted" PR label would span sessions.
     CommitAttributionService.resetInstance();
     if (this.initialized) {
-      logStartSession(this, new StartSessionEvent(this));
+      logStartSession(
+        this,
+        new StartSessionEvent(this),
+        sessionData && isSessionTransition ? previousSessionId : undefined,
+      );
     }
 
     // Refresh the runtime.json sidecar so external observers (terminal
@@ -3856,7 +3914,7 @@ export class Config {
     // sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
-    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
+    if (this.runtimeStatusEnabled && isSessionTransition) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
       const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
       const cliVersion = this.cliVersion ?? null;
@@ -4202,6 +4260,63 @@ export class Config {
       return undefined;
     }
     return reasoning.effort;
+  }
+
+  /**
+   * Return a higher-priority static DashScope knob that shadows the current
+   * global effort on qwen3.8-max, so interactive callers can report the
+   * effective outcome instead of confirming a tier that will not reach the
+   * wire. The provider resolves extra_body before samplingParams before the
+   * unified reasoning setting; same-layer explicit effort still wins budget.
+   */
+  getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
+    const cfg = this.getContentGeneratorConfig();
+    if (
+      !cfg ||
+      !DashScopeOpenAICompatibleProvider.isDashScopeProvider(cfg) ||
+      !isTieredEffortWireModel(cfg.model)
+    ) {
+      return undefined;
+    }
+
+    const currentEffort = this.getReasoningEffort();
+    const selected = selectDashScopeThinkingKnob(
+      cfg.model,
+      cfg.extra_body,
+      cfg.samplingParams,
+      currentEffort,
+    );
+    if (
+      !selected ||
+      selected.source === 'reasoning' ||
+      (selected.field === 'reasoning_effort' &&
+        selected.value === currentEffort)
+    ) {
+      return undefined;
+    }
+    if (selected.field === 'enable_thinking' && selected.value === true) {
+      // An on-switch never blocks the tier — the wire drops the switch and
+      // ships it — so only a request-level effort override can still shadow
+      // the current tier from under it.
+      if (selected.source !== 'extra_body') {
+        return undefined;
+      }
+      const below = selectDashScopeThinkingKnob(
+        cfg.model,
+        undefined,
+        cfg.samplingParams,
+        currentEffort,
+      );
+      if (
+        below?.source === 'samplingParams' &&
+        below.field === 'reasoning_effort' &&
+        below.value !== currentEffort
+      ) {
+        return { source: below.source, field: below.field };
+      }
+      return undefined;
+    }
+    return { source: selected.source, field: selected.field };
   }
 
   /**
@@ -4998,6 +5113,13 @@ export class Config {
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.goalTurnHostUnbind?.();
         this.goalTurnHostUnbind = undefined;
+        // Shutting down before the writer arrived: nothing will ever run
+        // the deferred restore, so settle it rather than strand awaiters.
+        this.settlePendingGoalRestore(
+          new GoalPersistenceUnavailableError(
+            'Config shut down before the session writer became available',
+          ),
+        );
         this.goalRuntime?.dispose();
       }
 
@@ -7417,22 +7539,89 @@ export class Config {
   private initializeGoalRuntime(records?: readonly ChatRecord[]): void {
     this.goalTurnHostUnbind?.();
     this.goalTurnHostUnbind = undefined;
+    // A runtime built here supersedes any restore still waiting on the
+    // writer: its records belong to the outgoing session.
+    this.settlePendingGoalRestore(
+      new GoalPersistenceUnavailableError(
+        'Goal runtime was replaced before the session writer became available',
+      ),
+    );
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
       this.goalRuntimeReady = undefined;
       return;
     }
+    const recorder = this.chatRecordingService;
     const runtime = createGoalRuntime({
-      journal: this.chatRecordingService,
-      evidenceSource: this.chatRecordingService,
+      journal: recorder,
+      evidenceSource: recorder,
       verifier: createGoalVerifier(this),
+      checkpointVerifier: createGoalCheckpointVerifier(this),
     });
     this.goalRuntime = runtime;
     if (this.goalTurnHost) {
       this.goalTurnHostUnbind = runtime.bindHost(this.goalTurnHost);
     }
-    this.goalRuntimeReady = runtime.restore(records ?? []).then(() => runtime);
+    // Under a session-writer lease the recorder starts `inactive` and
+    // rejects every write until `activateChatRecording()` hands it the
+    // lease. Restoring now would push the legacy-migration journal write
+    // straight into that guard, and `restore()` latches the resulting
+    // failure as `recoveryError` for the life of the runtime — the
+    // migrated goal is dropped and goal persistence is bricked for the
+    // whole resumed session. Wait for the writer instead.
+    if (this.sessionWriterLeaseEnabled && !recorder.hasWriteOwnership()) {
+      const ready = new Promise<GoalRuntime>((resolve, reject) => {
+        this.pendingGoalRestore = { runtime, resolve, reject };
+      });
+      this.goalRuntimeReady = ready;
+    } else {
+      this.goalRuntimeReady = runtime
+        .restore(records ?? [])
+        .then(() => runtime);
+    }
     void this.goalRuntimeReady.catch(() => undefined);
+  }
+
+  /**
+   * Run the restore that {@link initializeGoalRuntime} deferred because the
+   * session writer was not yet accepting writes.
+   *
+   * Called once `activateChatRecording()` has handed the recorder its lease.
+   * Deliberately re-reads the records from `sessionData`: activation
+   * replaces it with the authoritative transcript loaded under the lease, so
+   * the deferred restore sees newer records than the constructor did.
+   */
+  private startPendingGoalRestore(): void {
+    const pending = this.pendingGoalRestore;
+    if (!pending) return;
+    this.pendingGoalRestore = undefined;
+    if (pending.runtime !== this.goalRuntime) {
+      pending.reject(
+        new GoalPersistenceUnavailableError(
+          'Goal runtime was replaced before the session writer became available',
+        ),
+      );
+      return;
+    }
+    void pending.runtime
+      .restore(this.sessionData?.conversation.messages ?? [])
+      .then(
+        () => pending.resolve(pending.runtime),
+        (error: unknown) => pending.reject(error),
+      );
+  }
+
+  /**
+   * Fail a deferred restore that can never run — the writer never became
+   * available, or the runtime it belonged to was replaced. Without this the
+   * promise behind {@link getGoalRuntimeReady} would stay pending forever
+   * and every awaiting caller would hang rather than see the failure.
+   */
+  private settlePendingGoalRestore(error: unknown): void {
+    const pending = this.pendingGoalRestore;
+    if (!pending) return;
+    this.pendingGoalRestore = undefined;
+    pending.reject(error);
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
