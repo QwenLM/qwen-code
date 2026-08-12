@@ -5,10 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { StreamingState } from '../ui/types.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,
   formatSessionWindowTitle,
+  titleStatusPrefix,
 } from './windowTitle.js';
 
 describe('computeWindowTitle', () => {
@@ -226,5 +228,27 @@ describe('formatSessionWindowTitle', () => {
 
   it('should not add a prefix when statusPrefix is empty', () => {
     expect(formatSessionWindowTitle('s', 'p', '')).toBe('s');
+  });
+
+  it('should strip control characters from the status prefix', () => {
+    expect(
+      formatSessionWindowTitle('sess', 'proj', '\x07\x1b]2;evil\x07'),
+    ).toBe(']2;evilsess');
+  });
+});
+
+describe('titleStatusPrefix', () => {
+  it('should return the working symbol while responding', () => {
+    expect(titleStatusPrefix(StreamingState.Responding)).toBe('◐\uFE0E ');
+  });
+
+  it('should return the awaiting-confirmation symbol while waiting', () => {
+    expect(titleStatusPrefix(StreamingState.WaitingForConfirmation)).toBe(
+      '✳\uFE0E ',
+    );
+  });
+
+  it('should return no prefix when idle', () => {
+    expect(titleStatusPrefix(StreamingState.Idle)).toBe('');
   });
 });

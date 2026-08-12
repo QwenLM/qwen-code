@@ -33,7 +33,6 @@ import {
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
-import { ICON } from './constants.js';
 import {
   type EditorType,
   type Config,
@@ -157,6 +156,7 @@ import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
+  titleStatusPrefix,
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
@@ -4306,19 +4306,10 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     const folderName = basename(config.getTargetDir());
-    // Mirror Claude Code's tab status icons: a leading symbol conveys the
-    // streaming state in the window/tab title (◐ working,  awaiting
-    // confirmation). Idle gets no prefix.
-    const statusPrefix =
-      streamingState === StreamingState.Responding
-        ? `${ICON.CIRCLE_LEFT_HALF} `
-        : streamingState === StreamingState.WaitingForConfirmation
-          ? '✳\uFE0E '
-          : '';
     const title = formatSessionWindowTitle(
       sessionName,
       folderName,
-      statusPrefix,
+      titleStatusPrefix(streamingState),
     );
 
     // Only update the title if it's different from the last value we set
