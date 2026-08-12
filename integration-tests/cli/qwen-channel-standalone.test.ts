@@ -19,9 +19,17 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '../..');
+// Match the rest of the integration suite: prefer the bundled CLI path
+// that `globalSetup.ts` configures via `TEST_CLI_PATH` (root
+// `dist/cli.js`), falling back to the per-package output for direct
+// `vitest run integration-tests/...` invocations that bypass globalSetup.
+// The root bundle only exists after `npm run bundle` (`npm run build`
+// emits packages/*/dist/ only), so a bundle-only fallback fails with
+// misleading "Process exited before ..." errors when the last build step
+// was a plain build (#8975).
 const CLI_BIN =
-  process.env['TEST_CLI_PATH'] ?? path.join(REPO_ROOT, 'dist', 'cli.js');
+  process.env['TEST_CLI_PATH'] ??
+  path.resolve(__dirname, '../../packages/cli/dist/index.js');
 
 let child: ChildProcess | undefined;
 let testRoot: string | undefined;

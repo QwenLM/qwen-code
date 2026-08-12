@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 interface MockStateStoreInstance {
   path: string;
   setMany: ReturnType<typeof vi.fn>;
-  trySetMany: (names: string[], state: 'active' | 'stopped') => void;
+  trySetMany: (names: string[], state: 'active' | 'stopped') => boolean;
 }
 
 const mockChannelStateStoreInstances = vi.hoisted(
@@ -25,12 +25,14 @@ const mockChannelStateStore = vi.hoisted(() =>
       path,
       setMany,
       // Mirror the real best-effort wrapper so a throwing `setMany` mock
-      // still exercises "persistence failure never blocks a stop".
+      // still exercises "persistence failure never blocks a stop", and
+      // report the persisted boolean the route surfaces to API clients.
       trySetMany: (names: string[], state: 'active' | 'stopped') => {
         try {
           setMany(names, state);
+          return true;
         } catch {
-          // best-effort
+          return false;
         }
       },
     };
@@ -130,6 +132,9 @@ describe('DELETE /workspace/channel', () => {
       ['telegram', 'feishu'],
       'stopped',
     );
+    // The record persisted, so the happy-path response shape stays
+    // unchanged (the flag only appears on failure) (#8975).
+    expect(response.body).not.toHaveProperty('statePersisted');
   });
 
   it('records stops per workspace when the manager reports multiple workspaces (#8975)', async () => {
@@ -246,8 +251,9 @@ describe('DELETE /workspace/channel', () => {
         trySetMany: (names: string[], state: 'active' | 'stopped') => {
           try {
             instance.setMany(names, state);
+            return true;
           } catch {
-            // best-effort
+            return false;
           }
         },
       };
@@ -257,7 +263,12 @@ describe('DELETE /workspace/channel', () => {
 
     const response = await request(app).delete('/workspace/channel');
 
+    // The tear-down succeeded, so the stop itself still reports 200 — but
+    // the response must carry the persistence failure, or an API client
+    // treats the stop as durable and the stopped channels silently
+    // resurrect on the next `--channel all` start (#8975).
     expect(response.status).toBe(200);
     expect(response.body.changed).toBe(true);
+    expect(response.body.statePersisted).toBe(false);
   });
 });

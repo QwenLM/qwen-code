@@ -28,24 +28,25 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', async (importOriginal) => {
   return { ...actual, canonicalizeWorkspace: mockCanonicalizeWorkspace };
 });
 
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-
 const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
+const mockChannelStateStoreTrySetMany = vi.hoisted(() => vi.fn());
 const mockChannelStateStore = vi.hoisted(() =>
   vi.fn(() => ({
     readAll: vi.fn(() => ({})),
     set: mockChannelStateStoreSet,
     setMany: vi.fn(),
     // Mirror the real best-effort wrapper so a throwing `set` mock
-    // still exercises "persistence failure never blocks a stop".
+    // still exercises "persistence failure never blocks a stop", and
+    // report the persisted boolean for failure-path assertions.
     trySet: (name: string, state: 'active' | 'stopped') => {
       try {
         mockChannelStateStoreSet(name, state);
+        return true;
       } catch {
-        // best-effort
+        return false;
       }
     },
-    trySetMany: vi.fn(),
+    trySetMany: mockChannelStateStoreTrySetMany,
   })),
 );
 
@@ -58,10 +59,17 @@ import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+import { ChannelWorkerControlError } from './channel-worker-manager.js';
 
 beforeEach(() => {
   mockChannelStateStore.mockClear();
   mockChannelStateStoreSet.mockClear();
+  mockChannelStateStoreTrySetMany.mockClear();
+  mockChannelStateStoreTrySetMany.mockReturnValue(true);
+  // Individual tests install degraded-fs implementations; reset both the
+  // recorded calls and the implementation so a leak cannot cross tests.
+  mockCanonicalizeWorkspace.mockClear();
+  mockCanonicalizeWorkspace.mockImplementation((p: string) => path.resolve(p));
 });
 
 const WORKSPACE = '/ws/primary';
@@ -653,14 +661,24 @@ describe('createChannelManagementService', () => {
 
   it('records stops in the workspace state file (#8975)', async () => {
     const { service } = setup({ committedNames: ['bot'] });
+    // Simulate a workspace whose canonical form diverges from the raw
+    // path (e.g. a symlinked cwd): the store path must be derived from
+    // the CANONICAL form, matching the daemon worker's canonical restore
+    // read. The expected path is computed from the literal canonical
+    // value, NOT through the mock — dropping canonicalForGuard from the
+    // persistence call would hash the raw path and turn this red.
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === WORKSPACE ? `/canonical${WORKSPACE}` : path.resolve(p),
+    );
 
     await service.stop('bot');
 
+    expect(mockCanonicalizeWorkspace).toHaveBeenCalledWith(WORKSPACE);
     // Pin the EXACT workspace-derived path, not just its segments: a stop
     // written under a different hash than the daemon worker's restore read
     // resurrects the stopped channel after the next daemon restart.
     expect(mockChannelStateStore).toHaveBeenCalledWith(
-      daemonChannelRuntimeStatePath(canonicalizeWorkspace(WORKSPACE)),
+      daemonChannelRuntimeStatePath(`/canonical${WORKSPACE}`),
     );
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
@@ -671,6 +689,36 @@ describe('createChannelManagementService', () => {
 
     await expect(service.stop('bot')).rejects.toThrow('stop failed');
 
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
+  it('persists the torn-down channels when a failed stop carries them (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Disabling the LAST committed channel routes through the
+    // whole-selection stop, whose lease release can fail AFTER a successful
+    // tear-down; the manager carries the torn-down set on the error. The
+    // service must persist it like the whole-selection route does, or the
+    // channel resurrects on the next `--channel all` start while the
+    // per-channel route reports a bare 500 (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        stoppedChannels: [{ workspaceCwd: WORKSPACE, names: ['bot'] }],
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+    });
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(WORKSPACE),
+    );
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['bot'],
+      'stopped',
+    );
+    // The success-path single-name write must not run on the failure path.
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
@@ -683,6 +731,34 @@ describe('createChannelManagementService', () => {
     const result = await service.stop('bot');
 
     expect(result.instance.name).toBe('bot');
+  });
+
+  it('still records the stop when canonicalization fails on the persistence path (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // The stop is confirmed (changed: true), so the guard is never
+    // evaluated and every canonicalize call in this flow belongs to the
+    // persistence path: install a throwing mock there. The throw-safe
+    // wrapper must degrade to the path.resolve form instead of letting
+    // the raw fs error escape stop() AFTER the channel has already been
+    // disabled — an applied-but-unrecorded stop resurrects on the next
+    // `--channel all` start (#8975).
+    mockCanonicalizeWorkspace.mockImplementation(() => {
+      const error = new Error('EACCES') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(path.resolve(WORKSPACE)),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
   it('rejects an unconfirmable stop while the workspace worker is starting (#8975)', async () => {
@@ -714,6 +790,99 @@ describe('createChannelManagementService', () => {
     // The stopped record must not be persisted on a stop reported as
     // successful — the relaunching worker could overwrite it.
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unconfirmable stop in the mode-all crash-restart window too (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // The carry-over shape, contradicting the initial-start shape above:
+    // a crash-restarting mode-`all` worker carries its last committed
+    // names in `requestedChannels` (DEFINED), while `channels` is still
+    // the `['all']` launch placeholder. The guard must key on the
+    // placeholder too, or a stop of a channel outside the carried set
+    // gets a false 200 and the relaunched worker connects it (absent =
+    // active) and overwrites the record (#8975).
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          requestedChannels: ['telegram'],
+          lastConnectedChannels: ['telegram'],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_starting',
+    });
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
+  it('does not block a stop during a healthy mode-names starting window (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // A mode-names worker defines `requestedChannels` at launch and its
+    // `channels` are the real selection names (no `all` placeholder): it
+    // can only connect the named selection, so a stop of a channel
+    // outside it is safe to record even mid-window.
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['telegram'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['telegram'],
+          requestedChannels: ['telegram'],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await service.stop('bot');
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
+  it('records a stop against a permanently failed worker (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // Restart budget exhausted, no restart scheduled: the worker will
+    // never connect anything again, so it is not "starting" — the stop
+    // record is safe to persist (and the supervisor drops the carried
+    // names in this terminal state).
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['all'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await service.stop('bot');
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
   it('only blocks on a starting worker of the same workspace (#8975)', async () => {

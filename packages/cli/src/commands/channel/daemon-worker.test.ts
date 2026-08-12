@@ -1458,6 +1458,12 @@ describe('runChannelDaemonWorker', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       '[Channel] "feishu" skipped (stopped before restart)',
     );
+    // A silent fallback would hide that persistence is broken: stale
+    // entries survive, and a re-added channel is skipped forever with no
+    // diagnostic tracing the cause (#8975).
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
     expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
       expect.any(Object),
       ['telegram'],
@@ -1466,6 +1472,38 @@ describe('runChannelDaemonWorker', () => {
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram'],
       requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
+  it('records connected channels as active in one batched write (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    // Two channels on purpose: with a single channel, batched and
+    // per-channel writes are observationally identical, so moving the
+    // write into the connect loop would ship green (#8975).
+    mockParseConfiguredChannels.mockResolvedValueOnce([
+      parsedTelegram,
+      parsedFeishu,
+    ]);
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      'active',
+    );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
       pid: process.pid,
     });
     await handle.close();

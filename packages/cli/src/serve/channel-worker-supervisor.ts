@@ -127,6 +127,13 @@ export interface ChannelWorkerSnapshot {
   state: ChannelWorkerState;
   channels: string[];
   requestedChannels?: string[];
+  /**
+   * The connected set from the last ready report, carried across crash
+   * restarts. During the relaunch starting window `channels` is the launch
+   * placeholder, so stop captures intersect this instead to record exactly
+   * the channels that were connected before the crash (#8975).
+   */
+  lastConnectedChannels?: string[];
   pid?: number;
   startedAt?: string;
   exitCode?: number | null;
@@ -536,6 +543,9 @@ export function createChannelWorkerSupervisor(
     ...(snapshot.requestedChannels
       ? { requestedChannels: [...snapshot.requestedChannels] }
       : {}),
+    ...(snapshot.lastConnectedChannels
+      ? { lastConnectedChannels: [...snapshot.lastConnectedChannels] }
+      : {}),
     ...(snapshot.startupFailures
       ? {
           startupFailures: snapshot.startupFailures.map((failure) => ({
@@ -726,6 +736,15 @@ export function createChannelWorkerSupervisor(
           : 'Channel worker restart budget exhausted.',
         nextRestartAt: undefined,
       };
+      // The restart budget is exhausted, so no relaunch will ever commit a
+      // new ready report: drop the carried names and starting-state
+      // adapters. Keeping them would report every channel as `starting`
+      // forever, and an explicit per-channel start would see the channel as
+      // enabled and do nothing on the dead worker — silently swallowing the
+      // natural recovery command (#8975).
+      delete snapshot.requestedChannels;
+      delete snapshot.adapters;
+      delete snapshot.lastConnectedChannels;
       return false;
     }
     clearRestartTimer();
@@ -796,12 +815,21 @@ export function createChannelWorkerSupervisor(
     const requestedChannels =
       requestedChannelNames(opts.selection) ??
       (kind === 'restart' ? snapshot.requestedChannels : undefined);
+    // The relaunch window's `channels` is the launch placeholder, which a
+    // stop capture cannot intersect with real names; carry the connected
+    // set from the last ready report so the capture records exactly what
+    // was connected before the crash (#8975).
+    const lastConnectedChannels =
+      kind === 'restart' ? snapshot.lastConnectedChannels : undefined;
     const startedAt = new Date().toISOString();
     snapshot = {
       enabled: true,
       state: 'starting',
       channels: channelSelectionNames(opts.selection),
       ...(requestedChannels ? { requestedChannels } : {}),
+      ...(lastConnectedChannels
+        ? { lastConnectedChannels: [...lastConnectedChannels] }
+        : {}),
       ...(requestedChannels
         ? {
             adapters: requestedChannels.map((name) => ({
@@ -1117,6 +1145,10 @@ export function createChannelWorkerSupervisor(
         delete next.lastHeartbeatAt;
         delete next.nextRestartAt;
         delete next.staleHeartbeatAt;
+        // Snapshot the connected set for the next crash-restart window:
+        // its `channels` reverts to the launch placeholder, and stop
+        // captures intersect this carried set instead (#8975).
+        next.lastConnectedChannels = [...next.channels];
         if (Array.isArray(message.requestedChannels)) {
           next.requestedChannels = [...message.requestedChannels];
         }

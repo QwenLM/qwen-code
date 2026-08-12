@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   ChannelWorkerGroup,
@@ -17,6 +18,22 @@ import {
 import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
+
+// Identity-equivalent stand-in for the real helper: every workspace used in
+// these tests is nonexistent, where the real canonicalizeWorkspace falls
+// back to path.resolve — so the default keeps the other tests' expectations
+// while individual tests can simulate a degraded fs (non-ENOENT rethrow).
+const mockCanonicalizeWorkspace = vi.hoisted(() =>
+  vi.fn((p: string) => path.resolve(p)),
+);
+
+vi.mock('@qwen-code/acp-bridge/workspacePaths', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/acp-bridge/workspacePaths')
+    >();
+  return { ...actual, canonicalizeWorkspace: mockCanonicalizeWorkspace };
+});
 
 const PRIMARY = '/ws/primary';
 const SECONDARY = '/ws/secondary';
@@ -1047,14 +1064,16 @@ describe('createChannelWorkerManager', () => {
     });
   });
 
-  it('records no phantom names when a stop lands in the mode-all starting window (#8975)', async () => {
+  it('records no phantom names when a stop lands in the mode-all initial starting window (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
     await test.manager.setSelection({ mode: 'all' });
-    // The actually-reachable uncommitted state for a mode-`all` worker (e.g.
-    // a supervisor crash restart): only the `['all']` launch placeholder is
-    // present, no `requestedChannels`. A stop in that window has no real
-    // names to persist and must not record the phantom `all` entry.
+    // The INITIAL-start shape, before any ready report: only the `['all']`
+    // launch placeholder is present, no `requestedChannels` and no carried
+    // connected set. A stop in that window has no real names to persist and
+    // must not record the phantom `all` entry. (A CRASH-restart window is
+    // different: the supervisor carries the last committed names across the
+    // relaunch — see the crash-restart tests below.)
     vi.mocked(group.snapshots).mockReturnValue([
       workerSnapshot({
         state: 'starting',
@@ -1072,6 +1091,95 @@ describe('createChannelWorkerManager', () => {
 
     expect(result).toMatchObject({ changed: true });
     expect(result.stoppedChannels).toBeUndefined();
+  });
+
+  it('records the carried connected set when a stop lands in the mode-all crash-restart window (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // The crash-restart shape the supervisor produces: the last committed
+    // names are carried in `requestedChannels`, `channels` is the `['all']`
+    // launch placeholder again, and the connected set from the last ready
+    // report rides in `lastConnectedChannels`. Intersecting with the
+    // placeholder would empty the capture (every stopped channel
+    // resurrects); intersecting with the attempted set would record
+    // channels that never connected. The capture must intersect the
+    // carried CONNECTED set.
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'starting',
+        channels: ['all'],
+        requestedChannels: ['telegram', 'feishu'],
+        lastConnectedChannels: ['telegram'],
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram'] },
+    ]);
+  });
+
+  it('records only the connected channels in a mode-names crash-restart window (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    // Mode-names twin of the crash-restart window: the launch placeholder
+    // equals the selection names, so intersecting with `channels` degrades
+    // to the full attempted set and would record a channel whose connect
+    // failed before the crash as explicitly stopped though it never ran.
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'starting',
+        channels: ['telegram', 'feishu'],
+        requestedChannels: ['telegram', 'feishu'],
+        lastConnectedChannels: ['telegram'],
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram'] },
+    ]);
+  });
+
+  it('keeps the stop capture alive when workspace canonicalization fails (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      }),
+    ]);
+    // canonicalizeWorkspace rethrows non-ENOENT fs errors by design; a
+    // degraded worker path must degrade to the resolved form instead of
+    // escaping the stop before any tear-down as an opaque 500 with no
+    // structured code or stoppedChannels.
+    mockCanonicalizeWorkspace.mockImplementation(() => {
+      const error = new Error('EACCES') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+
+    try {
+      await expect(test.manager.stopSelection()).resolves.toMatchObject({
+        changed: true,
+        stoppedChannels: [
+          { workspaceCwd: path.resolve(PRIMARY), names: ['telegram'] },
+        ],
+      });
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
   });
 
   it('groups torn-down channels per workspace on stop (#8975)', async () => {

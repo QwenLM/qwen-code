@@ -12,7 +12,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import { sanitizeLogText } from '@qwen-code/channel-base';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 
 /**
  * Per-channel runtime state persisted by the channel service. `--channel all`
@@ -80,7 +80,13 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       noFollow: true,
     });
   } catch {
-    // Best-effort migration; a failure only loses the one-time legacy stops.
+    // Best-effort migration; a failure only loses the one-time legacy stops,
+    // but surface it so a later resurrection of those channels has a
+    // traceable cause — once any write creates the workspace file, the
+    // existsSync guard above locks adoption out permanently (#8975).
+    writeStoreWarning(
+      `[Channel] Warning: could not adopt legacy channel state from ${legacyPath}; recorded stops may not be honored.`,
+    );
     return;
   }
   try {
@@ -109,11 +115,7 @@ function writeStoreWarning(message: string): void {
       // The stderr target is gone; this diagnostic is already lost.
     });
   }
-  try {
-    writeStderrLine(message);
-  } catch {
-    // stderr is gone; there is nowhere to report this.
-  }
+  writeStderrLineSafe(message);
 }
 
 /**
@@ -189,21 +191,27 @@ export class ChannelStateStore {
   /**
    * Best-effort `set`: state persistence must never fail a channel operation
    * that already succeeded, so write errors are swallowed with a warning.
+   * Returns whether the state was persisted; callers whose success message
+   * or response claims a durable stop must surface a failed write (#8975).
    */
-  trySet(name: string, state: ChannelRuntimeState): void {
+  trySet(name: string, state: ChannelRuntimeState): boolean {
     try {
       this.set(name, state);
+      return true;
     } catch {
       this.warnWriteFailure();
+      return false;
     }
   }
 
   /** Best-effort `setMany`; see `trySet`. */
-  trySetMany(names: readonly string[], state: ChannelRuntimeState): void {
+  trySetMany(names: readonly string[], state: ChannelRuntimeState): boolean {
     try {
       this.setMany(names, state);
+      return true;
     } catch {
       this.warnWriteFailure();
+      return false;
     }
   }
 

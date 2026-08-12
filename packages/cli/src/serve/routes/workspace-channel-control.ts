@@ -285,15 +285,24 @@ function sendChannelControlError(
  * restart must not bring these channels back (#8975). Recorded from the
  * manager's stop result — the names torn down at commit time — because a
  * pre-stop snapshot of the control state can race an in-flight start.
+ * Returns whether every group was persisted; a failed write must be
+ * surfaced to the caller, or automation treats the stop as durable and the
+ * stopped channels silently resurrect on the next restart.
  */
 function recordChannelsStopped(
   groups: Array<{ workspaceCwd: string; names: string[] }> | undefined,
-): void {
+): boolean {
+  let persisted = true;
   for (const { workspaceCwd, names } of groups ?? []) {
-    new ChannelStateStore(
-      daemonChannelRuntimeStatePath(workspaceCwd),
-    ).trySetMany(names, 'stopped');
+    if (
+      !new ChannelStateStore(
+        daemonChannelRuntimeStatePath(workspaceCwd),
+      ).trySetMany(names, 'stopped')
+    ) {
+      persisted = false;
+    }
   }
+  return persisted;
 }
 
 export function registerWorkspaceChannelControlRoutes(
@@ -354,8 +363,15 @@ export function registerWorkspaceChannelControlRoutes(
         }
         try {
           const result = await deps.stopChannelWorker!();
-          recordChannelsStopped(result.stoppedChannels);
-          res.status(200).json(result);
+          const statePersisted = recordChannelsStopped(result.stoppedChannels);
+          res.status(200).json({
+            ...result,
+            // Only on failure: the happy-path response shape stays
+            // unchanged, but an API client must be able to tell that the
+            // stop record did not persist and the stop is not durable
+            // (#8975).
+            ...(statePersisted ? {} : { statePersisted: false }),
+          });
         } catch (error) {
           // A failed stop can still have torn down workers (partial
           // multi-workspace failure, or a lease-release failure after a

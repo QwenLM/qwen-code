@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
@@ -253,9 +254,16 @@ function errorMessage(error: unknown): string {
  * Only channels that actually connected are captured: the ready report
  * commits the attempted set in `requestedChannels` and the connected set in
  * `channels`, and intersecting the two keeps a partial start from recording
- * a never-connected channel as explicitly stopped (#8975). Before the ready
- * report commits, `channels` is the mode-`all` launch placeholder (`['all']`),
- * which the `all` filter drops, so a stop in that window records nothing.
+ * a never-connected channel as explicitly stopped (#8975). Inside the launch
+ * window `channels` is the placeholder, so the intersection degrades: for a
+ * crash-restarting mode-`all` worker it is the `['all']` placeholder (every
+ * carried real name fails the intersection, so the stop records nothing and
+ * the stopped channels resurrect), while for mode-names it equals the
+ * attempted set (a channel whose connect failed before the crash gets
+ * recorded as stopped though it never ran). Intersect with the connected
+ * set carried from the last ready report instead (#8975). Before the first
+ * ready report there is no carried set: a stop in the initial mode-`all`
+ * window records nothing, as before.
  * Runs inside the manager lane, so an in-flight start has already committed
  * and reported ready by the time a queued stop executes.
  */
@@ -264,12 +272,25 @@ function stoppedChannelsByWorkspace(
 ): Array<{ workspaceCwd: string; names: string[] }> {
   const byWorkspace = new Map<string, Set<string>>();
   for (const worker of workers) {
-    const connected = new Set(worker.channels);
+    const connectedSource =
+      worker.state === 'starting' && worker.lastConnectedChannels
+        ? worker.lastConnectedChannels
+        : worker.channels;
+    const connected = new Set(connectedSource);
     const names = (worker.requestedChannels ?? worker.channels).filter(
       (name) => !isAllChannelSelectionName(name) && connected.has(name),
     );
     if (names.length === 0) continue;
-    const workspaceCwd = canonicalizeWorkspace(worker.workspaceCwd);
+    // Throw-safe canonical form: canonicalizeWorkspace rethrows non-ENOENT
+    // fs errors by design, but a degraded worker path must degrade to the
+    // resolved form instead of escaping the stop before any tear-down as an
+    // opaque 500 with no structured code or stoppedChannels (#8975).
+    let workspaceCwd: string;
+    try {
+      workspaceCwd = canonicalizeWorkspace(worker.workspaceCwd);
+    } catch {
+      workspaceCwd = path.resolve(worker.workspaceCwd);
+    }
     let collected = byWorkspace.get(workspaceCwd);
     if (!collected) {
       collected = new Set<string>();

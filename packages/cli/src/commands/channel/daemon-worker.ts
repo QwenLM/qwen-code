@@ -474,6 +474,12 @@ export async function runChannelDaemonWorker(
       states =
         names.length > 0 ? stateStore.prune(names) : stateStore.readAll();
     } catch {
+      // prune throws only on write failure; the recorded states are still
+      // readable — fall back, but surface that persistence is broken so a
+      // later resurrection of stale entries has a traceable cause (#8975).
+      writeStdoutLine(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
       states = stateStore.readAll();
     }
     selectedNames = selectActiveChannels(names, states, writeStdoutLine);

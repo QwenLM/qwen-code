@@ -18,19 +18,22 @@ const mockChannelStateStore = vi.hoisted(() =>
     set: vi.fn(),
     setMany: mockChannelStateStoreSetMany,
     // Mirror the real best-effort wrappers so throwing `set`/`setMany`
-    // mocks still exercise "persistence failure never blocks a stop".
+    // mocks still exercise "persistence failure never blocks a stop", and
+    // report the persisted boolean so failure-path messages are testable.
     trySet: (name: string, state: 'active' | 'stopped') => {
       try {
         mockChannelStateStoreSetMany([name], state);
+        return true;
       } catch {
-        // best-effort
+        return false;
       }
     },
     trySetMany: (names: string[], state: 'active' | 'stopped') => {
       try {
         mockChannelStateStoreSetMany(names, state);
+        return true;
       } catch {
-        // best-effort
+        return false;
       }
     },
   })),
@@ -236,7 +239,18 @@ describe('stopCommand', () => {
 
     await invokeStop();
 
+    // The peek must run BEFORE readServiceInfo: the read unlinks a
+    // crashed service's stale pidfile during its liveness check, so a
+    // later peek would see no file and silently drop the stop record.
+    expect(mockPeekServiceInfo.mock.invocationCallOrder[0]).toBeLessThan(
+      mockReadServiceInfo.mock.invocationCallOrder[0]!,
+    );
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith('/workspace/a');
+    // And the store is constructed with the path the helper returns — a
+    // split here writes the stop to a different file than start reads.
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
     expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
       ['telegram', 'feishu'],
       'stopped',
@@ -246,6 +260,29 @@ describe('stopCommand', () => {
       expect.stringContaining(
         'Recorded the crashed service channels as stopped',
       ),
+    );
+  });
+
+  it('reports when the crashed service stop record fails to persist (#8975)', async () => {
+    mockPeekServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockReadServiceInfo.mockReturnValue(null);
+    mockChannelStateStoreSetMany.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    // The success message claims a durable stop; a swallowed write failure
+    // must not print it, or the resurrection comes as a surprise (#8975).
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
     );
   });
 
@@ -286,6 +323,11 @@ describe('stopCommand', () => {
     await invokeStop();
 
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(undefined);
+    // And the store is constructed with the path the helper returns — a
+    // split here writes the stop to a different file than start reads.
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
   });
 
   it('still stops the service when state persistence fails', async () => {
@@ -306,5 +348,10 @@ describe('stopCommand', () => {
 
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
+    // The "stay stopped" message claims a durable stop; a swallowed write
+    // failure must surface the contrary warning instead (#8975).
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
   });
 });

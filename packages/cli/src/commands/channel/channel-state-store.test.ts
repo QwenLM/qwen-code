@@ -26,14 +26,21 @@ function getStateHome(): string {
   return stateHome;
 }
 
+// Delegates to the real implementation by default; individual tests can
+// simulate a mid-write failure (ENOSPC and friends) that a read-side
+// obstacle cannot reach.
+const mockAtomicWriteFileSync = vi.hoisted(() => vi.fn());
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  mockAtomicWriteFileSync.mockImplementation(actual.atomicWriteFileSync);
   return {
     ...actual,
     Storage: {
       getGlobalQwenDir: () => getStateHome(),
     },
+    atomicWriteFileSync: mockAtomicWriteFileSync,
   };
 });
 
@@ -105,6 +112,11 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
     });
+    // Pin the deliberate restrictive permissions on the adopted file and
+    // its directory: the legacy file was written by an older release at
+    // default umask, and adoption exists to normalize it (#8975).
+    expect(statSync(workspacePath).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(workspacePath)).mode & 0o777).toBe(0o700);
     expect(existsSync(legacyPath)).toBe(false);
   });
 
@@ -144,19 +156,33 @@ describe('adoptLegacyChannelState (#8975)', () => {
     // Block the target: make an intermediate path component (the
     // `standalone` dir) a regular file, so mkdirSync throws ENOTDIR.
     writeFileSync(dirname(dirname(workspacePath)), '', 'utf-8');
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
 
-    expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+    try {
+      expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+      // A failed adoption must leave a diagnostic trail: the existsSync
+      // guard can lock adoption out permanently once any later write
+      // creates the workspace file, so a resurrection of the legacy stops
+      // must be traceable (#8975). (Asserted before mockRestore: vitest's
+      // restore clears the recorded calls.)
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('could not adopt legacy channel state'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
 
     expect(existsSync(workspacePath)).toBe(false);
     expect(readFileSync(legacyPath, 'utf-8')).toBe(legacyBody);
   });
 
-  it('leaves no target behind when the copy fails, so the next start retries', () => {
-    // A legacy "file" that is really a directory makes the read throw
-    // (EISDIR) — standing in for a mid-copy disk failure. The copy runs
-    // through the atomic write (temp + rename), so a failure can never
-    // leave a partial target that the existsSync guard would mistake for a
-    // completed adoption, blocking every later start.
+  it('leaves no target behind when the legacy read fails, so the next start retries', () => {
+    // A legacy "file" that is really a directory makes readFileSync throw
+    // (EISDIR) before the atomic write is reached; the read failure must
+    // leave no target behind, or the existsSync guard would treat it as a
+    // completed adoption and skip adoption forever.
     mkdirSync(legacyPath, { recursive: true });
 
     expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
@@ -171,6 +197,35 @@ describe('adoptLegacyChannelState (#8975)', () => {
       channels: { telegram: 'stopped' },
     });
     writeFileSync(legacyPath, legacyBody, 'utf-8');
+    adoptLegacyChannelState(workspace);
+    expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
+    expect(existsSync(legacyPath)).toBe(false);
+  });
+
+  it('leaves no target behind when the atomic write fails mid-copy (#8975)', () => {
+    // Simulate the disk failure at the WRITE stage (ENOSPC mid-copy),
+    // which a read-side obstacle cannot reach: the legacy file reads fine,
+    // then the atomic write itself fails. A non-atomic replacement that
+    // creates/truncates the target directly would leave a partial file the
+    // existsSync guard mistakes for a completed adoption — orphaning the
+    // legacy stops forever.
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+    });
+    writeFileSync(legacyPath, legacyBody, 'utf-8');
+    const writeError = new Error('ENOSPC') as NodeJS.ErrnoException;
+    writeError.code = 'ENOSPC';
+    mockAtomicWriteFileSync.mockImplementationOnce(() => {
+      throw writeError;
+    });
+
+    expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+
+    expect(existsSync(workspacePath)).toBe(false);
+    expect(readFileSync(legacyPath, 'utf-8')).toBe(legacyBody);
+
+    // Once the disk recovers, the retry adopts the legacy stops.
     adoptLegacyChannelState(workspace);
     expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
     expect(existsSync(legacyPath)).toBe(false);
@@ -258,23 +313,36 @@ describe('ChannelStateStore', () => {
   });
 
   it.each([
-    ['[]', {}],
-    ['"stopped"', {}],
-    ['{"channels": "stopped"}', {}],
-    ['{"channels": ["telegram"]}', {}],
-    ['{"channels": {"telegram": "running"}}', {}],
-    // Unknown states are dropped; valid entries survive.
+    // The third element is the expected discard-warning count: the warning
+    // is the only diagnostic trail of the lost records, so pin it on every
+    // discard branch; entry-wise filtering must NOT warn (#8975).
+    ['[]', {}, 1],
+    ['"stopped"', {}, 1],
+    ['{"channels": "stopped"}', {}, 1],
+    ['{"channels": ["telegram"]}', {}, 1],
+    ['{"channels": {"telegram": "running"}}', {}, 0],
+    // Unknown states are dropped entry-wise; valid entries survive —
+    // including ALONGSIDE an unknown state, so a whole-file-taint refactor
+    // of the unknown-state branch cannot ship green.
+    [
+      '{"channels": {"telegram": "stopped", "feishu": "running"}}',
+      { telegram: 'stopped' },
+      0,
+    ],
     [
       '{"channels": {"": "stopped", "telegram": "active"}}',
       { telegram: 'active' },
+      0,
     ],
-  ] as Array<[string, Record<string, string>]>)(
+  ] as Array<[string, Record<string, string>, number]>)(
     'treats wrong-shaped files as empty: %s',
-    (content, expected) => {
+    (content, expected, expectedWarnings) => {
       writeFileSync(filePath, content, 'utf-8');
-      expect(
-        new ChannelStateStore(filePath, { onWarning: vi.fn() }).readAll(),
-      ).toEqual(expected);
+      const onWarning = vi.fn();
+      expect(new ChannelStateStore(filePath, { onWarning }).readAll()).toEqual(
+        expected,
+      );
+      expect(onWarning).toHaveBeenCalledTimes(expectedWarnings);
     },
   );
 
@@ -315,10 +383,32 @@ describe('ChannelStateStore', () => {
         store.trySetMany(['telegram', 'feishu'], 'stopped'),
       ).not.toThrow();
 
-      expect(onWarning).toHaveBeenCalledTimes(2);
+      // The boolean reports that the write did NOT persist, so callers
+      // whose success message claims a durable stop can surface it (#8975).
+      expect(store.trySet('telegram', 'stopped')).toBe(false);
+      expect(store.trySetMany(['telegram', 'feishu'], 'stopped')).toBe(false);
+
+      expect(onWarning).toHaveBeenCalledTimes(4);
       expect(onWarning).toHaveBeenCalledWith(
         expect.stringContaining('failed to persist channel state'),
       );
+    });
+
+    it('trySet and trySetMany persist on the success path (#8975)', () => {
+      // Production writes channel state only through trySet/trySetMany; a
+      // regression breaking success-path persistence (dropped or misrouted
+      // delegation, warn-only conversion) must not ship green — so the
+      // success path reads the file back through a fresh store.
+      const store = new ChannelStateStore(filePath, { onWarning: vi.fn() });
+
+      expect(store.trySet('telegram', 'stopped')).toBe(true);
+      expect(store.trySetMany(['feishu', 'slack'], 'active')).toBe(true);
+
+      expect(new ChannelStateStore(filePath).readAll()).toEqual({
+        telegram: 'stopped',
+        feishu: 'active',
+        slack: 'active',
+      });
     });
   });
 

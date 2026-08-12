@@ -1080,6 +1080,14 @@ describe('createChannelWorkerSupervisor', () => {
       channels: ['all'],
       requestedChannels: ['telegram', 'feishu'],
     });
+    // The CONNECTED set from the last ready report rides along too: the
+    // window's `channels` is the placeholder, so the stop capture
+    // intersects this carried set to record exactly what was connected
+    // before the crash (#8975).
+    expect(supervisor.snapshot().lastConnectedChannels).toEqual([
+      'telegram',
+      'feishu',
+    ]);
 
     secondChild.emit('message', {
       type: 'ready',
@@ -1094,6 +1102,64 @@ describe('createChannelWorkerSupervisor', () => {
       pid: 22222,
       requestedChannels: ['telegram', 'feishu'],
     });
+    expect(supervisor.snapshot().lastConnectedChannels).toEqual([
+      'telegram',
+      'feishu',
+    ]);
+    await supervisor.stop();
+  });
+
+  it('carries the connected set, not the attempted set, across a crash restart (#8975)', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const secondChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
+    });
+
+    const started = supervisor.start();
+    // feishu's connect failed before the crash: the ready report commits
+    // the attempted set in requestedChannels and the connected set in
+    // channels — the carried snapshot must preserve that distinction.
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await started;
+
+    firstChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    expect(supervisor.snapshot().lastConnectedChannels).toEqual(['telegram']);
+
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await Promise.resolve();
+
+    expect(supervisor.snapshot().lastConnectedChannels).toEqual([
+      'telegram',
+      'feishu',
+    ]);
     await supervisor.stop();
   });
 
@@ -1229,6 +1295,15 @@ describe('createChannelWorkerSupervisor', () => {
         'Channel worker restart budget exhausted. Last error: Channel worker exited before ready',
       ),
     });
+    // A permanently failed worker will never commit a new ready report,
+    // so the carried names, starting-state adapters and connected set must
+    // be dropped: keeping them would report every channel as `starting`
+    // forever and let an explicit per-channel start return success without
+    // touching the dead worker (#8975).
+    const terminal = supervisor.snapshot();
+    expect(terminal.requestedChannels).toBeUndefined();
+    expect(terminal.adapters).toBeUndefined();
+    expect(terminal.lastConnectedChannels).toBeUndefined();
   });
 
   it('resets restart budget after an intentional stop and start', async () => {

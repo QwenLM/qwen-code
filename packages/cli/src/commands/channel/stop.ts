@@ -86,11 +86,13 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
         pidfileSnapshot.owner === 'channel' &&
         pidfileSnapshot.channels.length > 0
       ) {
-        new ChannelStateStore(
+        const recorded = new ChannelStateStore(
           channelRuntimeStatePath(pidfileSnapshot.workspaceCwd),
         ).trySetMany(pidfileSnapshot.channels, 'stopped');
         writeStdoutLine(
-          'No channel service is running. Recorded the crashed service channels as stopped.',
+          recorded
+            ? 'No channel service is running. Recorded the crashed service channels as stopped.'
+            : 'No channel service is running. Could not record the crashed service channels; --channel all may restart them.',
         );
       } else {
         writeStdoutLine('No channel service is running.');
@@ -112,7 +114,7 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     // not bring these channels back (#8975). Scope the record to the
     // workspace the service was started from, matching its config scope;
     // pidfiles from older releases fall back to the legacy global file.
-    new ChannelStateStore(
+    const recorded = new ChannelStateStore(
       channelRuntimeStatePath(info.workspaceCwd),
     ).trySetMany(info.channels, 'stopped');
 
@@ -141,7 +143,9 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     }
 
     writeStdoutLine(
-      'Stopped channels stay stopped until started again by name: qwen channel start <name>.',
+      recorded
+        ? 'Stopped channels stay stopped until started again by name: qwen channel start <name>.'
+        : 'Warning: could not persist the stopped record; --channel all may restart these channels.',
     );
     process.exit(0);
   },

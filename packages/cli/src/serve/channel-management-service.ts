@@ -25,6 +25,7 @@ import type {
 } from './channel-settings-store.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
+import { ChannelWorkerControlError } from './channel-worker-manager.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerManager,
@@ -243,6 +244,13 @@ export function createChannelManagementService(
   // A worker without a committed ready report (no `requestedChannels`) is
   // still starting; a mode-`all` worker in that window may connect any
   // configured channel, so per-channel stops cannot be confirmed (#8975).
+  // The ready report is not the only window opener: a crash-restarting
+  // mode-`all` worker carries its last committed names across the relaunch
+  // (`requestedChannels` defined) while `channels` is still the `['all']`
+  // launch placeholder — the same hazard, so the guard keys on the
+  // placeholder too. A permanently failed worker (restart budget exhausted,
+  // no restart scheduled) will never connect anything again, so it is not
+  // "starting" and stops may be recorded against it.
   const workspaceWorkerStarting = (): boolean => {
     const target = canonicalForGuard(opts.workspaceCwd);
     return opts.manager
@@ -250,7 +258,10 @@ export function createChannelManagementService(
       .workers.some(
         (worker) =>
           canonicalForGuard(worker.workspaceCwd) === target &&
-          worker.requestedChannels === undefined,
+          !(worker.state === 'failed' && worker.nextRestartAt === undefined) &&
+          (worker.requestedChannels === undefined ||
+            (worker.state === 'starting' &&
+              worker.channels.some(isAllChannelSelectionName))),
       );
   };
 
@@ -545,10 +556,31 @@ export function createChannelManagementService(
         );
       }
       assertWorkspaceConfig(persisted.channels[name]!);
-      const result = await opts.manager.setChannelEnabled(
-        { name, workspaceCwd: opts.workspaceCwd },
-        false,
-      );
+      let result: { changed: boolean };
+      try {
+        result = await opts.manager.setChannelEnabled(
+          { name, workspaceCwd: opts.workspaceCwd },
+          false,
+        );
+      } catch (error) {
+        // A failed stop can still have torn down channels: disabling the
+        // last committed channel routes through the whole-selection stop,
+        // whose lease release can fail after a successful tear-down. The
+        // manager carries the torn-down set on the error; persist it like
+        // the whole-selection route does, or those channels resurrect on
+        // the next `--channel all` start (#8975).
+        if (
+          error instanceof ChannelWorkerControlError &&
+          error.stoppedChannels
+        ) {
+          for (const group of error.stoppedChannels) {
+            new ChannelStateStore(
+              daemonChannelRuntimeStatePath(group.workspaceCwd),
+            ).trySetMany(group.names, 'stopped');
+          }
+        }
+        throw error;
+      }
       if (!result.changed && workspaceWorkerStarting()) {
         // A mode-`all` worker mid crash-restart has not committed real
         // channel names yet, so the disable could not be confirmed: the
