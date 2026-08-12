@@ -33,6 +33,8 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
+  logStartSession,
+  logSessionEnd,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -326,6 +328,8 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logStartSession: vi.fn(actual.logStartSession),
+    logSessionEnd: vi.fn(actual.logSessionEnd),
   };
 });
 
@@ -2232,6 +2236,84 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('records no lifecycle transition when resuming the current session id', async () => {
+      const sessionId = 'same-session-id';
+      const config = new Config({ ...baseParams, sessionId });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession(sessionId, {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+    });
+
+    it('ends the outgoing session before starting a replacement without continuation', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      const endedSessionIds: string[] = [];
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+      vi.mocked(logSessionEnd).mockImplementationOnce((cfg: Config) => {
+        endedSessionIds.push(cfg.getSessionId());
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(endedSessionIds).toEqual([outgoingSessionId]);
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+      expect(vi.mocked(logSessionEnd).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(logStartSession).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('carries the outgoing session id when resuming a different persisted session', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession('resumed-session-id', {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        outgoingSessionId,
+      );
+    });
+
     it('rejects a session switch while the current recorder owns the writer lease', () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const originalSessionId = config.getSessionId();
@@ -2248,6 +2330,9 @@ describe('Server Config (config.ts)', () => {
         }
       ).chatRecordingService = recorder;
 
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
       expect(() => config.startNewSession('replacement-session')).toThrow(
         expect.objectContaining({
           name: 'SessionWriterUnavailableError',
@@ -2258,6 +2343,9 @@ describe('Server Config (config.ts)', () => {
       expect(config.getChatRecordingService()).toBe(recorder);
       expect(finalize).not.toHaveBeenCalled();
       expect(flush).not.toHaveBeenCalled();
+      // A rejected switch must leave the live session's lifecycle untouched.
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).not.toHaveBeenCalled();
     });
 
     const resumedGoalSession = (
