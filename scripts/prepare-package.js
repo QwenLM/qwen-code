@@ -271,6 +271,15 @@ function writeDistPackageJson(rootDir, distDir) {
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
+  const lockfile = JSON.parse(
+    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
+  );
+  const sharpVersion =
+    lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
+    lockfile.packages?.['node_modules/sharp']?.version;
+  if (!sharpVersion) {
+    throw new Error('sharp version is not locked in package-lock.json');
+  }
 
   const distPackageJson = {
     name: rootPackageJson.name,
@@ -322,9 +331,7 @@ function writeDistPackageJson(rootDir, distDir) {
       // is sufficient: its own optionalDependencies pull in the matching @img
       // platform binary for every OS/arch npm installs onto, so the platform
       // packages are not pinned here (pinning them drifts on a sharp bump).
-      sharp: JSON.parse(
-        fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
-      ).packages['node_modules/sharp'].version,
+      sharp: sharpVersion,
     },
     engines: rootPackageJson.engines,
   };

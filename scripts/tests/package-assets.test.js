@@ -723,11 +723,8 @@ describe('package asset scripts', () => {
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
 
-    const lockfile = JSON.parse(
-      readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
-    );
     expect(distPackageJson.optionalDependencies.sharp).toBe(
-      lockfile.packages['node_modules/sharp'].version,
+      '0.0.0-core-fixture',
     );
     expect(
       existsSync(
@@ -1090,7 +1087,10 @@ describe('package asset scripts', () => {
         {
           packages: {
             'node_modules/sharp': {
-              version: '0.35.3',
+              version: '0.0.0-root-fixture',
+            },
+            'packages/core/node_modules/sharp': {
+              version: '0.0.0-core-fixture',
             },
           },
         },
@@ -1104,22 +1104,6 @@ describe('package asset scripts', () => {
       'packages/cli/src/i18n/locales/en.json',
       '{"hello":"world"}\n',
     );
-    writeFile(
-      rootDir,
-      'packages/core/package.json',
-      JSON.stringify(
-        {
-          name: '@qwen-code/qwen-code-core',
-          version: '0.17.0',
-          dependencies: {
-            sharp: '^0.35.0',
-          },
-        },
-        null,
-        2,
-      ),
-    );
-
     writeFile(
       rootDir,
       'packages/audio-capture/package.json',
