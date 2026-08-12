@@ -47,7 +47,10 @@ const expectedManifest = {
     },
     {
       paths: ['packages/core/src/skills/**'],
-      relatedPaths: ['packages/core/src/skills/**'],
+      relatedPaths: [
+        'packages/core/src/skills/*.ts',
+        'packages/core/src/skills/bundled/*/SKILL.md',
+      ],
       domains: ['core-skills'],
     },
     {
@@ -95,7 +98,8 @@ const expectedManifest = {
 
 const relatedPathSentinels: Readonly<Record<string, string>> = {
   'packages/core/src/config/**': 'packages/core/src/config/config.ts',
-  'packages/core/src/skills/**':
+  'packages/core/src/skills/*.ts': 'packages/core/src/skills/skill-manager.ts',
+  'packages/core/src/skills/bundled/*/SKILL.md':
     'packages/core/src/skills/bundled/review/SKILL.md',
   'packages/web-shell/client/adapters/**':
     'packages/web-shell/client/adapters/types.ts',
