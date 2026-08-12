@@ -305,6 +305,80 @@ describe('owned workspace runtime publication', () => {
       'workspace_removed',
     );
   });
+
+  it('rolls back a candidate rejected after registry publication', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-invalid-after-publication', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    runtimeRemoval.runtimeAdded = vi.fn().mockResolvedValue(undefined);
+    const validate = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('root changed after publication'));
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        validate,
+      ),
+    ).rejects.toThrow('root changed after publication');
+
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.runtimeAdded).not.toHaveBeenCalled();
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
+  it('keeps a candidate non-routable until post-publication validation passes', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-staged', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    let releaseValidation: (() => void) | undefined;
+    const validationGate = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    const validate = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(async () => validationGate);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval: createRemovalController(),
+    });
+
+    const publication = handle.publishOwnedRuntime(
+      runtime.workspaceCwd,
+      'live-conversation',
+      validate,
+    );
+    await vi.waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBeUndefined();
+
+    releaseValidation?.();
+    await expect(publication).resolves.toBe(runtime);
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+  });
 });
 
 describe('POST /workspaces', () => {

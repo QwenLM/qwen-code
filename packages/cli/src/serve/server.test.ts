@@ -29648,66 +29648,73 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
-  it('rolls back a partial Live bind and retries without republishing the runtime', async () => {
-    const restoreLiveSettings = await disableLiveVoiceAtBoot();
-    const setup = setupLiveRuntime();
-    const setTaskHandler = vi
-      .spyOn(setup.liveBridge, 'setLiveTaskToolRequestHandler')
-      .mockImplementationOnce(() => {
-        throw new Error('task handler bind failed');
+  it.each(['task', 'speech'] as const)(
+    'rolls back a partial Live bind after a %s handler failure and retries without republishing',
+    async (failedChannel) => {
+      const restoreLiveSettings = await disableLiveVoiceAtBoot();
+      const setup = setupLiveRuntime();
+      const failedSetter =
+        failedChannel === 'task'
+          ? vi.spyOn(setup.liveBridge, 'setLiveTaskToolRequestHandler')
+          : vi.spyOn(setup.liveBridge, 'setLiveSpeakToUserHandler');
+      failedSetter.mockImplementationOnce(() => {
+        throw new Error(`${failedChannel} handler bind failed`);
       });
-    try {
-      const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
-        | ((enabled: boolean) => Promise<void>)
-        | undefined;
-      if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
-      const capabilitiesBefore = await request(setup.app)
-        .get('/capabilities')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(capabilitiesBefore.body.workspaces).not.toContainEqual(
-        expect.objectContaining({ cwd: setup.root.canonicalRoot }),
-      );
+      try {
+        const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
+          | ((enabled: boolean) => Promise<void>)
+          | undefined;
+        if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
+        const capabilitiesBefore = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesBefore.body.workspaces).not.toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
 
-      const firstEnable = setEnabled(true);
-      await vi.waitFor(() => {
+        const firstEnable = setEnabled(true);
+        await vi.waitFor(() => {
+          expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        });
+        setup.resolveCreation();
+        await expect(firstEnable).rejects.toThrow(
+          `${failedChannel} handler bind failed`,
+        );
+
+        expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
+          setup.liveRuntime,
+        );
+        expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+        expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+        expect(failedSetter).toHaveBeenCalledTimes(2);
+        const capabilitiesAfter = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesAfter.body.workspaces).toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        await expect(setEnabled(true)).resolves.toBeUndefined();
         expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
-      });
-      setup.resolveCreation();
-      await expect(firstEnable).rejects.toThrow('task handler bind failed');
-
-      expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
-        setup.liveRuntime,
-      );
-      expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
-      expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
-      expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
-      expect(setTaskHandler).toHaveBeenCalledTimes(2);
-      const capabilitiesAfter = await request(setup.app)
-        .get('/capabilities')
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-      expect(capabilitiesAfter.body.workspaces).toContainEqual(
-        expect.objectContaining({ cwd: setup.root.canonicalRoot }),
-      );
-
-      await expect(setEnabled(true)).resolves.toBeUndefined();
-      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
-      expect(setup.liveBridge.liveScreenContextHandler).toEqual(
-        expect.any(Function),
-      );
-      expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
-        expect.any(Function),
-      );
-      expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
-        expect.any(Function),
-      );
-      expect(setTaskHandler.mock.calls.length).toBeGreaterThanOrEqual(3);
-    } finally {
-      await (
-        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
-      )();
-      await restoreLiveSettings();
-    }
-  });
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(failedSetter.mock.calls.length).toBeGreaterThanOrEqual(3);
+      } finally {
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+        await restoreLiveSettings();
+      }
+    },
+  );
 
   it('shutdown waits for the in-flight boot publication', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();

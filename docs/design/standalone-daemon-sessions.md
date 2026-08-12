@@ -219,11 +219,19 @@ requires each session directory to be an exact direct child. Symbolic links,
 junction/reparse escapes, path traversal, non-direct descendants, and identity
 changes are rejected.
 
-Device and inode identity are pinned for one daemon ownership lifetime. After a
-restart, a securely recreated root at the expected canonical path may be
-accepted; the feature does not promise persistent inode attestation across
-restarts. Windows validates canonical path and link/reparse behavior exposed by
-the platform without claiming POSIX owner/mode or ACL guarantees.
+Device and inode identity are pinned for both the root and every materialized
+session child for one daemon ownership lifetime. The owner keeps each child's
+validated identity by session ID and compares it before every later use; an
+owned `0700` directory substituted at the same path is still compromised.
+Identity may be established only at first materialization, after a daemon
+restart with no pending deletion journal, or by explicit repair when the path
+was proven absent. Archive does not reset it, and the normal-to-staged deletion
+rename preserves it. After a restart, a securely recreated root and child at
+the expected canonical paths may be accepted only after recovery journals have
+been reconciled; the feature does not promise persistent inode attestation
+across clean restarts. Windows validates canonical path and link/reparse
+behavior exposed by the platform without claiming POSIX owner/mode or ACL
+guarantees.
 
 The transcript and runtime configuration remain stored under the Conversations
 runtime root. The session's effective tool and shell working directory is its
@@ -408,8 +416,10 @@ logical transaction:
 
 1. Strictly validate the request and required UUID.
 2. Ensure cross-daemon ownership, runtime, and secure root.
-3. Reserve the UUID against the Conversations bridge and reject active,
-   archived, Live, or in-flight conflicts.
+3. Reserve the UUID daemon-wide across every active runtime bridge, every active
+   and archived transcript catalog, the Live owner index, and in-flight
+   creation. Admission is global, but the new session is created only through
+   the validated Conversations runtime. Any existing owner is a conflict.
 4. Validate and reuse an existing empty child or materialize a new deterministic
    child. A non-empty child without a transcript is a conflict and is never
    adopted or deleted automatically.
@@ -502,9 +512,15 @@ transcript and private files. The daemon then acquires the exclusive lifecycle
 coordinator and writer lease, closes prompt admission, and tears down active
 ownership.
 
-Deletion uses a small durable recovery journal under the daemon runtime storage
-namespace. Each owner-only, atomically written record contains the session ID,
-expected directory hash, bounded schema, and transaction phase.
+Deletion uses a small durable recovery journal beside the stable Conversations
+owner record in an owner-only user-global namespace independent of
+`QWEN_RUNTIME_DIR` and project runtime bases. Each atomically written record has
+a bounded schema containing the session ID, expected directory hash,
+transaction phase, validated Conversations-root canonical/device/inode
+identity, and the staged child's canonical/device/inode identity after rename.
+Recovery must match both recorded identities before destructive file cleanup;
+an identity mismatch or an unprovable identity fails closed and leaves files
+untouched.
 
 If both normal and staged children are absent, record that state, delete the
 transcript, and clear the journal. Missing files do not block transcript
@@ -517,13 +533,18 @@ mutation.
 3. If the normal child exists, atomically rename it to the exact `.deleting`
    sibling and persist the staged phase.
 4. Delete the active or archived transcript and its sidecars.
-5. If transcript deletion fails after staging a child, restore the normal child
-   and clear the journal, then return retryable
-   `500 transcript_deletion_failed` with the session intact. If rollback fails,
-   leave both journal and staged child for repair and return
+5. If deletion reports an error, re-read the transcript and all sidecar state
+   under the writer lease. Only a fully intact set permits restoring the normal
+   child and clearing the journal, followed by retryable
+   `500 transcript_deletion_failed` with the session intact. A fully absent set
+   commits transcript deletion and continues to step 6. Partial or unknown
+   state retains the journal and staged child and returns
+   `transcript_deletion_outcome_unknown`; recovery must reconcile it before any
+   rollback or recursive cleanup. If restoring a fully intact set fails, leave
+   both journal and staged child for repair and return
    `working_directory_recovery_failed`. If both children were already absent,
-   retain the journal and return `500 transcript_deletion_failed` so an exact
-   retry or bounded reconciliation can finish the authorized deletion.
+   retain the journal on intact, partial, or unknown deletion failure so an
+   exact retry or bounded reconciliation can finish the authorized deletion.
 6. If transcript deletion succeeds, recursively remove only the exact validated
    staged child, then clear the journal.
 
@@ -534,17 +555,23 @@ reconciliation can resume cleanup.
 Recovery considers active and archived transcripts and every Conversations
 source before destructive cleanup:
 
-- Transcript exists, journal valid, staged exists, normal absent: restore staged
-  to normal and clear the journal.
-- Transcript exists, normal exists, staged absent: clear a prepared journal
-  without touching the directory.
-- Transcript exists, journal valid, and both directories absent: finish
-  transcript deletion and clear the journal. A deletion failure retains the
-  journal and reports `transcript_deletion_failed` for a later exact retry or
-  bounded reconciliation.
-- Transcript absent, journal valid, staged exists, normal absent: finish exact
-  staged cleanup and clear the journal.
-- Transcript absent and both directories absent: clear the completed journal.
+- Transcript and sidecars are fully intact, journal valid, staged exists, normal
+  absent, and recorded identities match: restore staged to normal and clear the
+  journal.
+- Transcript and sidecars are fully intact, normal exists, staged absent: clear
+  a prepared journal without touching the directory.
+- Transcript and sidecars are fully intact, journal valid, and both directories
+  absent: finish transcript deletion and clear the journal. An intact deletion
+  failure retains the journal and reports `transcript_deletion_failed` for a
+  later exact retry or bounded reconciliation.
+- Transcript and sidecars are fully absent, journal valid, staged exists,
+  normal absent, and recorded identities match: finish exact staged cleanup and
+  clear the journal.
+- Transcript or sidecar state is partial or unknown: retain the journal and
+  staged state, report `transcript_deletion_outcome_unknown`, and leave every
+  directory untouched until bounded reconciliation proves a terminal state.
+- Transcript and sidecars are fully absent, both directories are absent, and
+  the journal's recorded root identity matches: clear the completed journal.
 - Both normal and staged exist, the journal is invalid or missing, the hash does
   not match, or any path fails validation: report
   `deletion_recovery_compromised` and leave every file untouched.
@@ -565,6 +592,7 @@ deletion was authorized.
 | Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`              |
 | Create crossed persistence and cleanup completed          | `500 standalone_creation_rolled_back` with UUID  |
 | Transcript deletion failed and directory state recovered  | `500 transcript_deletion_failed`                 |
+| Transcript or sidecar deletion outcome is partial/unknown | `500 transcript_deletion_outcome_unknown`        |
 | Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`          |
 | Create crossed persistence but cleanup outcome is unknown | `standalone_creation_outcome_unknown` with UUID  |
 | Conversations root identity or trust fails                | `503 conversation_root_compromised`              |
@@ -620,6 +648,8 @@ Suggested title: `refactor(cli): Generalize the Conversations runtime foundation
   ownership.
 - Introduce the one-flight `ConversationRuntimeManager` and split optional Live
   bindings from runtime lifetime.
+- Stage owned publication as non-routable until its post-registration root and
+  ownership validation passes; rollback and dispose a rejected candidate.
 - Preserve Live behavior, provenance, managed-relocation token, storage
   namespace, and process sharing.
 - Do not add standalone source, public routes, capability advertisement, SDK, or

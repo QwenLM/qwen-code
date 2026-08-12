@@ -80,7 +80,6 @@ export class ConversationRuntimeManager {
         );
       },
     );
-    await this.options.workspace.assertExactRoot(created.workspaceCwd);
     this.assertActiveRuntime(
       root.canonicalRoot,
       created,
@@ -104,6 +103,7 @@ export class ConversationRuntimeManager {
 
   private assertOwnedRuntime(runtime: WorkspaceRuntime, message: string): void {
     if (
+      runtime.primary ||
       runtime.provenance !== 'live-conversation' ||
       !runtime.trusted ||
       runtime.removable !== false

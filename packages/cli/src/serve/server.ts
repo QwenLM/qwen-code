@@ -1292,6 +1292,10 @@ export function createServeApp(
             canonicalRoot,
             'live-conversation',
             validate,
+            async (candidate) => {
+              await validate(candidate);
+              await deps.liveConversationWorkspace!.revalidate();
+            },
           );
           invalidateServeFeaturesCache();
           return runtime;

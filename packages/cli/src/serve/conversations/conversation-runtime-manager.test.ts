@@ -149,6 +149,28 @@ describe('ConversationRuntimeManager', () => {
     expect(workspace.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
   });
 
+  it('rejects an adopted runtime marked as primary', async () => {
+    const candidate = createRuntime({
+      workspaceId: 'conversations',
+      workspaceCwd: root.canonicalRoot,
+      primary: true,
+      provenance: 'live-conversation',
+      trusted: true,
+      removable: false,
+    });
+    const registry = createRegistry();
+    registry.add(candidate);
+    const publishRuntime = vi.fn();
+    const manager = new ConversationRuntimeManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+
+    await expect(manager.ensure()).rejects.toThrow(/without Live provenance/);
+    expect(publishRuntime).not.toHaveBeenCalled();
+  });
+
   it('rejects an adopted runtime that stops being active during validation', async () => {
     const candidate = createOwnedRuntime();
     const registry = createRegistry(candidate);
@@ -275,6 +297,17 @@ describe('ConversationRuntimeManager', () => {
   });
 
   it.each([
+    {
+      name: 'primary status',
+      runtime: createRuntime({
+        workspaceId: 'conversations',
+        workspaceCwd: root.canonicalRoot,
+        primary: true,
+        provenance: 'live-conversation',
+        trusted: true,
+        removable: false,
+      }),
+    },
     {
       name: 'provenance',
       runtime: createRuntime({
