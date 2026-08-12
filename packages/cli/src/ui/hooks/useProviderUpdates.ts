@@ -383,9 +383,10 @@ export function useProviderUpdates(
   const migrated = useRef(false);
 
   const executeUpdate = useCallback(
-    async (providerCfg: ProviderConfig, baseUrl?: string) => {
+    async (pending: PendingUpdate) => {
       try {
-        const resolved = resolveBaseUrl(providerCfg, baseUrl);
+        const providerCfg = pending.provider;
+        const resolved = resolveBaseUrl(providerCfg, pending.baseUrl);
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
@@ -407,7 +408,12 @@ export function useProviderUpdates(
           apiKey: '',
           modelIds: [...defaultIds, ...customIds],
         });
+        installPlan.providerState![
+          `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
+        ]!['version'] = pending.currentVersion;
         delete installPlan.env;
+        // Template updates never change the selected model.
+        delete installPlan.modelSelection;
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
@@ -424,37 +430,6 @@ export function useProviderUpdates(
             activeConfig.baseUrl,
             activeConfig.apiKeyEnvKey,
           );
-        const endpointOwnsModel =
-          installPlan.modelProviders?.[0]?.ownsModel ?? (() => false);
-        const newConfigs = installPlan.modelProviders?.[0]?.models ?? [];
-        const availableConfigs = providerCfg.mergeModelsByIdentity
-          ? [
-              ...newConfigs,
-              ...((
-                (settings.merged as Record<string, unknown>)[
-                  'modelProviders'
-                ] as Record<string, ProviderModelConfig[]> | undefined
-              )?.[providerCfg.protocol]?.filter(
-                (model) => !endpointOwnsModel(model),
-              ) ?? []),
-            ]
-          : newConfigs;
-        const previousModelStillAvailable = availableConfigs.some(
-          (cfg) =>
-            cfg.id === previousModel &&
-            (!providerCfg.mergeModelsByIdentity ||
-              !activeConfig?.baseUrl ||
-              normalizeBaseUrlForMatching(cfg.baseUrl) ===
-                normalizeBaseUrlForMatching(activeConfig.baseUrl)),
-        );
-        if (!updatesActiveProvider || previousModelStillAvailable) {
-          // An inactive-provider update must never rewrite the live session's
-          // model selection (and thereby fire syncAuthState); a selection
-          // rewrite is only acceptable when the updated provider is the one
-          // the session is actually using and its model disappeared.
-          delete installPlan.modelSelection;
-        }
-        const writesModelSelection = installPlan.modelSelection !== undefined;
         const settingsAdapter = createLoadedSettingsAdapter(settings);
 
         await applyProviderInstallPlan(installPlan, {
@@ -480,7 +455,7 @@ export function useProviderUpdates(
         const activeModel = config.getModel();
         const displayName = t(providerCfg.label);
 
-        if (!writesModelSelection) {
+        if (activeModel === previousModel) {
           addItem(
             {
               type: 'info',
@@ -564,7 +539,7 @@ export function useProviderUpdates(
         setUpdateRequest(undefined);
         if (choice === 'update') {
           for (const p of pendingList) {
-            await executeUpdate(p.provider, p.baseUrl);
+            await executeUpdate(p);
           }
         } else if (choice === 'skip') {
           const persistScope = getPersistScopeForModelSelection(settings);
