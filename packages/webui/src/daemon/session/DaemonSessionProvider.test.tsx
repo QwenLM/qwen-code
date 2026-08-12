@@ -14489,6 +14489,7 @@ describe('DaemonSessionProvider', () => {
       });
       const sourceReady = createDeferred<void>();
       const sourceEvent = createDeferred<void>();
+      const sourceEventProcessed = createDeferred<void>();
       let sourceSignal: AbortSignal | undefined;
       let subscriptions = 0;
       const source = createMockSession({
@@ -14523,6 +14524,7 @@ describe('DaemonSessionProvider', () => {
               },
             },
           };
+          sourceEventProcessed.resolve();
           await new Promise<void>((resolve) =>
             opts.signal?.addEventListener('abort', () => resolve(), {
               once: true,
@@ -14569,7 +14571,7 @@ describe('DaemonSessionProvider', () => {
       });
       await act(async () => {
         sourceEvent.resolve();
-        await flushPromises();
+        await sourceEventProcessed.promise;
         await flushTranscriptDispatch();
       });
       expect(
