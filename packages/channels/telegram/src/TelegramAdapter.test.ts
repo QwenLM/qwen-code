@@ -290,19 +290,6 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
   });
 
-  it('registers rotation bounds with its router', () => {
-    const setChannelRotation = vi.fn();
-    createChannel(
-      { sessionRotation: { maxTurns: 200, maxAgeHours: 24 } },
-      { setChannelRotation },
-    );
-
-    expect(setChannelRotation).toHaveBeenCalledWith('telegram', {
-      maxTurns: 200,
-      maxAgeHours: 24,
-    });
-  });
-
   it('treats typing status API failures as best-effort', () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);

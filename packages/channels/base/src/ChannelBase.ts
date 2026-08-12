@@ -1525,6 +1525,9 @@ export abstract class ChannelBase {
         );
       }
       if (options.shouldContinue && !(await options.shouldContinue())) {
+        // The firing was routed and counted but never prompted: give the
+        // count back so a dropped firing cannot consume the session's bound.
+        this.router.uncountTurn(this.name, sessionId);
         throw new ChannelLoopSkippedError(
           'loop dropped because it is no longer enabled',
         );
@@ -2295,7 +2298,11 @@ export abstract class ChannelBase {
   private purgeSessionState(sessionId: string): void {
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
-    this.sessionQueues.delete(sessionId);
+    // sessionQueues is deliberately NOT purged: a queued turn may still hold
+    // the captured chain, and deleting the entry would let the next message
+    // (which lazy recovery can re-attach to this same session ID) seed a
+    // fresh chain and run concurrently with the stale queued turn. /clear is
+    // the only path that may delete it, after the chain drains.
     this.removePendingPermissionsForSession(sessionId);
   }
 

@@ -222,7 +222,14 @@ export class SessionRouter {
         `starting a new session.\n`,
     );
     for (const listener of this.rotationListeners) {
-      listener(sessionId, target);
+      try {
+        listener(sessionId, target);
+      } catch (error) {
+        process.stderr.write(
+          `[SessionRouter] Rotation listener error for session ${sanitizeLogText(sessionId, 128)}: ` +
+            `${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+        );
+      }
     }
     this.discardRotatedSession(sessionId);
   }
@@ -394,6 +401,13 @@ export class SessionRouter {
             this.scheduleDiscardInvalidatedSession(sessionId, creating);
             throw error;
           }
+          // A restore reservation can hand back a session whose persisted
+          // counters are already at the bound. No lease or count is taken
+          // yet and the reservation is already cleared, so re-entering the
+          // loop routes this message through the rotation gate above.
+          if (this.shouldRotate(channelName, sessionId)) {
+            continue;
+          }
           this.promoteTargetToGroup(sessionId, isGroup);
           this.countTurn(channelName, sessionId);
           this.leaseSession(sessionId);
@@ -551,7 +565,15 @@ export class SessionRouter {
           if (startedAt !== undefined) {
             this.toStartedAt.set(loadedSessionId, startedAt);
           }
-          this.persist();
+          // Age-only channels get no countTurn persist below, so this is
+          // their only writer of the new ID and carried counters; maxTurns
+          // channels persist again in countTurn immediately below, and this
+          // write would be fully subsumed by it.
+          if (
+            this.channelRotations.get(input.channelName)?.maxTurns === undefined
+          ) {
+            this.persist();
+          }
         }
         this.countTurn(input.channelName, loadedSessionId);
         this.liveSessionIds.add(loadedSessionId);

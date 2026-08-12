@@ -1505,6 +1505,27 @@ describe('SessionRouter', () => {
       expect(listener).not.toHaveBeenCalled();
     });
 
+    it('keeps rotating when a rotation listener throws', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 1 });
+      const seen: string[] = [];
+      router.onSessionRotated(() => {
+        throw new Error('listener boom');
+      });
+      router.onSessionRotated((sessionId) => {
+        seen.push(sessionId);
+      });
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      // The throwing listener must not skip the discard, silence the rest,
+      // or fail the message after the retirement already landed.
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
+      await drainMicrotasks();
+
+      expect(seen).toEqual([first]);
+      expect(bridge.discardSession).toHaveBeenCalledWith(first);
+    });
+
     it('defers rotation while the outgoing session is still active', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 1 });
@@ -1642,6 +1663,54 @@ describe('SessionRouter', () => {
       );
     });
 
+    it('rotates an at-bound session handed back by an in-flight restore', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 3,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      let releaseRestore!: (sessionId: string) => void;
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          releaseRestore = resolve;
+        }),
+      );
+
+      // The message parks on the restore reservation; the restored session
+      // comes back already at its bound and must be rotated, not reused.
+      const restoring = router.restoreSessions();
+      const waiter = router.resolve('ch', 'alice', 'chat1');
+      releaseRestore('old-session');
+      await restoring;
+
+      const sessionId = await waiter;
+      router.releaseRoutingLease(sessionId);
+      expect(sessionId).not.toBe('old-session');
+      await drainMicrotasks();
+      expect(bridge.discardSession).toHaveBeenCalledWith('old-session');
+
+      // The waiter was the successor's first turn: the remaining bound of
+      // turns reuses it, and only then does it rotate.
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(sessionId);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(sessionId);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(sessionId);
+    });
+
     it('clears a bound when the channel re-registers without one', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 2 });
@@ -1686,8 +1755,12 @@ describe('SessionRouter', () => {
       );
       router.restoreRoutes();
 
+      // The ID-changing reload persists once: countTurn's write subsumes the
+      // carry-over, so maxTurns channels must not pay two whole-store writes.
+      mockWriteFileSync.mockClear();
       const carried = await routed(router, 'ch', 'alice', 'chat1');
       expect(carried).toBe('reloaded-session');
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
       // Carried turns (2) plus this message reach the bound: next rotates.
       expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(carried);
     });
@@ -1722,6 +1795,7 @@ describe('SessionRouter', () => {
       );
       router.restoreRoutes();
 
+      mockWriteFileSync.mockClear();
       await router.resolve('ch', 'alice', 'chat1');
 
       // Without the carry-over the reload would re-stamp 'now', silently
@@ -1729,6 +1803,9 @@ describe('SessionRouter', () => {
       expect(rotationCounters(router).toStartedAt.get('reloaded-session')).toBe(
         stamp,
       );
+      // Age-only channels keep the carry-over persist: countTurn writes
+      // nothing for them, so this is the only write of the new ID + stamp.
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
     });
 
     it('counts messages that waited on an in-flight creation', async () => {
@@ -1779,6 +1856,45 @@ describe('SessionRouter', () => {
 
       const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
       expect(persisted['ch:alice:chat1'].turns).toBe(1);
+    });
+
+    it('keeps a retirement durable when the successor creation fails', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 1 });
+      let rotations = 0;
+      router.onSessionRotated(() => {
+        rotations++;
+      });
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      (bridge.newSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('at capacity'),
+      );
+
+      // The rotation retires and persists BEFORE the successor is created;
+      // the creation failure must surface without un-retiring the route.
+      await expect(router.resolve('ch', 'alice', 'chat1')).rejects.toThrow(
+        'at capacity',
+      );
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:alice:chat1']).toBeUndefined();
+
+      // A restart therefore cannot restore the stale at-bound route and
+      // re-fire the rotation (a second notice + discard for one rotation).
+      const revived = new SessionRouter(bridge, '/tmp', 'user', persistPath, {
+        recoveryMode: 'lazy',
+      });
+      revived.setChannelRotation('ch', { maxTurns: 1 });
+      expect(revived.restoreRoutes()).toEqual({ restored: 0, dropped: 0 });
+
+      expect(await routed(revived, 'ch', 'alice', 'chat1')).not.toBe(first);
+      expect(rotations).toBe(1);
+      await drainMicrotasks();
+      expect(bridge.discardSession).toHaveBeenCalledTimes(1);
+      expect(bridge.discardSession).toHaveBeenCalledWith(first);
     });
 
     it('does not write per message when only maxAgeHours is configured', async () => {
