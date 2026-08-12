@@ -639,6 +639,33 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
+  it('does not resolve exited on SIGINT for a connected (childless) handle', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-1'),
+      socketPath,
+    );
+
+    connected.kill('SIGINT');
+    await waitFor(() => host.killedWith === 'SIGINT');
+
+    // SIGINT is non-terminal — exited must not settle within a grace window.
+    const settled = await Promise.race([
+      connected.exited.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    expect(settled).toBe(false);
+
+    // A terminal signal still resolves it.
+    connected.kill('SIGTERM');
+    await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
+  });
+
   it('resolves connected host exit when status polling fails', async () => {
     vi.useFakeTimers();
     try {
