@@ -85,7 +85,7 @@ export function getCachedArchiveInstaller({
   return `
       set -e
       verify_sha256() {
-        "${process.execPath}" -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");process.exit(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex")===process.argv[2]?0:1)' "$1" "$2"
+        "${process.execPath}" -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");const actual=createHash("sha256").update(readFileSync(process.argv[1])).digest("hex");if(actual!==process.argv[2]){console.error("SHA-256 mismatch for "+process.argv[1]+": expected "+process.argv[2]+", got "+actual);process.exit(1)}' "$1" "$2"
       }
       if ! cp "${cacheArchive}" "${localArchive}" 2>/dev/null \
         || ! verify_sha256 "${localArchive}" "${expectedSha256}"; then
@@ -94,8 +94,15 @@ export function getCachedArchiveInstaller({
           -o "${localArchive}" "${downloadUrl}"
         verify_sha256 "${localArchive}" "${expectedSha256}"
         ${archiveCheck}
-        cp "${localArchive}" "${cacheArchive}.$$"
-        mv -f "${cacheArchive}.$$" "${cacheArchive}"
+        cache_tmp=''
+        if cache_tmp="$(mktemp "${cacheArchive}.XXXXXX" 2>/dev/null)" \
+          && cp "${localArchive}" "$cache_tmp" \
+          && "${process.execPath}" -e 'require("node:fs").renameSync(process.argv[1],process.argv[2])' "$cache_tmp" "${cacheArchive}" 2>/dev/null; then
+          :
+        else
+          [ -z "$cache_tmp" ] || rm -f "$cache_tmp"
+          echo "Warning: could not persist linter archive to ${cacheArchive}" >&2
+        fi
       fi
       ${extract}
       test -x "${executable}"
@@ -160,7 +167,8 @@ function getLinters() {
       actionlint: {
         check: 'command -v actionlint',
         installer: `
-      mkdir -p "${TEMP_DIR}/actionlint" "${CACHE_DIR}"
+      mkdir -p "${TEMP_DIR}/actionlint"
+      mkdir -p "${CACHE_DIR}" 2>/dev/null || true
       ${getCachedArchiveInstaller({
         cacheArchive: actionlintArchive,
         localArchive: actionlintLocalArchive,
@@ -186,7 +194,8 @@ function getLinters() {
       shellcheck: {
         check: 'command -v shellcheck',
         installer: `
-      mkdir -p "${TEMP_DIR}/shellcheck" "${CACHE_DIR}"
+      mkdir -p "${TEMP_DIR}/shellcheck"
+      mkdir -p "${CACHE_DIR}" 2>/dev/null || true
       ${getCachedArchiveInstaller({
         cacheArchive: shellcheckArchive,
         localArchive: shellcheckLocalArchive,

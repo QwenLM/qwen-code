@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -99,10 +100,13 @@ describe('linter directories', () => {
 
     expect(toPosix(first)).toBe('/runner/cache/qwen-code/linters');
     expect(second).toBe(first);
+    expect(
+      toPosix(getLinterCacheDir({ env: {}, homeDir: '/home/runner' })),
+    ).toBe('/home/runner/.cache/qwen-code/linters');
   });
 
   it.skipIf(process.platform === 'win32')(
-    'replaces an untrusted cache and reuses the verified archive offline',
+    'verifies and reuses archives without depending on cache writes',
     async () => {
       const { getCachedArchiveInstaller } = await import('../lint.js');
       const root = mkdtempSync(path.join(tmpdir(), 'linter-cache-'));
@@ -122,7 +126,7 @@ describe('linter directories', () => {
         writeFileSync(fixture, 'official archive');
         writeFileSync(
           curl,
-          '#!/bin/sh\nprintf "download\\n" >> "$CURL_LOG"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit; fi\n  shift\ndone\nexit 1\n',
+          '#!/bin/sh\nprintf "download\\n" >> "$CURL_LOG"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then\n    if [ "$CORRUPT_DOWNLOAD" = "1" ]; then printf corrupt > "$2"; else cp "$FIXTURE_ARCHIVE" "$2"; fi\n    exit\n  fi\n  shift\ndone\nexit 1\n',
         );
         chmodSync(curl, 0o755);
 
@@ -142,23 +146,46 @@ describe('linter directories', () => {
           ...process.env,
           PATH: `${binDir}:${process.env.PATH}`,
           CURL_LOG: curlLog,
+          CORRUPT_DOWNLOAD: '0',
           FIXTURE_ARCHIVE: fixture,
         };
+
+        expect(() =>
+          execSync(installer, {
+            env: { ...env, CORRUPT_DOWNLOAD: '1' },
+          }),
+        ).toThrow();
+        expect(readFileSync(cacheArchive, 'utf8')).toBe(
+          'validator-passing plant',
+        );
 
         execSync(installer, { env });
         expect(readFileSync(cacheArchive, 'utf8')).toBe('official archive');
         expect(readFileSync(executable, 'utf8')).toBe('official archive');
-        expect(readFileSync(curlLog, 'utf8')).toBe('download\n');
+        expect(readFileSync(curlLog, 'utf8')).toBe('download\ndownload\n');
 
         rmSync(localArchive);
         rmSync(executable);
         rmSync(fixture);
         execSync(installer, { env });
         expect(readFileSync(executable, 'utf8')).toBe('official archive');
-        expect(readFileSync(curlLog, 'utf8')).toBe('download\n');
+        expect(readFileSync(curlLog, 'utf8')).toBe('download\ndownload\n');
+
+        writeFileSync(fixture, 'official archive');
+        rmSync(localArchive);
+        rmSync(executable);
+        rmSync(cacheArchive);
+        mkdirSync(cacheArchive);
+        execSync(installer, { env });
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        expect(statSync(cacheArchive).isDirectory()).toBe(true);
+        expect(readFileSync(curlLog, 'utf8')).toBe(
+          'download\ndownload\ndownload\n',
+        );
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
     },
+    15_000,
   );
 });
