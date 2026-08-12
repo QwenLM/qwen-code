@@ -2740,6 +2740,57 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     }
   });
 
+  // An unlabeled override-path dispatch runs the runtime agent under the
+  // agentType's name; the transcript must record that same identity, not
+  // the generic default (agentName is the only human-readable agent
+  // identity a workflow dispatch leaves on disk).
+  it('records the agentType name in the transcript for an unlabeled override dispatch', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async (name) =>
+          name === 'code-reviewer'
+            ? {
+                name: 'code-reviewer',
+                description: 'reviews chunks',
+                systemPrompt: 'You review code.',
+                level: 'session',
+              }
+            : null,
+        onCreate: async () => ({
+          finalText: 'review-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('review chunk 1 of 3', {
+        agentType: 'code-reviewer',
+      });
+
+      expect(calls[0]!.config.name).toBe('code-reviewer');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('code-reviewer');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
   it('strips internal tags from override-path final text', async () => {
     const { config } = fakeConfigWithMgr({
       findSubagentByName: async () => ({
@@ -3941,7 +3992,38 @@ describe('createProductionDispatch — subagent transcripts', () => {
     expect(recs[0]!['agentId']).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
     expect(recs[0]!['agentName']).toBe('chunk-3');
     expect(recs[0]!['sessionId']).toBe('sess-1');
+    // Launch metadata flows through buildAgentTranscriptAttach — pin it
+    // here so a dropped builder wiring line fails the suite.
+    expect(recs[0]!['version']).toBe('9.9.9');
+    expect(recs[0]!['cwd']).toBe(projectDir);
     expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
+  });
+
+  // An empty prompt seeds no user record, so the transcript would give no
+  // evidence of what the agent was asked — the dispatch is rejected at the
+  // boundary instead, before any transcript is started.
+  it('rejects an empty or non-string prompt before attaching a transcript', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await expect(dispatch('', { label: 'empty' })).rejects.toThrow(
+      /non-empty string prompt/,
+    );
+    await expect(
+      dispatch(42 as unknown as string, { label: 'bad' }),
+    ).rejects.toThrow(/non-empty string prompt/);
+    expect(transcriptNames()).toHaveLength(0);
+  });
+
+  // The display name is resolved once and handed to both the runtime agent
+  // and the transcript, so an empty label cannot diverge into a runtime
+  // agent named '' whose transcript says 'workflow-agent'.
+  it('keeps the runtime agent name and the transcript aligned for an empty label', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('task', { label: '' });
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.name).toBe('workflow-agent');
+    const recs = recordsIn(transcriptNames()[0]!);
+    expect(recs[0]!['agentName']).toBe('workflow-agent');
   });
 
   it("records the subagent's tool calls and their results", async () => {

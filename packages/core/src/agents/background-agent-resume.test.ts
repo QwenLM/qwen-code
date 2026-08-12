@@ -3143,6 +3143,109 @@ describe('BackgroundAgentResumeService', () => {
     expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
   });
 
+  // The resume attach recomputes the transcript path instead of reusing the
+  // registered outputFile; the recomputed path must follow
+  // meta.parentSessionId, not the current session (the divergence a CLI
+  // restart produces, reachable via send-message revive).
+  it('appends resumed records to the launch-session transcript when the current session differs', async () => {
+    const launchSessionId = 'session-launch'; // config.getSessionId() is 'session-1'
+    const agentId = 'agent-cross-session';
+    const metaPath = getAgentMetaPath(tempDir, launchSessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, launchSessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Cross-session resume',
+      parentSessionId: launchSessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: launchSessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId: launchSessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'partial answer' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Cross-session resume',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'original task',
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'partial answer');
+
+    const subagent = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'continued',
+    };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose,
+    });
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+
+    // Resumed records land in the LAUNCH session's transcript, chained onto
+    // its last stable record — the current session's dir stays untouched.
+    const records = fs
+      .readFileSync(outputFile, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toHaveLength(3);
+    expect(records[2]).toMatchObject({
+      type: 'user',
+      sessionId: launchSessionId,
+      parentUuid: 'a1',
+      message: { role: 'user', parts: [{ text: 'keep going' }] },
+    });
+    expect(
+      fs.existsSync(getAgentJsonlPath(tempDir, 'session-1', agentId)),
+    ).toBe(false);
+  });
+
   it('cold-revives a completed worktree-isolated agent without retaining it', async () => {
     const agentId = 'completed-isolated';
     const metaPath = path.join(tempDir, `${agentId}.meta.json`);

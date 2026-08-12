@@ -385,6 +385,13 @@ export function createProductionDispatch(
   bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
+    // An empty or non-string prompt seeds no `user` record, so the
+    // transcript would carry no evidence of what the agent was asked —
+    // and a stall retry on top would open the file with an orphaned
+    // `agent_retry` marker. Reject at the boundary instead.
+    if (typeof prompt !== 'string' || prompt.length === 0) {
+      throw new Error('agent() requires a non-empty string prompt.');
+    }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
     // AgentEventEmitter; it chains the caller's `signal` into the
@@ -400,6 +407,9 @@ export function createProductionDispatch(
     // dispatch appends to ONE transcript instead of presenting as two agents
     // to every reader of the subagent transcript dir.
     const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+    // Resolved once and handed to both the runtime and the transcript so
+    // the on-disk records name the same agent that ran.
+    const agentName = resolveWorkflowAgentName(opts);
     let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
@@ -409,7 +419,7 @@ export function createProductionDispatch(
           config,
           workflowAgentId,
           prompt,
-          opts,
+          agentName,
           emitter,
           attempt,
         );
@@ -421,6 +431,7 @@ export function createProductionDispatch(
             attemptSignal,
             emitter,
             workflowAgentId,
+            agentName,
             onTokens,
           );
         } finally {
@@ -431,10 +442,24 @@ export function createProductionDispatch(
       {
         stallMs,
         signal,
-        label: typeof opts.label === 'string' ? opts.label : undefined,
+        label: agentName,
       },
     );
   };
+}
+
+/**
+ * Single derivation of a dispatch's display name: the fast path and the
+ * ephemeral override default run the runtime agent under it, and the
+ * transcript records it, so the on-disk identity always matches the agent
+ * that ran. An explicit non-empty label wins; an unlabeled override-path
+ * agent runs under its agentType's name; otherwise the shared default.
+ * The truthy check keeps `label: ''` from naming the agent ''.
+ */
+function resolveWorkflowAgentName(opts: WorkflowAgentOpts): string {
+  return typeof opts.label === 'string' && opts.label
+    ? opts.label
+    : (opts.agentType ?? 'workflow-agent');
 }
 
 /**
@@ -460,7 +485,8 @@ function attachDispatchTranscript(
   config: Config,
   agentId: string,
   prompt: string,
-  opts: WorkflowAgentOpts,
+  /** The name the runtime agent runs under — see resolveWorkflowAgentName. */
+  agentName: string,
   emitter: AgentEventEmitter,
   /** 1-based attempt; retries append to the transcript attempt 1 opened. */
   attempt: number,
@@ -468,10 +494,7 @@ function attachDispatchTranscript(
   const append = attempt > 1;
   try {
     const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
-      agentName:
-        typeof opts.label === 'string' && opts.label
-          ? opts.label
-          : 'workflow-agent',
+      agentName,
       // The prompt the SCRIPT dispatched, seeded as the transcript's first
       // user record — the same shape AgentTool writes, so a reader that
       // recovers a launch prompt from a transcript needs no workflow-
@@ -510,6 +533,8 @@ async function runSingleDispatch(
    * identity — it keys the transcript file and the ALS agent-context frame.
    */
   workflowAgentId: string,
+  /** The name the runtime agent runs under — see resolveWorkflowAgentName. */
+  agentName: string,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
@@ -524,7 +549,7 @@ async function runSingleDispatch(
     opts.schema === undefined
   ) {
     const subagent = await AgentHeadless.create(
-      opts.label ?? 'workflow-agent',
+      agentName,
       config,
       {
         systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -585,6 +610,7 @@ async function runSingleDispatch(
     opts,
     attemptSignal,
     workflowAgentId,
+    agentName,
     onTokens,
     emitter,
   );
@@ -658,6 +684,8 @@ async function runOverridePath(
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
   workflowAgentId: string,
+  /** The name the runtime agent runs under — see resolveWorkflowAgentName. */
+  agentName: string,
   /**
    * P5: forwarded from createProductionDispatch. The override path
    * builds its own AgentHeadless and runs subagent.execute(); the
@@ -710,7 +738,7 @@ async function runOverridePath(
     // createAgentHeadless gives us provider routing via
     // buildRuntimeContentGeneratorView and per-agent ToolRegistry cleanup.
     baseConfig = {
-      name: opts.label ?? 'workflow-agent',
+      name: agentName,
       description: 'Default workflow subagent (per-call overrides).',
       systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
       level: 'session',
