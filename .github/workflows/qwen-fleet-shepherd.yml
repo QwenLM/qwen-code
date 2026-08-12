@@ -356,6 +356,20 @@ jobs:
             echo "$(( (NOW_EPOCH - $(date -u -d "$1" +%s)) / 86400 ))"
           }
 
+          # CI-status classifiers shared by BOTH dashboard loops, so a
+          # check-naming or status-set change lands in one place and the two
+          # tables can never classify the same PR differently.
+          # WAITING and REQUESTED are also not-yet-final check states.
+          pending_checks() {
+            jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "$1"
+          }
+          # Platform-blind on purpose: the dashboard is a health VIEW, and a
+          # Windows- or macOS-only regression is just as red as an Ubuntu one
+          # (reruns stay with the Patrol either way).
+          failed_test_url() {
+            jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "$1"
+          }
+
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
           # autofix/skip is the maintainer opt-out honored at every
           # engagement path — a skip-labeled PR gets no shepherd levers and
@@ -385,12 +399,8 @@ jobs:
               DASH_ROWS="${DASH_ROWS}| #${PR} | ? | incomplete metadata | — |\n"
               continue
             fi
-            # WAITING and REQUESTED are also not-yet-final check states.
-            PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "${ROW}")"
-            # Platform-blind on purpose: the dashboard is a health VIEW, and
-            # a Windows- or macOS-only regression is just as red as an Ubuntu
-            # one (reruns stay with the Patrol either way).
-            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "${ROW}")"
+            PENDING="$(pending_checks "${ROW}")"
+            FAILED_TEST_URL="$(failed_test_url "${ROW}")"
             BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
 
             STATUS_NOTE='idle'
@@ -441,6 +451,13 @@ jobs:
                 ACTION_NOTE='conflict dispatch already sent for this head'
               elif [[ "${DISPATCHES}" -ge "${MAX_CONFLICT_DISPATCHES_PER_TICK}" ]]; then
                 ACTION_NOTE='conflict-dispatch budget reached this tick'
+              elif [[ -n "${NH_PREFIX}" ]]; then
+                # A paused PR's own label declares the loop stopped on it —
+                # the dispatched scan would refuse ("Dispatch refused …
+                # stays unhandled"), so spending a dispatch slot here only
+                # posts a contradictory comment and plants a dedup marker.
+                # The conflict stays unhandled until a human re-arms.
+                ACTION_NOTE='paused (needs-human) — conflict stays unhandled until re-arm'
               elif live_skip "${PR}"; then
                 # Budget first: once it is exhausted no mutation is possible,
                 # so the PAT-backed live label read would be pure waste.
@@ -539,7 +556,12 @@ jobs:
             > /tmp/takeover-raw.json 2> /dev/null; then
             TK_OK=false
             echo "::warning::takeover enumeration failed; the takeover table shows an error row this tick"
-            TAKEOVER_ROWS='| — | — | — | ⚠️ enumeration unreadable this tick | fail closed — no release evaluation ran |\n'
+            # The release lever is fed by the needs-human enumeration (loop
+            # 2), NOT this display window — so a takeover-list failure does
+            # NOT stop pause evaluation. The row must say so, or the
+            # dashboard contradicts itself during the very outage it exists
+            # to clarify.
+            TAKEOVER_ROWS='| — | — | — | ⚠️ takeover pool unreadable this tick | paused rows below still evaluated (needs-human fed) |\n'
           else
             if [[ "$(jq length /tmp/takeover-raw.json)" -ge 100 ]]; then
               echo "::warning::takeover pool at the 100-PR enumeration limit — recently-active PRs (paused-but-discussed ones included) may be missing from this table"
@@ -579,8 +601,8 @@ jobs:
               AUTHOR="$(jq -r '.author.login // "?"' <<< "${ROW}")"
               UPDATED="$(jq -r '.updatedAt // ""' <<< "${ROW}")"
               MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${ROW}")"
-              PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "${ROW}")"
-              FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "${ROW}")"
+              PENDING="$(pending_checks "${ROW}")"
+              FAILED_TEST_URL="$(failed_test_url "${ROW}")"
               HAS_NH="$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${ROW}")"
               UPD_AGO='?'
               [[ -n "${UPDATED}" ]] && UPD_AGO="$(days_since "${UPDATED}")d"

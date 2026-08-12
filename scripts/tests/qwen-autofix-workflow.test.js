@@ -3181,6 +3181,20 @@ describe('qwen-autofix workflow', () => {
     );
     expect(consentRecheck).toBeGreaterThan(-1);
     expect(consentRecheck).toBeLessThan(labelPost);
+    // R3-1: a release ack newer than the window suppresses the every-scan
+    // label POST — a released bot PR stays in the scan candidate set with
+    // ROUND >= cap, so an unconditional POST would re-add the escalation
+    // label the release just removed and ping-pong with the shepherd's
+    // cleanup. The gate must sit BEFORE the label POST.
+    expect(reviewScanJob).toContain('RELEASE_ACKED=');
+    expect(reviewScanJob).toContain(
+      'cap label/notice skipped: PR was released after its last re-arm',
+    );
+    const releaseGate = reviewScanJob.indexOf(
+      'elif [[ "${RELEASE_ACKED}" != "0" ]]; then',
+    );
+    expect(releaseGate).toBeGreaterThan(-1);
+    expect(releaseGate).toBeLessThan(labelPost);
     // The dry-run line covers both writes.
     expect(reviewScanJob).toContain(
       'DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL}',
@@ -3468,12 +3482,17 @@ describe('qwen-autofix workflow', () => {
     expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, takeover label untouched — the only API
     // write is the stale needs-human cleanup (404-tolerant; this PR was
-    // never paused, so the stub's silent success stands in for the 404).
+    // never paused). Pin the full DELETE line (method + encoded label) and
+    // that it is the ONLY API write — a fragment match would let a refactor
+    // swap the DELETE for a probe GET or add a stray label POST (R3-9).
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
     expect(rearm.writes).not.toContain('labels[]=autofix/takeover');
     expect(rearm.writes).not.toContain('labels/autofix%2Ftakeover');
-    expect(rearm.writes).toContain('labels/autofix%2Fneeds-human');
+    expect(rearm.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Fneeds-human',
+    );
+    expect(rearm.writes.match(/^API /gm) ?? []).toHaveLength(1);
     expect(rearm.log).toContain('re-armed');
     // remove + present → label removed, through the URI-encoded path segment
     // (real jq runs in the substitution, so the %2F is the executed truth).
@@ -9730,19 +9749,21 @@ exit 1
     expect(rearmStep).toBeTruthy();
     const block = rearmStep.replace(/\n {10}/g, '\n');
 
-    const runRearm = ({ actor = BOT, apiFail = false } = {}) => {
+    const runRearm = ({ actor = BOT, apiFail = false, labels = '[]' } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
       try {
         writeFileSync(
           join(dir, 'gh'),
           [
             '#!/bin/bash',
-            `echo "$1 $2" >> '${join(dir, 'calls.log')}'`,
+            `echo "$@" >> '${join(dir, 'calls.log')}'`,
             'if [[ "$1" == "api" && "$2" == "user" ]]; then',
             `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
             `  printf '%s' "${actor}"`,
             'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
             `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
+            'elif [[ "$1" == "pr" && "$2" == "view" ]]; then',
+            `  printf '%s' '{"labels":${labels}}'`,
             'fi',
           ].join('\n'),
         );
@@ -9756,6 +9777,8 @@ exit 1
             PR: '7354',
             REPO: 'QwenLM/qwen-code',
             AUTOFIX_BOT: BOT,
+            NEEDS_HUMAN_LABEL: 'autofix/needs-human',
+            SKIP_LABEL: 'autofix/skip',
           },
           encoding: 'utf8',
         });
@@ -9783,9 +9806,28 @@ exit 1
     expect(ok.body).toContain('<!-- autofix-rearm -->');
     expect(ok.body).toContain('<details>');
     expect(ok.body).toContain('中文说明');
+    // R3-11: the /retry path's needs-human DELETE must actually target the
+    // encoded label (broken @uri / renamed variable / swallowed failure all
+    // fail here), and it is the only label write the re-arm performs.
+    expect(ok.calls).toContain(
+      'api -X DELETE repos/QwenLM/qwen-code/issues/7354/labels/autofix%2Fneeds-human',
+    );
+    expect(ok.calls.match(/^api -X DELETE/gm) ?? []).toHaveLength(1);
     // No line may be indented 4+ spaces, or the marker renders as a code block
     // and the scanners' marker match silently fails.
     expect(ok.body).not.toMatch(/^ {4,}/m);
+
+    // R3-7: skip wins over re-arm — with autofix/skip present the stale-label
+    // DELETE is skipped, so a frozen PR keeps its only filterable escalation
+    // state (no scan manages it and the fresh window won't re-apply it).
+    const skipped = runRearm({
+      actor: BOT,
+      labels: '[{"name":"autofix/skip"}]',
+    });
+    expect(skipped.status).toBe(0);
+    expect(skipped.calls).toContain('pr comment');
+    expect(skipped.calls).not.toContain('api -X DELETE');
+    expect(skipped.stdout).toContain('removal skipped');
 
     // Actor mismatch: the PAT authenticates as someone else -> the guard exits
     // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR

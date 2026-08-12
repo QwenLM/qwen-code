@@ -116,7 +116,7 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('consent withdrawn, no %s');
     expect(workflow).toContain('fail closed, no %s');
     expect(workflow).toMatch(
-      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]{0,220}elif live_skip "\$\{PR\}"; then/,
+      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]*?paused \(needs-human\)[\s\S]*?elif live_skip "\$\{PR\}"; then/,
     );
     expect(workflow).toMatch(
       /SYNCS\}" -ge "\$\{MAX_SYNCS_PER_TICK\}" \]\]; then[\s\S]{0,160}elif live_skip "\$\{PR\}"; then/,
@@ -1057,9 +1057,16 @@ exit 1`;
       expect(site).not.toContain('> /dev/null');
     }
     // A zero-padded variable must not kill the lever: base-10 normalize
-    // after the numeric guard (R2-6).
-    expect(workflow).toContain(
-      'AUTO_RELEASE_DAYS=$((10#${AUTO_RELEASE_DAYS}))',
+    // AFTER the numeric guard (R2-6). Pin the ORDER, anchored on the
+    // AUTO_RELEASE_DAYS-specific guard line — a looser regex would match the
+    // unrelated COUNT guard earlier in the file, and moving the normalize
+    // above the guard would let `$((10#abc))` abort the tick under set -e
+    // (R3-10).
+    expect(workflow).toMatch(
+      /is not numeric; using 3"\n\s+AUTO_RELEASE_DAYS=3\n/,
+    );
+    expect(workflow).toMatch(
+      /if \[\[ ! "\$\{AUTO_RELEASE_DAYS\}" =~ \^\[0-9\]\+\$ \]\]; then[\s\S]*?AUTO_RELEASE_DAYS=\$\(\(10#\$\{AUTO_RELEASE_DAYS\}\)\)/,
     );
     // The summary dedup is scoped to THIS pause cycle — markers older than
     // the latest cap notice don't suppress a second release's summary
@@ -1183,7 +1190,7 @@ exit 1`;
     const transient = headlines.filter((h) =>
       h.includes('a setup step failed'),
     );
-    expect(terminal.length).toBeGreaterThanOrEqual(4);
+    expect(terminal.length).toBe(5);
     expect(transient).toHaveLength(1);
     const matches = (h) =>
       execFileSync('jq', ['-rn', '--arg', 'b', h, `$b | test("${reasonRe}")`], {
@@ -1285,9 +1292,11 @@ exit 1`;
       /issues\/\$\{PR\}\/comments" --paginate[\s\S]{0,80}\/tmp\/tk-ic\.json/,
     );
     // R2-19: the release scope check requires BOTH labels — the --arg
-    // bindings are the load-bearing part.
+    // bindings are the load-bearing part. R3-12: the pin runs through the
+    // comparison operator, so a polarity flip (`!=` → `==`) of the scope
+    // guard fails instead of silently releasing label-changed PRs.
     expect(workflow).toContain(
-      'jq -r --arg a "${TAKEOVER_LABEL}" --arg b "${NEEDS_HUMAN_LABEL}" \'([.labels[]?.name] | index($a) != null) and ([.labels[]?.name] | index($b) != null)\' <<< "${LIVE_LABELS_JSON}"',
+      'jq -r --arg a "${TAKEOVER_LABEL}" --arg b "${NEEDS_HUMAN_LABEL}" \'([.labels[]?.name] | index($a) != null) and ([.labels[]?.name] | index($b) != null)\' <<< "${LIVE_LABELS_JSON}")" != "true" ]]; then',
     );
     // R2-20: live_skip exports the payload the scope check rides.
     expect(workflow).toContain(
@@ -1310,6 +1319,33 @@ exit 1`;
     // addressable route).
     expect(workflow).toMatch(
       /auto-release takeover \(paused \$\{PAUSE_D\}d\)" \\\n\s+gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{TAKEOVER_LABEL\}" '\$l\|@uri'\)"/,
+    );
+    // R3-2: the takeover-enum error row must NOT claim "no release
+    // evaluation ran" — the lever is fed by the needs-human enumeration.
+    expect(workflow).toContain(
+      'paused rows below still evaluated (needs-human fed)',
+    );
+    expect(workflow).not.toContain('fail closed — no release evaluation ran');
+    // R3-8: the conflict-dispatch lever refuses a paused (needs-human) PR
+    // instead of spending a dispatch slot the scan would refuse.
+    expect(workflow).toContain(
+      'paused (needs-human) — conflict stays unhandled until re-arm',
+    );
+    expect(workflow).toMatch(
+      /elif \[\[ -n "\$\{NH_PREFIX\}" \]\]; then\n\s+#[\s\S]*?conflict stays unhandled until re-arm/,
+    );
+    // R1-10: the CI-status classifiers are shared helpers, and NEITHER loop
+    // inlines its own copy of the jq (a check-naming change must land once).
+    expect(workflow).toContain('pending_checks() {');
+    expect(workflow).toContain('failed_test_url() {');
+    expect(
+      workflow.match(/PENDING="\$\(pending_checks "\$\{ROW\}"\)/g),
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/FAILED_TEST_URL="\$\(failed_test_url "\$\{ROW\}"\)/g),
+    ).toHaveLength(2);
+    expect(workflow).not.toContain(
+      'IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length\' <<< "${ROW}"',
     );
   });
 });

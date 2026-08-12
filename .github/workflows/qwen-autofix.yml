@@ -1916,8 +1916,15 @@ jobs:
           gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '\U0001F504 AutoFix re-armed. The next scan re-reads this PR'"'"'s feedback from the start and the round counter resets. Nothing was deleted — this marker supersedes the evaluation markers above it.\n\n<details>\n<summary>中文说明</summary>\n\n\U0001F504 已重新武装 AutoFix。下一次扫描会从头重新读取本 PR 的反馈，轮次计数也已重置。未删除任何内容 —— 本标记使其上方的评估标记失效。\n\n</details>\n\n<!-- autofix-rearm -->')"
           echo "🔄 re-armed PR #${PR}"
           # Management resumed — the escalation label is stale. 404 is the
-          # common case (the PR was never paused).
-          if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+          # common case (the PR was never paused). Skip wins over re-arm
+          # EVERYWHERE (mirrors the takeover-command guard): a frozen PR
+          # must keep its escalation label, because the fresh re-arm window
+          # won't re-apply it while skip is present and no scan manages the
+          # PR — an unguarded DELETE would silently drop the only filterable
+          # escalation state, with no shepherd heal to restore it.
+          if [[ "$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' || echo '')" == "true" ]]; then
+            echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
+          elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
             [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
           fi
 
@@ -2915,6 +2922,18 @@ jobs:
                 [ .[] | select((.user.login // "") == $ab)
                   | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                   | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              # A release ack newer than the last re-arm means the most
+              # recent management action was a deliberate release (`takeover
+              # stop`), not a re-arm. The label POST below must NOT fire in
+              # that state: a released PR stays in the scan candidate set and
+              # keeps ROUND >= cap, so an unconditional POST would re-add the
+              # escalation label the release just removed — and ping-pong with
+              # the shepherd's cleanup lever every tick. A re-arm advances
+              # REARM_KEY past the release ack, re-enabling the label.
+              RELEASE_ACKED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- takeover-ack released -->"))
+                  | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
               if [[ "${DRY_RUN}" == "true" ]]; then
                 echo "🧪 DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL} on #${PR}"
               else
@@ -2937,6 +2956,8 @@ jobs:
                 fi
                 if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                   echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                elif [[ "${RELEASE_ACKED}" != "0" ]]; then
+                  echo "🧭 cap label/notice skipped: PR was released after its last re-arm (#${PR})"
                 else
                   # The escalation label rides EVERY cap detection, noticed
                   # or not: the once-per-window dedup suppresses repeat
