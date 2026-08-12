@@ -531,6 +531,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    if (isNoReply(text)) return;
     if (!this.connected) {
       throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
     }
@@ -919,6 +920,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         ),
       };
       await this.handleInbound(envelope);
+      this.cursor.processedDocumentFingerprints = [
+        ...this.cursor.processedDocumentFingerprints,
+        documentHistoryKey(documentId, fingerprint),
+      ].slice(-MAX_PROCESSED_ITEMS);
       known.add(fingerprint);
       state.fingerprints.push(fingerprint);
       this.saveCursor();

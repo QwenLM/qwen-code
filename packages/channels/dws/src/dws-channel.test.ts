@@ -215,6 +215,10 @@ class TestableDwsChannel extends DwsChannel {
   resolveSession(): Promise<string> {
     return this.router.resolve(this.name, 'alice', 'doc-1', 'comment-1');
   }
+
+  resolveImSession(): Promise<string> {
+    return this.router.resolve(this.name, 'alice', 'cid-1');
+  }
 }
 
 let qwenHome: string;
@@ -874,6 +878,24 @@ describe('DwsChannel', () => {
     expect(second.inbound).toHaveLength(0);
   });
 
+  it('does not redispatch a document comment after it is reopened', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ disableAtMessages: true, documentIds: ['doc-1'] }),
+    );
+    await channel.poll();
+    const request = comment('new', '/qwen once');
+    client.comments.set('doc-1', [request]);
+    await channel.poll();
+    client.comments.set('doc-1', []);
+    await channel.poll();
+    client.comments.set('doc-1', [request]);
+    await channel.poll();
+
+    expect(channel.inbound.map((item) => item.text)).toEqual(['once']);
+  });
+
   it('returns document output to the originating root comment', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(
@@ -1001,6 +1023,20 @@ describe('DwsChannel', () => {
     await channel.respond('cid-1', '[NO_REPLY]');
 
     expect(client.replyToImMessage).not.toHaveBeenCalled();
+    expect(client.sendImMessage).not.toHaveBeenCalled();
+  });
+
+  it('suppresses the no-reply sentinel for proactive IM delivery', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'message-1', 'please help'),
+    );
+    const sessionId = await channel.resolveImSession();
+
+    await channel.dispatchBackgroundResponse(sessionId, '[NO_REPLY]');
+
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 });
