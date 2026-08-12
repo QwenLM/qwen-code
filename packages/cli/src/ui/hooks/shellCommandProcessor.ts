@@ -19,6 +19,7 @@ import type {
 import {
   compactToolResultDisplayForHistory,
   createDebugLogger,
+  isSignalTermination,
   isBinary,
   ShellExecutionService,
 } from '@qwen-code/qwen-code-core';
@@ -288,7 +289,7 @@ export const useShellCommandProcessor = (
               } else if (result.aborted) {
                 finalStatus = ToolCallStatus.Canceled;
                 finalOutput = `Command was cancelled.\n${finalOutput}`;
-              } else if (result.signal) {
+              } else if (isSignalTermination(result.signal)) {
                 finalStatus = ToolCallStatus.Error;
                 finalOutput = `Command terminated by signal: ${result.signal}.\n${finalOutput}`;
               } else if (result.exitCode !== 0) {
