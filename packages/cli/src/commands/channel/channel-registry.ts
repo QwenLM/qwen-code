@@ -82,8 +82,13 @@ function managementFieldsWithSharedControls(
   defaultSessionScope: SessionScope,
 ): readonly ChannelConfigFieldDescriptor[] {
   const declared = new Set(fields.map((field) => field.key));
+  const normalizedFields = fields.map((field) =>
+    field.key === 'sessionScope' && field.default === undefined
+      ? { ...field, default: defaultSessionScope }
+      : field,
+  );
   return [
-    ...fields,
+    ...normalizedFields,
     ...SHARED_ACCESS_FIELDS.filter((field) => !declared.has(field.key)),
     ...(declared.has('sessionScope')
       ? []
@@ -236,6 +241,14 @@ function assertManagementField(
 function assertManagementDescriptor(plugin: ChannelPlugin): void {
   const management = plugin.management;
   if (management === undefined) return;
+  const defaultSessionScope: unknown = plugin.defaultSessionScope ?? 'user';
+  if (
+    !SESSION_SCOPE_OPTIONS.some(
+      (option) => option.value === defaultSessionScope,
+    )
+  ) {
+    throw new Error('Channel defaultSessionScope is invalid.');
+  }
   if (
     management.validateConfig !== undefined &&
     (typeof management.validateConfig !== 'function' ||
@@ -249,6 +262,23 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
     throw new Error('Channel management metadata must declare a fields array.');
   }
   assertManagementFields(management.fields);
+  const sessionScopeField = management.fields.find(
+    (field) => field.key === 'sessionScope',
+  );
+  if (sessionScopeField) {
+    if (sessionScopeField.kind !== 'enum') {
+      throw new Error('Channel field "sessionScope" must be an enum.');
+    }
+    if (
+      !sessionScopeField.options?.some(
+        (option: { value: string }) => option.value === defaultSessionScope,
+      )
+    ) {
+      throw new Error(
+        'Channel field "sessionScope" must include the channel defaultSessionScope.',
+      );
+    }
+  }
 }
 
 function ensureBuiltins(): Promise<void> {

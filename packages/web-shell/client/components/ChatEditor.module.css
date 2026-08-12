@@ -1811,28 +1811,41 @@
 
 .imageRemove {
   position: absolute;
-  top: 0;
-  right: 0;
+  top: 2px;
+  right: 2px;
   width: 16px;
   height: 16px;
-  font-size: 12px;
-  line-height: 16px;
-  text-align: center;
-  background: rgba(0, 0, 0, 0.7);
-  color: var(--error-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
   border: none;
   cursor: pointer;
-  border-radius: 0 0 0 4px;
+  border-radius: 50%;
+  padding: 0;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease;
+}
+
+.imageRemove svg {
+  display: block;
+}
+
+.imageThumb:hover .imageRemove:not(:disabled),
+.imageRemove:focus-visible {
+  opacity: 1;
 }
 
 .imageRemove:not(:disabled):hover {
-  background: var(--error-color);
-  color: var(--chat-editor-text-primary);
+  background: rgba(0, 0, 0, 0.8);
 }
 
 .imageRemove:disabled {
   cursor: default;
-  opacity: 0.55;
+  opacity: 0;
 }
 
 .searchPanel {
