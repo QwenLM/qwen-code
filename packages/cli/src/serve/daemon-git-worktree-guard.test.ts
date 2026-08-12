@@ -2013,6 +2013,12 @@ it -C ${outsideRepo} reset --hard`,
     () => `git() { :; }; unset -f git; git -C ${plainOutsidePath} reset --hard`,
     () =>
       `alias git='echo hi'; unalias git; git -C ${plainOutsidePath} reset --hard`,
+    // `sh` resolves to dash on most daemons but to bash on macOS, so the
+    // guard never replays an exported shadow for it: importing on a
+    // dash-backed `sh` would recreate the escape. It fails closed — the
+    // deliberate, safe trade-off is over-denying the bash-backed case.
+    () =>
+      `git() { :; }; export -f git; sh -c "git -C ${plainOutsidePath} reset --hard"`,
     // `env -i`/`-`/`--ignore-environment` wipe the exported function before
     // bash starts, so even bash resolves the real git.
     () =>

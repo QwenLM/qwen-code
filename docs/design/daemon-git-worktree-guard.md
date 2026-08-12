@@ -250,6 +250,13 @@ own design; this one should not grow into it by accretion.
 - No general shell interpreter or environment-variable analysis: script files
   run by `bash script.sh` or `source` are not read, and variable values are
   not tracked across commands.
+- No resolution of the `sh` implementation: only `bash` imports `export -f`
+  functions, but `sh` is bash on macOS and dash elsewhere. The basename cannot
+  say which, so the guard never replays an exported shadow for `sh -c` —
+  importing it on a dash-backed `sh` would recreate the escape. It fails
+  closed, over-denying the bash-backed case (a false positive, not a bypass).
+  `env -i`/`-`/`--ignore-environment` likewise drop the exported functions
+  before a bash child starts, so they are not imported into that payload.
 - No revocation of a recorded relocation: `unset GIT_DIR` and `env -u GIT_DIR`
   later in the same chain do not clear an exported GIT\_\* relocation, so such a
   chain can be denied even though the real shell would run it inside the
