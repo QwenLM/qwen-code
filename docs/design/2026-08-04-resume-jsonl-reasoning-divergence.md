@@ -13,7 +13,7 @@ status: 'confirmed'
 > directly by the consolidator against
 > [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/fix/geminichat-thought-consolidation)
 > @ [`f907a0f5c`](https://github.com/QwenLM/qwen-code/commit/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e)
-> (PR #8260's tip commit).
+> (PR #8260's tip commit at audit time; the branch has since moved).
 
 ## Verdict: **BUG**
 
@@ -31,7 +31,7 @@ thinking guard in the request-conversion pipeline.
 compatible backends get a controlled, diagnostic local `throw`. **Native
 Anthropic base URLs get no local guard at all** (`dropUnsignedAssistantThinking`
 is explicitly gated `!isAnthropicNativeBaseUrl(...)` at
-[`anthropicContentGenerator.ts:736-741`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/anthropicContentGenerator.ts#L736-L741)),
+[`anthropicContentGenerator.ts:736-740`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/anthropicContentGenerator.ts#L736-L740)),
 so the malformed request ships straight to the wire and — per Anthropic's own
 documented replay contract — is expected to be rejected with a raw 400
 directly from Anthropic's API. This specific native-Anthropic outcome was not
@@ -67,7 +67,7 @@ the type system.
 
 ### 1. What PR #8260's fix actually does — and its scope
 
-[`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5140)
+[`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5139)
 re-runs `dropDanglingUnsignedTrailingThought` on the truncated turn's parts
 immediately before merging in a recovery continuation that carries a
 `functionCall`. This closes the hazard for the **live, in-memory** session.
@@ -110,14 +110,14 @@ Traced in full, from `--resume` to rehydrated `Content[]`:
 1. [`GeminiClient.initialize()`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/client.ts#L429-L441)
    calls `buildApiHistoryFromConversation(resumedSessionData.conversation)`
    and passes the result directly into `startChat(...)`.
-2. [`buildApiHistoryFromConversation`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2197-L2245)
+2. [`buildApiHistoryFromConversation`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2197-L2251)
    walks the persisted `ChatRecord[]` and calls
    [`appendApiHistoryRecord`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2171-L2184)
    once per record: `history.push(copyContentForApiHistory(record.message))`,
    with one special case (merging consecutive `mid_turn_user_message`
    records into the previous **user** turn — irrelevant here, since these
    are both `model`-role records).
-   [`copyContentForApiHistory`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2130-L2166)
+   [`copyContentForApiHistory`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2143-L2169)
    copies every part verbatim via `{ ...part }` — no branch special-cases
    `thought` or `thoughtSignature`.
 3. `startChat()` runs exactly one repair pass on the resumed history:
@@ -137,7 +137,7 @@ On the next Anthropic-routed request built from this resumed history:
 1. `processContents` emits one Anthropic message per `Content` — so the
    truncated attempt and the continuation become two separate assistant
    messages.
-2. [`mergeConsecutiveAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1405-L1443)
+2. [`mergeConsecutiveAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1405-L1448)
    runs at [`converter.ts:285` and `:287`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L285-L287) —
    **before**
    [`dropUnsignedThinkingFromAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L300-L301) —
@@ -158,13 +158,13 @@ On the next Anthropic-routed request built from this resumed history:
    path) — or, for native Anthropic, the guard never runs at all and the
    malformed message ships straight to the wire.
 
-### A second, independently documented hazard shape (Race B)
+### A second hazard shape (Race B)
 
-`geminiChat.ts`'s own canonical note names a second, distinct trigger: a
-process crash or OOM immediately after a stream emits `[...thought, functionCall]`
-but before the corresponding `functionResponse` is recorded. Here the
-dangling thought and the `functionCall` are **already in the same JSONL
-record** — no merge needed. On resume, `repairOrphanedToolUseTurns` (Site 4
+`geminiChat.ts`'s own canonical note documents a second, distinct hazard shape: a
+process crash or OOM leaves a dangling `model[fc]` in the JSONL transcript which
+`--resume` then rehydrates. If this `functionCall` turn also contains an unsigned thought
+(e.g., via a proxy-dropped signature, the accepted residual risk documented in Site 1),
+they are **already in the same JSONL record** — no merge needed. On resume, `repairOrphanedToolUseTurns` (Site 4
 of the companion inventory) synthesizes an error `functionResponse` for the
 orphaned `functionCall`, which makes this turn **active** again (a `tool_use`
 immediately followed by a `tool_result`) — without ever inspecting or fixing
@@ -201,8 +201,5 @@ API by any reviewer — flagged explicitly rather than asserted.
 This is the concrete instance the companion inventory document's Site 3
 refers to, and it is presented here as its own document because it is an
 actionable, scoped bug — not a philosophical question — with a clear next
-step: resume-time rehydration of `Content[]` needs to run the same
-reasoning-episode consolidation that the live path applies, rather than
-assuming a persisted, already-terminated conversation is automatically
-well-formed. No fix is proposed in detail here, consistent with this being a
+step: reasoning-episode consolidation must happen at a layer every transcript→`Content[]` reader passes through (e.g. background-agent/fork transcript recovery, ACP replay/restore, see Site 11 of the inventory), or the persistence producer must be made to write the coalesced shape. Simply fixing resume-time rehydration is insufficient, as it leaves other consumers exposed to the identical hazard. No fix is proposed in detail here, consistent with this being a
 documentation-and-verdict deliverable, not an implementation PR.
