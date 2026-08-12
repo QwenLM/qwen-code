@@ -51,6 +51,28 @@ function fileIdFor(fileRef: string): MediaFileId {
   return hashId('f', fileRef);
 }
 
+/**
+ * fileId of a POLICY DERIVATIVE, keyed by (root, object path).
+ *
+ * Derivatives live in the content-addressed object store, so two roots
+ * that derive byte-identical output land on the same object path. Keying
+ * the graph node on the path alone would make them ONE File node whose
+ * `rootFileId` belongs to whichever root created it first — leaking one
+ * file's lineage into another's (M §11.2: 不能把一个文件的权限或
+ * provenance 泄漏给另一个文件) and putting the node outside the second
+ * root's bounded traversal (M §8).
+ *
+ * Folding the root in gives each root its own cheap metadata rows while
+ * the BYTES stay deduplicated by the object store — the reuse M §11.2
+ * actually sanctions ("受管文件的物理存储块").
+ */
+function derivedFileIdFor(
+  objectPath: string,
+  rootFileId: MediaFileId,
+): MediaFileId {
+  return hashId('f', `${rootFileId}|${objectPath}`);
+}
+
 /** versionId is deterministic in (fileId, sha256): re-recognizing the
  * same content is a no-op, and two files sharing bytes keep two distinct
  * version records (M §11 — same hash never merges Files). */
@@ -303,7 +325,12 @@ function upsertRecognizedFile(
   event: FileRecognizedEvent,
   now: string,
 ): FileRecognizedCommit & { changed: boolean } {
-  const fileId = fileIdFor(event.fileRef);
+  // Policy derivatives are identified per root (see derivedFileIdFor);
+  // user/tool files by their locator alone.
+  const fileId =
+    event.origin === 'policy' && event.rootFileId !== undefined
+      ? derivedFileIdFor(event.fileRef, event.rootFileId)
+      : fileIdFor(event.fileRef);
   const fileVersionId = versionIdFor(fileId, event.sha256);
   let changed = false;
 
@@ -360,25 +387,80 @@ function upsertRecognizedFile(
   };
 }
 
+/**
+ * Content-identity reuse key of a recorded execution, or undefined when
+ * its source version is no longer in the graph. Recomputed from the
+ * record rather than persisted, so executions written before this key
+ * existed participate too.
+ */
+function reuseKeyOf(
+  snapshot: MediaMemorySnapshot,
+  execution: MediaPolicyExecutionRecord,
+): string | undefined {
+  const sha = snapshot.versions[execution.sourceVersionId]?.sha256;
+  return sha === undefined ? undefined : `${sha}|${execution.omniConfigHash}`;
+}
+
+/**
+ * The earliest execution whose content-identity key matches — one that
+ * already performed this exact computation on identical bytes, through
+ * another File. Deterministic (completion time, then id) so the same
+ * graph always attributes reuse to the same original. Reuse records are
+ * skipped as candidates: a chain always points at the ORIGINAL.
+ */
+function findReusableExecution(
+  snapshot: MediaMemorySnapshot,
+  reuseKey: string,
+  selfExecutionId: PolicyExecutionId,
+): MediaPolicyExecutionRecord | undefined {
+  let best: MediaPolicyExecutionRecord | undefined;
+  for (const candidate of Object.values(snapshot.executions)) {
+    if (candidate.executionId === selfExecutionId) continue;
+    if (candidate.reusedExecutionId !== undefined) continue;
+    if (reuseKeyOf(snapshot, candidate) !== reuseKey) continue;
+    if (
+      !best ||
+      candidate.completedAt < best.completedAt ||
+      (candidate.completedAt === best.completedAt &&
+        candidate.executionId < best.executionId)
+    ) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 function commitExecution(
   snapshot: MediaMemorySnapshot,
   input: PolicySucceededInput,
   maxInlineTextBytes: number,
   now: string,
 ): { commit: PolicySucceededCommit; changed: boolean } {
-  // Content-identity execution key (M §11): source content ⊕ resolved
-  // tool configuration. The fingerprint already folds in tool name,
-  // effective arguments, and descriptor version at the S4 boundary.
+  // Per-File execution identity (M §11.2/§11.3 «每个 File 仍写入自己的
+  // PolicyExecution 与 provenance … 不共享图节点»): keyed on the SOURCE
+  // VERSION, so two Files that happen to share bytes each record their
+  // own execution instead of the second one silently adopting the first's
+  // node (which left it with zero records of its own and rebound the
+  // first's derivatives under the second's root).
   const sourceVersion = snapshot.versions[input.source.fileVersionId];
   const sourceSha = sourceVersion?.sha256 ?? input.source.fileVersionId;
-  const executionId = hashId('x', `${sourceSha}|${input.omniConfigHash}`);
+  const executionId = hashId(
+    'x',
+    `${input.source.fileVersionId}|${input.omniConfigHash}`,
+  );
+  // Content-identity reuse key (M §11.3): the same bytes under the same
+  // resolved tool configuration produce byte-identical output no matter
+  // which File they were derived through. Deliberately NOT the execution
+  // id — it spans Files, which is exactly what makes cross-File reuse
+  // possible while provenance stays separate.
+  const reuseKey = `${sourceSha}|${input.omniConfigHash}`;
 
   const mediaBindings = new Map<string, MediaMemoryBinding>();
   const existing = snapshot.executions[executionId];
   if (existing) {
-    // Replay / cache hit: the graph already holds this execution and its
-    // outputs — rebuild the bindings from the recorded derivatives
-    // instead of duplicating nodes.
+    // Idempotent replay: THIS File already has this execution (same
+    // source version, same configuration) — rebuild the bindings from its
+    // own recorded derivatives instead of duplicating nodes.
     for (const entryId of existing.outputRefs) {
       const entry = snapshot.entries[entryId];
       if (!entry?.derivedVersionId) continue;
@@ -387,7 +469,8 @@ function commitExecution(
       mediaBindings.set(version.sha256, {
         fileId: version.fileId,
         fileVersionId: version.fileVersionId,
-        rootFileId: input.source.rootFileId,
+        rootFileId:
+          snapshot.files[version.fileId]?.rootFileId ?? input.source.rootFileId,
       });
     }
     return {
@@ -395,6 +478,13 @@ function commitExecution(
       changed: false,
     };
   }
+
+  // Cross-File reuse (M §11.3): another File already ran this exact
+  // computation on identical bytes. Record OUR own execution pointing at
+  // it via `reusedExecutionId` and materialize our own entry/version rows
+  // over the same content-addressed objects — no re-derivation, no shared
+  // graph nodes, no borrowed lineage.
+  const reused = findReusableExecution(snapshot, reuseKey, executionId);
 
   const outputRefs: MediaMemoryEntryId[] = [];
   for (const [index, output] of input.outputs.entries()) {
@@ -481,6 +571,7 @@ function commitExecution(
     inputScope: {},
     omniConfigHash: input.omniConfigHash,
     outputRefs,
+    ...(reused !== undefined ? { reusedExecutionId: reused.executionId } : {}),
     startedAt: input.startedAt,
     completedAt: input.completedAt,
   };

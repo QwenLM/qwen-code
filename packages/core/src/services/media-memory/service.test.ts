@@ -180,6 +180,64 @@ describe('MediaMemoryService.recordFileRecognized', () => {
 });
 
 describe('MediaMemoryService.commitPolicySucceeded', () => {
+  it("gives a byte-identical sibling file its own execution, not the first file's", async () => {
+    // Two Files with identical bytes and the same policy configuration.
+    // The execution key used to be content-only, so B adopted A's
+    // execution node: B got ZERO records of its own while A's derivative
+    // versions were handed back stamped with B's root (mixed lineage).
+    // M §11.2/§11.3: each File writes its own PolicyExecution and
+    // provenance; only the underlying computation and bytes are reused.
+    const a = (await service.recordFileRecognized(recognizedEvent()))!;
+    const b = (await service.recordFileRecognized(
+      recognizedEvent({ fileRef: '/movies/copy.mkv' }),
+    ))!;
+
+    const commitA = (await service.commitPolicySucceeded(succeededInput(a)))!;
+    const commitB = (await service.commitPolicySucceeded(succeededInput(b)))!;
+
+    // Separate execution nodes, and B's is recorded as a reuse of A's.
+    expect(commitB.executionId).not.toBe(commitA.executionId);
+    expect(commitB.created).toBe(true);
+    const snapshot = await readSnapshot();
+    expect(snapshot.executions[commitB.executionId]).toMatchObject({
+      sourceVersionId: b.fileVersionId,
+      rootFileId: b.rootFileId,
+      reusedExecutionId: commitA.executionId,
+    });
+    // A's execution is the original — it points at nothing.
+    expect(
+      snapshot.executions[commitA.executionId]!.reusedExecutionId,
+    ).toBeUndefined();
+
+    // Each side's derivative is rooted in its OWN tree (no borrowed
+    // lineage), while both name the same content-addressed object.
+    const bindingA = commitA.mediaBindings.get(SHA_OUT)!;
+    const bindingB = commitB.mediaBindings.get(SHA_OUT)!;
+    expect(bindingA.rootFileId).toBe(a.rootFileId);
+    expect(bindingB.rootFileId).toBe(b.rootFileId);
+    expect(bindingB.fileId).not.toBe(bindingA.fileId);
+    expect(snapshot.files[bindingA.fileId]!.fileRef).toBe(
+      snapshot.files[bindingB.fileId]!.fileRef,
+    );
+  });
+
+  it('stays idempotent when the SAME file replays the same execution', async () => {
+    const a = (await service.recordFileRecognized(recognizedEvent()))!;
+    const first = (await service.commitPolicySucceeded(succeededInput(a)))!;
+    const replay = (await service.commitPolicySucceeded(succeededInput(a)))!;
+
+    expect(replay.executionId).toBe(first.executionId);
+    expect(replay.created).toBe(false);
+    expect(replay.mediaBindings.get(SHA_OUT)).toEqual(
+      first.mediaBindings.get(SHA_OUT),
+    );
+    const snapshot = await readSnapshot();
+    expect(Object.keys(snapshot.executions)).toHaveLength(1);
+    expect(
+      snapshot.executions[first.executionId]!.reusedExecutionId,
+    ).toBeUndefined();
+  });
+
   it('commits execution + derived version + entry atomically with lineage edges', async () => {
     const source = (await service.recordFileRecognized(recognizedEvent()))!;
     const commit = await service.commitPolicySucceeded(succeededInput(source));
