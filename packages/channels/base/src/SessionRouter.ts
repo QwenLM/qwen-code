@@ -217,6 +217,9 @@ export class SessionRouter {
     // Persist the retirement now: if the successor creation fails before its
     // own persist, a restart must not restore the stale route and re-fire the
     // whole rotation (a second notice and discard for what was one rotation).
+    // Mid-restore this write is suspended like any other and only becomes
+    // durable with the restore's end flush, so a crash in that window
+    // re-fires the rotation once on the next start.
     this.persist();
     process.stderr.write(
       `[SessionRouter] Rotated session for key ${sanitizeLogText(key, 256)} on ${sanitizeLogText(channelName, 128)}: ` +
@@ -832,7 +835,9 @@ export class SessionRouter {
    * Called after bridge restart — attempts loadSession for each saved mapping.
    * Failed loads are dropped (new session on next message). Overlapping
    * restores (e.g. a reconnect READY mid cold-start restore) are safe:
-   * persistence stays suspended until the last one finishes.
+   * persistence stays suspended until the last one finishes, and rotation
+   * state already live in memory survives the later restore's reservation
+   * pass.
    */
   async restoreSessions(): Promise<{
     restored: number;
@@ -848,7 +853,15 @@ export class SessionRouter {
     let changed = persisted.dropped > 0;
     const reservations = new Map<
       string,
-      { reservation: SessionReservation; operation: SessionOperation }
+      {
+        reservation: SessionReservation;
+        operation: SessionOperation;
+        liveRotation?: {
+          turns?: number;
+          startedAt?: number;
+          leases?: number;
+        };
+      }
     >();
 
     for (const key of persisted.droppedKeys) {
@@ -866,6 +879,18 @@ export class SessionRouter {
       // Reserve every persisted key up front so inbound messages during restart
       // wait for restore instead of returning stale IDs or creating duplicates.
       for (const key of Object.keys(entries)) {
+        const liveSessionId = this.toSession.get(key);
+        // A route already back in memory can have routed messages newer than
+        // the persisted snapshot (persists stay suspended across the restore
+        // window); carry its rotation state across the wipe so the reload
+        // below cannot rewind it.
+        const liveRotation = liveSessionId
+          ? {
+              turns: this.toTurns.get(liveSessionId),
+              startedAt: this.toStartedAt.get(liveSessionId),
+              leases: this.sessionRoutingLeases.get(liveSessionId),
+            }
+          : undefined;
         this.deleteByKey(key);
         const reservation = this.createSessionReservation();
         reservation.promise.catch(() => undefined);
@@ -876,7 +901,7 @@ export class SessionRouter {
         );
         operation.promise.catch(() => undefined);
         this.creatingSessions.set(key, operation);
-        reservations.set(key, { reservation, operation });
+        reservations.set(key, { reservation, operation, liveRotation });
       }
 
       const loadWindow = this.beginSessionLoad();
@@ -910,6 +935,9 @@ export class SessionRouter {
             this.toTarget.set(sessionId, entry.target);
             this.toCwd.set(sessionId, entry.cwd);
             this.restoreRotationState(sessionId, entry);
+            if (reserved.liveRotation) {
+              this.carryLiveRotationState(sessionId, reserved.liveRotation);
+            }
             reservation.resolve(sessionId);
             if (sessionId !== entry.sessionId) {
               changed = true;
@@ -923,6 +951,9 @@ export class SessionRouter {
             reservation.reject(
               new Error('Session restore failed', { cause: err }),
             );
+            // The drop must reach disk even when an overlapping restore
+            // flushes last: the last finisher only reads its own `changed`.
+            this.persistRequestedWhileSuspended = true;
             // Session can't be loaded — will create fresh on next message
             failed++;
             changed = true;
@@ -1058,6 +1089,33 @@ export class SessionRouter {
     if (entry.turns !== undefined) this.toTurns.set(sessionId, entry.turns);
     if (entry.startedAt !== undefined) {
       this.toStartedAt.set(sessionId, entry.startedAt);
+    }
+  }
+
+  /**
+   * Re-apply the rotation state a route had live in memory when a restore
+   * reserved it: routed messages made it newer than the persisted snapshot
+   * the restore reads, so it wins over restoreRotationState's seed.
+   */
+  private carryLiveRotationState(
+    sessionId: string,
+    liveRotation: {
+      turns?: number;
+      startedAt?: number;
+      leases?: number;
+    },
+  ): void {
+    if (liveRotation.turns !== undefined) {
+      this.toTurns.set(sessionId, liveRotation.turns);
+    }
+    if (liveRotation.startedAt !== undefined) {
+      this.toStartedAt.set(sessionId, liveRotation.startedAt);
+    }
+    if (liveRotation.leases) {
+      this.sessionRoutingLeases.set(
+        sessionId,
+        (this.sessionRoutingLeases.get(sessionId) ?? 0) + liveRotation.leases,
+      );
     }
   }
 

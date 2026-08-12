@@ -94,6 +94,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       timeout: ReturnType<typeof setTimeout>;
     }
   >();
+  private readonly pendingSessionRequests = new Set<{
+    reject: (error: Error) => void;
+  }>();
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -137,6 +140,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       );
       // Do not emit sessionDied here: a full ACP process exit is handled by
       // channel start crash recovery, which reloads the persisted sessions.
+      this.rejectPendingSessionRequests();
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
@@ -217,11 +221,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
-    await this.registerChannelLoopMcpServer();
-    const response = await conn.newSession({ cwd, mcpServers: [] });
-    this.knownSessionIds.add(response.sessionId);
-    this.sessionBindingTokens.set(response.sessionId, bindingToken);
-    return response.sessionId;
+    const sessionId = await this.settleOnChildExit(async () => {
+      await this.registerChannelLoopMcpServer();
+      const response = await conn.newSession({ cwd, mcpServers: [] });
+      return response.sessionId;
+    });
+    this.knownSessionIds.add(sessionId);
+    this.sessionBindingTokens.set(sessionId, bindingToken);
+    return sessionId;
   }
 
   async loadSession(
@@ -231,11 +238,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
-    await this.registerChannelLoopMcpServer();
-    await conn.loadSession({
-      sessionId,
-      cwd,
-      mcpServers: [],
+    await this.settleOnChildExit(async () => {
+      await this.registerChannelLoopMcpServer();
+      await conn.loadSession({
+        sessionId,
+        cwd,
+        mcpServers: [],
+      });
     });
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
@@ -339,6 +348,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   }
 
   stop(): void {
+    this.rejectPendingSessionRequests();
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
@@ -438,6 +448,40 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Not connected to ACP agent');
     }
     return this.connection;
+  }
+
+  /**
+   * The ACP SDK never settles requests still awaiting a response once the
+   * stream ends, so a child death mid-request would hang the caller forever;
+   * a restore's persist suspension, in particular, would never lift. Reject
+   * those requests when the child exits instead.
+   */
+  private settleOnChildExit<T>(run: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const pending = { reject };
+      this.pendingSessionRequests.add(pending);
+      run().then(
+        (result) => {
+          this.pendingSessionRequests.delete(pending);
+          resolve(result);
+        },
+        (error: unknown) => {
+          this.pendingSessionRequests.delete(pending);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private rejectPendingSessionRequests(): void {
+    for (const pending of this.pendingSessionRequests) {
+      pending.reject(
+        new Error(
+          'ACP agent process exited while a session request was in flight',
+        ),
+      );
+    }
+    this.pendingSessionRequests.clear();
   }
 
   private requestPermission(
