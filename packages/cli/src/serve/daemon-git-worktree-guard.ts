@@ -879,6 +879,9 @@ type RunAnalysis =
       payload: string;
       state: PrefixState;
       propagatesCwd: boolean;
+      // Only bash imports functions marked with `export -f`; dash/sh/zsh/ksh
+      // resolve the external program instead.
+      importsExportedFunctions?: boolean;
     }
   | {
       kind: 'cd';
@@ -1165,6 +1168,7 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         payload: scan.payload,
         state,
         propagatesCwd: false,
+        importsExportedFunctions: program === 'bash',
       };
     }
     if (program === 'nohup' || program === 'exec') {
@@ -2178,6 +2182,43 @@ async function evaluateCommandWithCwd(
         restoreShellState(subshellCwds.pop());
         subshellDepth--;
       }
+      // Removal builtins retract earlier definitions: `unset -f`/`unalias`
+      // drop a function/alias, `export -n -f` clears the export attribute.
+      const removalProgram = readProgramWord(run);
+      if (removalProgram === 'unset' || removalProgram === 'unalias') {
+        const isFunctions =
+          removalProgram === 'unalias' ||
+          run.some((token) => token.text === '-f');
+        const clearAll = run.some(
+          (token) => token.text === '-a' || token.text === '-af',
+        );
+        if (clearAll) {
+          definedBodies.clear();
+          gitShapedNames.clear();
+        } else {
+          for (const token of run.slice(1)) {
+            if (token.text.startsWith('-')) continue;
+            if (isFunctions || removalProgram === 'unalias') {
+              definedBodies.delete(token.text);
+              gitShapedNames.delete(token.text);
+              exportedFunctions.delete(token.text);
+            }
+          }
+        }
+        continue;
+      }
+      if (
+        removalProgram === 'export' &&
+        run.some((token) => token.text === '-n') &&
+        run.some((token) => token.text === '-f')
+      ) {
+        for (const token of run.slice(1)) {
+          if (!token.text.startsWith('-') && !token.dynamic) {
+            exportedFunctions.delete(token.text);
+          }
+        }
+        continue;
+      }
       // A recorded function shadows a builtin or the git program, and bash
       // resolves it before either. `command`/`builtin` name a different
       // program word, so they bypass this naturally.
@@ -2266,16 +2307,17 @@ async function evaluateCommandWithCwd(
                     gitShapedNames,
                     exportedFunctions,
                   }
-                : {
-                    // A `sh -c`/`bash -c` subprocess imports only functions
-                    // carried by `export -f`.
-                    definedBodies: new Map(
-                      [...definedBodies].filter(([name]) =>
-                        exportedFunctions.has(name),
+                : analysis.importsExportedFunctions
+                  ? {
+                      // Only bash imports `export -f` functions.
+                      definedBodies: new Map(
+                        [...definedBodies].filter(([name]) =>
+                          exportedFunctions.has(name),
+                        ),
                       ),
-                    ),
-                    exportedFunctions,
-                  }),
+                      exportedFunctions,
+                    }
+                  : {}),
             },
           );
           if (nested.denial) {

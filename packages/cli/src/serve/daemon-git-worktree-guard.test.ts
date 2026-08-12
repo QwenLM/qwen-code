@@ -2003,6 +2003,44 @@ it -C ${outsideRepo} reset --hard`,
     }
   });
 
+  // A harmless recorded body must not mask a relocation the real interpreter
+  // would run: only bash imports `export -f`, and removals retract a shadow.
+  it.each([
+    // dash does not import the exported function, so the real git relocates.
+    () =>
+      `git() { :; }; export -f git; dash -c "git -C ${plainOutsidePath} reset --hard"`,
+    // `unset -f`/`unalias` remove the shadow, exposing the real git.
+    () => `git() { :; }; unset -f git; git -C ${plainOutsidePath} reset --hard`,
+    () =>
+      `alias git='echo hi'; unalias git; git -C ${plainOutsidePath} reset --hard`,
+  ])(
+    'does not let a stale/incompatible shadow mask a relocation %#',
+    async (b) => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(b()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it('keeps a live compatible shadow modelled', async () => {
+    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+    const guard = createDaemonToolGuard();
+
+    for (const command of [
+      // bash imports the function, which really shadows git and drops args.
+      `git() { :; }; export -f git; bash -c "git -C ${plainOutsidePath} reset --hard"`,
+      // The alias is still in effect (no removal).
+      `alias git='echo hi'; git -C ${plainOutsidePath} reset --hard`,
+      // Removing a different name leaves the git shadow intact.
+      `git() { :; }; unset -f other; git -C ${plainOutsidePath} reset --hard`,
+    ]) {
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    }
+  });
+
   // The shell-executing set pins ToolNames literals in acp-bridge, which
   // cannot import core; a rename must fail here.
   it('matches the ToolNames constants for shell-executing tools', () => {
