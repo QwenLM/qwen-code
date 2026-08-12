@@ -652,7 +652,7 @@ async function runFixedPoliciesUnbounded(
 }
 
 /** Validated view of one media artifact after descriptor/staging checks. */
-interface ValidatedMediaArtifact {
+export interface ValidatedMediaArtifact {
   kind: 'media';
   absolutePath: string;
   recognized: RecognizedMedia;
@@ -665,7 +665,7 @@ interface ValidatedMediaArtifact {
 
 /** Validated view of one non-media file artifact (transcript protocol,
  * upstream P §6.2): bounded UTF-8 text, never probed as media. */
-interface ValidatedFileArtifact {
+export interface ValidatedFileArtifact {
   kind: 'file';
   absolutePath: string;
   mimeType: string;
@@ -677,7 +677,7 @@ interface ValidatedFileArtifact {
   role?: string;
 }
 
-type ValidatedArtifact = ValidatedMediaArtifact | ValidatedFileArtifact;
+export type ValidatedArtifact = ValidatedMediaArtifact | ValidatedFileArtifact;
 
 /**
  * Execute one policy against one work item: degradation-cache lookup,
@@ -1037,7 +1037,7 @@ async function executePolicy(
  * protocol), bounded strict-UTF-8 text matching a declared file output —
  * and, for lossy outputs, a non-empty `metadata.omniDisclosure`.
  */
-async function validateArtifact(
+export async function validateArtifact(
   artifact: ToolArtifact,
   descriptor: MediaPolicyToolDescriptor,
   stagingDir: string,
@@ -1156,7 +1156,7 @@ async function validateArtifact(
 
 /** Every required media/file output declared by the descriptor must have
  * been produced (§5 completeness check). */
-function assertRequiredOutputsPresent(
+export function assertRequiredOutputsPresent(
   descriptor: MediaPolicyToolDescriptor,
   validated: ValidatedArtifact[],
   toolName: string,

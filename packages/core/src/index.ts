@@ -702,6 +702,7 @@ export {
   extractRequestResourceIds,
   type OmniMemorySideQueryOutcome,
 } from './omni/memory-side-query.js';
+export { collectModelPolicyCall } from './omni/policy/model-call-collection.js';
 export {
   OmniRecallMediaMemoryTool,
   type OmniRecallMediaMemoryParams,

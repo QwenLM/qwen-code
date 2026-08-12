@@ -71,6 +71,17 @@ export class MediaResourceRegistry {
   ): MediaResourceBinding | undefined {
     return this.byVersionId.get(fileVersionId);
   }
+
+  /** Look up a binding by its harness-side locator. Lets collection paths
+   * that only hold a resolved `inputPath` (a gated model call, where the
+   * gate already turned the handle back into a path) recover the memory
+   * identity without re-hashing the file. */
+  resolveByFileRef(fileRef: string): MediaResourceBinding | undefined {
+    for (const binding of this.byVersionId.values()) {
+      if (binding.fileRef === fileRef) return binding;
+    }
+    return undefined;
+  }
 }
 
 /** Structural view of the Config accessor (same pattern as
