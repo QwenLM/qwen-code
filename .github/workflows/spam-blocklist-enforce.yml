@@ -11,7 +11,10 @@ name: 'Spam blocklist enforcement'
 #             spam disappears in seconds rather than at the next sweep.
 #   sweep   — hourly backstop for anything the event lane missed (a comment
 #             posted before the username was added to the blocklist, or an
-#             enforce run that failed).
+#             enforce run that failed). It scans the last two hours by
+#             default; spam older than the window needs a one-off
+#             workflow_dispatch with a larger `hours` input, because the
+#             listings filter on last-updated time and never re-see it.
 #
 # Only the thread AUTHOR being blocklisted closes a thread. A spam comment on
 # someone else's PR deletes the comment and leaves the PR open — closing it
@@ -41,6 +44,10 @@ on:
     types:
       - 'submitted'
       - 'edited'
+      # `dismissed` is the one type that reaches a review posted before its
+      # author was blocklisted: a maintainer dismissing it is the signal to
+      # minimize it.
+      - 'dismissed'
   # Deliberately NOT `issues:`. The repository holds qwen-triage to being the
   # single immediate owner of issue opened/reopened/edited, enforced by
   # scripts/tests/issue-triage-ownership-workflow.test.js — a second workflow
@@ -62,7 +69,7 @@ on:
   workflow_dispatch:
     inputs:
       hours:
-        description: 'Sweep lane: look back this many hours (default 2)'
+        description: 'Sweep lane: hours to look back (default 2); raise it to reach spam older than the normal window'
         required: false
         default: 2
         type: 'number'
@@ -162,25 +169,29 @@ jobs:
             // through issues.update so they can carry state_reason; PRs close
             // through pulls.update, which is the endpoint that owns PR state.
             // Locking is issues.lock for both — a PR is an issue as far as
-            // conversation locking is concerned.
-            const closeThread = async (number, isPullRequest) => {
+            // conversation locking is concerned. A thread a previous run
+            // closed but failed to lock still needs its lock, so skip only
+            // the close half when it is already closed.
+            const closeThread = async (number, isPullRequest, state) => {
               const kind = isPullRequest ? 'pull request' : 'issue';
-              await run(`close ${kind} #${number}`, () =>
-                isPullRequest
-                  ? github.rest.pulls.update({
-                      owner,
-                      repo,
-                      pull_number: number,
-                      state: 'closed',
-                    })
-                  : github.rest.issues.update({
-                      owner,
-                      repo,
-                      issue_number: number,
-                      state: 'closed',
-                      state_reason: 'not_planned',
-                    }),
-              );
+              if (state !== 'closed') {
+                await run(`close ${kind} #${number}`, () =>
+                  isPullRequest
+                    ? github.rest.pulls.update({
+                        owner,
+                        repo,
+                        pull_number: number,
+                        state: 'closed',
+                      })
+                    : github.rest.issues.update({
+                        owner,
+                        repo,
+                        issue_number: number,
+                        state: 'closed',
+                        state_reason: 'not_planned',
+                      }),
+                );
+              }
               await run(`lock ${kind} #${number}`, () =>
                 github.rest.issues.lock({
                   owner,
@@ -205,9 +216,11 @@ jobs:
               // The comment may have arrived on a thread the spammer also
               // opened — e.g. they bump their own spam issue. Handle the
               // thread here so the sweep is not the only path that closes it.
+              // `locked`, not `state`, is the skip condition: a closed thread
+              // whose lock failed on an earlier run still needs the lock.
               const issue = payload.issue;
-              if (issue && issue.state !== 'closed' && isBlocked(issue.user?.login)) {
-                await closeThread(issue.number, Boolean(issue.pull_request));
+              if (issue && !issue.locked && isBlocked(issue.user?.login)) {
+                await closeThread(issue.number, Boolean(issue.pull_request), issue.state);
               }
             } else if (eventName === 'pull_request_review_comment') {
               const comment = payload.comment;
@@ -238,7 +251,7 @@ jobs:
             } else if (eventName === 'pull_request_target') {
               const pull = payload.pull_request;
               if (isBlocked(pull?.user?.login)) {
-                await closeThread(pull.number, true);
+                await closeThread(pull.number, true, pull.state);
               }
             }
 
@@ -319,16 +332,18 @@ jobs:
             const failures = [];
             const run = async (label, fn) => {
               try {
-                await fn();
+                const result = await fn();
                 actions.push(label);
                 core.info(`ok: ${label}`);
+                return result;
               } catch (error) {
                 if (error?.status === 404) {
                   core.info(`already gone: ${label}`);
-                  return;
+                  return undefined;
                 }
                 failures.push(`${label}: ${error?.status ?? ''} ${error?.message ?? error}`);
                 core.warning(`failed: ${label} — ${error?.message ?? error}`);
+                return undefined;
               }
             };
 
@@ -337,11 +352,19 @@ jobs:
             // year-old thread is still in scope, and they are the only listing
             // that surfaces inline review comments at all. The predecessor
             // workflow walked threads and consequently never saw a single
-            // inline review comment.
-            const issueComments = await github.paginate(
-              github.rest.issues.listCommentsForRepo,
-              { owner, repo, since, per_page: 100 },
-            );
+            // inline review comment. Routed through run() so a failed listing
+            // (a rate-limit 403 is realistic — the token's limit is shared
+            // with every enforce run of the same hour) collects as a failure
+            // and the rest of the sweep still executes.
+            const issueComments =
+              (await run('list issue comments', () =>
+                github.paginate(github.rest.issues.listCommentsForRepo, {
+                  owner,
+                  repo,
+                  since,
+                  per_page: 100,
+                }),
+              )) ?? [];
             for (const comment of issueComments) {
               if (!isBlocked(comment.user?.login)) continue;
               await run(`delete issue comment ${comment.id}`, () =>
@@ -353,10 +376,15 @@ jobs:
               );
             }
 
-            const reviewComments = await github.paginate(
-              github.rest.pulls.listReviewCommentsForRepo,
-              { owner, repo, since, per_page: 100 },
-            );
+            const reviewComments =
+              (await run('list review comments', () =>
+                github.paginate(github.rest.pulls.listReviewCommentsForRepo, {
+                  owner,
+                  repo,
+                  since,
+                  per_page: 100,
+                }),
+              )) ?? [];
             for (const comment of reviewComments) {
               if (!isBlocked(comment.user?.login)) continue;
               await run(`delete review comment ${comment.id}`, () =>
@@ -368,38 +396,46 @@ jobs:
               );
             }
 
-            // listForRepo returns issues AND pull requests; `state: 'open'`
-            // keeps the sweep from re-locking threads that were already dealt
-            // with on a previous run.
-            const threads = await github.paginate(github.rest.issues.listForRepo, {
-              owner,
-              repo,
-              state: 'open',
-              since,
-              sort: 'updated',
-              direction: 'desc',
-              per_page: 100,
-            });
+            // listForRepo returns issues AND pull requests. `state: 'all'`
+            // matters: a thread a previous run closed but failed to lock is
+            // exactly what this backstop must repair, and `state: 'open'`
+            // would filter it out. Skip on `locked` instead, and close only
+            // what is still open.
+            const threads =
+              (await run('list threads', () =>
+                github.paginate(github.rest.issues.listForRepo, {
+                  owner,
+                  repo,
+                  state: 'all',
+                  since,
+                  sort: 'updated',
+                  direction: 'desc',
+                  per_page: 100,
+                }),
+              )) ?? [];
             for (const thread of threads) {
               if (!isBlocked(thread.user?.login)) continue;
+              if (thread.locked) continue;
               const isPullRequest = Boolean(thread.pull_request);
               const kind = isPullRequest ? 'pull request' : 'issue';
-              await run(`close ${kind} #${thread.number}`, () =>
-                isPullRequest
-                  ? github.rest.pulls.update({
-                      owner,
-                      repo,
-                      pull_number: thread.number,
-                      state: 'closed',
-                    })
-                  : github.rest.issues.update({
-                      owner,
-                      repo,
-                      issue_number: thread.number,
-                      state: 'closed',
-                      state_reason: 'not_planned',
-                    }),
-              );
+              if (thread.state === 'open') {
+                await run(`close ${kind} #${thread.number}`, () =>
+                  isPullRequest
+                    ? github.rest.pulls.update({
+                        owner,
+                        repo,
+                        pull_number: thread.number,
+                        state: 'closed',
+                      })
+                    : github.rest.issues.update({
+                        owner,
+                        repo,
+                        issue_number: thread.number,
+                        state: 'closed',
+                        state_reason: 'not_planned',
+                      }),
+                );
+              }
               await run(`lock ${kind} #${thread.number}`, () =>
                 github.rest.issues.lock({
                   owner,
@@ -421,10 +457,10 @@ jobs:
                 ['Blocklisted users', String(blocked.size)],
                 ['Issue comments scanned', String(issueComments.length)],
                 ['Review comments scanned', String(reviewComments.length)],
-                ['Open threads scanned', String(threads.length)],
+                ['Threads scanned', String(threads.length)],
                 ['Actions taken', String(actions.length)],
               ])
-              .addList(actions)
+              .addList([...actions, ...failures.map((f) => `FAILED — ${f}`)])
               .write();
 
             if (failures.length > 0) {
