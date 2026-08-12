@@ -41,11 +41,33 @@ const summary = (
 const activeGoal = (
   condition: string,
   overrides: Partial<NonNullable<BridgeSessionGoal['active']>> = {},
-): BridgeSessionGoal => ({
-  active: { condition, iterations: 0, setAt: 1000, ...overrides },
-});
+): BridgeSessionGoal => {
+  const active = { condition, iterations: 0, setAt: 1000, ...overrides };
+  return {
+    snapshot: {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: active.condition,
+        status: 'active',
+        evidenceCursor: { recordId: 'cursor-1' },
+        turnCount: active.iterations,
+        activeTimeMs: 0,
+        createdAt: active.setAt,
+        updatedAt: active.setAt,
+        ...(active.lastReason ? { lastReason: active.lastReason } : {}),
+      },
+    },
+    active,
+  };
+};
 
-const noGoal: BridgeSessionGoal = { active: null };
+const noGoal: BridgeSessionGoal = {
+  snapshot: { v: 2, activity: 'idle', goal: null },
+  active: null,
+};
 
 function makeApp(
   bridge: GoalsSessionBridge,

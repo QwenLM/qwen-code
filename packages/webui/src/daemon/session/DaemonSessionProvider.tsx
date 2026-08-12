@@ -3093,7 +3093,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
-            error: message,
             errorStatus: resolveConnectionErrorStatus(
               errorStatus,
               current.errorStatus,
@@ -3124,6 +3123,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
+          error: undefined,
         }));
         await delay(delayMs, abort.signal);
       }
@@ -5262,7 +5262,11 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'cleared' &&
     kind !== 'achieved' &&
     kind !== 'failed' &&
-    kind !== 'aborted'
+    kind !== 'aborted' &&
+    // Rejecting 'paused' made every surface keep showing a paused goal as
+    // actively running: the card never rendered and the active-goal
+    // derivation fell back to the previous 'set' card.
+    kind !== 'paused'
   ) {
     return null;
   }

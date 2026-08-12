@@ -46,9 +46,11 @@ import {
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
+  isAskUserQuestionToolName,
   isActiveToolStatus,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { isTodoWriteToolName } from '../utils/todos';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -262,8 +264,19 @@ function isForceExpandGroup(
 }
 
 function isHiddenInCompactMode(msg: Message): boolean {
-  if (msg.role === 'thinking') return true;
-  return false;
+  return msg.role === 'thinking';
+}
+
+function isStandaloneToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    msg.tools.some(
+      (tool) =>
+        isSubAgentToolCall(tool) ||
+        isTodoWriteToolName(tool.toolName) ||
+        isAskUserQuestionToolName(tool.toolName),
+    )
+  );
 }
 
 function mergeCompactToolGroups(
@@ -276,7 +289,11 @@ function mergeCompactToolGroups(
   while (i < messages.length) {
     const msg = messages[i];
 
-    if (msg.role !== 'tool_group' || isForceExpandGroup(msg, pendingApproval)) {
+    if (
+      msg.role !== 'tool_group' ||
+      isForceExpandGroup(msg, pendingApproval) ||
+      isStandaloneToolGroup(msg)
+    ) {
       if (!isHiddenInCompactMode(msg)) {
         result.push(msg);
       }
@@ -298,7 +315,8 @@ function mergeCompactToolGroups(
 
       if (
         next.role === 'tool_group' &&
-        !isForceExpandGroup(next, pendingApproval)
+        !isForceExpandGroup(next, pendingApproval) &&
+        !isStandaloneToolGroup(next)
       ) {
         mergeableGroups.push(next);
         lastMergedIdx = j;
@@ -322,6 +340,7 @@ function mergeCompactToolGroups(
       id: mergeableGroups[0].id,
       role: 'tool_group',
       tools: mergedTools,
+      timestamp: mergeableGroups[0].timestamp,
     });
     i = lastMergedIdx + 1;
   }

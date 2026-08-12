@@ -4797,6 +4797,7 @@ describe('createAcpSessionBridge', () => {
       hasMore: false,
     });
 
+    await expect(refresh).rejects.toBeInstanceOf(SessionNotFoundError);
     await expect(refresh).rejects.toMatchObject({
       code: 'session_closing',
     });
