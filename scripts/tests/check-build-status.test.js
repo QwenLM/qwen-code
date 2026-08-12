@@ -12,6 +12,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -99,6 +100,9 @@ describe('scripts/check-build-status.js', () => {
       expect(readFileSync(warningsFile, 'utf8')).toContain(
         'Build timestamp file',
       );
+      if (process.platform !== 'win32') {
+        expect(statSync(warningsFile).mode & 0o777).toBe(0o600);
+      }
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

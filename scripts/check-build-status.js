@@ -35,7 +35,7 @@ function clearWarningsFile() {
 function writeWarningsFile(content) {
   if (!warningsFilePath) return;
   try {
-    fs.writeFileSync(warningsFilePath, content);
+    fs.writeFileSync(warningsFilePath, content, { mode: 0o600 });
   } catch (err) {
     console.error(`[Check Script] Error writing warnings file: ${err.message}`);
   }

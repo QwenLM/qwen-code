@@ -117,9 +117,13 @@ describe('scripts/start.js launcher', () => {
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined);
     try {
+      rmSyncMock.mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      });
       expect(rmSyncMock).not.toHaveBeenCalled();
       close(0, null);
       expect(rmSyncMock).toHaveBeenCalledWith(warningsPath, { force: true });
+      expect(exitSpy).toHaveBeenCalledWith(0);
     } finally {
       exitSpy.mockRestore();
     }
