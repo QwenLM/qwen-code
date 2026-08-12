@@ -578,6 +578,85 @@ describe('GitDiffDialog', () => {
     ).toBe(true);
   });
 
+  it('refetches a latched diff failure when a source-list retry succeeds', async () => {
+    // A transient blip fails the revision-triggered diff fetch AND the
+    // commit-list refetch. Retry re-runs the list; when that succeeds the
+    // surviving ref keeps the options identity stable, so only the source
+    // nonce can re-issue the latched diff failure — otherwise the error view
+    // loses its only Retry button with no request in flight.
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitLog.mockResolvedValue({
+      available: true,
+      entries: [
+        { sha: 'abcdef1234567890', shortSha: 'abcdef1', subject: 'head' },
+      ],
+      hasMore: false,
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={0} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'commit';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'commit',
+      ref: 'abcdef1234567890',
+    });
+
+    // The blip: a revision bump refetches both, and both fail.
+    workspaceGitLog.mockRejectedValueOnce(new Error('daemon blip'));
+    workspaceGitDiff.mockRejectedValueOnce(new Error('daemon blip'));
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={1} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Failed to load changes');
+    const retry = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('Retry'),
+    );
+    expect(retry).toBeTruthy();
+
+    // The retry succeeds on the list; the latched diff error must re-issue
+    // the diff request.
+    workspaceGitLog.mockResolvedValueOnce({
+      available: true,
+      entries: [
+        { sha: 'abcdef1234567890', shortSha: 'abcdef1', subject: 'head' },
+      ],
+      hasMore: false,
+    });
+    await act(async () => {
+      retry!.click();
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenCalledTimes(3);
+    expect(workspaceGitDiff).toHaveBeenLastCalledWith(undefined, {
+      mode: 'commit',
+      ref: 'abcdef1234567890',
+    });
+    expect(document.body.textContent).not.toContain('Failed to load changes');
+  });
+
   it('distinguishes an empty commit list from an unavailable comparison', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     workspaceGitLog.mockResolvedValue({

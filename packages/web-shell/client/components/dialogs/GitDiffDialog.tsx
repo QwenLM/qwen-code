@@ -27,6 +27,11 @@ import { resolveFenceLanguage } from '../messages/Markdown';
 import { languageForPath } from '../messages/ToolGroup';
 import { sanitizeControlChars } from '../messages/toolFormatting';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import {
+  displayBranchName,
+  qualifyLocalBranchRef,
+  qualifyRemoteBranchRef,
+} from '../../utils/gitRefs';
 import { DialogShell } from './DialogShell';
 import styles from './GitDiffDialog.module.css';
 
@@ -580,18 +585,22 @@ export function GitDiffContent({
         setBranches(result);
         setBranchRef((current) => {
           // Fully qualified values name the exact ref of the selected row,
-          // so a colliding short name resolves to the chosen target.
+          // so a colliding short name resolves to the chosen target; the
+          // qualify helpers absorb git's disambiguation prefixes so an
+          // ambiguous short name never yields a double-prefixed ref.
           const qualified = [
             ...result.local
               .filter((branch) => !branch.isHead)
-              .map((branch) => `refs/heads/${branch.name}`),
-            ...result.remote.map((branch) => `refs/remotes/${branch.name}`),
+              .map((branch) => qualifyLocalBranchRef(branch.name)),
+            ...result.remote.map((branch) =>
+              qualifyRemoteBranchRef(branch.name),
+            ),
           ];
           if (current && qualified.includes(current)) return current;
           const fallback = result.local.find((branch) => !branch.isHead);
-          if (fallback) return `refs/heads/${fallback.name}`;
+          if (fallback) return qualifyLocalBranchRef(fallback.name);
           const remote = result.remote[0];
-          return remote ? `refs/remotes/${remote.name}` : '';
+          return remote ? qualifyRemoteBranchRef(remote.name) : '';
         });
       })
       .catch(() => {
@@ -629,12 +638,12 @@ export function GitDiffContent({
       ...(branches?.local ?? [])
         .filter((branch) => !branch.isHead)
         .map((branch) => ({
-          value: `refs/heads/${branch.name}`,
-          label: sanitizeControlChars(branch.name),
+          value: qualifyLocalBranchRef(branch.name),
+          label: sanitizeControlChars(displayBranchName(branch.name)),
         })),
       ...(branches?.remote ?? []).map((branch) => ({
-        value: `refs/remotes/${branch.name}`,
-        label: sanitizeControlChars(branch.name),
+        value: qualifyRemoteBranchRef(branch.name),
+        label: sanitizeControlChars(displayBranchName(branch.name)),
       })),
     ],
     [branches],
@@ -652,6 +661,9 @@ export function GitDiffContent({
   // Depends only on fetch inputs: the revision refresh nulls and refills the
   // cached lists, and including them here would cancel-and-reissue the diff
   // request on every list transition (three identical requests per bump).
+  // `sourceNonce` is the exception: a successful source-list retry keeps the
+  // options identity stable, so the nonce bump is the only signal that must
+  // also re-issue a latched diff-fetch failure.
   useEffect(() => {
     if (options === null) return;
     let cancelled = false;
@@ -675,7 +687,7 @@ export function GitDiffContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd, gitCwd, options, revision]);
+  }, [client, workspaceCwd, gitCwd, options, revision, sourceNonce]);
 
   const subtitle =
     diff && diff.available

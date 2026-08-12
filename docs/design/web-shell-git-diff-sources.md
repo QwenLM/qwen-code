@@ -47,8 +47,9 @@ the hidden-file count instead of reporting that there are no changes.
 
 ## Error handling
 
-- A mode outside the supported enum, or a commit/branch mode without `ref`, is
-  rejected as a parse error by the daemon.
+- A mode outside the supported enum, a commit/branch mode without `ref`, or a
+  `ref` supplied with `uncommitted`/`unstaged`/`staged` mode (which have no
+  ref to compare against) is rejected as a parse error by the daemon.
 - An unresolved ref returns `available: false` without falling back to `HEAD`.
 - Non-repositories retain their current unavailable behavior. Transient Git
   states (merge, rebase, cherry-pick, revert) keep worktree- and

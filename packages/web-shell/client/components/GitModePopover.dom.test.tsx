@@ -112,6 +112,7 @@ function openChip(): void {
 function renderPopover(
   props: {
     workspaceCwd?: string;
+    intent?: SessionGitIntent;
     onIntentChange?: (intent: SessionGitIntent) => void;
   } = {},
 ): void {
@@ -121,7 +122,7 @@ function renderPopover(
         <GitModePopover
           branch="main"
           workspaceCwd={props.workspaceCwd ?? '/repo'}
-          intent={{ mode: 'current' }}
+          intent={props.intent ?? { mode: 'current' }}
           onIntentChange={props.onIntentChange ?? vi.fn()}
         />
       </I18nProvider>,
@@ -448,7 +449,13 @@ describe('GitModePopover existing branches', () => {
         }),
     );
     const onIntentChange = vi.fn();
-    renderPopover({ onIntentChange });
+    // A non-current queued intent: the final `onIntentChange({mode:'current'})`
+    // assertion then discriminates the component's hardcoded collapse from a
+    // mere pass-through of the existing intent.
+    renderPopover({
+      onIntentChange,
+      intent: { mode: 'branch', name: 'queued' },
+    });
     openChip();
     clickButton('Existing branch');
     await flush();
@@ -686,7 +693,76 @@ describe('GitModePopover existing branches', () => {
     await flush();
 
     openChip();
+    // Flush the branch refetch the reopen triggers: the error must survive
+    // the refetch landing, and no state update may escape act().
+    await flush();
     expect(document.body.textContent).toContain('Commit or stash first');
+  });
+
+  it('keeps the in-flight checkout visible when the popover reopens mid-flight', async () => {
+    let rejectCheckout!: (error: Error) => void;
+    workspaceGitCheckout.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCheckout = reject;
+        }),
+    );
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    clickButton('topic'); // checkout stays in flight across closing
+    act(() => popoverHarness.onOpenChange?.(false));
+    openChip();
+    await flush();
+
+    // The reopen must land on the existing-branch box — the only surface
+    // that renders the in-flight state — instead of the intent's mode view,
+    // where every control is disabled and nothing explains why.
+    expect(
+      document.body.querySelector('input[aria-label="Search branches\u2026"]'),
+    ).toBeTruthy();
+
+    // A failure landing after the reopen must be visible without a manual
+    // mode switch.
+    await act(async () => {
+      rejectCheckout(new Error('hook failed'));
+    });
+    await flush();
+    expect(document.body.textContent).toContain('hook failed');
+  });
+
+  it('qualifies ambiguous short names instead of double-prefixing them', async () => {
+    // git lengthens refname:short for ambiguous names (branch `release` +
+    // tag `release` → `heads/release`); the picker values must absorb the
+    // disambiguation prefix instead of synthesizing refs/heads/heads/release.
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'heads/release', isHead: false },
+      ],
+      remote: [{ name: 'remotes/origin/main', isHead: false }],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    renderPopover();
+    openChip();
+    clickButton('Existing branch');
+    await flush();
+
+    expect(optionButtons().map((option) => option.textContent?.trim())).toEqual(
+      ['release', 'origin/main'],
+    );
+
+    clickButton('release');
+    await flush();
+    expect(workspaceGitCheckout).toHaveBeenCalledWith('refs/heads/release');
   });
 
   it('renders branch labels with bidi overrides escaped', async () => {

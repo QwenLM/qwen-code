@@ -213,6 +213,28 @@ describe('workspace Git diff routes', () => {
     );
   });
 
+  it('trims whitespace-padded refs before forwarding them', async () => {
+    fetchGitDiffMock.mockResolvedValue({
+      stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
+      perFileStats: new Map(),
+    });
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/diff?mode=commit&ref=%20topic%20',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitDiffMock).toHaveBeenCalledWith('/work/main', {
+      mode: 'commit',
+      ref: 'topic',
+    });
+  });
+
   it('accepts an explicit mode=uncommitted', async () => {
     fetchGitDiffMock.mockResolvedValue({
       stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },

@@ -14,7 +14,14 @@ import { execFile } from 'node:child_process';
 // `O_RDONLY` (= 0 on POSIX) — harmless in mock environments where no
 // real `open()` ever runs.
 import * as nodeFs from 'node:fs';
-import { access, lstat, open, readFile, stat } from 'node:fs/promises';
+import {
+  access,
+  lstat,
+  open,
+  readFile,
+  readlink,
+  stat,
+} from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   structuredPatch,
@@ -191,46 +198,66 @@ export async function fetchGitDiff(
   // mechanism, but pinning both flags everywhere is defense-in-depth —
   // git's behavior around these drivers has shifted between versions
   // before.
-  const [shortstatOut, untrackedOut, ignoredUntrackedOut] = await Promise.all([
-    runGit(
-      [
-        '--no-optional-locks',
-        'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        ...comparison.args,
-        '--shortstat',
-      ],
-      gitRoot,
-    ),
-    comparison.includeUntracked
-      ? runGit(
-          [
-            '--no-optional-locks',
-            'ls-files',
-            '-z',
-            '--others',
-            '--exclude-standard',
-          ],
-          gitRoot,
-        )
-      : Promise.resolve(null),
-    // Branch-mode collision classification needs the ignore-INCLUSIVE
-    // listing: a baseline-tracked path that was untracked-and-ignored (the
-    // common `git rm --cached` + .gitignore recipe) is absent from the
-    // exclude-standard list and would survive as the exact phantom deletion
-    // the classification exists to remove. All-added rows below stay
-    // exclude-standard-driven — an ignored file is not an addition.
-    comparison.untrackedBaseRef
-      ? runGit(['--no-optional-locks', 'ls-files', '-z', '--others'], gitRoot)
-      : Promise.resolve(null),
-  ]);
+  const [shortstatOut, untrackedOut, ignoredUntrackedOut, nameStatusOut] =
+    await Promise.all([
+      runGit(
+        [
+          '--no-optional-locks',
+          'diff',
+          '--no-ext-diff',
+          '--no-textconv',
+          ...comparison.args,
+          '--shortstat',
+        ],
+        gitRoot,
+      ),
+      comparison.includeUntracked
+        ? runGit(
+            [
+              '--no-optional-locks',
+              'ls-files',
+              '-z',
+              '--others',
+              '--exclude-standard',
+            ],
+            gitRoot,
+          )
+        : Promise.resolve(null),
+      // Branch-mode collision classification needs the ignore-INCLUSIVE
+      // listing: a baseline-tracked path that was untracked-and-ignored (the
+      // common `git rm --cached` + .gitignore recipe) is absent from the
+      // exclude-standard list and would survive as the exact phantom deletion
+      // the classification exists to remove. All-added rows below stay
+      // exclude-standard-driven — an ignored file is not an addition.
+      comparison.untrackedBaseRef
+        ? runGit(['--no-optional-locks', 'ls-files', '-z', '--others'], gitRoot)
+        : Promise.resolve(null),
+      // Branch-mode collision classification also needs name-status up front:
+      // its deletion/renamed-old paths bound which untracked paths can appear
+      // as phantom deletions at all (see the candidate filter below).
+      comparison.untrackedBaseRef
+        ? runGit(
+            [
+              '--no-optional-locks',
+              'diff',
+              '--no-ext-diff',
+              '--no-textconv',
+              ...comparison.args,
+              '--name-status',
+              '-z',
+            ],
+            gitRoot,
+          )
+        : Promise.resolve(null),
+    ]);
   // A failed listing must not fold into an empty path list: collision
   // classification would skip its re-accounting and leave phantom deletions,
   // the opposite of the fail-closed trackedAtBase probe below.
   if (
     comparison.untrackedBaseRef &&
-    (untrackedOut === null || ignoredUntrackedOut === null)
+    (untrackedOut === null ||
+      ignoredUntrackedOut === null ||
+      nameStatusOut === null)
   ) {
     return null;
   }
@@ -240,6 +267,14 @@ export async function fetchGitDiff(
   const classifiablePaths = comparison.untrackedBaseRef
     ? splitNulDelimited(ignoredUntrackedOut)
     : [];
+  // A path can surface as a phantom deletion only when the comparison reports
+  // it deleted or as the old side of a rename; this set bounds the collision
+  // classification below. (Non-null in branch mode: the guard above fails
+  // closed on a name-status fetch failure.)
+  const phantomCandidatePaths =
+    nameStatusOut != null
+      ? parsePhantomCandidatePaths(nameStatusOut)
+      : new Set<string>();
 
   // Branch mode compares the worktree against the baseline tree, but
   // `git diff <baseline>` proxies the worktree through the index: a path the
@@ -265,19 +300,24 @@ export async function fetchGitDiff(
     classifiablePaths.length > 0 &&
     quickStats.filesCount + rawUntrackedPaths.length <= MAX_FILES_FOR_DETAILS
   ) {
+    // Classify only the phantom candidates, not the whole ignore-inclusive
+    // listing: the latter can hold thousands of ignored paths the detail gate
+    // never limits, and every extra ls-tree chunk is one more serial
+    // round-trip that can fail the whole branch diff closed.
+    const candidates = classifiablePaths.filter((filePath) =>
+      phantomCandidatePaths.has(filePath),
+    );
     trackedAtBase = await classifyPathsTrackedAtBase(
       gitRoot,
       comparison.untrackedBaseRef,
-      classifiablePaths,
+      candidates,
     );
     if (trackedAtBase === null) return null;
     const tracked = trackedAtBase;
     filteredUntrackedPaths = rawUntrackedPaths.filter(
       (filePath) => !tracked.has(filePath),
     );
-    collisionPaths = classifiablePaths.filter((filePath) =>
-      tracked.has(filePath),
-    );
+    collisionPaths = candidates.filter((filePath) => tracked.has(filePath));
   }
   // Without classification (non-branch modes, or branch mode past the
   // fast-path threshold) every untracked path counts as an addition. A
@@ -310,8 +350,10 @@ export async function fetchGitDiff(
   // Numstat gives us +/- counts; name-status tells us *why* a row exists
   // (D = deleted, M = modified, R<score> = rename, etc.). We need both
   // because numstat alone can't distinguish a delete (`0\tN\tpath`) from
-  // a heavy edit that drops N lines.
-  const [numstatOut, nameStatusOut] = await Promise.all([
+  // a heavy edit that drops N lines. Branch mode already fetched name-status
+  // with the listings above (the classification candidates need it); the
+  // other modes fetch it here beside numstat.
+  const [numstatOut, lateNameStatusOut] = await Promise.all([
     runGit(
       [
         '--no-optional-locks',
@@ -324,24 +366,27 @@ export async function fetchGitDiff(
       ],
       gitRoot,
     ),
-    runGit(
-      [
-        '--no-optional-locks',
-        'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        ...comparison.args,
-        '--name-status',
-        '-z',
-      ],
-      gitRoot,
-    ),
+    comparison.untrackedBaseRef
+      ? Promise.resolve(null)
+      : runGit(
+          [
+            '--no-optional-locks',
+            'diff',
+            '--no-ext-diff',
+            '--no-textconv',
+            ...comparison.args,
+            '--name-status',
+            '-z',
+          ],
+          gitRoot,
+        ),
   ]);
   if (numstatOut == null) return null;
 
   const { stats, perFileStats } = parseGitNumstat(numstatOut);
+  const nameStatus = nameStatusOut ?? lateNameStatusOut;
   const deletedPaths =
-    nameStatusOut != null ? parseDeletedFromNameStatus(nameStatusOut) : null;
+    nameStatus != null ? parseDeletedFromNameStatus(nameStatus) : null;
   if (deletedPaths && deletedPaths.size > 0) {
     for (const [filename, s] of perFileStats) {
       if (deletedPaths.has(filename)) s.isDeleted = true;
@@ -673,14 +718,16 @@ function trimPartialUtf8Sequence(buf: Buffer, end: number): number {
   for (let back = 1; back <= 3 && back <= end; back++) {
     const byte = buf[end - back] ?? 0;
     if ((byte & 0xc0) === 0x80) continue;
+    // 0xC0/0xC1 and 0xF5-0xF7 can never start a valid sequence, so they are
+    // not partial leads — leave them for the validator to reject.
     const leadLength =
       byte < 0x80
         ? 1
-        : byte >= 0xc0 && byte < 0xe0
+        : byte >= 0xc2 && byte < 0xe0
           ? 2
           : byte >= 0xe0 && byte < 0xf0
             ? 3
-            : byte >= 0xf0 && byte < 0xf8
+            : byte >= 0xf0 && byte < 0xf5
               ? 4
               : 0;
     if (leadLength === 0) return end;
@@ -749,6 +796,36 @@ async function readWorktreeTextFile(
   } finally {
     await fh.close().catch(() => {});
   }
+}
+
+/**
+ * Worktree side of a collision comparison. A symlink stands in for its blob
+ * directly — a symlink's blob content is exactly its target string, so
+ * comparing targets is the true base-vs-worktree comparison (`readWorktreeTextFile`
+ * rejects non-regular files); regular files go through the strict text read.
+ */
+async function readWorktreeCollisionSide(
+  gitRoot: string,
+  relPath: string,
+): Promise<{ text: string; truncated: boolean } | null> {
+  const absPath = path.join(gitRoot, relPath);
+  let lst;
+  try {
+    lst = await lstat(absPath);
+  } catch {
+    return null;
+  }
+  if (lst.isSymbolicLink()) {
+    let target: Buffer;
+    try {
+      target = await readlink(absPath, { encoding: 'buffer' });
+    } catch {
+      return null;
+    }
+    if (!isUtf8(target)) return null;
+    return { text: target.toString('utf8'), truncated: false };
+  }
+  return readWorktreeTextFile(gitRoot, relPath, true);
 }
 
 /**
@@ -976,13 +1053,18 @@ async function diffBaseBlobAgainstWorktree(
   // Strict UTF-8 validation — invalid text is treated as binary instead of
   // being lossily decoded (see the baseRaw read above).
   if (!isUtf8(baseBytes)) return null;
-  const worktree = await readWorktreeTextFile(gitRoot, relPath, true);
+  const worktree = await readWorktreeCollisionSide(gitRoot, relPath);
   if (worktree === null) return null;
   const baseText = baseBytes.toString('utf8');
   // @types/diff does not declare the runtime-supported `timeout` option yet.
   const patchOptions: PatchOptions & { timeout: number } = {
     context: 3,
     timeout: COLLISION_PATCH_TIMEOUT_MS,
+    // Tracked rows in the same view follow git's clean/smudge EOL semantics,
+    // so the collision comparison must too: with line-ending conversion active
+    // (`core.autocrlf`, `.gitattributes` eol), a git-unchanged file differs
+    // only by trailing CRs and would otherwise show as a whole-file rewrite.
+    stripTrailingCr: true,
   };
   let patch: ParsedDiff | undefined;
   try {
@@ -1061,12 +1143,27 @@ async function applyBaselineCollisions(
 ): Promise<void> {
   const collisionSet = new Set(collisionPaths);
   // Rename rows are keyed by the NEW path — an index entry, never an
-  // untracked collision — so they cannot carry one; when a rename's OLD path
-  // was recreated as an untracked file it is a separate change, re-accounted
-  // by the loop below beside the rename row.
+  // untracked collision — so they cannot BE one; but rename detection can
+  // ABSORB a collision path's phantom deletion when the recreated old content
+  // pairs with an added path. Record both shapes: plain deletion rows go into
+  // `phantom`, absorbed renames into `renameAbsorbed` so the loop can convert
+  // the surviving rename row into a plain addition of the new path.
   const phantom = new Map<string, { added: number; removed: number }>();
+  const renameAbsorbed = new Map<
+    string,
+    { newPath: string; added: number; removed: number }
+  >();
   forEachNumstatEntry(numstatOut, (entry) => {
-    if (entry.oldPath) return;
+    if (entry.oldPath) {
+      if (collisionSet.has(entry.oldPath)) {
+        renameAbsorbed.set(entry.oldPath, {
+          newPath: entry.path,
+          added: entry.added,
+          removed: entry.removed,
+        });
+      }
+      return;
+    }
     if (collisionSet.has(entry.path)) {
       phantom.set(entry.path, { added: entry.added, removed: entry.removed });
     }
@@ -1080,6 +1177,28 @@ async function applyBaselineCollisions(
       stats.linesRemoved -= stale.removed;
     }
     perFileStats.delete(relPath);
+    const absorbed = renameAbsorbed.get(relPath);
+    if (absorbed) {
+      // The rename row stays one file but loses its rename framing: the
+      // baseline does not track the new path, so against the baseline the
+      // true comparison is a plain addition of its worktree content — and
+      // "renamed from <relPath>" would contradict the collision row the loop
+      // re-adds under the old path.
+      stats.linesAdded -= absorbed.added;
+      stats.linesRemoved -= absorbed.removed;
+      const lines = await countUntrackedLines(
+        path.join(gitRoot, absorbed.newPath),
+      );
+      stats.linesAdded += lines.added;
+      if (perFileStats.has(absorbed.newPath) || perFileStats.size < MAX_FILES) {
+        perFileStats.set(absorbed.newPath, {
+          added: lines.added,
+          removed: 0,
+          isBinary: lines.isBinary,
+          truncated: lines.truncated,
+        });
+      }
+    }
     const row = await diffBaseBlobAgainstWorktree(gitRoot, baseRef, relPath);
     if (row === null) {
       // Binary or unreadable on either side: keep one opaque row.
@@ -1120,7 +1239,7 @@ async function applyBaselineCollisions(
 /**
  * Whether the worktree file's type/mode matches the baseline blob's mode.
  * Git tracks only the executable bit for regular files; a baseline symlink
- * (mode 120000) never matches a regular worktree file. Returns `false` —
+ * (mode 120000) matches only a symlink worktree path. Returns `false` —
  * keeping the row — when either side cannot be determined.
  */
 async function worktreeModeMatchesBase(
@@ -1128,9 +1247,11 @@ async function worktreeModeMatchesBase(
   relPath: string,
   baseMode: string | undefined,
 ): Promise<boolean> {
-  if (baseMode !== '100644' && baseMode !== '100755') return false;
+  if (baseMode !== '100644' && baseMode !== '100755' && baseMode !== '120000')
+    return false;
   try {
     const st = await lstat(path.join(gitRoot, relPath));
+    if (baseMode === '120000') return st.isSymbolicLink();
     if (!st.isFile()) return false;
     // Git canonicalizes modes from the owner-exec bit only (0o100); group or
     // other exec bits never reach a tracked mode.
@@ -1560,6 +1681,39 @@ export function parseDeletedFromNameStatus(stdout: string): Set<string> {
   return deleted;
 }
 
+/**
+ * Parse `git diff --name-status -z` output and return every path that can
+ * surface as a branch-mode phantom deletion: the `D` rows plus the OLD side
+ * of rename/copy rows (rename detection can absorb a collision path's
+ * deletion into the paired addition). Bounds the collision classification —
+ * no other path can produce a phantom row.
+ */
+export function parsePhantomCandidatePaths(stdout: string): Set<string> {
+  const tokens = stdout.split('\0');
+  if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+
+  const candidates = new Set<string>();
+  let i = 0;
+  while (i < tokens.length) {
+    const status = tokens[i] ?? '';
+    i++;
+    if (status === '') continue;
+    const head = status[0];
+    // Rename / copy entries carry TWO path tokens; the old one is the
+    // deletion candidate.
+    if (head === 'R' || head === 'C') {
+      const oldPath = tokens[i] ?? '';
+      if (oldPath !== '') candidates.add(oldPath);
+      i += 2;
+      continue;
+    }
+    const path = tokens[i] ?? '';
+    i++;
+    if (head === 'D' && path !== '') candidates.add(path);
+  }
+  return candidates;
+}
+
 function splitNulDelimited(stdout: string | null): string[] {
   if (!stdout) return [];
   return stdout.split('\0').filter(Boolean);
@@ -1770,8 +1924,18 @@ async function runGit(
 ): Promise<string | null> {
   // `core.quotepath=false` keeps non-ASCII filenames as UTF-8 in git's output
   // instead of octal-escaping them (`\346\226\207.txt`), which would otherwise
-  // end up as literal keys in `perFileStats`.
-  const fullArgs = ['-c', 'core.quotepath=false', ...args];
+  // end up as literal keys in `perFileStats`. `diff.renames=true` pins rename
+  // detection against ambient config (`diff.renames=false` in the user's
+  // global gitconfig would otherwise split rename rows into delete+add and
+  // change both the stats and the collision re-accounting that keys on
+  // `oldPath`); inert for the non-diff commands run through here.
+  const fullArgs = [
+    '-c',
+    'core.quotepath=false',
+    '-c',
+    'diff.renames=true',
+    ...args,
+  ];
   return await new Promise((resolve) => {
     let child: ReturnType<typeof execFile>;
     try {
@@ -1806,7 +1970,13 @@ async function runGitBuffer(
   args: string[],
   cwd: string,
 ): Promise<Buffer | null> {
-  const fullArgs = ['-c', 'core.quotepath=false', ...args];
+  const fullArgs = [
+    '-c',
+    'core.quotepath=false',
+    '-c',
+    'diff.renames=true',
+    ...args,
+  ];
   return await new Promise((resolve) => {
     try {
       execFile(

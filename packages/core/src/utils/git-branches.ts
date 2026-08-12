@@ -289,9 +289,9 @@ async function readHeadBranchName(
  * The number of entries in HEAD's reflog, or 0 when it cannot be read
  * (unborn HEAD, reflogging disabled). Snapshotted before a checkout step:
  * entries added afterwards belong to the step and any hooks it ran — the
- * index lock held across both excludes concurrent in-repo checkouts — so
- * they are the evidence of the step's moves even when a hook moves HEAD
- * away again.
+ * per-cwd checkout serialization holds across snapshot, step, and hooks, so
+ * no other daemon checkout can interleave — and they are the evidence of the
+ * step's moves even when a hook moves HEAD away again.
  */
 async function headReflogCount(
   cwd: string,
@@ -340,6 +340,29 @@ interface CheckoutOriginal {
   commit: string;
   /** HEAD's reflog length before the step (see headReflogCount). */
   reflogCount: number;
+}
+
+// Checkouts are serialized per workspace cwd from the pre-step HEAD snapshot
+// through landing verification: the reflog attribution below cannot tell this
+// step's entries apart from a CONCURRENT same-target checkout's, so without
+// the queue a failed step could pass its movement proof on the other step's
+// entry and its rollback would undo a concurrent successful switch.
+const checkoutSerializers = new Map<string, Promise<void>>();
+
+function serializeCheckout<T>(cwd: string, work: () => Promise<T>): Promise<T> {
+  const previous = checkoutSerializers.get(cwd) ?? Promise.resolve();
+  const result = previous.then(work);
+  const settled: Promise<void> = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  checkoutSerializers.set(cwd, settled);
+  void settled.then(() => {
+    if (checkoutSerializers.get(cwd) === settled) {
+      checkoutSerializers.delete(cwd);
+    }
+  });
+  return result;
 }
 
 /**
@@ -400,11 +423,11 @@ async function runCheckoutStep(
  * count, not just the newest one: a failing post-checkout hook can run its
  * own `git checkout`, moving HEAD again and leaving ITS entry newest — a
  * newest-only scan would miss the step's entry, which is still present, and
- * never roll back. The index lock held across step and hook excludes
- * concurrent in-repo checkouts, so every post-snapshot entry belongs to
- * them. Hook entries of another shape (empty-message `symbolic-ref`,
- * `update-ref -m`) do not match the checkout form. With reflogging disabled
- * there is no evidence the step moved HEAD, so this stays `false`.
+ * away. The per-cwd checkout serialization covers the snapshot, the step,
+ * and its hooks, so every post-snapshot entry belongs to them. Hook entries
+ * of another shape (empty-message `symbolic-ref`, `update-ref -m`) do not
+ * match the checkout form. With reflogging disabled there is no evidence the
+ * step moved HEAD, so this stays `false`.
  */
 async function checkoutMovedHead(
   cwd: string,
@@ -504,9 +527,19 @@ async function checkoutLanded(
 
 /**
  * Checkout a branch, tag, or revision. Returns the resulting HEAD state.
- * Throws on dirty tree or invalid ref.
+ * Throws on dirty tree or invalid ref. Serialized per cwd so concurrent
+ * checkouts in one workspace cannot cross-contaminate each other's
+ * snapshot/landing/rollback window.
  */
-export async function gitCheckout(
+export function gitCheckout(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitCheckoutResult> {
+  return serializeCheckout(cwd, () => performCheckout(cwd, ref, env));
+}
+
+async function performCheckout(
   cwd: string,
   ref: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -636,9 +669,21 @@ export async function gitCheckout(
 
 /**
  * Create a new branch and check it out. Throws if the branch already exists
- * or the working tree is dirty.
+ * or the working tree is dirty. Shares the per-cwd checkout serialization so
+ * a concurrent checkout cannot land between the snapshot and the rollback.
  */
-export async function gitCreateBranch(
+export function gitCreateBranch(
+  cwd: string,
+  name: string,
+  startPoint?: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitCheckoutResult> {
+  return serializeCheckout(cwd, () =>
+    performCreateBranch(cwd, name, startPoint, env),
+  );
+}
+
+async function performCreateBranch(
   cwd: string,
   name: string,
   startPoint?: string,

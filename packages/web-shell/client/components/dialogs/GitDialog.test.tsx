@@ -92,7 +92,10 @@ async function flush() {
   });
 }
 
-function mount(initialView: 'diff' | 'log' | 'prs' = 'diff', gitCwd?: string) {
+function mount(
+  initialView: 'diff' | 'log' | 'prs' | 'commit' = 'diff',
+  gitCwd?: string,
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -318,6 +321,94 @@ describe('GitDialog', () => {
     await act(async () => {
       document.getElementById('git-dialog-tab-diff')?.click();
     });
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'commit';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+
+    const commitTrigger = document.body.querySelector(
+      'button[aria-label="Select commit"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      commitTrigger.click();
+    });
+    await flush();
+    const olderOption = Array.from(
+      document.body.querySelectorAll('[role="option"]'),
+    ).find((option) =>
+      option.textContent?.includes('keep selected'),
+    ) as HTMLButtonElement;
+    expect(olderOption).toBeTruthy();
+    await act(async () => {
+      olderOption.click();
+    });
+    await flush();
+
+    await act(async () => {
+      document.getElementById('git-dialog-tab-log')?.click();
+    });
+    await flush();
+    await act(async () => {
+      document.getElementById('git-dialog-tab-diff')?.click();
+    });
+    await flush();
+
+    expect(source.value).toBe('commit');
+    expect(
+      document.body.querySelector('button[aria-label="Select commit"]')
+        ?.textContent,
+    ).toContain('keep selected');
+  });
+
+  it('preserves the selected diff source for dialogs opened in the commit view', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitLog.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      entries: [
+        {
+          sha: 'abcdef1234567890',
+          shortSha: 'abcdef1',
+          subject: 'head commit',
+          authorName: 'Author',
+          authorEmail: 'author@example.com',
+          authorDate: Math.floor(Date.now() / 1000) - 60,
+          parents: [],
+          refs: '',
+        },
+        {
+          sha: '1234567890abcdef',
+          shortSha: '1234567',
+          subject: 'keep selected',
+          authorName: 'Author',
+          authorEmail: 'author@example.com',
+          authorDate: Math.floor(Date.now() / 1000) - 120,
+          parents: [],
+          refs: '',
+        },
+      ],
+      hasMore: false,
+    });
+    // Opened in the commit view: only the initializer's
+    // `initialView === 'commit'` latch keeps GitDiffContent mounted before
+    // selectView ever runs, so a tab round-trip must not reset the source.
+    mount('commit');
     await flush();
 
     const source = document.body.querySelector(

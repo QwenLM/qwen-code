@@ -19,6 +19,11 @@ import {
   SearchIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
+import {
+  displayBranchName,
+  qualifyLocalBranchRef,
+  qualifyRemoteBranchRef,
+} from '../utils/gitRefs';
 import { sanitizeControlChars } from './messages/toolFormatting';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
@@ -135,14 +140,17 @@ export function GitModePopover({
       setOpen(v);
       if (v) {
         // An unread checkout failure must stay visible on reopen — the
-        // existing-branch box is the only surface that renders it; the fetch
-        // and checkout paths clear errors when real work starts.
-        setSelectedMode(checkoutError ? 'existing' : intent.mode);
+        // existing-branch box is the only surface that renders it and the
+        // in-flight spinner; the fetch and checkout paths clear errors when
+        // real work starts.
+        setSelectedMode(
+          checkoutError || checkoutRef ? 'existing' : intent.mode,
+        );
         setBranchName(intent.mode === 'branch' ? intent.name : '');
         setExistingSearch('');
       }
     },
-    [intent, checkoutError],
+    [intent, checkoutError, checkoutRef],
   );
 
   const handleSelectCurrent = useCallback(() => {
@@ -202,18 +210,25 @@ export function GitModePopover({
     };
     // Values are fully qualified so the daemon checks out the exact ref
     // namespace of the clicked row; a colliding short name (a tag or
-    // same-named branch) cannot resolve to a different target.
+    // same-named branch) cannot resolve to a different target. The qualify
+    // helpers absorb git's disambiguation prefixes (`heads/x`, `remotes/x`)
+    // so an ambiguous short name never yields a double-prefixed ref.
     for (const item of existingBranches?.local ?? []) {
       if (!item.isHead)
-        add(t('gitMode.existingLocal'), item.name, `refs/heads/${item.name}`);
+        add(
+          t('gitMode.existingLocal'),
+          displayBranchName(item.name),
+          qualifyLocalBranchRef(item.name),
+        );
     }
     for (const item of existingBranches?.remote ?? []) {
-      const slash = item.name.indexOf('/');
-      const remote = slash > 0 ? item.name.slice(0, slash) : 'remote';
+      const displayName = displayBranchName(item.name);
+      const slash = displayName.indexOf('/');
+      const remote = slash > 0 ? displayName.slice(0, slash) : 'remote';
       add(
         t('gitMode.existingRemote', { remote }),
-        item.name,
-        `refs/remotes/${item.name}`,
+        displayName,
+        qualifyRemoteBranchRef(item.name),
       );
     }
     return groups;
