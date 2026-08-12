@@ -23,10 +23,8 @@ import { buildScenario, TOKEN_INTERVAL_MS } from './stream-script.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
   foldLiveEvent,
-  livePhase,
   settleOpenTools,
   type LiveHistoryItem,
-  type LivePhase,
   type LiveToolItem,
 } from './live-session-model.js';
 import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
@@ -37,6 +35,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
+import { execSync } from 'node:child_process';
 import type { PartListUnion } from '@google/genai';
 import { livePromptEvents } from './live-session.js';
 import { resumeEventsFromConfig } from './resume-session.js';
@@ -61,14 +60,6 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 let spinnerTick = 0;
 const nextSpinner = () => SPINNER[spinnerTick++ % SPINNER.length];
 
-const PHASE_LABEL: Record<LivePhase, string> = {
-  idle: '',
-  thinking: 'thinking',
-  tool: 'running tool',
-  approving: 'awaiting approval',
-  responding: 'responding',
-};
-
 /** One-line truncated preview of the tool-call args JSON. */
 const argsPreview = (args: string) => {
   const line = args.split('\n')[0] ?? '';
@@ -78,46 +69,6 @@ const argsPreview = (args: string) => {
 // ---------------------------------------------------------------------------
 // components
 // ---------------------------------------------------------------------------
-
-function ThinkingBlock(props: {
-  item: Extract<LiveHistoryItem, { kind: 'thinking' }>;
-  expanded: boolean;
-  onToggle: (id: string) => void;
-}) {
-  const { item, expanded, onToggle } = props;
-  const [hover, setHover] = useState(false);
-  const renderer = useRenderer();
-  const label = !item.done
-    ? `∵ Thinking…`
-    : expanded
-      ? `∴ Thought (${item.text.length} chars) · click to collapse`
-      : `∴ Thought (${item.text.length} chars) · click to expand`;
-  return (
-    <box flexDirection="column" marginTop={0}>
-      <box
-        onMouseOver={() => setHover(true)}
-        onMouseOut={() => setHover(false)}
-        onMouseUp={(e) => {
-          if (e.button === MouseButton.LEFT) {
-            const sel = renderer.getSelection();
-            if (!sel?.getSelectedText()) onToggle(item.id);
-          }
-        }}
-        paddingLeft={1}
-        backgroundColor={hover ? C.hover : undefined}
-      >
-        <text fg={C.purple} attributes={1}>
-          {label}
-        </text>
-      </box>
-      {expanded && item.text.length > 0 && (
-        <box paddingLeft={3} marginTop={0}>
-          <text fg={C.dim}>{item.text}</text>
-        </box>
-      )}
-    </box>
-  );
-}
 
 function ToolCard(props: {
   item: LiveToolItem;
@@ -261,13 +212,16 @@ function AssistantMessage(props: {
 }) {
   const { item } = props;
   return (
-    <box paddingLeft={1} marginTop={0}>
-      <markdown
-        content={item.text}
-        streaming={item.streaming}
-        syntaxStyle={SYNTAX}
-        fg={C.text}
-      />
+    <box paddingLeft={1} marginTop={1} flexDirection="row">
+      <text fg={C.accent}>◆ </text>
+      <box flexGrow={1} flexDirection="column">
+        <markdown
+          content={item.text}
+          streaming={item.streaming}
+          syntaxStyle={SYNTAX}
+          fg={C.text}
+        />
+      </box>
     </box>
   );
 }
@@ -279,6 +233,20 @@ function AssistantMessage(props: {
 /** Original-style header banner. Stable: depends only on config/width, so it
  *  does not re-render on streaming; resize re-renders without flicker via the
  *  erase-free painter. */
+function approvalModeLabel(mode: string): string {
+  switch (mode) {
+    case 'yolo':
+      return 'YOLO';
+    case 'auto-edit':
+    case 'accepting-edits':
+      return 'Auto-edit';
+    case 'auto':
+      return 'Auto';
+    default:
+      return 'Default';
+  }
+}
+
 // Faithful port of the original ink Header (components/Header.tsx): a
 // single-border info panel with 4 lines — title(+version), blank spacer,
 // auth|model(+hint), directory. Same data sources as the original.
@@ -351,7 +319,7 @@ function App({
   const [items, setItems] = useState<LiveHistoryItem[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [_toast, setToast] = useState<string | null>(null);
   const [, setThemeTick] = useState(0);
   const [dialog, setDialog] = useState<MountedDialog | null>(null);
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -400,7 +368,6 @@ function App({
   const liveAbortRef = useRef<AbortController | null>(null);
 
   // Streaming phase for the status bar / spinner / border (F1.1).
-  const phase = livePhase(items, streaming);
 
   const toggle = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -722,28 +689,39 @@ function App({
 
   const banner = buildBanner(config, width);
 
+  // footer (mirrors original Footer): project · git · model + approval mode
+  const footerProject = nodePath.basename(process.cwd());
+  let footerBranch = '';
+  try {
+    footerBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim();
+  } catch {
+    footerBranch = '';
+  }
+  const footerModel =
+    (
+      config as unknown as { getModelDisplayName?: () => string } | undefined
+    )?.getModelDisplayName?.() ?? '';
+  const footerLine1 =
+    `→ ${footerProject}` +
+    (footerBranch ? ` · git:(${footerBranch})` : '') +
+    (footerModel ? ` · ${footerModel}` : '');
+  const footerLine2 = `${approvalModeLabel(String(approvalMode ?? ''))} mode (shift + tab to cycle)`;
+
   return (
     <box flexDirection="column" width={width} height="100%">
       {banner}
-      {/* Tips line at steady state (mirrors original Tips); status while busy */}
-      {streaming || commandProcessing ? (
-        <box paddingLeft={1} paddingRight={1} flexShrink={0}>
-          <text fg={C.dim}>
-            {streaming
-              ? `${nextSpinner()} streaming… (${PHASE_LABEL[phase]}) (Esc interrupt · Ctrl+C quit)`
-              : `${nextSpinner()} running command… (Esc cancel · Ctrl+C quit)`}
-            {toast ? `   ${toast}` : ''}
-          </text>
-        </box>
-      ) : (
-        <box paddingLeft={1} paddingRight={1} flexShrink={0}>
-          <text fg={C.dim}>
-            {
-              'Tips: Try /insight to generate personalized insights from your chat history.'
-            }
-          </text>
-        </box>
-      )}
+      {/* Tips line (mirrors original Tips component) */}
+      <box paddingLeft={1} paddingRight={1} flexShrink={0}>
+        <text fg={C.dim}>
+          {
+            'Tips: Try /insight to generate personalized insights from your chat history.'
+          }
+        </text>
+      </box>
       {/* chat viewport — replaces qwen-code VP mode */}
       <scrollbox
         flexGrow={1}
@@ -765,7 +743,7 @@ function App({
                   marginTop={1}
                 >
                   <text fg={C.green} attributes={1}>
-                    ❯{' '}
+                    {'> '}
                   </text>
                   <text fg={C.text} attributes={1}>
                     {item.text}
@@ -773,13 +751,11 @@ function App({
                 </box>
               );
             case 'thinking':
+              // original shows a lone dim ∴ marker for thinking
               return (
-                <ThinkingBlock
-                  key={item.id}
-                  item={item}
-                  expanded={expanded.has(item.id)}
-                  onToggle={toggle}
-                />
+                <box key={item.id} paddingLeft={1} marginTop={1}>
+                  <text fg={C.dim}>∴</text>
+                </box>
               );
             case 'assistant':
               return <AssistantMessage key={item.id} item={item} />;
@@ -842,9 +818,20 @@ function App({
             liveAbortRef.current = null;
             setStreaming(false);
           }}
-          placeholder=""
+          placeholder="Type your message or @path/to/file"
           focus={!dialog}
         />
+      </box>
+
+      {/* footer (mirrors original Footer) */}
+      <box
+        flexDirection="column"
+        paddingLeft={1}
+        paddingRight={1}
+        flexShrink={0}
+      >
+        <text fg={C.dim}>{footerLine1}</text>
+        <text fg={C.dim}>{footerLine2}</text>
       </box>
     </box>
   );
