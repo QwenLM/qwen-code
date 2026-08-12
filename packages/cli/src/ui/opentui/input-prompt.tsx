@@ -627,7 +627,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             const color = isActive ? C.accent : C.dim;
             const label = suggestion.label ?? suggestion.value;
             return (
-              <box key={`${suggestion.value}-${originalIndex}`}>
+              <box
+                key={`${suggestion.value}-${originalIndex}`}
+                flexDirection="row"
+              >
                 <box width={2} flexShrink={0}>
                   <text fg={color}>{isActive ? '> ' : '  '}</text>
                 </box>

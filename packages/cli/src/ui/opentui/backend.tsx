@@ -247,6 +247,8 @@ const WITTY_LOADING_PHRASES = [
   'Crafting a response worthy of your patience...',
 ];
 
+const SPINNER_FRAMES = ['⠋', '⠙', '', '', '⠼', '⠴', '', '', '⠇', '⠏'];
+
 const LOGO_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
 function lerpHex(a: string, b: string, t: number): string {
   const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
@@ -417,6 +419,7 @@ function App({
   const [streaming, setStreaming] = useState(false);
   const [loadingPhrase, setLoadingPhrase] = useState(WITTY_LOADING_PHRASES[0]);
   const [elapsed, setElapsed] = useState(0);
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
   useEffect(() => {
     if (!streaming) return;
     setElapsed(0);
@@ -426,6 +429,7 @@ function App({
       ],
     );
     const tick = setInterval(() => setElapsed((s) => s + 1), 1000);
+    const spin = setInterval(() => setSpinnerFrame((f) => f + 1), 120);
     const phrase = setInterval(
       () =>
         setLoadingPhrase(
@@ -437,6 +441,7 @@ function App({
     );
     return () => {
       clearInterval(tick);
+      clearInterval(spin);
       clearInterval(phrase);
     };
   }, [streaming]);
@@ -891,7 +896,6 @@ function App({
             }
           </text>
         </box>
-        <box height={1} />
         {items.map((item) => {
           switch (item.kind) {
             case 'user':
@@ -982,7 +986,7 @@ function App({
         {(streaming || commandProcessing) && (
           <box paddingLeft={1} paddingRight={1}>
             <text fg={C.dim}>
-              {`${nextSpinner()} ${loadingPhrase} (${elapsed}s · Esc to cancel)`}
+              {`${SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]} ${loadingPhrase} (${elapsed}s · Esc to cancel)`}
             </text>
           </box>
         )}
