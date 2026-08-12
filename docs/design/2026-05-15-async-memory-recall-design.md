@@ -5,6 +5,12 @@
 **Related issues:** #3761, #3759
 **Related PRs:** #3814, #3866
 
+> **Updated 2026-08-08:** The UserQuery consume point now waits for at most
+> 100 ms before preserving a pending result for ToolResult delivery. The
+> zero-wait UserQuery statements and behavior-table rows below describe the
+> original design and are superseded by
+> `2026-08-08-native-memory-recall-reliability.md`.
+
 ---
 
 ## Problem

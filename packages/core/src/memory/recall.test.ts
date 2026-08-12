@@ -276,7 +276,7 @@ describe('auto-memory relevant recall', () => {
     ).toBe('fw-api.md');
   });
 
-  it('weights title and description matches above body-only matches', () => {
+  it('weights each title and description match above a body match', () => {
     const bodyMatch = memoryDoc(
       'body.md',
       'reference',
@@ -482,8 +482,52 @@ describe('auto-memory relevant recall', () => {
       .mock.calls[0]![2];
     expect(modelCandidates).toHaveLength(200);
     expect(modelCandidates[0]).toBe(lexicalTarget);
-    expect(modelCandidates.slice(-20)).toEqual(recentDocs);
+    expect(modelCandidates.filter((doc) => recentDocs.includes(doc))).toEqual(
+      recentDocs,
+    );
+    expect(modelCandidates[1]).toBe(recentDocs[0]);
     expect(result.selectedDocs).toEqual([lexicalTarget]);
+  });
+
+  it('fills sparse lexical candidates to the model limit with recent docs', async () => {
+    const lexicalDocs = Array.from({ length: 3 }, (_, index) =>
+      memoryDoc(
+        `lexical-${index}.md`,
+        'reference',
+        `Sparse target ${index}`,
+        '',
+        '',
+      ),
+    );
+    const recentDocs = Array.from({ length: 250 }, (_, index) => ({
+      ...memoryDoc(
+        `recent-${String(index).padStart(3, '0')}.md`,
+        'reference',
+        `General memory ${index}`,
+        '',
+        '',
+      ),
+      mtimeMs: 250 - index,
+    }));
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
+      ...lexicalDocs,
+      ...recentDocs,
+    ]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'find the sparse target',
+      { config: {} as Config },
+    );
+
+    const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
+      .mock.calls[0]![2];
+    expect(modelCandidates).toHaveLength(200);
+    expect(modelCandidates.filter((doc) => lexicalDocs.includes(doc))).toEqual(
+      lexicalDocs,
+    );
+    expect(modelCandidates).toContain(recentDocs[100]);
   });
 
   it('falls back to heuristic selection when model-driven selection fails', async () => {

@@ -38,7 +38,7 @@ Improve only the existing failure fallback:
 - score only the body window that can be surfaced in the prompt;
 - require a title, description, or body lexical match before applying a type
   boost;
-- weight title and description matches above body-only matches.
+- weight each title and description token match above a body token match.
 
 ## Non-goals
 
@@ -46,9 +46,9 @@ Improve only the existing failure fallback:
 - No public recall timing or retrieval-mode setting.
 - No new tokenizer or retrieval dependency.
 - No change to memory writes, scopes, extraction, DREAM, forget, or compaction.
-- No removal of the shared scanner's 200-document cap. Recall-specific broad
-  candidate selection needs its own bounded manifest design and remains a
-  separate change.
+- No removal of the shared scanner's 200-document cap for non-recall callers.
+  Recall alone uses the bounded broad-candidate design documented in
+  `2026-08-09-bounded-memory-recall-candidates.md`.
 
 ## Verification
 

@@ -227,21 +227,40 @@ function selectModelCandidateDocuments(
   query: string,
   docs: ScannedAutoMemoryDocument[],
   recentTools: readonly string[],
-): ScannedAutoMemoryDocument[] {
+  fallbackLimit: number,
+): {
+  modelCandidates: ScannedAutoMemoryDocument[];
+  fallbackDocs: ScannedAutoMemoryDocument[];
+} {
   const eligible = docs.filter(
     (doc) => !isActiveToolUsageMemory(doc, recentTools),
   );
   const lexical = selectRelevantAutoMemoryDocuments(
     query,
     eligible,
+    Math.max(
+      MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE,
+      fallbackLimit,
+    ),
+  );
+  const modelLexical = lexical.slice(
+    0,
     MAX_MODEL_CANDIDATE_DOCS - RECENT_MODEL_CANDIDATE_RESERVE,
   );
-  const selected = new Set(lexical.map((doc) => doc.filePath));
+  const selected = new Set(modelLexical.map((doc) => doc.filePath));
   const recent = eligible
     .filter((doc) => !selected.has(doc.filePath))
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .slice(0, MAX_MODEL_CANDIDATE_DOCS - lexical.length);
-  return [...lexical, ...recent];
+    .slice(0, MAX_MODEL_CANDIDATE_DOCS - modelLexical.length);
+  const modelCandidates = modelLexical.flatMap((doc, index) => {
+    const recentDoc = recent[index];
+    return recentDoc ? [doc, recentDoc] : [doc];
+  });
+  modelCandidates.push(...recent.slice(modelLexical.length));
+  return {
+    modelCandidates,
+    fallbackDocs: lexical.slice(0, fallbackLimit),
+  };
 }
 
 function truncateBody(body: string): string {
@@ -358,17 +377,20 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     };
   }
 
+  let fallbackDocs: ScannedAutoMemoryDocument[] | undefined;
   if (options.config) {
     try {
-      const modelCandidates = selectModelCandidateDocuments(
+      const candidates = selectModelCandidateDocuments(
         query,
         docs,
         options.recentTools ?? [],
+        limit,
       );
+      fallbackDocs = candidates.fallbackDocs;
       const selectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
         options.config,
         query,
-        modelCandidates,
+        candidates.modelCandidates,
         limit,
         options.recentTools ?? [],
         options.abortSignal,
@@ -431,14 +453,15 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     };
   }
 
-  const heuristicDocs = docs.filter(
-    (doc) => !isActiveToolUsageMemory(doc, options.recentTools ?? []),
-  );
-  const selectedDocs = selectRelevantAutoMemoryDocuments(
-    query,
-    heuristicDocs,
-    limit,
-  );
+  const selectedDocs =
+    fallbackDocs ??
+    selectRelevantAutoMemoryDocuments(
+      query,
+      docs.filter(
+        (doc) => !isActiveToolUsageMemory(doc, options.recentTools ?? []),
+      ),
+      limit,
+    );
   const strategy: RelevantAutoMemoryPromptResult['strategy'] =
     selectedDocs.length > 0 ? 'heuristic' : 'none';
   if (options.config && !options.abortSignal?.aborted) {

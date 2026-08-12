@@ -21,6 +21,8 @@ Recall ranks the combined project and user pool before model selection:
 - retain up to 180 documents with a lexical match using the existing scorer;
 - fill the remaining candidate slots by recency, preserving at least 20 recent
   opportunities when enough lexical matches exist;
+- interleave recent opportunities with lexical candidates so the manifest byte
+  budget cannot systematically exclude the entire recent reserve;
 - send at most 200 candidates to the model selector;
 - append manifest entries only while their cumulative UTF-8 size remains at or
   below 25,000 bytes;
@@ -38,9 +40,11 @@ or unreadable files keep the existing skip behavior. Empty candidate manifests
 return no model selection rather than sending an unbounded request.
 
 There is no public setting, persistent index, new dependency, provider API, or
-Fast/Refined state machine. Recall still performs an O(n) local pass over the
-already parsed documents; a persistent catalog requires separate measurement
-and evidence.
+Fast/Refined state machine. Each recall enumerates, reads, and parses the full
+project and user memory trees, then performs O(n) local ranking and active-tool
+filtering over the parsed documents. The model candidate count and manifest are
+bounded, but the local I/O and filtering work grow with the memory tree; a
+persistent catalog requires separate measurement and evidence.
 
 ## Verification
 
@@ -51,6 +55,6 @@ and evidence.
   remaining at 200 documents.
 - A manifest built from large multibyte descriptions stays within 25,000 UTF-8
   bytes.
-- The deterministic CLI E2E selects the overflow topic and exposes its unique
-  marker at the ToolResult delivery point after the bounded initial wait
-  expires.
+- A real temporary memory-tree integration test verifies overflow-topic recall;
+  client tests independently verify bounded initial waiting and later
+  ToolResult delivery.

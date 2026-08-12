@@ -350,35 +350,37 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[resolveRelevantAutoMemoryPromptForQuery] --> B[scanAutoMemoryTopicDocuments\n扫描所有主题文件]
-    B --> C[filterExcludedAutoMemoryDocuments\n过滤本轮已写入的文件]
+    A[resolveRelevantAutoMemoryPromptForQuery] --> B[scanAllAutoMemoryTopicDocuments +\nscanAllUserAutoMemoryTopicDocuments\n扫描项目级与用户级全部主题文件]
+    B --> C[filterExcludedAutoMemoryDocuments\n合并作用域并过滤本轮已写入的文件]
     C --> D{query 为空\n或 docs 为空\n或 limit <= 0?}
     D -- 是 --> E[返回空 prompt\nstrategy: none]
     D -- 否 --> F{是否配置了 Config?}
-    F -- 是 --> G[selectRelevantAutoMemoryDocumentsByModel\n发起 side query 请求模型选择]
-    G --> H{模型返回结果?}
-    H -- 有文档 --> I[strategy: model]
-    H -- 无文档 --> J[strategy: none\n仍然返回空]
-    G -- "失败/异常" --> K[回退到启发式选择]
-    F -- 否 --> K
-    K --> L[tokenize query\n提取 ≥3 字符的 token]
-    L --> M[scoreDocument 打分\n关键词匹配 +2 / 类型关键词 +1 / 有内容 +1]
-    M --> N[过滤 score=0 的文档\n按分数降序排列，取 Top 5]
-    N --> O{有得分文档?}
-    O -- 是 --> P[strategy: heuristic]
-    O -- 否 --> J
-    I --> Q[buildRelevantAutoMemoryPrompt\n构建 Relevant Memory 区块]
-    P --> Q
-    Q --> R[返回注入主系统提示的 prompt 片段]
+    F -- 是 --> G[selectModelCandidateDocuments\n词法候选 + recent reserve\n最多 200 篇且交错排列]
+    G --> H[selectRelevantAutoMemoryDocumentsByModel\n构建最多 25 KB manifest\n发起 side query 请求模型选择]
+    H --> I{模型返回结果?}
+    I -- 有文档 --> J[strategy: model]
+    I -- 无文档 --> K[strategy: none\n仍然返回空]
+    H -- "失败/异常" --> L[复用已计算的启发式排序]
+    F -- 否 --> M[tokenize query\nNFKC + ASCII token + CJK bigram\n最多 64 个 token]
+    M --> N[scoreDocument 打分\ntitle +4 / description +3 / body +1\n词法命中后类型加成最多 +2]
+    N --> O[过滤 score=0 的文档\n按分数降序排列，取 Top 5]
+    L --> O
+    O --> P{有得分文档?}
+    P -- 是 --> Q[strategy: heuristic]
+    P -- 否 --> K
+    J --> R[buildRelevantAutoMemoryPrompt\n构建 Relevant Memory 区块]
+    Q --> R
+    R --> S[返回注入主系统提示的 prompt 片段]
 ```
 
 **评分规则（启发式）**：
 
-| 条件                             | 加分             |
-| -------------------------------- | ---------------- |
-| query token 出现在文档内容中     | +2（每个 token） |
-| query token 是该类型的特征关键词 | +1（每个 token） |
-| 文档 body 非空                   | +1               |
+| 条件                                       | 加分                |
+| ------------------------------------------ | ------------------- |
+| query token 出现在 title                   | +4（每个 token）    |
+| query token 出现在 description             | +3（每个 token）    |
+| query token 出现在 body 前 1200 字符       | +1（每个 token）    |
+| 至少一次词法命中后，token 是类型特征关键词 | +1，整篇文档最多 +2 |
 
 **每种类型的特征关键词**：
 
