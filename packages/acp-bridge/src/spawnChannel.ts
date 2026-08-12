@@ -10,11 +10,25 @@ import { Readable, Writable } from 'node:stream';
 import { getHeapStatistics } from 'node:v8';
 import type { ChannelFactory } from './channel.js';
 import { redactLogCredentials } from './logRedaction.js';
-import { ndJsonStream, type NdJsonStreamHooks } from './ndJsonStream.js';
+import {
+  ndJsonStream,
+  type NdJsonStreamHooks,
+  type NdJsonStreamLimits,
+  validateNdJsonStreamLimits,
+} from './ndJsonStream.js';
 import { MissingCliEntryError } from './status.js';
+import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
+import type { ChildHeapPolicy } from './child-heap-policy.js';
 
 let cachedMemoryArgs: string[] | undefined;
+export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
+  Object.freeze({
+    maxFrameBytes: 64 * 1024 * 1024,
+    maxQueuedMessages: 256,
+    maxQueuedBytes: 64 * 1024 * 1024,
+  });
+
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
   const constrainedMemory = (process as { constrainedMemory?: () => number })
@@ -105,8 +119,20 @@ export interface SpawnChannelFactoryOptions {
   onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
   extraArgs?: string[];
   pipeHooks?: NdJsonStreamHooks;
+  pipeLimits?: NdJsonStreamLimits;
   sourceEnv?: Readonly<NodeJS.ProcessEnv>;
   processRegistry?: ProcessRegistry;
+  /**
+   * Daemon child-heap policy. Only meaningful together with a **shared**
+   * `processRegistry`: the factory otherwise builds its own, every spawn sees
+   * a concurrent count of 1, and each child is handed the whole pool — the
+   * current overcommit, now with a policy object attesting to it. All three
+   * daemon factories pass the same registry.
+   *
+   * Omitted by every single-child caller (interactive CLI, IDE companion,
+   * direct-embed), which keeps the host-derived ceiling.
+   */
+  childHeapPolicy?: ChildHeapPolicy;
 }
 
 /**
@@ -121,6 +147,7 @@ export interface SpawnChannelFactoryOptions {
 export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
+  if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
   return async (workspaceCwd, childEnvOverrides) => {
     const sourceEnv = options.sourceEnv ?? process.env;
@@ -134,14 +161,29 @@ export function createSpawnChannelFactory(
       childEnvOverrides,
     );
     childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    // Marks the child as daemon-spawned so its ACP channel fallback reports
+    // channel=daemon in usage statistics (see cli/src/config/acp-channel-fallback.ts).
+    childEnv['QWEN_CODE_SERVE'] = '1';
 
-    const memoryArgs = getAcpMemoryArgs();
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
+    // Reserve BEFORE deciding: the reservation is what makes this spawn
+    // visible to any other spawn racing it, so the count below includes this
+    // child and two concurrent spawns cannot both be told they are alone.
     const reservation = processRegistry.reserve();
     let child;
+    // Everything between `reserve()` and `attach()` belongs inside this try.
+    // `childHeapPolicy` is a public `createSpawnChannelFactory` option, so an
+    // externally supplied `decide()` can throw; outside the try that would
+    // reject the spawn while leaving the reservation held forever, inflating
+    // `committedProcessCount` for every later spawn.
     try {
+      // Observation only: the policy is asked what it *would* decide so the
+      // refusal count is real, but nothing here acts on the answer — no
+      // derived ceiling reaches the child and no spawn is refused.
+      options.childHeapPolicy?.decide(processRegistry.committedProcessCount);
+      const memoryArgs = getAcpMemoryArgs();
       child = spawn(
         process.execPath,
         [
@@ -190,7 +232,21 @@ export function createSpawnChannelFactory(
 
     const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const stream = ndJsonStream(writable, readable, options.pipeHooks);
+    const pipeHooks = options.pipeLimits
+      ? {
+          ...options.pipeHooks,
+          onTransportError: (error: unknown) => {
+            void trackedChild.terminate().catch(() => {});
+            options.pipeHooks?.onTransportError?.(error);
+          },
+        }
+      : options.pipeHooks;
+    const stream = ndJsonStream(
+      writable,
+      readable,
+      pipeHooks,
+      options.pipeLimits,
+    );
 
     return {
       stream,
@@ -242,6 +298,10 @@ export const defaultSpawnChannelFactory: ChannelFactory =
  * daemon or IDE environment leak it into per-session `qwen --acp`
  * children silently disables skills in those children.
  *
+ * `QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN`: daemon-local credential for the
+ * loopback Guard provider. The ACP child reaches the daemon over its private
+ * channel and never needs this token.
+ *
  * **WARNING**: this denylist is correct *only because the agent
  * already has unrestricted shell-tool access* — anything in the env
  * is reachable via `~/.bashrc`/`~/.aws/credentials`/etc. anyway.
@@ -257,6 +317,7 @@ export const defaultSpawnChannelFactory: ChannelFactory =
 const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
   'QWEN_CODE_SIMPLE',
+  EXTERNAL_TOOL_GUARD_TOKEN_ENV,
 ]);
 
 /**

@@ -17,48 +17,95 @@ import {
   query,
   tool,
   createSdkMcpServer,
-  isSDKAssistantMessage,
-  isSDKResultMessage,
   isSDKSystemMessage,
   type SDKMessage,
   type SDKSystemMessage,
 } from '@qwen-code/sdk';
 import {
   SDKTestHelper,
-  extractText,
-  findToolUseBlocks,
   findToolResults,
   createSharedTestOptions,
+  assertSuccessfulCompletion,
 } from './test-helper.js';
+import {
+  fakeToolCall,
+  startFakeOpenAIServer,
+  type FakeOpenAIHandler,
+  type FakeOpenAIServer,
+} from '../fake-openai-server.js';
+import {
+  IS_CONTAINER_SANDBOX,
+  CONTAINER_SANDBOX_NO_PROXY,
+  fakeServerHostOptions,
+} from '../test-helper.js';
 
 const SHARED_TEST_OPTIONS = {
   ...createSharedTestOptions(),
   permissionMode: 'yolo' as const,
 };
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? CONTAINER_SANDBOX_NO_PROXY
+  : '127.0.0.1,localhost';
+const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+
+function fakeModelOptions(baseUrl: string) {
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+      no_proxy: LOCAL_OPENAI_NO_PROXY,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
+  };
+}
+
+function advertisedToolNames(
+  fakeServer: FakeOpenAIServer,
+  requestIndex: number,
+): string[] {
+  const tools = fakeServer.requests.filter(
+    ({ body }) => body['stream'] === true,
+  )[requestIndex]?.body['tools'];
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((entry): string[] => {
+    const name = (entry as { function?: { name?: unknown } }).function?.name;
+    return typeof name === 'string' ? [name] : [];
+  });
+}
 
 // MCP tool names are generated with the pattern: mcp__<serverName>__<toolName>
 const MCP_CALCULATE_SUM = 'mcp__sdk-calculator__calculate_sum';
-const MCP_REVERSE_STRING = 'mcp__sdk-string-utils__reverse_string';
-const MCP_SDK_ADD = 'mcp__sdk-math__sdk_add';
-const MCP_SDK_MULTIPLY = 'mcp__sdk-math__sdk_multiply';
+const MCP_REVERSE_STRING = 'mcp__sdk-calculator__reverse_string';
 const MCP_MAYBE_FAIL = 'mcp__sdk-error-test__maybe_fail';
 const MCP_DELAYED_RESPONSE = 'mcp__sdk-async__delayed_response';
 
 describe('SDK MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;
   let testDir: string;
+  let fakeResponse: FakeOpenAIHandler;
+  let fakeServer: FakeOpenAIServer;
 
   beforeEach(async () => {
     helper = new SDKTestHelper();
     testDir = await helper.setup('sdk-mcp-server-integration');
+    fakeResponse = () => ({ content: 'Done.' });
+    fakeServer = await startFakeOpenAIServer(
+      (context) => fakeResponse(context),
+      FAKE_SERVER_OPTIONS,
+    );
   });
 
   afterEach(async () => {
+    await fakeServer.close();
     await helper.cleanup();
   });
 
   describe('Basic SDK MCP Tool Usage', () => {
-    it('should use SDK MCP tool to perform a simple calculation', async () => {
+    it('routes multiple tools from one SDK MCP server', async () => {
       // Define a simple calculator tool using the tool() API with Zod schema
       const calculatorTool = tool(
         'calculate_sum',
@@ -71,19 +118,54 @@ describe('SDK MCP Server Integration (E2E)', () => {
           content: [{ type: 'text', text: String(args.a + args.b) }],
         }),
       );
+      const stringTool = tool(
+        'reverse_string',
+        'Reverse a string',
+        { text: z.string().describe('The text to reverse') },
+        async (args) => ({
+          content: [
+            { type: 'text', text: args.text.split('').reverse().join('') },
+          ],
+        }),
+      );
 
       // Create SDK MCP server with the tool
       const serverConfig = createSdkMcpServer({
         name: 'sdk-calculator',
         version: '1.0.0',
-        tools: [calculatorTool],
+        tools: [calculatorTool, stringTool],
       });
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('tool_search', {
+                query: `select:${MCP_CALCULATE_SUM},${MCP_REVERSE_STRING}`,
+              }),
+            ],
+          };
+        }
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [
+              fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 }),
+              fakeToolCall(MCP_REVERSE_STRING, { text: 'hello world' }),
+            ],
+          };
+        }
+        return { content: 'Done.' };
+      };
 
       const q = query({
-        prompt:
-          'Use the calculate_sum tool to add 25 and 17. Output the result of tool only.',
+        prompt: 'Calculate 25 + 17, then reverse hello world.',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           mcpServers: {
             'sdk-calculator': serverConfig,
@@ -92,239 +174,143 @@ describe('SDK MCP Server Integration (E2E)', () => {
       });
 
       const messages: SDKMessage[] = [];
-      let assistantText = '';
-      let foundToolUse = false;
-
-      try {
-        for await (const message of q) {
-          messages.push(message);
-
-          if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, MCP_CALCULATE_SUM);
-            if (toolUseBlocks.length > 0) {
-              foundToolUse = true;
-            }
-            assistantText += extractText(message.message.content);
-          }
-        }
-
-        // Validate tool was called
-        expect(foundToolUse).toBe(true);
-
-        // Validate result contains expected answer: 25 + 17 = 42
-        expect(assistantText).toMatch(/42/);
-
-        // Validate successful completion
-        const lastMessage = messages[messages.length - 1];
-        expect(isSDKResultMessage(lastMessage)).toBe(true);
-        if (isSDKResultMessage(lastMessage)) {
-          expect(lastMessage.subtype).toBe('success');
-        }
-      } finally {
-        await q.close();
-      }
-    });
-
-    it('should use SDK MCP tool with string operations', async () => {
-      // Define a string manipulation tool with Zod schema
-      const stringTool = tool(
-        'reverse_string',
-        'Reverse a string',
-        {
-          text: z.string().describe('The text to reverse'),
-        },
-        async (args) => ({
-          content: [
-            { type: 'text', text: args.text.split('').reverse().join('') },
-          ],
-        }),
-      );
-
-      const serverConfig = createSdkMcpServer({
-        name: 'sdk-string-utils',
-        version: '1.0.0',
-        tools: [stringTool],
-      });
-
-      const q = query({
-        prompt: `Use the 'reverse_string' tool to process the word "hello world". Output the tool result only.`,
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          mcpServers: {
-            'sdk-string-utils': serverConfig,
-          },
-        },
-      });
-
-      const messages: SDKMessage[] = [];
-      let assistantText = '';
-      let foundToolUse = false;
-
-      try {
-        for await (const message of q) {
-          messages.push(message);
-
-          if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(
-              message,
-              MCP_REVERSE_STRING,
-            );
-            if (toolUseBlocks.length > 0) {
-              foundToolUse = true;
-            }
-            assistantText += extractText(message.message.content);
-          }
-        }
-
-        // Validate tool was called
-        expect(foundToolUse).toBe(true);
-
-        // Validate result contains reversed string: "olleh"
-        expect(assistantText.toLowerCase()).toMatch(/olleh/);
-
-        // Validate successful completion
-        const lastMessage = messages[messages.length - 1];
-        expect(isSDKResultMessage(lastMessage)).toBe(true);
-      } finally {
-        await q.close();
-      }
-    });
-  });
-
-  describe('Multiple SDK MCP Tools', () => {
-    it('should use multiple tools from the same SDK MCP server', async () => {
-      // Define the Zod schema shape for two numbers
-      const twoNumbersSchema = {
-        a: z.number().describe('First number'),
-        b: z.number().describe('Second number'),
-      };
-
-      // Define multiple tools
-      const addTool = tool(
-        'sdk_add',
-        'Add two numbers',
-        twoNumbersSchema,
-        async (args) => ({
-          content: [{ type: 'text', text: String(args.a + args.b) }],
-        }),
-      );
-
-      const multiplyTool = tool(
-        'sdk_multiply',
-        'Multiply two numbers',
-        twoNumbersSchema,
-        async (args) => ({
-          content: [{ type: 'text', text: String(args.a * args.b) }],
-        }),
-      );
-
-      const serverConfig = createSdkMcpServer({
-        name: 'sdk-math',
-        version: '1.0.0',
-        tools: [addTool, multiplyTool],
-      });
-
-      const q = query({
-        prompt:
-          'First use sdk_add to calculate 10 + 5, then use sdk_multiply to multiply the result by 3. Give me the final answer.',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          debug: false,
-          mcpServers: {
-            'sdk-math': serverConfig,
-          },
-        },
-      });
-
-      const messages: SDKMessage[] = [];
-      let assistantText = '';
-      const toolCalls: string[] = [];
-
-      try {
-        for await (const message of q) {
-          messages.push(message);
-
-          if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message);
-            toolUseBlocks.forEach((block) => {
-              toolCalls.push(block.name);
-            });
-            assistantText += extractText(message.message.content);
-          }
-        }
-
-        // Validate both tools were called
-        expect(toolCalls).toContain(MCP_SDK_ADD);
-        expect(toolCalls).toContain(MCP_SDK_MULTIPLY);
-
-        // Validate result: (10 + 5) * 3 = 45
-        expect(assistantText).toMatch(/45/);
-
-        // Validate successful completion
-        const lastMessage = messages[messages.length - 1];
-        expect(isSDKResultMessage(lastMessage)).toBe(true);
-      } finally {
-        await q.close();
-      }
-    });
-  });
-
-  describe('SDK MCP Server Discovery', () => {
-    it('should list SDK MCP servers in system init message', async () => {
-      // Define echo tool with Zod schema
-      const echoTool = tool(
-        'echo',
-        'Echo a message',
-        {
-          message: z.string().describe('Message to echo'),
-        },
-        async (args) => ({
-          content: [{ type: 'text', text: args.message }],
-        }),
-      );
-
-      const serverConfig = createSdkMcpServer({
-        name: 'sdk-echo',
-        version: '1.0.0',
-        tools: [echoTool],
-      });
-
-      const q = query({
-        prompt: 'Hello',
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testDir,
-          debug: false,
-          mcpServers: {
-            'sdk-echo': serverConfig,
-          },
-        },
-      });
-
       let systemMessage: SDKSystemMessage | null = null;
 
       try {
         for await (const message of q) {
+          messages.push(message);
+
           if (isSDKSystemMessage(message) && message.subtype === 'init') {
             systemMessage = message;
-            break;
           }
         }
 
-        // Validate MCP server is listed
-        expect(systemMessage).not.toBeNull();
-        expect(systemMessage!.mcp_servers).toBeDefined();
-        expect(Array.isArray(systemMessage!.mcp_servers)).toBe(true);
-
-        // Find our SDK MCP server
-        const sdkServer = systemMessage!.mcp_servers?.find(
-          (server) => server.name === 'sdk-echo',
+        expect(advertisedToolNames(fakeServer, 1)).toEqual(
+          expect.arrayContaining([MCP_CALCULATE_SUM, MCP_REVERSE_STRING]),
         );
-        expect(sdkServer).toBeDefined();
+
+        const toolResults = findToolResults(messages, MCP_CALCULATE_SUM);
+        expect(toolResults).toHaveLength(1);
+        expect(toolResults[0]?.isError).toBe(false);
+        expect(toolResults[0]?.content).toContain('42');
+        const stringResults = findToolResults(messages, MCP_REVERSE_STRING);
+        expect(stringResults).toHaveLength(1);
+        expect(stringResults[0]?.isError).toBe(false);
+        expect(stringResults[0]?.content).toContain('dlrow olleh');
+        expect(
+          systemMessage?.mcp_servers?.some(
+            (server) => server.name === 'sdk-calculator',
+          ),
+        ).toBe(true);
+        assertSuccessfulCompletion(messages);
       } finally {
         await q.close();
+      }
+    });
+
+    it('keeps previously used MCP tools available when resuming a session', async () => {
+      // Resume needs a persisted transcript; the rest of this suite keeps
+      // recording disabled so enable it only for this case.
+      testDir = await helper.setup('sdk-mcp-server-integration', {
+        chatRecording: true,
+      });
+
+      const calculatorTool = tool(
+        'calculate_sum',
+        'Calculate the sum of two numbers',
+        z.object({
+          a: z.number().describe('First number'),
+          b: z.number().describe('Second number'),
+        }).shape,
+        async (args) => ({
+          content: [{ type: 'text', text: String(args.a + args.b) }],
+        }),
+      );
+      const serverConfig = createSdkMcpServer({
+        name: 'sdk-calculator',
+        version: '1.0.0',
+        tools: [calculatorTool],
+      });
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        if (requestIndex === 0) {
+          return {
+            toolCalls: [
+              fakeToolCall('tool_search', {
+                query: `select:${MCP_CALCULATE_SUM}`,
+              }),
+            ],
+          };
+        }
+        if (requestIndex === 1) {
+          return {
+            toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 })],
+          };
+        }
+        if (requestIndex === 3) {
+          // The resumed model calls the historical tool directly, without a
+          // second tool_search request.
+          return {
+            toolCalls: [fakeToolCall(MCP_CALCULATE_SUM, { a: 8, b: 5 })],
+          };
+        }
+        return { content: 'Done.' };
+      };
+
+      const firstQuery = query({
+        prompt: 'Calculate 25 + 17.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          mcpServers: { 'sdk-calculator': serverConfig },
+        },
+      });
+      const firstMessages: SDKMessage[] = [];
+      const sessionId = firstQuery.getSessionId();
+      try {
+        for await (const message of firstQuery) {
+          firstMessages.push(message);
+        }
+        expect(
+          findToolResults(firstMessages, MCP_CALCULATE_SUM)[0]?.content,
+        ).toContain('42');
+        assertSuccessfulCompletion(firstMessages);
+      } finally {
+        await firstQuery.close();
+      }
+
+      const resumedQuery = query({
+        prompt: 'Now calculate 8 + 5 with the same tool.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
+          cwd: testDir,
+          resume: sessionId,
+          mcpServers: { 'sdk-calculator': serverConfig },
+        },
+      });
+      const resumedMessages: SDKMessage[] = [];
+      try {
+        for await (const message of resumedQuery) {
+          resumedMessages.push(message);
+        }
+
+        expect(advertisedToolNames(fakeServer, 3)).toContain(MCP_CALCULATE_SUM);
+        const resumedResults = findToolResults(
+          resumedMessages,
+          MCP_CALCULATE_SUM,
+        );
+        expect(resumedResults).toHaveLength(1);
+        expect(resumedResults[0]?.isError).toBe(false);
+        expect(resumedResults[0]?.content).toContain('13');
+        assertSuccessfulCompletion(resumedMessages);
+      } finally {
+        await resumedQuery.close();
       }
     });
   });
@@ -351,12 +337,32 @@ describe('SDK MCP Server Integration (E2E)', () => {
         version: '1.0.0',
         tools: [errorTool],
       });
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        return requestIndex === 0
+          ? {
+              toolCalls: [
+                fakeToolCall('tool_search', {
+                  query: `select:${MCP_MAYBE_FAIL}`,
+                }),
+              ],
+            }
+          : requestIndex === 1
+            ? {
+                toolCalls: [fakeToolCall(MCP_MAYBE_FAIL, { shouldFail: true })],
+              }
+            : { content: 'Done.' };
+      };
 
       const q = query({
-        prompt:
-          'Use the maybe_fail tool with shouldFail set to true. Tell me what happens.',
+        prompt: 'Run the failing operation.',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
           mcpServers: {
@@ -366,26 +372,18 @@ describe('SDK MCP Server Integration (E2E)', () => {
       });
 
       const messages: SDKMessage[] = [];
-      let foundToolUse = false;
 
       try {
         for await (const message of q) {
           messages.push(message);
-
-          if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, MCP_MAYBE_FAIL);
-            if (toolUseBlocks.length > 0) {
-              foundToolUse = true;
-            }
-          }
         }
 
-        // Tool should be called
-        expect(foundToolUse).toBe(true);
-
-        // Query should complete (even with tool error)
-        const lastMessage = messages[messages.length - 1];
-        expect(isSDKResultMessage(lastMessage)).toBe(true);
+        expect(advertisedToolNames(fakeServer, 1)).toContain(MCP_MAYBE_FAIL);
+        const toolResults = findToolResults(messages, MCP_MAYBE_FAIL);
+        expect(toolResults).toHaveLength(1);
+        expect(toolResults[0]?.isError).toBe(true);
+        expect(toolResults[0]?.content).toContain('Tool intentionally failed');
+        assertSuccessfulCompletion(messages);
       } finally {
         await q.close();
       }
@@ -393,16 +391,7 @@ describe('SDK MCP Server Integration (E2E)', () => {
   });
 
   describe('Async Tool Handlers', () => {
-    // FIXME(#8256): Flaky on the live model. The failure recorded for this case
-    // (run 30650798703, macOS shard 2/2) was a 300000ms timeout: the real-model
-    // query() hung / exceeded the 5-minute suite timeout. The suspected shared
-    // cause with the subagents case is model nondeterminism (the model sometimes
-    // answers without calling the delayed_response tool). Already survived
-    // asserting on the deterministic tool result, a forced prompt, retry: 2, and
-    // the 5-minute suite timeout. Skipped like the other model-nondeterministic
-    // cases (permission-control.test.ts); the durable fix is driving it with the
-    // fake OpenAI server harness the interactive tests use.
-    it.skip('should handle async tool handlers with delays', async () => {
+    it('should handle async tool handlers with delays', async () => {
       // Define a tool with async delay using Zod schema
       const delayedTool = tool(
         'delayed_response',
@@ -426,12 +415,37 @@ describe('SDK MCP Server Integration (E2E)', () => {
         version: '1.0.0',
         tools: [delayedTool],
       });
+      let streamingRequestIndex = 0;
+      fakeResponse = ({ body }) => {
+        if (body['stream'] !== true) {
+          return { content: '{"selected_memories":[]}' };
+        }
+        const requestIndex = streamingRequestIndex++;
+        return requestIndex === 0
+          ? {
+              toolCalls: [
+                fakeToolCall('tool_search', {
+                  query: `select:${MCP_DELAYED_RESPONSE}`,
+                }),
+              ],
+            }
+          : requestIndex === 1
+            ? {
+                toolCalls: [
+                  fakeToolCall(MCP_DELAYED_RESPONSE, {
+                    delay: 50,
+                    value: 'test_async',
+                  }),
+                ],
+              }
+            : { content: 'Done.' };
+      };
 
       const q = query({
-        prompt:
-          'Use the delayed_response tool with delay=50 and value="test_async". Tell me the result.',
+        prompt: 'Run the delayed operation.',
         options: {
           ...SHARED_TEST_OPTIONS,
+          ...fakeModelOptions(fakeServer.baseUrl),
           cwd: testDir,
           debug: false,
           mcpServers: {
@@ -441,37 +455,20 @@ describe('SDK MCP Server Integration (E2E)', () => {
       });
 
       const messages: SDKMessage[] = [];
-      let foundToolUse = false;
 
       try {
         for await (const message of q) {
           messages.push(message);
-
-          if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(
-              message,
-              MCP_DELAYED_RESPONSE,
-            );
-            if (toolUseBlocks.length > 0) {
-              foundToolUse = true;
-            }
-          }
         }
 
-        // Validate tool was called
-        expect(foundToolUse).toBe(true);
-
-        // Assert on the deterministic tool result rather than the model's
-        // paraphrased final text, which does not reliably echo the value
-        // verbatim and made this test flaky on main.
+        expect(advertisedToolNames(fakeServer, 1)).toContain(
+          MCP_DELAYED_RESPONSE,
+        );
         const toolResults = findToolResults(messages, MCP_DELAYED_RESPONSE);
-        expect(toolResults.length).toBeGreaterThan(0);
+        expect(toolResults).toHaveLength(1);
         expect(toolResults[0]?.isError).toBe(false);
         expect(toolResults[0]?.content.toLowerCase()).toMatch(/test_async/i);
-
-        // Validate successful completion
-        const lastMessage = messages[messages.length - 1];
-        expect(isSDKResultMessage(lastMessage)).toBe(true);
+        assertSuccessfulCompletion(messages);
       } finally {
         await q.close();
       }

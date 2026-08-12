@@ -109,6 +109,20 @@ export function expressionsOf(...texts: string[]): string[] {
     while (i !== -1) {
       const end = t.indexOf('}}', i + 3);
       if (end === -1) break; // unterminated — no site to report
+      // A site may not span another OPENER. Scanning forward to the next `}}`
+      // is right for `format('{0}')`, but a MALFORMED site above a real one
+      // has no `}}` of its own, so the scan runs past it to the genuine site's
+      // close and swallows both into one blob — measured:
+      // `${{ github.event.issue.title }` (one brace) above a real
+      // `${{ github.event.comment.body }}` left the second one unenumerated.
+      // Dropping an injection site is the one direction this list must not
+      // fail in, so an interleaved opener abandons the malformed site and
+      // restarts at it.
+      const nextOpen = t.indexOf('${{', i + 3);
+      if (nextOpen !== -1 && nextOpen < end) {
+        i = nextOpen;
+        continue;
+      }
       seen.add(t.slice(i, end + 2).trim());
       i = t.indexOf('${{', end + 2);
     }

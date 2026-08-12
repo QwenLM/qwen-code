@@ -30,11 +30,12 @@
 // A third kind — **a test count** — is the one that motivated this command and
 // is deliberately NOT ruled as a contradiction. A count is only falsifiable
 // against the suite the author meant, and a Test Plan almost never says which
-// one; `build-test` runs the subset of workspaces the diff touched, which is
-// frequently a different set. Ruling "471 ≠ 472, contradiction" off that
-// mismatch would file a defect on arithmetic the command cannot do, and this
-// skill's one design philosophy is that a wrong comment costs more than a
-// missing one. So a count claim is reported as `differs`: both numbers, side by
+// one; `build-test` runs the workspaces the diff touches plus the workspaces
+// that depend on them, which is frequently a different set. Ruling
+// "471 ≠ 472, contradiction" off that mismatch would file a defect on
+// arithmetic the command cannot do, and this skill's one design philosophy is
+// that a wrong comment costs more than a missing one. So a count claim is
+// reported as `differs`: both numbers, side by
 // side, framed as claimed-vs-observed. That is what the finding was worth in the
 // first place — a note to the author, never a blocker.
 //
@@ -49,8 +50,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
+import { git } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
-import { readWorkspacePackages } from './lib/workspaces.js';
+import {
+  hasUnmodeledWorkspaceGlob,
+  readWorkspaceGlobs,
+  readWorkspacePackages,
+} from './lib/workspaces.js';
 import type { BuildTestReport } from './build-test.js';
 import type { FileMetric } from './lib/report.js';
 
@@ -259,6 +265,18 @@ function maskFileCounts(section: string): string {
 function codeSpans(section: string): string[] {
   const spans: string[] = [];
   const add = (line: string) => {
+    // A pasted unified diff is EVIDENCE, and the PR template invites pasting
+    // it inside the Test Plan ("paste logs or test output"). Its syntax lines
+    // would otherwise shed false path claims (`+++ b/<path>` → `b/<path>`,
+    // `diff --git a/x b/x` → both). Drop them whole; a diff's body lines
+    // carry no runner and match no claim shape on their own.
+    if (/^(?:diff --git |\+\+\+ |--- |@@ |index )/.test(line.trim())) return;
+    // A diff BODY line is a claim-shedder too: `-packages/old/gone.ts` matches
+    // PATH_RE (its class admits a leading -/+) and ruled a false contradicted
+    // on a realistic pasted diff. Inside a ```diff fence every content line is
+    // prefixed, so dropping +/- prefixed lines loses no repro command — a
+    // command line in a Test Plan is never itself diff content.
+    if (/^[+-]/.test(line.trim())) return;
     // Strip a prompt marker, then anything after a `#` comment: a repro line is
     // written `npm test   # 471 pass`, and the comment is not part of the command.
     const t = line
@@ -442,6 +460,42 @@ function normalizeClaimPath(text: string): string {
   return normalize(text.replace(/:\d+(?::\d+)?$/, '').replace(/\/$/, ''));
 }
 
+/**
+ * Is `path` gitignored in `worktree`? One `git` spawn per distinct path, memoed
+ * for the process — a Test Plan naming the same artifact in its Evidence and
+ * its Environment sections should not pay twice.
+ *
+ * `--` before the path is belt-and-braces, and measured as such: `PATH_RE`'s
+ * class admits a leading `-`, but no `-`-leading text survives extraction today
+ * (`extractClaims('`-packages/old/gone.ts`')` returns nothing), so nothing
+ * reaches `check-ignore` in OPTION position. It is one token against a future
+ * extraction change, not a live hole. A non-zero exit means either "not
+ * ignored" or "no git here"; both fall through to the ordinary ruling, which is
+ * why this returns a plain boolean.
+ *
+ * Spawned through the package's own `git` helper rather than a bare
+ * `execFileSync`, for the deadline it carries: every other git invocation in
+ * these commands runs under `GIT_TIMEOUT_MS` because, as that constant's
+ * comment puts it, "a hang must still end". This was the one without it, and
+ * it runs against a worktree the review does not control.
+ */
+function isGitIgnored(worktree: string, path: string): boolean {
+  const key = `${worktree}\0${path}`;
+  const memo = ignoreCache.get(key);
+  if (memo !== undefined) return memo;
+  let ignored: boolean;
+  try {
+    git('-C', worktree, 'check-ignore', '-q', '--', path);
+    ignored = true;
+  } catch {
+    ignored = false;
+  }
+  ignoreCache.set(key, ignored);
+  return ignored;
+}
+
+const ignoreCache = new Map<string, boolean>();
+
 function rulePath(
   text: string,
   worktree: string,
@@ -469,12 +523,32 @@ function rulePath(
       note: 'not a repo-relative path',
     };
   }
+  // ONE existence check, and the ignore status only ever picks the WORDING or
+  // downgrades a would-be contradiction — never swallows a `reproduces`. Two
+  // existence checks with the ignore probe between them made the second one
+  // unreachable and silently retired its note, which is the distinction a
+  // reader needs: a tracked file that is present is state at the reviewed
+  // commit, an ignored file that is present is something this run produced.
+  const ignored = isGitIgnored(worktree, path);
   if (existsSync(join(worktree, path))) {
     return {
       kind: 'path',
       text,
       verdict: 'reproduces',
-      note: 'exists at the reviewed commit (the diff does not change it)',
+      note: ignored
+        ? 'exists in the review worktree — gitignored, so it is a build output this run produced, not state at the reviewed commit'
+        : 'exists at the reviewed commit (the diff does not change it)',
+    };
+  }
+  // A gitignored path (a build output the Environment section names — the
+  // template's own example is a dist/ entry point) is absent at the reviewed
+  // commit BY CONSTRUCTION, the same reasoning that excludes `.qwen/` paths.
+  if (ignored) {
+    return {
+      kind: 'path',
+      text,
+      verdict: 'unchecked',
+      note: 'gitignored — a build output, absent at the reviewed commit by construction',
     };
   }
   return {
@@ -575,8 +649,25 @@ function ruleCommand(
     // No readable root manifest; workspace packages may still define scripts.
   }
   const defined = new Set<string>(rootScripts);
-  for (const pkg of readWorkspacePackages(worktree)) {
+  const { packages, skipped } = readWorkspacePackages(worktree);
+  for (const pkg of packages) {
     for (const s of pkg.scripts) defined.add(s);
+  }
+  // A skipped dir whose manifest still PARSES — no usable `name`, or shadowed
+  // by a later glob — has a fully readable scripts table (scripts need no
+  // `name` to enumerate), and discarding it would rule `unchecked` on evidence
+  // this check actually holds. Merge those scripts; reserve `unchecked` for
+  // the genuinely unreadable manifests.
+  const unreadable: string[] = [];
+  for (const dir of skipped) {
+    try {
+      const pkg = JSON.parse(
+        readFileSync(join(worktree, dir, 'package.json'), 'utf8'),
+      ) as { scripts?: Record<string, unknown> } | null;
+      for (const s of Object.keys(pkg?.scripts ?? {})) defined.add(s);
+    } catch {
+      unreadable.push(dir);
+    }
   }
   // No manifest could be read at all (a tree this command cannot inspect):
   // absent evidence, not evidence of absence.
@@ -588,20 +679,48 @@ function ruleCommand(
       note: 'no package manifest could be read',
     };
   }
-  return defined.has(script)
-    ? {
-        kind: 'command',
-        text,
-        verdict: 'reproduces',
-        note: `\`${script}\` is a defined script`,
-      }
-    : {
-        kind: 'command',
-        text,
-        verdict: 'contradicted',
-        observed: 'no package defines this script',
-        note: 'the Test Plan tells the reviewer to run a script that does not exist at the reviewed commit',
-      };
+  if (defined.has(script)) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'reproduces',
+      note: `\`${script}\` is a defined script`,
+    };
+  }
+  // A workspace layout this check cannot model (`packages/**`, an inner or
+  // prefix star) hides whole packages from the walker — they land in NEITHER
+  // `packages` nor `skipped`, so the script table may be silently incomplete.
+  // Absent evidence, not evidence of absence.
+  if (hasUnmodeledWorkspaceGlob(readWorkspaceGlobs(worktree))) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note:
+        'the workspace globs use a shape this check does not model, so the ' +
+        'script table may be incomplete',
+    };
+  }
+  // A member the graph could not read may still define it — the same rule as
+  // the total absence above: absent evidence, not evidence of absence.
+  if (unreadable.length > 0) {
+    return {
+      kind: 'command',
+      text,
+      verdict: 'unchecked',
+      note:
+        `${unreadable.join(', ')} ${unreadable.length === 1 ? 'has' : 'have'} a ` +
+        'package.json this check could not read, so the script table may be ' +
+        'incomplete',
+    };
+  }
+  return {
+    kind: 'command',
+    text,
+    verdict: 'contradicted',
+    observed: 'no package defines this script',
+    note: 'the Test Plan tells the reviewer to run a script that does not exist at the reviewed commit',
+  };
 }
 
 function ruleCount(text: string, observed: number[]): TestPlanClaim {

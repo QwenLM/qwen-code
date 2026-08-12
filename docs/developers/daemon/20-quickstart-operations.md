@@ -16,7 +16,7 @@ qwen serve: bound to workspace "/your/cwd"
 qwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.
 ```
 
-Open `http://127.0.0.1:4170/demo` in a browser to see the debug console: chat UI, event stream, and workspace inspection. In the default loopback dev mode, `createServeApp()` mounts the `/demo` route from `packages/cli/src/serve/routes/health-demo.ts` **before** `bearerAuth`, so no token is required.
+Open `http://127.0.0.1:4170/` in a browser to get the Web Shell UI: chat, session list, and workspace inspection. `createServeApp()` mounts the bundled Web Shell assets (`packages/cli/src/serve/web-shell-static.ts`) **before** `bearerAuth`, so the shell itself loads without a token; its own API calls carry the bearer when one is configured — start the daemon with `--open` (which puts the token in the URL fragment, never sent to the server) or append `#token=…` manually when auth is enabled. `--no-web` opts out and leaves the daemon API-only.
 
 ## 2. Launch recipes
 
@@ -67,7 +67,7 @@ qwen serve --channel-idle-timeout-ms 60000
 QWEN_SERVE_RATE_LIMIT=1 qwen serve
 ```
 
-With the hardened loopback recipe (3), `/demo` is registered after `bearerAuth`. A normal browser navigation needs an auth header, so use curl or an SDK script instead.
+With the hardened loopback recipe (3), `/health` is registered after `bearerAuth`, so probes must carry the token like every other API route (the Web Shell static surface stays pre-auth by design; pass `--no-web` for an API-only daemon).
 
 ## 3. Full startup flags
 
@@ -80,6 +80,9 @@ The CLI is defined in **`packages/cli/src/commands/serve.ts`**:
 | `--token <s>`                           | string                         | env / none                                       | Non-loopback and `--require-auth`        | Bearer token; trimmed once. **It appears in `/proc/<pid>/cmdline`, so prefer `QWEN_SERVER_TOKEN`**. Boot stderr also warns about this.                                                                                                                                                                                |
 | `--max-sessions <n>`                    | number                         | `32`                                             | -                                        | Per-workspace active session cap. Excess spawn returns 503. `0` means unlimited. `NaN` / negative values throw.                                                                                                                                                                                                       |
 | `--max-total-sessions <n>`              | number                         | derived for multiple startup/restored workspaces | -                                        | Daemon-wide active session cap. When omitted, a finite default is derived once from the per-workspace cap and startup/restored workspace count; dynamic registration does not recompute it. `0` means unlimited.                                                                                                      |
+| `--memory-budget-mb <n>`                | integer in `[1024, 1048576]`   | 50% of cgroup/host memory                        | Observation only                         | Total memory budget for the daemon process tree, capped at resolved available memory. Reported under `limits.memory`; modeled into a partition that nothing applies.                                                                                                                                                  |
+| `--memory-pressure-mode <mode>`         | `off` \| `observe`             | `observe`                                        | Observation only                         | Reports `runtime.memory.pressure` in both modes; only `observe` raises the `daemon_memory_pressure` issue. Root process only.                                                                                                                                                                                         |
+| `--child-heap-mode <mode>`              | `off` \| `observe`             | `observe`                                        | Observation only                         | Under `observe`, reports the modeled partition under `limits.memory.childHeap`; applies nothing and refuses nothing. Under `off`, that block's two figures are `null`.                                                                                                                                                |
 | `--max-pending-prompts-per-session <n>` | number                         | `5`                                              | -                                        | Accepted but pending/running prompt cap per session. Excess prompt returns 503. `0` / `Infinity` means unlimited. Negative or non-integer values throw.                                                                                                                                                               |
 | `--workspace <dir>`                     | string / repeatable            | `process.cwd()`                                  | -                                        | Startup workspace runtime; repeat to register additional isolated runtimes. The first is primary. Each value **must be an absolute path, must exist, and must be a directory**. Boot canonicalizes every value via `canonicalizeWorkspace`. `POST /session` with a mismatched `cwd` returns `400 workspace_mismatch`. |
 | `--max-connections <n>`                 | number                         | `256`                                            | -                                        | Listener-level `server.maxConnections`. `0` / `Infinity` means unlimited. `NaN` / negative values fail boot to avoid fail-open behavior.                                                                                                                                                                              |
@@ -195,23 +198,21 @@ curl -N \
   -H 'Last-Event-ID: 0' \
   'http://127.0.0.1:4170/session/<sid>/events'
 
-# 8. Demo page
-open http://127.0.0.1:4170/demo
+# 8. Web Shell UI
+open http://127.0.0.1:4170/
 ```
 
 When bearer auth is enabled, add `-H "Authorization: Bearer $QWEN_SERVER_TOKEN"` to every request.
 
-## 8. Can the demo page be used?
+## 8. Is there a browser UI?
 
-**Yes.** It is implemented by `getDemoHtml(port)` in `packages/cli/src/serve/demo.ts` as self-contained HTML with no external dependency.
+**Yes — the Web Shell.** `resolveWebShellDir()` finds the built assets (bundled next to the CLI bundle in a release, `packages/web-shell/dist` in a checkout) and `mountWebShellAssets()` serves them at `/`, `/assets`, and `/session/:id` document navigations (browser deep links — a plain `curl /session/<id>` gets the API's 401/404, not the shell). When the assets are missing the daemon degrades to API-only instead of crashing; `--no-web` opts out explicitly.
 
-| Launch mode                       | Where `/demo` is registered                                                    | Direct browser navigation                              |
-| --------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| Loopback without `--require-auth` | `routes/health-demo.ts`, mounted by `createServeApp()` **before** `bearerAuth` | Works without token                                    |
-| Loopback with `--require-auth`    | `routes/health-demo.ts`, mounted by `createServeApp()` **after** `bearerAuth`  | Difficult to use from a plain browser; use curl or SDK |
-| Non-loopback bind                 | `routes/health-demo.ts`, mounted by `createServeApp()` **after** `bearerAuth`  | Same as above                                          |
+The static shell is mounted **before** `bearerAuth` in every launch mode — a browser cannot attach an `Authorization` header to an address-bar navigation or a `<script src>` subresource, so gating it would just break the UI. Every API route it calls stays token-gated, and the front end attaches the bearer itself. On a non-loopback bind the shell is read-only unless `--allow-origin <origin>` is passed — same-origin POSTs carry an `Origin` header that the CORS wall rejects (403) — so pass `--allow-origin` for any bind beyond loopback.
 
-CSP is `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'`, plus `X-Frame-Options: DENY`. The page can only fetch `'self'` (the daemon) and cannot load external scripts or styles.
+CSP is built by `buildWebShellCsp()` and is deliberately looser than a static page's (`'unsafe-inline'` for the inline `performance.measure` patch, `eval`/wasm/blob workers for shiki and mermaid, `data:` for katex fonts, `connect-src 'self'` for SSE). `frame-ancestors 'none'` plus `X-Frame-Options: DENY` block clickjacking, except when an extension origin is explicitly allowed via `--allow-origin` so the UI can be hosted in a Chrome side panel (#5626).
+
+For raw protocol inspection, subscribe to the SSE stream directly (`routes/sse-events.ts`) — see the curl recipes in section 7.
 
 ## 9. Call chain from `qwen serve` to the listening server
 
@@ -252,7 +253,7 @@ serve/run-qwen-serve.ts              const app = createServeApp(opts, () => actu
    v
 serve/server.ts                    createServeApp() - builds Express app (**does not listen**)
    |  |- middleware chain (Host allowlist / CORS / bearerAuth / mutation gate / rate limit)
-   |  |- route mounting (health / demo / capabilities / workspace / session / SSE / ACP HTTP)
+   |  |- route mounting (health / web-shell static / capabilities / workspace / session / SSE / ACP HTTP)
    |  `- return app
    |
    v
@@ -279,7 +280,7 @@ The main assembly happens in `createServeApp()` in `server.ts`, which wires midd
 
 | Routes                                                                                       | File                                                    | Mounting entry                                                                 |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `/health`, `/demo`                                                                           | `packages/cli/src/serve/routes/health-demo.ts`          | `healthDemoRoutes.register()`                                                  |
+| `/health`                                                                                    | `packages/cli/src/serve/routes/health.ts`               | `healthRoutes.register()`                                                      |
 | `/daemon/status`                                                                             | `packages/cli/src/serve/routes/daemon-status.ts`        | `registerDaemonStatusRoutes()`                                                 |
 | `/capabilities`, workspace init/tool/MCP mutation routes, ACP HTTP bridge                    | `packages/cli/src/serve/server.ts`                      | Registered directly inside `createServeApp()`                                  |
 | Workspace status, env, preflight, MCP/tool/provider/skill summaries                          | `packages/cli/src/serve/routes/workspace-status.ts`     | `registerWorkspaceStatusRoutes()`, `registerWorkspaceDiagnosticStatusRoutes()` |
@@ -377,6 +378,6 @@ QWEN_SERVE_DEBUG=1 qwen serve
 - Express factory: `packages/cli/src/serve/server.ts`
 - Middleware: `packages/cli/src/serve/auth.ts`
 - Bridge factory: `packages/acp-bridge/src/bridge.ts`
-- Demo page HTML: `packages/cli/src/serve/demo.ts`
+- Web Shell static mount: `packages/cli/src/serve/web-shell-static.ts`
 - User docs: [`../../users/qwen-serve.md`](../../users/qwen-serve.md)
 - Wire protocol: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md)

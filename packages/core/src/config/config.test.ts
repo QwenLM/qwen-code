@@ -33,6 +33,8 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
+  logStartSession,
+  logSessionEnd,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -326,6 +328,8 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logStartSession: vi.fn(actual.logStartSession),
+    logSessionEnd: vi.fn(actual.logSessionEnd),
   };
 });
 
@@ -626,6 +630,45 @@ describe('Server Config (config.ts)', () => {
           ...baseParams,
           memoryAgentTimeoutMinutes: -5,
         }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('getMemoryAgentMaxTurns', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getMemoryAgentMaxTurns()).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 25,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(25);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 0,
+        }).getMemoryAgentMaxTurns(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: -1,
+        }).getMemoryAgentMaxTurns(),
+      ).toBeUndefined();
+    });
+
+    it('treats fractional values as unset', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentMaxTurns: 2.5,
+        }).getMemoryAgentMaxTurns(),
       ).toBeUndefined();
     });
   });
@@ -2193,6 +2236,84 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('records no lifecycle transition when resuming the current session id', async () => {
+      const sessionId = 'same-session-id';
+      const config = new Config({ ...baseParams, sessionId });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession(sessionId, {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+    });
+
+    it('ends the outgoing session before starting a replacement without continuation', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      const endedSessionIds: string[] = [];
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+      vi.mocked(logSessionEnd).mockImplementationOnce((cfg: Config) => {
+        endedSessionIds.push(cfg.getSessionId());
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(endedSessionIds).toEqual([outgoingSessionId]);
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+      expect(vi.mocked(logSessionEnd).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(logStartSession).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('carries the outgoing session id when resuming a different persisted session', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession('resumed-session-id', {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        outgoingSessionId,
+      );
+    });
+
     it('rejects a session switch while the current recorder owns the writer lease', () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const originalSessionId = config.getSessionId();
@@ -2209,6 +2330,9 @@ describe('Server Config (config.ts)', () => {
         }
       ).chatRecordingService = recorder;
 
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
       expect(() => config.startNewSession('replacement-session')).toThrow(
         expect.objectContaining({
           name: 'SessionWriterUnavailableError',
@@ -2219,6 +2343,9 @@ describe('Server Config (config.ts)', () => {
       expect(config.getChatRecordingService()).toBe(recorder);
       expect(finalize).not.toHaveBeenCalled();
       expect(flush).not.toHaveBeenCalled();
+      // A rejected switch must leave the live session's lifecycle untouched.
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).not.toHaveBeenCalled();
     });
 
     const resumedGoalSession = (
@@ -3128,7 +3255,9 @@ describe('Server Config (config.ts)', () => {
 
       await config.initialize();
 
-      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(TARGET_DIR);
+      expect(maybeRunAutoSkillCurator).toHaveBeenCalledWith(
+        path.resolve(TARGET_DIR),
+      );
       expect(
         vi.mocked(maybeRunAutoSkillCurator).mock.invocationCallOrder[0],
       ).toBeLessThan(vi.mocked(SkillManager).mock.invocationCallOrder[0]);
@@ -4255,6 +4384,149 @@ describe('Server Config (config.ts)', () => {
 
       config.approveMcpServerForSession('not-pending');
       expect(config.isMcpServerPendingApproval('b')).toBe(true);
+    });
+  });
+
+  describe('reasoning effort override', () => {
+    it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { thinking_budget: 4096 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+    });
+
+    it('does not report an identical static effort or a non-tiered model', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { reasoning_effort: 'max' },
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+
+      config.getContentGeneratorConfig().model = 'qwen3.7-max';
+      config.getContentGeneratorConfig().extra_body = {
+        thinking_budget: 4096,
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+
+    it.each([
+      {
+        name: 'extra_body enable_thinking disable',
+        extra_body: { enable_thinking: false },
+        expected: { source: 'extra_body', field: 'enable_thinking' },
+      },
+      {
+        name: 'different extra_body effort',
+        extra_body: { reasoning_effort: 'high' },
+        expected: { source: 'extra_body', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams enable_thinking disable',
+        samplingParams: { enable_thinking: false },
+        expected: { source: 'samplingParams', field: 'enable_thinking' },
+      },
+      {
+        name: 'samplingParams budget',
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+      {
+        name: 'different samplingParams effort',
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'identical samplingParams effort',
+        samplingParams: { reasoning_effort: 'max' },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch over a samplingParams disable',
+        extra_body: { enable_thinking: true },
+        samplingParams: { enable_thinking: false },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams enable_thinking on-switch',
+        samplingParams: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams effort under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams budget under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+    ])('resolves $name', ({ extra_body, samplingParams, expected }) => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body,
+        samplingParams,
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual(expected);
+    });
+
+    it('does not report an override for a non-DashScope endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: { effort: 'max' },
+        samplingParams: { thinking_budget: 2048 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
     });
   });
 

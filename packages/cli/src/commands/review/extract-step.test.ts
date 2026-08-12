@@ -162,8 +162,11 @@ describe('runExtractStep', () => {
     expect(script).not.toContain('precheck-arm');
     expect(meta.index).toBe(1);
     expect(meta.workingDirectory).toBe('scripts');
-    // Executable, with the runner's default shell recorded.
-    expect(statSync(meta.scriptPath).mode & 0o111).not.toBe(0);
+    // Executable, with the runner's default shell recorded. Windows has no
+    // POSIX mode bits; stat reports 0o666.
+    if (process.platform !== 'win32') {
+      expect(statSync(meta.scriptPath).mode & 0o111).not.toBe(0);
+    }
     expect(meta.shell).toBe('bash');
   });
 
@@ -568,7 +571,56 @@ jobs:
   );
 });
 
+describe('multi-line env values stay comments', () => {
+  it('prefixes EVERY line of a block-scalar env value', () => {
+    // An unprefixed second line would sit in the script as an executable line.
+    const wf = [
+      'jobs:',
+      '  j:',
+      '    steps:',
+      '      - name: s',
+      '        env:',
+      '          SCRIPT: |',
+      '            first',
+      '            rm -rf /tmp/x',
+      '        run: echo ok',
+    ].join('\n');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-es-env-'));
+    const p = join(dir, 'wf.yml');
+    writeFileSync(p, wf);
+    const meta = runExtractStep({
+      workflow: p,
+      job: 'j',
+      step: 's',
+      out: join(dir, 'o.sh'),
+    });
+    const script = readFileSync(meta.scriptPath, 'utf8');
+    for (const line of script.split('\n')) {
+      if (line.includes('rm -rf')) expect(line.startsWith('#')).toBe(true);
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe('expressionsOf / invokedCommandsOf', () => {
+  it('captures an expression containing its own closing brace', () => {
+    expect(expressionsOf("a ${{ format('{0}', x) }} b")).toEqual([
+      "${{ format('{0}', x) }}",
+    ]);
+  });
+
+  it('still enumerates a real site below a MALFORMED one', () => {
+    // A non-greedy scan with no opener guard runs from the broken `${{` all
+    // the way to the next site's `}}` and swallows it — the injection site
+    // below silently stops being reported, which is the one direction this
+    // helper must not fail in.
+    expect(
+      expressionsOf(
+        'echo ${{ github.event.issue.title }\nrun: echo ${{ github.event.comment.body }}',
+      ),
+    ).toEqual(['${{ github.event.comment.body }}']);
+  });
+
   it('ends a plain <<WORD heredoc only at column 0, as bash does', () => {
     // An indented `EOF` inside a plain heredoc is still BODY. Ending there
     // leaked the rest of the body into the command list, and the entry it

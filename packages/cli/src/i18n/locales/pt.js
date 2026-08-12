@@ -997,6 +997,14 @@ export default {
     'Já gerando resumo, aguarde a conclusão da solicitação anterior',
   'No conversation found to summarize.':
     'Nenhuma conversa encontrada para resumir.',
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'O caminho do resumo já existe e não é um resumo gerado: {{path}}',
+  'Summary path must be within the project root.':
+    'O caminho do resumo deve estar dentro da raiz do projeto.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'O caminho do resumo resolve para um diretório existente: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'O caminho do resumo termina com um separador, mas é um arquivo existente: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Falha ao gerar resumo do contexto do projeto: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1556,7 +1564,16 @@ export default {
     'Agente em segundo plano precisa de aprovação',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
   Running: 'Em execução',
+  Pausing: 'Pausando',
   Paused: 'Pausado',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'A pausa é cooperativa; o trabalho em andamento pode terminar antes que o fluxo de trabalho seja pausado. Uma chamada de agente aguardando aprovação de ferramenta mantém a execução neste estado e continua contando para o limite de tempo ativo até que a aprovação seja respondida.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Pausado: nenhum novo agente será iniciado; o código do script entre chamadas de agente continua em execução. Pressione p para retomar. /clear, /branch e a troca de sessão cancelam execuções pausadas.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'A pausa/retomada foi rejeitada; o estado do fluxo de trabalho mudou. Tente novamente.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Dica: use `/workflows p <runId>` ou Tarefas em segundo plano + p para pausar/retomar cooperativamente; use `/workflows <runId>` para ver detalhes.',
   Completed: 'Concluído',
   Failed: 'Falhou',
   Stopped: 'Parado',
