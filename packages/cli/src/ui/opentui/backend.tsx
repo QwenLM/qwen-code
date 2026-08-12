@@ -788,10 +788,31 @@ function App({
                 </box>
               );
             case 'thinking':
-              // original shows a lone dim ∴ marker for thinking
+              // original: lone dim ∴ marker; click expands the thought with
+              // proper wrapping + right padding
               return (
-                <box key={item.id} paddingLeft={1} marginTop={1}>
-                  <text fg={C.dim}>∴</text>
+                <box
+                  key={item.id}
+                  flexDirection="column"
+                  paddingLeft={1}
+                  paddingRight={2}
+                  marginTop={1}
+                >
+                  <box
+                    onMouseUp={(e) => {
+                      if (e.button === MouseButton.LEFT) {
+                        const sel = renderer.getSelection();
+                        if (!sel?.getSelectedText()) toggle(item.id);
+                      }
+                    }}
+                  >
+                    <text fg={C.dim}>∴</text>
+                  </box>
+                  {expanded.has(item.id) && item.text.length > 0 && (
+                    <box paddingLeft={2} paddingRight={2} marginTop={1}>
+                      <text fg={C.dim}>{item.text}</text>
+                    </box>
+                  )}
                 </box>
               );
             case 'assistant':
