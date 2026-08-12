@@ -3145,11 +3145,23 @@ describe('qwen-autofix workflow', () => {
   it('applies the needs-human escalation label at the cap and removes it on resume/release', () => {
     // The label contract: one env definition, one idempotent create with a
     // fixed color (a REST add of a missing label would mint a random one).
+    // The create's `|| true` and the POST's `if !` guard are load-bearing
+    // under the runner's `bash -e`: a create that fails once the label
+    // exists, or a POST that aborts the scan on a transient 502, must not
+    // ship green (R2-25).
     expect(workflow).toContain("NEEDS_HUMAN_LABEL: 'autofix/needs-human'");
     expect(reviewScanJob).toContain(
       'gh label create "${NEEDS_HUMAN_LABEL}" --repo "${REPO}" --color',
     );
-    expect(reviewScanJob).toContain('-f "labels[]=${NEEDS_HUMAN_LABEL}"');
+    expect(reviewScanJob).toMatch(
+      /gh label create "\$\{NEEDS_HUMAN_LABEL\}"[\s\S]{0,250}?2> \/dev\/null \|\| true/,
+    );
+    expect(reviewScanJob).toContain(
+      'if ! gh api -X POST "repos/${REPO}/issues/${PR}/labels" -f "labels[]=${NEEDS_HUMAN_LABEL}"',
+    );
+    expect(reviewScanJob).toContain(
+      '${NEEDS_HUMAN_LABEL} add failed for #${PR}; will retry next scan',
+    );
     // The label write sits OUTSIDE the once-per-window comment dedup —
     // that is the bootstrap property: already-noticed PRs (paused before
     // this shipped) get labeled on the first scan after deploy. Assert on
@@ -3449,6 +3461,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(addAbsent.writes).toContain('labels[]=autofix/takeover');
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
+    // …and the engage arm clears any stale escalation label (R2-27: the
+    // removal must live in THIS branch, not just anywhere in the file).
+    expect(addAbsent.writes).toContain('labels/autofix%2Fneeds-human');
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, takeover label untouched — the only API
@@ -3469,6 +3484,9 @@ describe('qwen-autofix workflow', () => {
     expect(removePresent.writes).toContain(
       'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
     );
+    // …and the stop arm clears the escalation label in the same breath
+    // (R2-27): a stop on a paused PR must not leave needs-human behind.
+    expect(removePresent.writes).toContain('labels/autofix%2Fneeds-human');
     // Release acks directly too — the exact mirror of the engage side: a
     // loud add next to a mute stop re-creates the lost-event ambiguity on
     // the release side (and fork/non-main releases have no other ack path
@@ -3506,6 +3524,7 @@ describe('qwen-autofix workflow', () => {
     expect(forkRefused.writes).not.toContain('API');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
     expect(forkManaged.writes).toContain('labels[]=autofix/takeover');
+    expect(forkManaged.writes).toContain('labels/autofix%2Fneeds-human');
     // Fork label events carry no secrets, so no other job could ever ack a
     // fork engage — the command's own ack is the ONLY one, and it sets the
     // expectation that the first round comes from the next scheduled scan.

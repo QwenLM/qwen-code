@@ -2943,7 +2943,8 @@ jobs:
                   # comments, but the label is what makes a paused PR
                   # filterable and what the shepherd's auto-release ages
                   # from — and applying it unconditionally backfills the
-                  # already-paused fleet on the first scan after this ships.
+                  # already-paused fleet via the scan rotation after this
+                  # ships (idle backoff: expect hours, not the first scan).
                   gh label create "${NEEDS_HUMAN_LABEL}" --repo "${REPO}" --color 'D93F0B' \
                     --description 'The autofix loop stopped on this PR — a human must re-arm, split, merge, or close it' \
                     2> /dev/null || true

@@ -30,7 +30,9 @@ time-budget cap all write a terminal `autofix-eval` marker with
 `round=EFF_MAX_ROUNDS`, which the next scan sees as `ROUND >= EFF_MAX_ROUNDS`
 and lands in the cap-notice branch). The label write is placed so it runs
 even when the once-per-window notice comment is dedup'd — this backfills the
-label onto the five already-paused PRs on the first scan after deploy.
+label onto the already-paused fleet via the regular scan rotation after
+deploy (idle backoff defers PRs idle >24h to ~1 scan in 4 — expect hours,
+not the first scan).
 
 **Removed** wherever management resumes or a human takes over:
 
@@ -78,9 +80,13 @@ When a PR carries **both** `autofix/takeover` and `autofix/needs-human` and
 its terminal timestamp is older than `AUTO_RELEASE_DAYS` (default 3, tunable
 via the `QWEN_SHEPHERD_AUTO_RELEASE_DAYS` repo variable):
 
-1. Remove `autofix/takeover` (the loop disengages).
-2. Post one bilingual summary: why it was released, the stop reason, and the
-   human's options (merge / close / split + re-takeover).
+1. Post one bilingual summary — dedup'd by its
+   `<!-- fleet-shepherd auto-release -->` marker (scoped to the current
+   pause cycle): why it was released, the stop reason, and the human's
+   options (merge / close / split + re-takeover).
+2. Remove `autofix/takeover` (the loop disengages). A failed removal finds
+   the marker and retries only the DELETE; a failed summary leaves both
+   labels in place so the whole release retries next tick.
 3. Keep `autofix/needs-human`: the PR still needs a human decision, and the
    label remains the filterable TODO list. It clears on re-engage/re-arm via
    the paths in (A).

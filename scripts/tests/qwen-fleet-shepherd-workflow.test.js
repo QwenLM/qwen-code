@@ -1087,6 +1087,11 @@ exit 1`;
     expect(loop2.match(/echo "🐑 #\$\{PR\} \[/g)).toHaveLength(1);
     expect(loop2.match(/TAKEOVER_ROWS="\$\{TAKEOVER_ROWS\}/g)).toHaveLength(1);
     expect(loop2.match(/HUMAN_ROWS="\$\{HUMAN_ROWS\}/g)).toHaveLength(1);
+    // R2-17: …and the append is POSITIONALLY outside the evaluation arms
+    // (a bare occurrence count can't tell arm-level from loop-body level).
+    expect(loop2).toMatch(
+      /\n {14}fi\n(?: {14}#[^\n]*\n)+ {14}echo "🐑 #\$\{PR\} \[/,
+    );
   });
 
   it('pins the marker/headline contracts against qwen-autofix.yml — drift fails here, not in production', () => {
@@ -1097,8 +1102,8 @@ exit 1`;
     const autofix = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
     // 1. Resume markers: the scan's REARM_KEY (the write side's own idea of
     //    "management resumed") and the shepherd's RESUME_TS must name the
-    //    same markers — a new resume path added to only one file must fail
-    //    here, never as a wrongful auto-release.
+    //    same markers — compare the FULL sets, so a resume path added to
+    //    only one file fails here, never as a wrongful auto-release (R2-10).
     const rearmKey = autofix.match(
       /REARM_KEY="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)'/,
     )?.[1];
@@ -1107,13 +1112,14 @@ exit 1`;
       /RESUME_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
     )?.[1];
     expect(resumeTs).toBeTruthy();
-    for (const marker of [
-      '<!-- autofix-rearm -->',
-      '<!-- takeover-ack engaged -->',
-    ]) {
-      expect(rearmKey).toContain(marker);
-      expect(resumeTs).toContain(marker);
-    }
+    const markerSet = (p) =>
+      new Set(
+        [...p.matchAll(/contains\("(<!-- [^"]+ -->)"\)/g)].map((m) => m[1]),
+      );
+    expect(markerSet(rearmKey)).toEqual(markerSet(resumeTs));
+    // 1b. The label constants the whole integration keys on (R2-11).
+    expect(autofix).toContain("NEEDS_HUMAN_LABEL: 'autofix/needs-human'");
+    expect(autofix).toContain("TAKEOVER_LABEL: 'autofix/takeover'");
     // 2. The re-arm commands the shepherd greps for are the same strings
     //    qwen-autofix.yml routes on, and the refusal-ack variants that
     //    supersede a refused command are exactly the ones the producer can
@@ -1130,10 +1136,29 @@ exit 1`;
       /REFUSAL_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
     )?.[1];
     expect(refusalTs).toBeTruthy();
-    for (const variant of ['fork-refused', 'base-refused', 'skip-blocked']) {
-      expect(refusalTs).toContain(variant);
-      expect(autofix).toContain(`<!-- takeover-ack ${variant} -->`);
-    }
+    // Compare the refusal-variant SET against the producer's full ack
+    // taxonomy (minus engaged/released) — a one-sided addition on either
+    // side fails here (R2-10).
+    const producerAckVariants = new Set(
+      [...autofix.matchAll(/<!-- takeover-ack ([a-z-]+) -->/g)].map(
+        (m) => m[1],
+      ),
+    );
+    const producerRefusals = [...producerAckVariants].filter(
+      (v) => v !== 'engaged' && v !== 'released',
+    );
+    expect(producerRefusals.sort()).toEqual([
+      'base-refused',
+      'fork-refused',
+      'skip-blocked',
+    ]);
+    const shepherdRefusals = (
+      refusalTs.match(/takeover-ack \(([^)]+)\)/)?.[1] ?? ''
+    )
+      .split('|')
+      .filter(Boolean)
+      .sort();
+    expect(shepherdRefusals).toEqual(producerRefusals.sort());
     // 3. Every TERMINAL headline the address leg can print matches the
     //    shepherd's REASON regex, and the transient setup-failure headline
     //    does not. Templates are extracted from the producer and exercised
@@ -1166,5 +1191,125 @@ exit 1`;
       }).trim();
     for (const h of terminal) expect(matches(h)).toBe('true');
     for (const h of transient) expect(matches(h)).toBe('false');
+    // Every extracted headline must be CLASSIFIED — an unclassified one
+    // (today: the retry-transient/item-level variants) is asserted against
+    // the regex expecting false, so a future terminal headline that misses
+    // the hard-coded substrings fails loudly instead of degrading the
+    // dashboard reason silently (R2-14).
+    const unclassified = headlines.filter(
+      (h) => !terminal.includes(h) && !transient.includes(h),
+    );
+    expect(unclassified.length).toBeGreaterThan(0);
+    for (const h of unclassified) expect(matches(h)).toBe('false');
+  });
+
+  it('pins the previously mutation-tested gaps from review round 2', () => {
+    // R2-7: days_since() is behaviorally replayed (the /86400 → /3600
+    // mutation must fail) — shim GNU date through node for macOS hosts.
+    const daysSince = workflow.match(/days_since\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    expect(daysSince).toBeTruthy();
+    const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
+    const runDays = (now, ts) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${gnuDateShim}\n${daysSince.replace(/\n {10}/g, '\n')}\ndays_since "\${TS}"`,
+        ],
+        {
+          env: { ...process.env, NOW_EPOCH: String(now), TS: ts },
+          encoding: 'utf8',
+        },
+      ).trim();
+    const NOW = Date.parse('2026-08-10T00:00:00Z') / 1000;
+    expect(runDays(NOW, '2026-08-07T01:00:00Z')).toBe('2');
+    expect(runDays(NOW, '2026-08-06T23:00:00Z')).toBe('3');
+    // R2-8: the 🛑 prefix must reach the bot-fleet row, not just exist.
+    expect(workflow).toContain('${NH_PREFIX}${STATUS_NOTE} | ${ACTION_NOTE} |');
+    // R2-18: the prefix condition's truth mapping — replay verbatim.
+    const nhCond = workflow.match(
+      /if \[\[ "\$\(jq -r --arg l "\$\{NEEDS_HUMAN_LABEL\}" '([^']*)' <<< "\$\{ROW\}"\)" == "true" \]\]/,
+    )?.[1];
+    expect(nhCond).toBeTruthy();
+    const nhRun = (labels) =>
+      execFileSync('jq', ['-r', '--arg', 'l', 'autofix/needs-human', nhCond], {
+        encoding: 'utf8',
+        input: JSON.stringify({ labels }),
+      }).trim();
+    expect(nhRun([{ name: 'autofix/needs-human' }])).toBe('true');
+    expect(nhRun([])).toBe('false');
+    // R2-9: loop 1's deferral and its HM_OK=false fallback are pinned.
+    const loop1 = workflow.match(
+      /# Loop 1: managed takeover PRs[\s\S]*?done < <\(jq -c '\.\[\]' \/tmp\/takeover\.json\)/,
+    )?.[0];
+    expect(loop1).toBeTruthy();
+    expect(loop1).toContain('continue # loop 2 renders paused PRs');
+    expect(loop1).toContain('pause evaluation unavailable this tick');
+    // R2-16: the needs-human skip filter is byte-identical to the pinned
+    // takeover filter (an inverted population ships red, not green). The
+    // [^']+ capture cannot span across call sites (the lazy [\s\S]*? form
+    // silently would).
+    const humanFilter = workflow.match(
+      /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([^']+)' \\\n\s+\/tmp\/human-raw\.json/,
+    )?.[1];
+    expect(humanFilter).toBeTruthy();
+    const takeoverFilterP = workflow.match(
+      /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([^']+)' \\\n\s+\/tmp\/takeover-raw\.json/,
+    )?.[1];
+    expect(humanFilter).toBe(takeoverFilterP);
+    // R2-24/R2-28: the needs-human enumeration (the lever's population)
+    // carries the stale-first sort and the labels payload.
+    const humanEnum = workflow.match(
+      /--label "\$\{NEEDS_HUMAN_LABEL\}"[\s\S]*?\/tmp\/human-raw\.json/,
+    )?.[0];
+    expect(humanEnum).toBeTruthy();
+    expect(humanEnum).toContain("--search 'sort:updated-asc'");
+    expect(humanEnum).toContain(
+      '--json number,author,updatedAt,mergeable,labels',
+    );
+    // R2-22: neither enumeration failure may terminate the tick — any
+    // spelling of exit — because the dashboard write carries the liveness
+    // watermark.
+    expect(workflow).not.toMatch(
+      /takeover enumeration failed[\s\S]{0,400}exit( 0| 1)?\b/,
+    );
+    expect(workflow).not.toMatch(
+      /needs-human enumeration failed[\s\S]{0,400}exit( 0| 1)?\b/,
+    );
+    // R2-29: both loop-2 evidence fetches paginate (paused PRs are the
+    // high-comment population — page 1 alone misses the newest notice).
+    expect(workflow).toMatch(
+      /issues\/\$\{PR\}\/events" --paginate[\s\S]{0,80}\/tmp\/tk-ev\.json/,
+    );
+    expect(workflow).toMatch(
+      /issues\/\$\{PR\}\/comments" --paginate[\s\S]{0,80}\/tmp\/tk-ic\.json/,
+    );
+    // R2-19: the release scope check requires BOTH labels — the --arg
+    // bindings are the load-bearing part.
+    expect(workflow).toContain(
+      'jq -r --arg a "${TAKEOVER_LABEL}" --arg b "${NEEDS_HUMAN_LABEL}" \'([.labels[]?.name] | index($a) != null) and ([.labels[]?.name] | index($b) != null)\' <<< "${LIVE_LABELS_JSON}"',
+    );
+    // R2-20: live_skip exports the payload the scope check rides.
+    expect(workflow).toContain(
+      'LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels',
+    );
+    // R2-12: the labeled-event merge into RESUME_TS exists…
+    expect(workflow).toMatch(
+      /if \[\[ -n "\$\{EVENT_TS\}" && "\$\{EVENT_TS\}" > "\$\{RESUME_TS\}" \]\]; then\n\s+RESUME_TS="\$\{EVENT_TS\}"/,
+    );
+    // R2-21: …and both promotions run BEFORE the evaluation chain consumes
+    // RESUME_TS (position-independent extractions can't see this).
+    expect(workflow).toMatch(
+      /RESUME_TS="\$\{CMD_TS\}"[\s\S]*?RESUME_TS="\$\{EVENT_TS\}"[\s\S]*?if \[\[ -z "\$\{TERM_TS\}" \]\]/,
+    );
+    // R2-13: CLEANUPS increments only after the heal DELETE succeeded.
+    expect(workflow).toMatch(
+      /clear stale \$\{NEEDS_HUMAN_LABEL\}[\s\S]{0,400}labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}" '\$l\|@uri'\)"; then\n\s+CLEANUPS=\$\(\( CLEANUPS \+ 1 \)\)/,
+    );
+    // R2-23: both shepherd DELETEs are URI-encoded (the encoded path is the
+    // addressable route).
+    expect(workflow).toMatch(
+      /auto-release takeover \(paused \$\{PAUSE_D\}d\)" \\\n\s+gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{TAKEOVER_LABEL\}" '\$l\|@uri'\)"/,
+    );
   });
 });

@@ -22,12 +22,14 @@ name: 'Fleet Shepherd'
 #
 # One lever exists for the takeover pool: AUTO-RELEASE. A PR carrying both
 # autofix/takeover and autofix/needs-human whose cap pause went unanswered
-# for AUTO_RELEASE_DAYS days gets its takeover label removed plus one
-# bilingual summary comment (merge / close / split + re-takeover). The
-# needs-human label stays as the filterable TODO. No marker is needed for
-# idempotency: the lever's scope condition (both labels) is false once the
-# release lands. Every other takeover state — conflicts, red CI, new
-# feedback — remains the autofix scan's job; the shepherd only reports it.
+# for AUTO_RELEASE_DAYS days gets one bilingual summary comment (merge /
+# close / split + re-takeover) and then its takeover label removed. The
+# needs-human label stays as the filterable TODO. Idempotency: the summary
+# is dedup'd by its `<!-- fleet-shepherd auto-release -->` marker (scoped to
+# the current pause cycle), so a failed label removal retries only the
+# DELETE, and the scope condition (both labels) turns false once the release
+# lands. Every other takeover state — conflicts, red CI, new feedback —
+# remains the autofix scan's job; the shepherd only reports it.
 #
 # NON-GOAL: rerunning flaky-failed CI. That is owned by the CI Failure Patrol
 # (.github/workflows/qwen-ci-flaky-rerun.yml), which has its own markers,
