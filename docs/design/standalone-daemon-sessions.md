@@ -423,11 +423,19 @@ logical transaction:
 
 Before source persistence, failure closes the ACP session, releases the UUID,
 and removes only an empty child. After source persistence, transcript existence
-is the durable outcome marker. The daemon attempts orphan transcript cleanup
-under the lifecycle lock, but if cleanup fails or the process crashes, it
-preserves the UUID and reports `standalone_creation_outcome_unknown` so the
-client can query exact identity. The design does not claim rollback atomicity
-beyond the transcript store's actual behavior.
+is the durable outcome marker. Under the lifecycle lock, the daemon first closes
+the ACP session, removes only an empty child, and then attempts orphan transcript
+cleanup. Cleanup is complete only after ACP session teardown succeeds, the empty
+child is removed, the orphan transcript is removed, and the UUID reservation is
+released. Complete cleanup returns
+`500 standalone_creation_rolled_back` with the UUID and is safe to retry with
+that UUID. If ACP-session closure or transcript cleanup fails, or the process
+crashes, the daemon preserves the transcript and UUID and reports
+`standalone_creation_outcome_unknown` so the client can query exact identity.
+Once source persistence has succeeded, transcript deletion is not attempted
+unless ACP session teardown and empty-child removal have both succeeded; a
+partial unwind therefore remains discoverable by exact lookup. The design does
+not claim rollback atomicity beyond the transcript store's actual behavior.
 
 Client disconnect does not abort the logical transaction. If relocation commits
 but the response cannot be written, detach the phantom response client without
@@ -509,9 +517,13 @@ mutation.
 3. If the normal child exists, atomically rename it to the exact `.deleting`
    sibling and persist the staged phase.
 4. Delete the active or archived transcript and its sidecars.
-5. If transcript deletion fails, restore the normal child and clear the journal.
-   If rollback fails, leave both journal and staged child for repair and return
-   `working_directory_recovery_failed`.
+5. If transcript deletion fails after staging a child, restore the normal child
+   and clear the journal, then return retryable
+   `500 transcript_deletion_failed` with the session intact. If rollback fails,
+   leave both journal and staged child for repair and return
+   `working_directory_recovery_failed`. If both children were already absent,
+   retain the journal and return `500 transcript_deletion_failed` so an exact
+   retry or bounded reconciliation can finish the authorized deletion.
 6. If transcript deletion succeeds, recursively remove only the exact validated
    staged child, then clear the journal.
 
@@ -526,6 +538,10 @@ source before destructive cleanup:
   to normal and clear the journal.
 - Transcript exists, normal exists, staged absent: clear a prepared journal
   without touching the directory.
+- Transcript exists, journal valid, and both directories absent: finish
+  transcript deletion and clear the journal. A deletion failure retains the
+  journal and reports `transcript_deletion_failed` for a later exact retry or
+  bounded reconciliation.
 - Transcript absent, journal valid, staged exists, normal absent: finish exact
   staged cleanup and clear the journal.
 - Transcript absent and both directories absent: clear the completed journal.
@@ -547,6 +563,8 @@ deletion was authorized.
 | Private child disappeared before prompt                   | `409 working_directory_missing`                  |
 | Existing managed path fails validation                    | `409 working_directory_compromised`              |
 | Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`              |
+| Create crossed persistence and cleanup completed          | `500 standalone_creation_rolled_back` with UUID  |
+| Transcript deletion failed and directory state recovered  | `500 transcript_deletion_failed`                 |
 | Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`          |
 | Create crossed persistence but cleanup outcome is unknown | `standalone_creation_outcome_unknown` with UUID  |
 | Conversations root identity or trust fails                | `503 conversation_root_compromised`              |

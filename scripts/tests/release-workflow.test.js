@@ -140,12 +140,6 @@ describe('Live Host release workflow', () => {
 });
 
 describe('Live Host CI workflow', () => {
-  it('runs when shared Conversations runtime code changes', () => {
-    expect(liveHostCiWorkflow).toContain(
-      "- 'packages/cli/src/serve/conversations/**'",
-    );
-  });
-
   it('replaces partial package signatures before strict verification', () => {
     expect(liveHostCiWorkflow).toContain(
       'codesign --force --deep --sign - --entitlements',

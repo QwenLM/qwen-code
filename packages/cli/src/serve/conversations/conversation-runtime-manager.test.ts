@@ -255,6 +255,25 @@ describe('ConversationRuntimeManager', () => {
     expect(publishRuntime).not.toHaveBeenCalled();
   });
 
+  it('rejects a cached runtime replaced by another active generation', async () => {
+    const candidate = createOwnedRuntime();
+    const replacement = createOwnedRuntime();
+    const registry = createRegistry(candidate);
+    const publishRuntime = vi.fn();
+    const manager = new ConversationRuntimeManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+    await manager.ensure();
+    const entry = registry.getEntryByWorkspaceCwd(root.canonicalRoot)!;
+    registry.beginReplacement(entry, 'next');
+    registry.activateReplacement(entry, replacement, 'next');
+
+    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    expect(publishRuntime).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       name: 'provenance',
@@ -339,6 +358,35 @@ describe('ConversationRuntimeManager', () => {
     await expect(manager.ensure()).rejects.toThrow(/exact/);
     await expect(manager.ensure()).resolves.toBe(candidate);
     expect(registry.getByWorkspaceCwd('/work/wrong')).toBeUndefined();
+    expect(publishRuntime).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries after a published runtime stops being active before publication returns', async () => {
+    const registry = createRegistry();
+    const first = createOwnedRuntime();
+    const second = createOwnedRuntime();
+    const publishRuntime = vi
+      .fn()
+      .mockImplementationOnce(async (_cwd, validate) => {
+        await validate(first);
+        registry.add(first);
+        registry.beginDrain(first);
+        return first;
+      })
+      .mockImplementationOnce(async (_cwd, validate) => {
+        await validate(second);
+        registry.add(second);
+        return second;
+      });
+    const manager = new ConversationRuntimeManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+
+    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    registry.completeDrain(first);
+    await expect(manager.ensure()).resolves.toBe(second);
     expect(publishRuntime).toHaveBeenCalledTimes(2);
   });
 

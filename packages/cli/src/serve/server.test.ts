@@ -29451,6 +29451,12 @@ describe('Live conversation runtime lifecycle', () => {
         );
       });
       expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+      expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+      expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
     } finally {
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
