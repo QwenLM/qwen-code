@@ -1153,3 +1153,11 @@ export function effectiveMaxDownloadFileBytes(config: Config): number {
   }
   return uploadCap;
 }
+
+// Re-anchoring is reached from the CLI's `@`-reference funnel, which already
+// loads this module dynamically for every other omni call it makes. Kept off
+// the ROOT barrel deliberately: that barrel is statically imported across the
+// CLI, and every module added to its graph regroups esbuild's chunks — which
+// is how the ACP agent's static closure acquired iconv-lite's 550 KB of
+// encoding tables (scripts/check-serve-fast-path-bundle.js caught it).
+export { reanchorRememberedMedia } from './memory-recall.js';

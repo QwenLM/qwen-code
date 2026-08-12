@@ -19,6 +19,10 @@ export default defineConfig({
         __dirname,
         '../core/src/utils/transcript-records.ts',
       ),
+      '@qwen-code/qwen-code-core/omniPolicyCollection': path.resolve(
+        __dirname,
+        '../core/src/omni/policy/model-call-collection.ts',
+      ),
       '@qwen-code/qwen-code-core/omni': path.resolve(
         __dirname,
         '../core/src/omni/index.ts',

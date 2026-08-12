@@ -8204,8 +8204,14 @@ export class Session implements SessionContext {
             toolResult.artifacts &&
             toolResult.artifacts.length > 0
           ) {
+            // Deep subpath, not the root or `omni` barrel: both are
+            // statically imported across the CLI, so re-exporting this
+            // through either drags the whole policy graph — and, via
+            // iconvHelper's top-level iconv-lite import, its ~550 KB of
+            // encoding tables — into the ACP agent's static closure
+            // (scripts/check-serve-fast-path-bundle.js enforces that).
             const { collectModelPolicyCall } = await import(
-              '@qwen-code/qwen-code-core'
+              '@qwen-code/qwen-code-core/omniPolicyCollection'
             );
             await collectModelPolicyCall({
               config: this.config,

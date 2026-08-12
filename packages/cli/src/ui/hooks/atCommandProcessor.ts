@@ -490,7 +490,7 @@ export async function resolveAtCommandQuery({
       let reanchored = false;
       if (config.isOmniEnabled?.()) {
         const { reanchorRememberedMedia } = await import(
-          '@qwen-code/qwen-code-core'
+          '@qwen-code/qwen-code-core/omni'
         );
         for (const dir of config.getWorkspaceContext().getDirectories()) {
           const anchor = await reanchorRememberedMedia(
