@@ -28,6 +28,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 import {
   ALL_PROVIDERS,
   AuthType,
+  CODING_PLAN_GLOBAL_BASE_URL,
   type ProviderConfig,
   type ProviderInstallPlan,
 } from '@qwen-code/qwen-code-core';
@@ -55,6 +56,19 @@ describe('settingsWriter', () => {
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('persists the selected Coding Plan region metadata', () => {
+    writeCodingPlanConfig('global', 'coding-plan-key');
+
+    const settings = JSON.parse(
+      fs.readFileSync(settingsPath, 'utf-8'),
+    ) as Record<string, Record<string, Record<string, unknown>>>;
+
+    expect(settings.providerMetadata?.['coding-plan']).toMatchObject({
+      region: 'global',
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+    });
   });
 
   it('clears stale coding plan metadata when writing api-key providers', () => {

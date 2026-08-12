@@ -162,16 +162,26 @@ impl RuntimeLayout {
                 .join("runtime")
                 .join("qwen-code")
         };
-        let node = if cfg!(windows) {
-            root.join("node").join("node.exe")
-        } else {
-            root.join("node").join("bin").join("node")
-        };
-        let entry = root.join("lib").join("cli-entry.js");
+        let (node, entry) = layout_from_root(root);
         require_file(&node, "Node.js runtime")?;
         require_file(&entry, "Qwen Code runtime entry")?;
         Ok(Self { node, entry })
     }
+}
+
+fn layout_from_root(root: PathBuf) -> (PathBuf, PathBuf) {
+    let node = if cfg!(windows) {
+        root.join("node").join("node.exe")
+    } else {
+        root.join("node").join("bin").join("node")
+    };
+    let entry = root.join("lib").join("cli-entry.js");
+    // Tauri's resource_dir() returns `\\?\` verbatim paths on Windows, and
+    // Node's entry-script resolution cannot handle that prefix (#8929).
+    (
+        dunce::simplified(&node).to_path_buf(),
+        dunce::simplified(&entry).to_path_buf(),
+    )
 }
 
 fn require_file(path: &Path, description: &str) -> Result<(), String> {
@@ -532,6 +542,8 @@ mod tests {
     };
     #[cfg(unix)]
     use super::{stop_runtime_handle, wait_for_listening};
+    #[cfg(windows)]
+    use super::layout_from_root;
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
@@ -584,6 +596,22 @@ mod tests {
             .expect("cleanup long workspace");
         let error = result.expect_err("reject long workspace");
         assert!(error.contains("unsupported Windows extended-length form"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_layout_strips_windows_verbatim_prefix() {
+        let root = PathBuf::from(r"\\?\C:\Users\user\AppData\Local\Qwen Code Desktop")
+            .join("runtime")
+            .join("qwen-code");
+        let (node, entry) = layout_from_root(root);
+        for path in [node, entry] {
+            let path = path.to_string_lossy();
+            assert!(
+                !path.starts_with("\\\\?\\"),
+                "runtime path keeps the verbatim prefix: {path}"
+            );
+        }
     }
 
     #[test]
