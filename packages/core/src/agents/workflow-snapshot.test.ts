@@ -17,6 +17,7 @@ import {
   WORKFLOW_RUNTIME_VERSION,
   listWorkflowRunRecords,
   readWorkflowManifest,
+  projectWorkflowResult,
   toSnapshot,
   writeWorkflowManifest,
   acquireWorkflowRunOwnership,
@@ -149,6 +150,36 @@ describe('toSnapshot', () => {
     // enclosing stringify would have dropped the key either way.
     expect(toSnapshot(task({ result: () => 1 })).result).toBeUndefined();
   });
+
+  it.each([
+    'x'.repeat(MAX_WORKFLOW_ARTIFACT_BYTES + 1),
+    { nested: ['x'.repeat(MAX_WORKFLOW_ARTIFACT_BYTES + 1)] },
+  ])(
+    'omits an oversized result before materializing its JSON projection',
+    (result) => {
+      expect(projectWorkflowResult(result)).toMatch(/result omitted/i);
+    },
+  );
+
+  it('keeps a result whose serialized form exactly reaches the limit', () => {
+    const result = 'x'.repeat(MAX_WORKFLOW_ARTIFACT_BYTES - 2);
+
+    expect(projectWorkflowResult(result)).toBe(result);
+  });
+
+  const jsonWithRawSupport = JSON as typeof JSON & {
+    rawJSON?: (value: string) => unknown;
+  };
+  it.runIf(typeof jsonWithRawSupport.rawJSON === 'function')(
+    'bounds raw JSON without materializing its projection',
+    () => {
+      const result = jsonWithRawSupport.rawJSON!(
+        JSON.stringify('x'.repeat(MAX_WORKFLOW_ARTIFACT_BYTES + 1)),
+      );
+
+      expect(projectWorkflowResult(result)).toMatch(/result omitted/i);
+    },
+  );
 
   it('copies arrays defensively (snapshot is decoupled from the live entry)', () => {
     const t = task();

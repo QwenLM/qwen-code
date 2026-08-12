@@ -64,6 +64,15 @@ export const MAX_WORKFLOW_ARGS_BYTES = 64 * 1024;
  */
 export const MAX_WORKFLOW_ARTIFACT_BYTES = 32 * 1024 * 1024;
 
+const WORKFLOW_RESULT_TOO_LARGE = Symbol('workflowResultTooLarge');
+
+function omittedWorkflowResult(): string {
+  return (
+    `(workflow result omitted: artifact exceeded the ` +
+    `${MAX_WORKFLOW_ARTIFACT_BYTES} byte limit)`
+  );
+}
+
 function serializeWorkflowArtifact<T extends { result?: unknown }>(
   artifact: T,
 ): string {
@@ -75,9 +84,7 @@ function serializeWorkflowArtifact<T extends { result?: unknown }>(
     serialized = JSON.stringify(
       {
         ...artifact,
-        result:
-          `(workflow result omitted: artifact exceeded the ` +
-          `${MAX_WORKFLOW_ARTIFACT_BYTES} byte limit)`,
+        result: omittedWorkflowResult(),
       },
       null,
       2,
@@ -237,9 +244,95 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
 export function projectWorkflowResult(result: unknown): unknown {
   if (result === undefined) return undefined;
   let serialized: string | undefined;
+  let byteLength = 0;
+  let isRoot = true;
+  const populatedParents = new WeakSet<object>();
+  const jsonWithRawSupport = JSON as typeof JSON & {
+    isRawJSON?: (value: unknown) => boolean;
+  };
+  const addBytes = (count: number) => {
+    byteLength += count;
+    if (byteLength > MAX_WORKFLOW_ARTIFACT_BYTES) {
+      throw WORKFLOW_RESULT_TOO_LARGE;
+    }
+  };
+  const addJsonStringBytes = (value: string) => {
+    addBytes(2);
+    for (let index = 0; index < value.length; index++) {
+      const code = value.charCodeAt(index);
+      if (code === 0x22 || code === 0x5c) {
+        addBytes(2);
+      } else if (
+        code === 0x08 ||
+        code === 0x09 ||
+        code === 0x0a ||
+        code === 0x0c ||
+        code === 0x0d
+      ) {
+        addBytes(2);
+      } else if (code < 0x20) {
+        addBytes(6);
+      } else if (code < 0x80) {
+        addBytes(1);
+      } else if (code < 0x800) {
+        addBytes(2);
+      } else if (code >= 0xd800 && code <= 0xdbff) {
+        const next = value.charCodeAt(index + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          addBytes(4);
+          index += 1;
+        } else {
+          addBytes(6);
+        }
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        addBytes(6);
+      } else {
+        addBytes(3);
+      }
+    }
+  };
   try {
-    serialized = JSON.stringify(result);
-  } catch {
+    serialized = JSON.stringify(result, function (key, value: unknown) {
+      const root = isRoot;
+      isRoot = false;
+      const omitted =
+        value === undefined ||
+        typeof value === 'function' ||
+        typeof value === 'symbol';
+      if (omitted && !root && !Array.isArray(this)) return value;
+
+      if (!root) {
+        if (populatedParents.has(this)) addBytes(1);
+        else populatedParents.add(this);
+        if (!Array.isArray(this)) {
+          addJsonStringBytes(key);
+          addBytes(1);
+        }
+      }
+
+      if (omitted) {
+        if (!root) addBytes(4);
+      } else if (typeof value === 'string') {
+        addJsonStringBytes(value);
+      } else if (typeof value === 'number') {
+        addBytes(Number.isFinite(value) ? String(value).length : 4);
+      } else if (typeof value === 'boolean') {
+        addBytes(value ? 4 : 5);
+      } else if (value === null) {
+        addBytes(4);
+      } else if (typeof value === 'object') {
+        if (jsonWithRawSupport.isRawJSON?.(value)) {
+          addBytes(
+            Buffer.byteLength((value as { rawJSON: string }).rawJSON, 'utf8'),
+          );
+        } else {
+          addBytes(2);
+        }
+      }
+      return value;
+    });
+  } catch (error) {
+    if (error === WORKFLOW_RESULT_TOO_LARGE) return omittedWorkflowResult();
     return `(non-JSON-serializable ${typeof result})`;
   }
   // A function or a symbol serializes to `undefined` without throwing;
