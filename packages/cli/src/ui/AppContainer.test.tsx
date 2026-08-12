@@ -358,6 +358,7 @@ describe('AppContainer State Management', () => {
       confirmationRequest: null,
     });
     mockedUseGeminiStream.mockReturnValue({
+      pendingToolCalls: [],
       streamingState: 'idle',
       submitQuery: vi.fn(),
       initError: null,
@@ -705,6 +706,7 @@ describe('AppContainer State Management', () => {
       });
       const requestShutdown = vi.fn();
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: StreamingState.Responding,
         submitQuery: vi.fn(),
         initError: null,
@@ -873,6 +875,7 @@ describe('AppContainer State Management', () => {
         confirmationRequest: null,
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery,
         initError: null,
@@ -1475,6 +1478,7 @@ describe('AppContainer State Management', () => {
         drainQueue: vi.fn().mockReturnValue([]),
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery,
         initError: null,
@@ -1780,6 +1784,7 @@ describe('AppContainer State Management', () => {
       const mockSubmitQuery = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -1828,6 +1833,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -1936,6 +1942,7 @@ describe('AppContainer State Management', () => {
       const mockQueueMessage = vi.fn();
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: mockSubmitQuery,
         initError: null,
@@ -1985,6 +1992,7 @@ describe('AppContainer State Management', () => {
         .mockReturnValueOnce('Use list_agents to inspect restored agents.')
         .mockReturnValue(null);
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -2604,6 +2612,7 @@ describe('AppContainer State Management', () => {
           confirmationRequest: null,
         });
         mockedUseGeminiStream.mockReturnValue({
+          pendingToolCalls: [],
           streamingState: StreamingState.Responding,
           submitQuery: vi.fn(),
           initError: null,
@@ -2699,6 +2708,7 @@ describe('AppContainer State Management', () => {
           capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
         return {
+          pendingToolCalls: [],
           ...streamReturnValue,
           streamingResponseLengthRef: { current: 0 },
           isReceivingContent: false,
@@ -4367,6 +4377,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Processing request';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -4413,6 +4424,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state as Idle with no thought
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4460,6 +4472,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Confirm tool execution';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'waitingForConfirmation',
         submitQuery: vi.fn(),
         initError: null,
@@ -4507,6 +4520,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought with a short subject
       const shortTitle = 'Short';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -4559,6 +4573,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const title = 'Test Title';
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -4608,6 +4623,7 @@ describe('AppContainer State Management', () => {
 
       // Mock the streaming state as Idle with no thought
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4676,6 +4692,7 @@ describe('AppContainer State Management', () => {
       >);
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4776,6 +4793,7 @@ describe('AppContainer State Management', () => {
       >);
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -4904,6 +4922,7 @@ describe('AppContainer State Management', () => {
       mockedMeasureElement.mockReturnValue({ width: 80, height: 10 }); // Footer is taller than the screen
 
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -5235,6 +5254,7 @@ describe('AppContainer State Management', () => {
     it('should cancel ongoing request on first Ctrl+C', () => {
       const mockCancelOngoingRequest = vi.fn();
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'responding',
         submitQuery: vi.fn(),
         initError: null,
@@ -6065,6 +6085,7 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,
@@ -6109,6 +6130,7 @@ describe('AppContainer State Management', () => {
         truncateToItem: vi.fn(),
       });
       mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [],
         streamingState: 'idle',
         submitQuery: vi.fn(),
         initError: null,

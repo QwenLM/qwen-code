@@ -29,6 +29,9 @@ import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockConnectExistingAgentViewSupervisor = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async () => ({
     status: vi.fn(async () => ({ pid: 123 })),
@@ -71,6 +74,7 @@ vi.mock('../commands/update.js', () => ({
 
 vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
+  connectExistingAgentViewSupervisor: mockConnectExistingAgentViewSupervisor,
 }));
 
 const createNativeLspServiceInstance = () => ({
@@ -474,6 +478,10 @@ describe('parseArguments', () => {
     [
       ['--bg', 'background task', '--output-format', 'json'],
       'Cannot use --bg/--background with JSON output',
+    ],
+    [
+      ['--bg', 'background task', '--json-schema', '{}'],
+      'Cannot use --bg/--background with --json-schema',
     ],
   ])('rejects %s', async (args, message) => {
     process.argv = ['node', 'script.js', ...args];

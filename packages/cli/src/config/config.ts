@@ -1018,6 +1018,9 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return 'Cannot use --bg/--background with JSON output';
           }
+          if (argv['background'] && argv['jsonSchema'] !== undefined) {
+            return 'Cannot use --bg/--background with --json-schema';
+          }
           if (argv['prompt'] && hasPositionalQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
           }
