@@ -1169,6 +1169,31 @@ describe('WorkflowOrchestrator', () => {
     expect((results[1] as { result: unknown }).result).toBe('r:b');
   });
 
+  // The boundary check runs before deriveAgentKey: hash.update() throws an
+  // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, which would
+  // preempt the dispatch's descriptive error on the journaled path.
+  it('P6: rejects an invalid prompt before journal key derivation', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `r:${prompt}`,
+    );
+    await expect(
+      orchestrator.run({
+        script: `return await agent(42);`,
+        args: undefined,
+        journal,
+      }),
+    ).rejects.toThrow(/non-empty string prompt/);
+    // The mis-call consumes nothing: no started marker, no result line.
+    expect(entries).toHaveLength(0);
+  });
+
   it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
@@ -2531,9 +2556,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // Hook for schema-mode tests: the override path attaches an
       // AgentEventEmitter that the dispatch listens to for `structured_output`
       // calls. The test can drive that emitter to simulate model behavior.
-      runWithEmitter?: (emitter: {
-        emit(event: string, payload: unknown): void;
-      }) => void;
+      runWithEmitter?: (
+        emitter: { emit(event: string, payload: unknown): void },
+        signal?: AbortSignal,
+      ) => void | Promise<void>;
     }>;
   }): {
     config: Config;
@@ -2602,10 +2628,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 );
                 call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
-                  outcome.runWithEmitter(
+                  await outcome.runWithEmitter(
                     options.eventEmitter as {
                       emit(event: string, payload: unknown): void;
                     },
+                    signal,
                   );
                 }
                 // R3 (wenshao #6): honor `nextExecuteThrow` on the
@@ -2741,9 +2768,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   // An unlabeled override-path dispatch runs the runtime agent under the
-  // agentType's name; the transcript must record that same identity, not
-  // the generic default (agentName is the only human-readable agent
-  // identity a workflow dispatch leaves on disk).
+  // agentType's resolved canonical name; the transcript must record that
+  // same identity — not the generic default and not the raw spelling the
+  // script happened to pass (the SubagentManager lookup is
+  // case-insensitive). agentName is the only human-readable agent identity
+  // a workflow dispatch leaves on disk.
   it('records the agentType name in the transcript for an unlabeled override dispatch', async () => {
     const transcriptDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'wf-override-transcript-'),
@@ -2751,8 +2780,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     try {
       const { config, calls } = fakeConfigWithMgr({
         transcriptDir,
+        // Case-insensitive like the real SubagentManager lookup.
         findSubagentByName: async (name) =>
-          name === 'code-reviewer'
+          name.toLowerCase() === 'code-reviewer'
             ? {
                 name: 'code-reviewer',
                 description: 'reviews chunks',
@@ -2767,7 +2797,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       });
 
       await createProductionDispatch(config)('review chunk 1 of 3', {
-        agentType: 'code-reviewer',
+        agentType: 'Code-Reviewer',
       });
 
       expect(calls[0]!.config.name).toBe('code-reviewer');
@@ -2789,6 +2819,138 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     } finally {
       fs.rmSync(transcriptDir, { recursive: true, force: true });
     }
+  });
+
+  // The identity invariant's third leg: an ephemeral override (model /
+  // isolation / schema only, no agentType) runs the runtime agent under the
+  // resolved display name and the transcript records that same name — a
+  // labeled model-only dispatch must not diverge into an unlabeled runtime
+  // agent.
+  it('runs a labeled model-only override under the label and records it in the transcript', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        onCreate: async () => ({
+          finalText: 'model-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('probe task', {
+        label: 'labeled-model',
+        model: 'm',
+      });
+
+      expect(calls[0]!.config.name).toBe('labeled-model');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('labeled-model');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // resolveWorkflowAgentName's truthy check keeps `agentType: ''` from
+  // naming the agent '' — the dispatch still throws "agent type '' not
+  // found", but the transcript seeded before that throw records the shared
+  // default, not a blank identity.
+  it('never records a blank identity for an empty agentType', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async () => null,
+        onCreate: async () => ({
+          finalText: '',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('task', { agentType: '' }),
+      ).rejects.toThrow(/agent type '' not found/);
+
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('workflow-agent');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // The stall wrapper's abandoned error interpolates the dispatch's display
+  // name; when that name comes from a model-authored agentType definition
+  // (validateName charset-checks the TRIMMED name, so a definition named
+  // 'rev\n' registers with the raw name), control characters must not
+  // fragment the single-line error.
+  it('sanitizes control characters out of the agentType stall error', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async (name) =>
+        name === 'rev\n'
+          ? {
+              name: 'rev\n',
+              description: 'newline-named reviewer',
+              systemPrompt: 'You review code.',
+              level: 'session',
+            }
+          : null,
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: async (emitter, signal) => {
+          emitter.emit(AgentEventType.ROUND_START, {
+            subagentId: 'sub',
+            round: 1,
+            promptId: 'p1',
+            timestamp: Date.now(),
+          });
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted) return resolve();
+            signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+        },
+      }),
+    });
+
+    const dispatch = createProductionDispatch(config);
+    const error: unknown = await dispatch('doomed', {
+      agentType: 'rev\n',
+      stallMs: 5,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).toContain(
+      'agent "rev" stalled on all 3 attempts',
+    );
   });
 
   it('strips internal tags from override-path final text', async () => {
@@ -4124,6 +4286,15 @@ describe('createProductionDispatch — subagent transcripts', () => {
     expect(records[1]!['type']).toBe('system');
     expect(records[1]!['subtype']).toBe('agent_retry');
     expect(records[1]!['systemPayload']).toEqual({ attempt: 2 });
+    // Attempt 2's own records follow the marker — a retried agent that did
+    // nothing would end the file at the marker, exactly the shape the
+    // comment above warns about.
+    expect(records.map((r) => r['type'])).toEqual([
+      'user',
+      'system',
+      'assistant',
+    ]);
+    expect(partsOf(records[2]!)).toEqual([{ text: 'retry completed' }]);
     for (let i = 1; i < records.length; i++) {
       expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
       expect(records[i]!['agentId']).toBe(records[0]!['agentId']);

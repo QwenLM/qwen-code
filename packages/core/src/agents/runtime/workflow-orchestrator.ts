@@ -409,7 +409,7 @@ export function createProductionDispatch(
     const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
     // Resolved once and handed to both the runtime and the transcript so
     // the on-disk records name the same agent that ran.
-    const agentName = resolveWorkflowAgentName(opts);
+    const agentName = await resolveWorkflowAgentName(config, opts);
     let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
@@ -442,7 +442,10 @@ export function createProductionDispatch(
       {
         stallMs,
         signal,
-        label: agentName,
+        // agentName can carry a model-authored agentType spelling — keep
+        // the stall log / abandoned error single-line the same way the
+        // "not found" throw site sanitizes it.
+        label: sanitizeForErrorMessage(agentName),
       },
     );
   };
@@ -453,13 +456,28 @@ export function createProductionDispatch(
  * ephemeral override default run the runtime agent under it, and the
  * transcript records it, so the on-disk identity always matches the agent
  * that ran. An explicit non-empty label wins; an unlabeled override-path
- * agent runs under its agentType's name; otherwise the shared default.
- * The truthy check keeps `label: ''` from naming the agent ''.
+ * agent records its agentType's resolved canonical name — the
+ * SubagentManager lookup is case-insensitive, so the spelling the script
+ * passed may differ from the agent that actually runs; otherwise the
+ * shared default. The truthy checks keep `label: ''` and `agentType: ''`
+ * from naming the agent ''.
  */
-function resolveWorkflowAgentName(opts: WorkflowAgentOpts): string {
-  return typeof opts.label === 'string' && opts.label
-    ? opts.label
-    : (opts.agentType ?? 'workflow-agent');
+async function resolveWorkflowAgentName(
+  config: Config,
+  opts: WorkflowAgentOpts,
+): Promise<string> {
+  if (typeof opts.label === 'string' && opts.label) {
+    return opts.label;
+  }
+  if (opts.agentType) {
+    const resolved = await config
+      .getSubagentManager()
+      .findSubagentByName(opts.agentType);
+    if (resolved) {
+      return resolved.name;
+    }
+  }
+  return opts.agentType || 'workflow-agent';
 }
 
 /**
@@ -1494,6 +1512,14 @@ export class WorkflowOrchestrator {
     let journalAgentId = 0;
 
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+      // Must run before deriveAgentKey below: hash.update() throws an
+      // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, preempting
+      // the dispatch's boundary error on the journaled path.
+      if (typeof prompt !== 'string' || prompt.length === 0) {
+        return rejectThroughPauseGate(
+          new Error('agent() requires a non-empty string prompt.'),
+        );
+      }
       // P6: journal cache lookup — runs BEFORE the budget gate + agent
       // counter so a cached result is free (no token spend, no agent-cap
       // slot, no live dispatch). The key is computed SYNCHRONOUSLY here so

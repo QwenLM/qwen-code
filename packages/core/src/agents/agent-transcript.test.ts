@@ -27,11 +27,17 @@ import type { Content } from '@google/genai';
 
 // Pin the git-branch annotation without spawning git: buildAgentTranscriptAttach
 // is the only consumer of getCachedGitBranch in this file's import graph.
+// vi.hoisted so the attach tests can also pin WHICH directory the builder
+// hands to the lookup (project root, not the storage dir).
+const { getCachedGitBranchMock } = vi.hoisted(() => ({
+  getCachedGitBranchMock: vi.fn(() => 'test-branch'),
+}));
+
 vi.mock('../utils/gitUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
   return {
     ...actual,
-    getCachedGitBranch: () => 'test-branch',
+    getCachedGitBranch: getCachedGitBranchMock,
   };
 });
 
@@ -84,6 +90,10 @@ describe('agent-transcript', () => {
   });
 
   describe('buildAgentTranscriptAttach', () => {
+    beforeEach(() => {
+      getCachedGitBranchMock.mockClear();
+    });
+
     function makeConfig(cliVersion: string): Config {
       return {
         getSessionId: () => 'sess-9',
@@ -109,6 +119,10 @@ describe('agent-transcript', () => {
         version: '1.2.3',
         gitBranch: 'test-branch',
       });
+      // The branch lookup is anchored at the project root — the storage dir
+      // is never inside a git repo, so a swap would silently drop gitBranch
+      // from every transcript.
+      expect(getCachedGitBranchMock).toHaveBeenCalledWith('/proj/root');
     });
 
     it('falls back to an unknown version when the CLI reports none', () => {
