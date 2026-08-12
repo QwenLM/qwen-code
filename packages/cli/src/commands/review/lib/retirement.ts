@@ -113,7 +113,7 @@ const REVERSE_AUDIT_MARKER = 'reverse-audit';
  * transcript classifies `unknown`, and no chunk retires — the territory is
  * never consulted.
  */
-function bakedRanges(
+export function bakedRanges(
   prompt: string,
   diffPath: string | undefined,
 ): Array<[number, number]> {
@@ -357,7 +357,7 @@ function classifyReturn(
  * single read holds it all. A read with no line range (a `read_file` with
  * no limit) proves no lines at all and overlaps nothing.
  */
-function openedTheTerritory(
+export function openedTheTerritory(
   diffReads: Array<[number, number]>,
   territory: Array<[number, number]>,
 ): boolean {
