@@ -182,6 +182,8 @@ import {
   runWithInvocationContext,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
+  collectSessionTurnState,
+  computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -1271,30 +1273,7 @@ export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
 ): number {
-  let maxPromptTurn = 0;
-  let userMessageCount = 0;
-  const promptIdPrefix = `${sessionId}########`;
-
-  for (const record of records) {
-    if (record.sessionId === sessionId && isUserPromptRecord(record)) {
-      userMessageCount += 1;
-    }
-
-    for (const promptId of getRecordPromptIds(record)) {
-      if (!promptId.startsWith(promptIdPrefix)) {
-        continue;
-      }
-
-      const suffix = promptId.slice(promptIdPrefix.length);
-      if (!/^\d+$/.test(suffix)) {
-        continue;
-      }
-
-      maxPromptTurn = Math.max(maxPromptTurn, Number(suffix));
-    }
-  }
-
-  return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+  return computeInitialTurnFromHistoryCore(records, sessionId);
 }
 
 export async function fireSessionPermissionDeniedForAutoMode(
@@ -1327,42 +1306,6 @@ export async function fireSessionPermissionDeniedForAutoMode(
       );
     }
   }
-}
-
-function getRecordPromptIds(record: ChatRecord): string[] {
-  const promptIds: string[] = [];
-  const recordPromptId = (record as { promptId?: unknown }).promptId;
-  if (typeof recordPromptId === 'string') {
-    promptIds.push(recordPromptId);
-  }
-  const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
-  if (telemetryPromptId) {
-    promptIds.push(telemetryPromptId);
-  }
-  return promptIds;
-}
-
-function readTelemetryPromptId(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object' || !('uiEvent' in payload)) {
-    return undefined;
-  }
-  const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
-  if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
-    return undefined;
-  }
-  const promptId = (uiEvent as { prompt_id?: unknown }).prompt_id;
-  return typeof promptId === 'string' ? promptId : undefined;
-}
-
-function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
-    return false;
-  }
-  return (
-    record.message?.parts?.some(
-      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
-    ) ?? false
-  );
 }
 
 const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
@@ -3148,21 +3091,14 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
-    for (const record of records) {
-      if (record.subtype !== 'notification') continue;
-      const backgroundTask = (
-        record.systemPayload as
-          | { backgroundTask?: { taskId?: unknown } }
-          | undefined
-      )?.backgroundTask;
-      if (typeof backgroundTask?.taskId === 'string') {
-        this.persistedBackgroundNotificationTaskIds.add(backgroundTask.taskId);
-      }
-    }
-    this.turn = Math.max(
-      this.turn,
-      computeInitialTurnFromHistory(records, this.config.getSessionId()),
+    const turnState = collectSessionTurnState(
+      records,
+      this.config.getSessionId(),
     );
+    for (const taskId of turnState.backgroundNotificationTaskIds) {
+      this.persistedBackgroundNotificationTaskIds.add(taskId);
+    }
+    this.turn = Math.max(this.turn, turnState.initialTurn);
   }
 
   async replayHistory(
