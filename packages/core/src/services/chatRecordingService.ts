@@ -404,7 +404,6 @@ export interface NotificationRecordPayload {
     description?: string;
     commandLabel?: string;
     eventCount?: number;
-    exitCode?: number;
     droppedLines?: number;
   };
 }

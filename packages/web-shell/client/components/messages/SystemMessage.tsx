@@ -122,13 +122,13 @@ export const SystemMessage = memo(function SystemMessage({
   const isRecap = variant === 'info' && source === 'recap';
   const isTaskNotification =
     variant === 'info' && source === 'background_notification';
+  const notificationData =
+    isTaskNotification && typeof data === 'object' && data !== null
+      ? (data as Record<string, unknown>)
+      : undefined;
   const taskStatus =
-    isTaskNotification &&
-    typeof data === 'object' &&
-    data !== null &&
-    'status' in data &&
-    typeof data.status === 'string'
-      ? data.status
+    typeof notificationData?.status === 'string'
+      ? notificationData.status
       : undefined;
   const taskNotificationLabel =
     taskStatus === 'completed'
@@ -154,36 +154,34 @@ export const SystemMessage = memo(function SystemMessage({
           : InfoIcon;
 
   const taskKind =
-    isTaskNotification &&
-    typeof data === 'object' &&
-    data !== null &&
-    'kind' in data &&
-    typeof data.kind === 'string'
-      ? data.kind
+    typeof notificationData?.kind === 'string'
+      ? notificationData.kind
       : undefined;
   const taskCommandLabel =
-    typeof data === 'object' &&
-    data !== null &&
-    'commandLabel' in data &&
-    typeof data.commandLabel === 'string'
-      ? data.commandLabel
+    typeof notificationData?.commandLabel === 'string'
+      ? notificationData.commandLabel
       : undefined;
   const taskDescription =
-    typeof data === 'object' &&
-    data !== null &&
-    'description' in data &&
-    typeof data.description === 'string'
-      ? data.description
+    typeof notificationData?.description === 'string'
+      ? notificationData.description
       : undefined;
   const taskEventCount =
-    typeof data === 'object' &&
-    data !== null &&
-    'eventCount' in data &&
-    typeof data.eventCount === 'number'
-      ? data.eventCount
+    typeof notificationData?.eventCount === 'number'
+      ? notificationData.eventCount
+      : undefined;
+  const taskDroppedLines =
+    typeof notificationData?.droppedLines === 'number'
+      ? notificationData.droppedLines
       : undefined;
   const taskI18nText = (() => {
     if (!taskKind || !taskStatus) return undefined;
+    if (
+      taskStatus !== 'completed' &&
+      taskStatus !== 'failed' &&
+      taskStatus !== 'cancelled'
+    ) {
+      return undefined;
+    }
     const key = `notification.${taskKind}.${taskStatus}` as const;
     if (taskKind === 'shell') {
       return taskCommandLabel
@@ -192,7 +190,11 @@ export const SystemMessage = memo(function SystemMessage({
     }
     if (taskKind === 'monitor' || taskKind === 'agent') {
       return taskDescription
-        ? t(key, { description: taskDescription, events: taskEventCount ?? 0 })
+        ? t(key, {
+            description: taskDescription,
+            events: taskEventCount ?? 0,
+            droppedLines: taskDroppedLines ?? 0,
+          })
         : undefined;
     }
     return undefined;
@@ -221,7 +223,7 @@ export const SystemMessage = memo(function SystemMessage({
               <TaskNotificationIcon aria-hidden="true" />
             </span>
             <div className={styles.notificationText}>
-              {taskI18nText ?? content}
+              {taskI18nText ?? <Markdown content={content} />}
             </div>
           </div>
         </div>

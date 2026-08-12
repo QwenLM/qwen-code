@@ -175,6 +175,8 @@ import {
   runWithRuntimeContentGenerator,
   getInvocationContext,
   runWithInvocationContext,
+  stripDisplayControlChars,
+  buildBackgroundEntryLabel,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -1036,7 +1038,6 @@ export interface BackgroundNotificationQueueItem {
     description?: string;
     commandLabel?: string;
     eventCount?: number;
-    exitCode?: number;
     droppedLines?: number;
   };
 }
@@ -1051,11 +1052,16 @@ const NOTIFICATION_LABEL_MAX_LENGTH = 80;
 
 /** Collapse whitespace and truncate a task label for compact UI display. */
 function truncateNotificationLabel(label: string): string {
-  const normalized = label.replace(/\s+/g, ' ').trim();
+  const normalized = stripDisplayControlChars(label)
+    .replace(/\s+/g, ' ')
+    .trim();
   if (normalized.length <= NOTIFICATION_LABEL_MAX_LENGTH) {
     return normalized;
   }
-  return normalized.slice(0, NOTIFICATION_LABEL_MAX_LENGTH - 3) + '...';
+  // Slice by code point so the cut cannot split a surrogate pair.
+  return (
+    [...normalized].slice(0, NOTIFICATION_LABEL_MAX_LENGTH - 3).join('') + '...'
+  );
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -6482,7 +6488,11 @@ export class Session implements SessionContext {
           toolUseId: meta.toolUseId,
           todoWorkChainId: meta.todoWorkChainId,
           structured: entry
-            ? { description: truncateNotificationLabel(entry.description) }
+            ? {
+                description: truncateNotificationLabel(
+                  buildBackgroundEntryLabel(entry),
+                ),
+              }
             : undefined,
         });
       },
@@ -6531,10 +6541,7 @@ export class Session implements SessionContext {
           !this.todoStopGuardBackgroundBaseline.shells.has(meta.shellId),
         todoWorkChainId: meta.todoWorkChainId,
         structured: entry
-          ? {
-              commandLabel: truncateNotificationLabel(entry.description),
-              exitCode: meta.exitCode,
-            }
+          ? { commandLabel: truncateNotificationLabel(entry.description) }
           : undefined,
       });
     });
@@ -6660,6 +6667,7 @@ export class Session implements SessionContext {
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
+          ...item.structured,
         },
       );
     } catch (error) {

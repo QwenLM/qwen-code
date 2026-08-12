@@ -1446,11 +1446,25 @@ const EN: Messages = {
   'notification.shell.cancelled': (v) =>
     `Background shell "${v?.command ?? ''}" was cancelled.`,
   'notification.monitor.completed': (v) =>
-    `Monitor "${v?.description ?? ''}" completed. (${v?.events ?? 0} events)`,
+    `Monitor "${v?.description ?? ''}" completed. (${v?.events ?? 0} events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
   'notification.monitor.failed': (v) =>
-    `Monitor "${v?.description ?? ''}" failed.`,
+    `Monitor "${v?.description ?? ''}" failed. (${v?.events ?? 0} events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
   'notification.monitor.cancelled': (v) =>
-    `Monitor "${v?.description ?? ''}" was cancelled.`,
+    `Monitor "${v?.description ?? ''}" was cancelled. (${
+      v?.events ?? 0
+    } events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
   'notification.agent.completed': (v) =>
     `Background agent "${v?.description ?? ''}" completed.`,
   'notification.agent.failed': (v) =>
@@ -4242,11 +4256,17 @@ const ZH: Messages = {
   'notification.shell.cancelled': (v) =>
     `后台 Shell 已取消：${v?.command ?? ''}`,
   'notification.monitor.completed': (v) =>
-    `监控器已完成（${v?.events ?? 0} 个事件）：${v?.description ?? ''}`,
+    `监控器已完成（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
   'notification.monitor.failed': (v) =>
-    `监控器执行失败：${v?.description ?? ''}`,
+    `监控器执行失败（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
   'notification.monitor.cancelled': (v) =>
-    `监控器已取消：${v?.description ?? ''}`,
+    `监控器已取消（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
   'notification.agent.completed': (v) =>
     `后台智能体已完成：${v?.description ?? ''}`,
   'notification.agent.failed': (v) =>

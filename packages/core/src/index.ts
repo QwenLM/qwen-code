@@ -344,6 +344,7 @@ export type {
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
+  stripDisplayControlChars,
   TERMINAL_OSC_REGEX,
   TERMINAL_CSI_REGEX,
   TERMINAL_SHIFT_DCS_REGEX,
