@@ -50,13 +50,17 @@ export const useEffortCommand = (
         // for future sessions, but say it won't take effect until thinking is
         // re-enabled.
         if (addItem) {
-          addItem(
+          const feedbackItem: HistoryItemWithoutId & Record<string, unknown> =
             {
               type: MessageType.INFO,
               text: formatEffortChangeMessage(config, effort),
-            },
-            Date.now(),
-          );
+            };
+          addItem(feedbackItem, Date.now());
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/effort',
+            outputHistoryItems: [feedbackItem],
+          });
         }
       } finally {
         setIsEffortDialogOpen(false);
