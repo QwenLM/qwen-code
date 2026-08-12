@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
@@ -21,7 +22,7 @@ use tauri::{
     WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 use url::Url;
 
 #[cfg(target_os = "windows")]
@@ -37,6 +38,7 @@ static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -307,6 +309,10 @@ fn bootstrap_state(
     require_bootstrap_origin(&webview)?;
     let starting = state.starting.load(Ordering::SeqCst) != 0;
     let running = lock(&state.runtime).is_some();
+    let workspace = bootstrap_workspace(
+        lock(&state.last_workspace).clone(),
+        state.settings.workspace(),
+    );
     Ok(BootstrapState {
         desktop_version: env!("CARGO_PKG_VERSION").to_string(),
         status: if running {
@@ -316,12 +322,18 @@ fn bootstrap_state(
         } else {
             "idle"
         },
-        workspace: state
-            .settings
-            .workspace()
-            .map(|path| path.to_string_lossy().into_owned()),
+        workspace: workspace.map(|path| path.to_string_lossy().into_owned()),
         error: lock(&state.last_error).clone(),
     })
+}
+
+fn bootstrap_workspace(
+    last_workspace: Option<(PathBuf, bool)>,
+    persisted_workspace: Option<PathBuf>,
+) -> Option<PathBuf> {
+    last_workspace
+        .map(|(workspace, _)| workspace)
+        .or(persisted_workspace)
 }
 
 #[tauri::command]
@@ -431,12 +443,8 @@ fn open_logs(
 #[tauri::command]
 async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
-    let update = app
-        .updater()
-        .map_err(|error| format!("Failed to initialize updater: {error}"))?
-        .check()
-        .await
-        .map_err(|error| format!("Failed to check for updates: {error}"))?
+    let update = check_for_update(&app)
+        .await?
         .ok_or_else(|| "No desktop update is available.".to_string())?;
     let version = update.version.clone();
     let confirmed = tauri::async_runtime::spawn_blocking({
@@ -825,11 +833,7 @@ fn check_updates_silently(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
-            Ok(updater) => updater,
-            Err(_) => return,
-        };
-        let Ok(Some(update)) = updater.check().await else {
+        let Ok(Some(update)) = check_for_update(&app).await else {
             return;
         };
         let _ = app.emit("update-available", update.version.clone());
@@ -876,6 +880,16 @@ fn check_updates_silently(app: AppHandle) {
     });
 }
 
+async fn check_for_update(app: &AppHandle) -> Result<Option<Update>, String> {
+    app.updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Failed to initialize updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {error}"))
+}
+
 fn is_safe_external_url(url: &Url) -> bool {
     matches!(url.scheme(), "https" | "http" | "mailto")
 }
@@ -895,9 +909,9 @@ mod tests {
         FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
     };
     use super::{
-        default_workspace_override_dir, default_workspace_path, ensure_workspace_dir,
-        is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
-        BOOTSTRAP_URL,
+        bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
+        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
+        is_same_origin, origin_of, BOOTSTRAP_URL,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -906,6 +920,25 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use url::Url;
+
+    #[test]
+    fn bootstrap_prefers_the_workspace_being_started() {
+        let attempted = PathBuf::from("/tmp/attempted");
+        let persisted = PathBuf::from("/tmp/persisted");
+        assert_eq!(
+            bootstrap_workspace(Some((attempted.clone(), false)), Some(persisted.clone())),
+            Some(attempted),
+        );
+        assert_eq!(
+            bootstrap_workspace(None, Some(persisted.clone())),
+            Some(persisted)
+        );
+        assert_eq!(
+            bootstrap_workspace(Some((PathBuf::from("/tmp/first-launch"), true)), None),
+            Some(PathBuf::from("/tmp/first-launch")),
+        );
+        assert_eq!(bootstrap_workspace(None, None), None);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
