@@ -3927,13 +3927,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             touchActivity();
           }
           byId.delete(sid);
-          telemetry.metrics?.sessionLifecycle('die');
-          emitSessionLifecycle({
-            type: 'removed',
-            sessionId: sid,
-            workspaceCwd: sessEntry.workspaceCwd,
-            reason: 'channel_closed',
-          });
+          if (!shuttingDown) {
+            telemetry.metrics?.sessionLifecycle('die');
+            emitSessionLifecycle({
+              type: 'removed',
+              sessionId: sid,
+              workspaceCwd: sessEntry.workspaceCwd,
+              reason: 'channel_closed',
+            });
+          }
           // Tombstone the id so any late `extNotification` from the
           // dying child can't leak into the early-event buffer for a
           // future load/resume of the same persisted session id.
@@ -11383,6 +11385,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         shuttingDown = true;
         cancelIdleTimer();
         stopSessionReaper();
+        const lifecycleEntries = Array.from(byId.values());
+        for (const entry of lifecycleEntries) {
+          telemetry.metrics?.sessionLifecycle('die');
+          emitSessionLifecycle({
+            type: 'removed',
+            sessionId: entry.sessionId,
+            workspaceCwd: entry.workspaceCwd,
+            reason: shutdownReason,
+          });
+        }
         // Let an already-observed child exit claim its sessions before the
         // shutdown snapshot labels remaining prompts as daemon_shutdown.
         await Promise.resolve();
@@ -11424,13 +11436,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // `byId` (above), so the handler's `byId.get(...)` is undefined
         // and the automatic publish wouldn't fire.
         for (const e of entries) {
-          telemetry.metrics?.sessionLifecycle('die');
-          emitSessionLifecycle({
-            type: 'removed',
-            sessionId: e.sessionId,
-            workspaceCwd: e.workspaceCwd,
-            reason: shutdownReason,
-          });
           // DAEMON-002/005: pending prompts owe their formal terminal
           // before the bus closes.
           const turnResults = flushPromptTerminals(
