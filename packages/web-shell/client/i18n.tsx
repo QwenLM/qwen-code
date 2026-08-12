@@ -2624,6 +2624,9 @@ const EN: Messages = {
   'channels.editor.field.dws.pollInterval': 'Poll interval (ms)',
   'channels.editor.field.dws.pollInterval.description':
     'Defaults to 60000 milliseconds',
+  'channels.editor.field.dws.groupPolicy': 'Group Policy',
+  'channels.editor.field.dws.groupPolicy.description':
+    'Controls which DingTalk conversations and document threads may start DWS tasks',
   'channels.editor.field.dws.senderPolicy': 'Sender Policy',
   'channels.editor.field.dws.senderPolicy.description':
     'Controls which DingTalk users may start DWS tasks',
@@ -5334,6 +5337,9 @@ const ZH: Messages = {
     '文档评论和指定群消息以此前缀开头时启动任务，默认为 /qwen',
   'channels.editor.field.dws.pollInterval': '轮询间隔（毫秒）',
   'channels.editor.field.dws.pollInterval.description': '默认 60000 毫秒',
+  'channels.editor.field.dws.groupPolicy': '群组策略',
+  'channels.editor.field.dws.groupPolicy.description':
+    '控制哪些钉钉会话和文档评论线程可以启动 DWS 任务',
   'channels.editor.field.dws.senderPolicy': '发送者策略',
   'channels.editor.field.dws.senderPolicy.description':
     '控制哪些钉钉用户可以启动 DWS 任务',

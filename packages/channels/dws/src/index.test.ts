@@ -24,6 +24,7 @@ describe('DWS channel plugin', () => {
       'wikiDiscoveryInterval',
       'trigger',
       'pollInterval',
+      'groupPolicy',
       'senderPolicy',
       'allowedUsers',
     ]);
@@ -33,7 +34,17 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
   });
 
-  it('defaults sender access to open', () => {
+  it('defaults sender and group access to open', () => {
+    const groupPolicy = plugin.management?.fields.find(
+      (field) => field.key === 'groupPolicy',
+    );
+    expect(groupPolicy?.default).toBe('open');
+    expect(groupPolicy?.options?.map((option) => option.value)).toEqual([
+      'open',
+      'allowlist',
+      'pairing',
+      'disabled',
+    ]);
     expect(
       plugin.management?.fields.find((field) => field.key === 'senderPolicy')
         ?.default,

@@ -75,6 +75,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     wikiDiscoveryInterval: 'channels.editor.field.dws.wikiDiscoveryInterval',
     trigger: 'channels.editor.field.dws.trigger',
     pollInterval: 'channels.editor.field.dws.pollInterval',
+    groupPolicy: 'channels.editor.field.dws.groupPolicy',
     senderPolicy: 'channels.editor.field.dws.senderPolicy',
     allowedUsers: 'channels.editor.field.dws.allowedUsers',
   },

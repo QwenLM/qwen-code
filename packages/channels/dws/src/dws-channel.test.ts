@@ -221,9 +221,17 @@ class TestableDwsChannel extends DwsChannel {
   }
 }
 
+class PolicyDwsChannel extends DwsChannel {
+  protected override startPollLoop(): void {}
+
+  async poll(): Promise<void> {
+    await this.pollOnce();
+  }
+}
+
 let qwenHome: string;
 let previousQwenHome: string | undefined;
-const channels: TestableDwsChannel[] = [];
+const channels: DwsChannel[] = [];
 
 beforeEach(() => {
   previousQwenHome = process.env['QWEN_HOME'];
@@ -253,6 +261,18 @@ async function readyChannel(
   channels.push(channel);
   await channel.connect();
   return channel;
+}
+
+async function readyPolicyChannel(
+  client: FakeDwsClient,
+  config = makeConfig(),
+  name = 'policy-dws',
+): Promise<{ channel: PolicyDwsChannel; bridge: ChannelAgentBridge }> {
+  const bridge = makeBridge();
+  const channel = new PolicyDwsChannel(name, config, bridge, undefined, client);
+  channels.push(channel);
+  await channel.connect();
+  return { channel, bridge };
 }
 
 describe('DwsChannel', () => {
@@ -420,6 +440,121 @@ describe('DwsChannel', () => {
       { kind: 'direct', openDingTalkId: 'open-alice' },
       'done',
       expect.any(String),
+    );
+  });
+
+  it('requires both group and sender allowlists before dispatching', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupPolicy: 'allowlist',
+        groups: { 'cid-allowed': {} },
+        senderPolicy: 'allowlist',
+        allowedUsers: ['open-bob'],
+      }),
+    );
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'denied-group', 'do not run', {
+        senderId: 'open-bob',
+        senderName: 'Bob',
+      }),
+    );
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'denied-sender', 'do not run', {
+        conversationId: 'cid-allowed',
+      }),
+    );
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'allowed', 'please run', {
+        conversationId: 'cid-allowed',
+        senderId: 'open-bob',
+        senderName: 'Bob',
+      }),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('please run'),
+      expect.any(Object),
+    );
+  });
+
+  it('starts group pairing instead of dispatching an unapproved conversation', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ groupPolicy: 'pairing' }),
+    );
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'pair-group', 'please help'),
+    );
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'group', conversationId: 'cid-1' },
+      expect.stringContaining('pairing code'),
+      expect.any(String),
+    );
+  });
+
+  it('drops direct messages when direct-message access is disabled', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        disableAtMessages: true,
+        imUserIds: ['user-2'],
+        dmPolicy: 'disabled',
+      }),
+    );
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_o2o', 'disabled-dm', 'please help'),
+    );
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+  });
+
+  it('applies group access policy to document comment threads', async () => {
+    const client = new FakeDwsClient();
+    client.comments.set('doc-2', []);
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        disableAtMessages: true,
+        documentIds: ['doc-1', 'doc-2'],
+        groupPolicy: 'allowlist',
+        groups: { 'doc-2': {} },
+      }),
+    );
+    await channel.poll();
+    client.comments.set('doc-1', [
+      comment('denied-document', 'do not run', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+    client.comments.set('doc-2', [
+      comment('allowed-document', 'please run', {
+        mentionedUserIds: ['user-self'],
+      }),
+    ]);
+
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('please run'),
+      expect.any(Object),
     );
   });
 

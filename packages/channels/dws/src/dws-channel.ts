@@ -366,8 +366,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
 
     config.blockStreaming = 'off';
-    config.groupPolicy = 'open';
-    config.dmPolicy = 'open';
     config.instructions = [
       config.instructions?.trim(),
       [

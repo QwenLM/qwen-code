@@ -110,6 +110,21 @@ export const plugin: ChannelPlugin = {
         description: 'Document comment polling interval. Defaults to 60000',
       },
       {
+        key: 'groupPolicy',
+        label: 'Group Policy',
+        kind: 'enum',
+        required: true,
+        default: 'open',
+        description:
+          'Controls which DingTalk conversations and document threads may start DWS tasks',
+        options: [
+          { value: 'open', label: 'Open' },
+          { value: 'allowlist', label: 'Allowlist' },
+          { value: 'pairing', label: 'Pairing' },
+          { value: 'disabled', label: 'Disabled' },
+        ],
+      },
+      {
         key: 'senderPolicy',
         label: 'Sender Policy',
         kind: 'enum',
