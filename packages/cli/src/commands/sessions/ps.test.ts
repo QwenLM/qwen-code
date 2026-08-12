@@ -162,12 +162,12 @@ describe('qwen sessions ps', () => {
 
   it('neutralizes control sequences coming from another process record', async () => {
     listLiveSessions.mockResolvedValue([
-      record({ name: 'ev[31mil\r', cwd: '/w/a\nb\tc' }),
+      record({ name: 'ev\x1b[31mil\r', cwd: '/w/a\nb\tc' }),
     ]);
     await run({ json: false });
 
     const row = stdout[1];
-    expect(row).not.toContain('');
+    expect(row).not.toContain('\x1b');
     expect(row).not.toContain('\r');
     expect(row).not.toContain('\n');
     // sanitizeTerminalText deliberately preserves TAB for multi-line

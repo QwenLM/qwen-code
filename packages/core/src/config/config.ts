@@ -1989,6 +1989,7 @@ export class Config {
 
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
+  private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
   private readonly cronEnabled: boolean = true;
@@ -3883,38 +3884,47 @@ export class Config {
     // sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
-    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
-      const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
-      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
-      const cliVersion = this.cliVersion ?? null;
-      const workDir = this.targetDir;
-      const newSessionId = this.sessionId;
-      this.queueRuntimeStatusWrite(async () => {
-        await clearRuntimeStatus(oldPath);
-        await writeRuntimeStatus(newPath, {
-          sessionId: newSessionId,
-          workDir,
-          qwenVersion: cliVersion,
+    if (previousSessionId !== this.sessionId) {
+      if (this.runtimeStatusEnabled) {
+        const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
+        const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+        const cliVersion = this.cliVersion ?? null;
+        const workDir = this.targetDir;
+        const newSessionId = this.sessionId;
+        this.queueRuntimeStatusWrite(async () => {
+          await clearRuntimeStatus(oldPath);
+          await writeRuntimeStatus(newPath, {
+            sessionId: newSessionId,
+            workDir,
+            qwenVersion: cliVersion,
+          });
         });
-        // Keep the machine-wide session registry in step: this PID's
-        // record would otherwise point discovery at the previous
-        // transcript. Keyed by PID, so a swap is a patch rather than a
-        // delete-and-rewrite.
+      }
+      if (this.sessionRegistered) {
+        const workDir = this.targetDir;
+        const newSessionId = this.sessionId;
+        // Keep the session registry in step: this PID's record would
+        // otherwise point discovery at the previous transcript. Keyed by
+        // PID, so a swap is a patch rather than a delete-and-rewrite.
         //
-        // This rides the sidecar's `runtimeStatusEnabled` gate rather
-        // than having its own. Not the same rule — the sidecar is gated
-        // because a short-lived process must not delete a sibling's
-        // file, and PID-keyed records have no such hazard — but the two
-        // lifecycles coincide, and the only divergence (sidecar write
-        // failed, registration succeeded) costs a stale `sessionId` in
-        // `ps --json` until exit.
+        // Gated on registration success rather than the sidecar's
+        // `runtimeStatusEnabled`: the failure domains are independent
+        // (project-local `chats/` dir vs the global dir), and riding the
+        // sidecar gate would skip every patch for a whole session when
+        // the sidecar write failed at startup while registration
+        // succeeded — `ps` would keep advertising the pre-/clear session
+        // id and the pre-/cd directory until exit. The inverse
+        // divergence is safe on its own: `patchSessionRecord` no-ops on
+        // a missing record.
         //
         // `name` is deliberately not patched: it is the handle a user
         // just read out of `qwen sessions ps`, and re-deriving it here
         // would rename a live session on every /clear for no gain — the
         // directory it names has not changed.
-        await patchSessionRecord({ sessionId: newSessionId, cwd: workDir });
-      });
+        this.queueRuntimeStatusWrite(async () => {
+          await patchSessionRecord({ sessionId: newSessionId, cwd: workDir });
+        });
+      }
     }
 
     return this.sessionId;
@@ -3931,6 +3941,17 @@ export class Config {
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
+  }
+
+  /**
+   * Marks this Config as registered in the session registry. Call once
+   * after `registerSession` returned true (from the interactive UI
+   * bootstrap). Gates the mid-session registry patches
+   * (startNewSession, refreshCurrentRuntimeStatus), so they ride the
+   * registry's own success rather than the sidecar's.
+   */
+  markSessionRegistered(): void {
+    this.sessionRegistered = true;
   }
 
   private queueRuntimeStatusWrite(write: () => Promise<void>): void {
@@ -3951,28 +3972,32 @@ export class Config {
   }
 
   private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
-    if (!this.runtimeStatusEnabled) {
+    if (!this.runtimeStatusEnabled && !this.sessionRegistered) {
       return;
     }
     this.queueRuntimeStatusWrite(async () => {
-      await writeRuntimeStatus(
-        this.storage.getRuntimeStatusPath(this.sessionId),
-        {
-          sessionId: this.sessionId,
-          workDir,
-          qwenVersion: this.cliVersion ?? null,
-        },
-      );
-      // The registry's DIRECTORY column is how a user tells two live
-      // sessions apart, so a mid-session directory switch has to reach it
-      // too — otherwise `qwen sessions ps` keeps advertising the folder
-      // this session left. Unlike the /clear path, `name` follows: it is
-      // derived from the directory's basename, which is exactly what
-      // changed here.
-      await patchSessionRecord({
-        cwd: workDir,
-        name: deriveSessionName(workDir, this.sessionId),
-      });
+      if (this.runtimeStatusEnabled) {
+        await writeRuntimeStatus(
+          this.storage.getRuntimeStatusPath(this.sessionId),
+          {
+            sessionId: this.sessionId,
+            workDir,
+            qwenVersion: this.cliVersion ?? null,
+          },
+        );
+      }
+      if (this.sessionRegistered) {
+        // The registry's DIRECTORY column is how a user tells two live
+        // sessions apart, so a mid-session directory switch has to reach
+        // it too — otherwise `qwen sessions ps` keeps advertising the
+        // folder this session left. Unlike the /clear path, `name`
+        // follows: it is derived from the directory's basename, which is
+        // exactly what changed here.
+        await patchSessionRecord({
+          cwd: workDir,
+          name: deriveSessionName(workDir, this.sessionId),
+        });
+      }
     });
     await this.flushRuntimeStatusWrites();
   }

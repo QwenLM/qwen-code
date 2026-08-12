@@ -18,7 +18,10 @@ import {
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
-import { readPidNamespaceId } from '../utils/process-liveness.js';
+import {
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 
 /**
  * Records the paths `readRecord` stats, while the real filesystem does the
@@ -172,6 +175,7 @@ describe('deriveSessionName', () => {
 
 describe('registerSession', () => {
   it('writes a record for this process and lists it back', async () => {
+    const before = Date.now();
     expect(
       await registerSession({
         sessionId: 's1',
@@ -179,6 +183,7 @@ describe('registerSession', () => {
         qwenVersion: '1.2.3',
       }),
     ).toBe(true);
+    const after = Date.now();
 
     const live = await listLiveSessions();
     expect(live).toHaveLength(1);
@@ -190,6 +195,11 @@ describe('registerSession', () => {
       qwenVersion: '1.2.3',
     });
     expect(live[0].name).toMatch(/^app-[0-9a-f]{2}$/);
+    // Bounds pin the epoch: a seconds-vs-milliseconds refactor (or a
+    // constant) ships green through every other assertion here, then
+    // breaks the AGE column and the newest-first ordering for everyone.
+    expect(live[0].startedAt).toBeGreaterThanOrEqual(before);
+    expect(live[0].startedAt).toBeLessThanOrEqual(after);
   });
 
   it('records the writer’s PID namespace identity', async () => {
@@ -287,6 +297,46 @@ describe('registerSession', () => {
     },
   );
 
+  it('refuses to overwrite a record held by another PID namespace', async () => {
+    // Host + devcontainer (or sibling containers) sharing one home can
+    // collide on a PID number; the loser of an overwrite would lose its
+    // record when the winner exits. First writer wins instead, and the
+    // second session stays undiscoverable — degraded but safe.
+    const foreign = liveBody({ pidNs: 1, sessionId: 'theirs' });
+    await writeRaw(`${process.pid}.json`, foreign);
+
+    expect(await registerSession({ sessionId: 'mine', cwd: '/w/app' })).toBe(
+      false,
+    );
+
+    expect(
+      JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+    ).toEqual(foreign);
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'refuses to overwrite a record held by another machine’s boot',
+    async () => {
+      // The initial PID namespace inode is a kernel constant identical on
+      // every Linux machine, so machines sharing a home over NFS pass
+      // the namespace comparison — only the boot prefix separates them.
+      expect(readLocalBootId()).not.toBeNull();
+      const foreign = liveBody({
+        procStart: 'not-this-boot:1',
+        sessionId: 'theirs',
+      });
+      await writeRaw(`${process.pid}.json`, foreign);
+
+      expect(await registerSession({ sessionId: 'mine', cwd: '/w/app' })).toBe(
+        false,
+      );
+
+      expect(
+        JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+      ).toEqual(foreign);
+    },
+  );
+
   it('reports failure instead of throwing when the home dir is unwritable', async () => {
     __setMockGlobalDir(path.join(tmpDir, 'nope', '\0invalid'));
     expect(
@@ -324,6 +374,7 @@ describe('patchSessionRecord', () => {
       cwd: '/w/app',
       qwenVersion: '1.2.3',
     });
+    const [before] = await listLiveSessions();
 
     await patchSessionRecord({ sessionId: 'new', name: 'renamed' });
 
@@ -334,6 +385,10 @@ describe('patchSessionRecord', () => {
       cwd: '/w/app',
       qwenVersion: '1.2.3',
     });
+    // Both production patch sites omit `startedAt`; a re-stamp would
+    // reset the AGE column and the newest-first ordering on every
+    // /clear and /cd.
+    expect(record.startedAt).toBe(before.startedAt);
   });
 
   it('does not create a record for a session that never registered', async () => {
@@ -365,13 +420,17 @@ describe('patchSessionRecord', () => {
     'refuses to merge into a stale record left by a dead previous incarnation of this PID',
     async () => {
       // Session A died without unlinking (SIGKILL); PID P was recycled by
-      // session B whose registration failed. B's patch passes the pid
-      // comparison alone — only the start token proves the record is not
-      // A's, and without it the merge would graft B's fields onto A's
-      // startedAt/version/name and list the chimera as live.
+      // session B whose registration failed. B's patch passes the pid,
+      // namespace and boot checks — same machine — and only the start
+      // token proves the record is not A's; without it the merge would
+      // graft B's fields onto A's startedAt/version/name and list the
+      // chimera as live. (A foreign boot prefix would be refused by the
+      // machine-identity check instead.)
+      const bootId = readLocalBootId();
+      expect(bootId).not.toBeNull();
       const filePath = await writeRaw(
         `${process.pid}.json`,
-        liveBody({ procStart: 'not-this-boot:1', sessionId: 'incarnation-a' }),
+        liveBody({ procStart: `${bootId}:1`, sessionId: 'incarnation-a' }),
       );
 
       await patchSessionRecord({ sessionId: 'incarnation-b' });
@@ -381,6 +440,30 @@ describe('patchSessionRecord', () => {
       });
     },
   );
+
+  it('preserves the identity fields across the patch merge', async () => {
+    // Both production patch sites run in ordinary use; a merge that
+    // drops `procStart` degrades every later liveness check to a bare
+    // kill(pid, 0) — a recycled PID resurrects the record — and a
+    // dropped `pidNs` hides the session behind the namespace guard.
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    const before = JSON.parse(
+      await fs.readFile(getSessionRecordPath(), 'utf8'),
+    ) as Record<string, unknown>;
+    if (process.platform === 'linux') {
+      // Otherwise the procStart equality pin below is vacuous.
+      expect(before['procStart']).not.toBeNull();
+    }
+
+    await patchSessionRecord({ sessionId: 'new', cwd: '/w/b' });
+
+    const after = JSON.parse(
+      await fs.readFile(getSessionRecordPath(), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(after['procStart']).toBe(before['procStart']);
+    expect(after['pidNs']).toBe(before['pidNs']);
+    expect(after['pid']).toBe(process.pid);
+  });
 
   it('still patches a record written without a start token', async () => {
     // Tokenless platforms must keep working through the pid comparison —
@@ -401,6 +484,35 @@ describe('patchSessionRecord', () => {
     const stat = await fs.stat(getSessionRecordPath());
     expect(stat.mode & 0o777).toBe(0o600);
   });
+
+  itPosixPatch(
+    'replaces a symlinked record instead of patching through it',
+    async () => {
+      // Mirror of the registration symlink test: the patch path is
+      // written on every /clear and /cd, so a dropped `noFollow` would
+      // redirect those writes through a pre-planted link just the same.
+      await registerSession({ sessionId: 's1', cwd: '/w/app' });
+      const outside = path.join(tmpDir, 'outside.json');
+      await fs.writeFile(
+        outside,
+        JSON.stringify(liveBody({ sessionId: 'outside' })),
+      );
+      await fs.rm(getSessionRecordPath());
+      await fs.symlink(outside, getSessionRecordPath());
+
+      await patchSessionRecord({ sessionId: 'patched' });
+
+      const outsideRecord = JSON.parse(
+        await fs.readFile(outside, 'utf8'),
+      ) as Record<string, unknown>;
+      expect(outsideRecord['sessionId']).toBe('outside');
+      expect((await fs.lstat(getSessionRecordPath())).isSymbolicLink()).toBe(
+        false,
+      );
+      const [record] = await listLiveSessions();
+      expect(record?.sessionId).toBe('patched');
+    },
+  );
 });
 
 describe('unregisterSession', () => {
@@ -411,6 +523,41 @@ describe('unregisterSession', () => {
     });
     await unregisterSession();
     expect(await listLiveSessions()).toEqual([]);
+  });
+
+  it('removes only this process’s record, leaving siblings intact', async () => {
+    // Plant a live sibling: a broadened deletion ("also clean up stale
+    // records on exit") would wipe it too, and registration is one-shot
+    // — the victim would stay invisible in `ps` for its whole lifetime.
+    await writeRaw(
+      `${process.ppid}.json`,
+      liveBody({
+        pid: process.ppid,
+        sessionId: 's-sibling',
+        startedAt: Date.now(),
+      }),
+    );
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+
+    await unregisterSession();
+
+    await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
+    const live = await listLiveSessions();
+    expect(live.map((r) => r.sessionId)).toEqual(['s-sibling']);
+  });
+
+  it('leaves a foreign-identity record at its path alone', async () => {
+    // The path is keyed by PID alone: the record sitting there may
+    // belong to a live session in another namespace that shares the
+    // number. Unlinking it would hide that session until it restarts.
+    const foreign = liveBody({ pidNs: 1, sessionId: 'theirs' });
+    await writeRaw(`${process.pid}.json`, foreign);
+
+    await unregisterSession();
+
+    expect(
+      JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+    ).toEqual(foreign);
   });
 
   it('is a no-op when nothing was registered', async () => {
@@ -445,11 +592,15 @@ describe('listLiveSessions', () => {
     'treats a recycled PID as stale',
     async () => {
       // Our own PID is alive, but the recorded start token belongs to a
-      // different process — so the record describes a session that is gone.
+      // different process on THIS boot — so the record describes a
+      // session that is gone. (A foreign boot prefix would model another
+      // machine, which is skipped rather than swept.)
+      const bootId = readLocalBootId();
+      expect(bootId).not.toBeNull();
       const filePath = await writeRaw(
         `${process.pid}.json`,
         liveBody({
-          procStart: 'not-this-boot:1',
+          procStart: `${bootId}:1`,
           sessionId: 's-recycled',
           cwd: '/w/app',
           name: 'app-aa',
@@ -488,6 +639,42 @@ describe('listLiveSessions', () => {
 
     expect(await listLiveSessions()).toEqual([]);
     await expect(fs.stat(filePath)).resolves.toBeDefined();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'neither lists nor sweeps a record from another machine’s boot',
+    async () => {
+      // Same initial-namespace inode on every Linux machine, so the
+      // namespace guard cannot separate two machines sharing one home —
+      // the boot prefix must. The recorded PID is dead on this side, so
+      // without the guard the sweep unlinks a live session's record on
+      // the other machine.
+      expect(readLocalBootId()).not.toBeNull();
+      const filePath = await writeRaw(
+        `${DEAD_PID}.json`,
+        liveBody({ pid: DEAD_PID, procStart: 'not-this-boot:1' }),
+      );
+
+      expect(await listLiveSessions()).toEqual([]);
+      await expect(fs.stat(filePath)).resolves.toBeDefined();
+    },
+  );
+
+  it('sweeps registration temp files orphaned by a crashed write', async () => {
+    // A writer that dies between the temp write and the rename leaves
+    // the temp behind; nothing else ever removes it.
+    const orphan = await writeRaw(`${process.pid}.json.0123456789ab.tmp`, '{}');
+    const stale = new Date(Date.now() - 6 * 60 * 1000);
+    await fs.utimes(orphan, stale, stale);
+
+    // A fresh temp may belong to a writer mid-rename — the age check
+    // must spare it.
+    const fresh = await writeRaw(`${process.pid}.json.fedcba987654.tmp`, '{}');
+
+    await listLiveSessions();
+
+    await expect(fs.stat(orphan)).rejects.toThrow();
+    await expect(fs.stat(fresh)).resolves.toBeDefined();
   });
 
   it('ignores files that are not <pid>.json', async () => {

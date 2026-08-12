@@ -108,6 +108,13 @@ describe('startInteractiveUI session registration', () => {
     await start();
     expect(registerCleanup).toHaveBeenCalledTimes(2);
     expect(unregisterSession).not.toHaveBeenCalled();
+    // Armed is not the contract — invoke the armed callback: a future
+    // edit emptying its body would pass the call-count pins while every
+    // session's record survives exit and `ps` lists it as running.
+    const armUnregister = registerCleanup.mock
+      .calls[0]?.[0] as () => Promise<void>;
+    await armUnregister();
+    expect(unregisterSession).toHaveBeenCalledTimes(1);
 
     vi.clearAllMocks();
     registerSession.mockResolvedValue(false);

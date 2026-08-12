@@ -286,7 +286,7 @@ export async function startInteractiveUI(
       config.isTelemetryInitializationDeferred(),
   });
 
-  // Announce this session in the machine-wide registry so sibling
+  // Announce this session in the session registry so sibling
   // sessions can discover it (`qwen sessions ps`). Unlike the runtime.json
   // sidecar above, this record is unlinked on exit — the registry's whole
   // value is that presence means "running right now".
@@ -310,6 +310,10 @@ export async function startInteractiveUI(
       // Only arm cleanup for a record that exists; registration fails on
       // a read-only home, and there is then nothing to unlink.
       registerCleanup(() => unregisterSession());
+      // Arms the mid-session registry patches (`/clear`, `/cd`) on this
+      // Config; without it the record would keep advertising the values
+      // the session started with.
+      config.markSessionRegistered();
     }
   } catch (err) {
     debugLogger.debug(`session registration skipped: ${String(err)}`);

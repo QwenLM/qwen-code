@@ -185,6 +185,9 @@ describe('Config.startNewSession session-registry patch', () => {
       cwd: tmpDir,
       qwenVersion: '0.0.0-test',
     });
+    config.markSessionRegistered();
+
+    const [before] = await listLiveSessions();
 
     config.startNewSession(sessionB);
 
@@ -198,6 +201,35 @@ describe('Config.startNewSession session-registry patch', () => {
     expect(after).not.toBeNull();
     expect(after!.pid).toBe(process.pid);
     expect(after!.cwd).toBe(tmpDir);
+    // `name` is deliberately not patched on /clear: deriveSessionName
+    // hashes the session id into the suffix, so re-deriving it would
+    // rename the session a user just read out of `ps`.
+    expect(after!.name).toBe(before!.name);
+  });
+
+  it('patches the registry even when the sidecar write failed at startup', async () => {
+    // The two failure domains are independent: the sidecar lives in the
+    // project's chats/ dir, the registry in the global dir. When the
+    // sidecar write fails but registration succeeds, the patches must
+    // keep going — otherwise `ps` shows stale values until exit.
+    const sessionA = 'aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa';
+    const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
+    const config = makeConfig(sessionA);
+    // No markRuntimeStatusEnabled(): models the failed sidecar write.
+    await registerSession({
+      sessionId: sessionA,
+      cwd: tmpDir,
+      qwenVersion: '0.0.0-test',
+    });
+    config.markSessionRegistered();
+
+    config.startNewSession(sessionB);
+
+    const after = await waitFor(async () => {
+      const [record] = await listLiveSessions();
+      return record?.sessionId === sessionB ? record : null;
+    });
+    expect(after).not.toBeNull();
   });
 });
 

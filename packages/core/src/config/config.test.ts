@@ -6056,6 +6056,7 @@ describe('Server Config (config.ts)', () => {
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
+    config.markSessionRegistered();
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -6074,11 +6075,22 @@ describe('Server Config (config.ts)', () => {
       return checked === oldRuntimeStatusPath || checked === newDir;
     });
 
+    // `toHaveBeenCalledWith` records the call the moment the promise is
+    // created, so it cannot distinguish an awaited patch from a
+    // fire-and-forget one; the settlement log pins that the registry
+    // update completes before `relocateWorkingDirectory` resolves — the
+    // user-visible guarantee is that `ps` already shows the new
+    // directory once `/cd` returns.
+    const settled: string[] = [];
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settled.push('patch');
+      });
 
     await config.relocateWorkingDirectory(newDir);
+    settled.push('relocated');
 
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldRuntimeStatusPath,
@@ -6096,6 +6108,7 @@ describe('Server Config (config.ts)', () => {
       cwd: newDir,
       name: sessionRegistry.deriveSessionName(newDir, sessionId),
     });
+    expect(settled).toEqual(['patch', 'relocated']);
 
     writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();

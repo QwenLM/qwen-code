@@ -25,7 +25,9 @@ import { isNodeError } from './errors.js';
  * `EPERM` (and Windows' `EACCES`) means the process exists but is owned
  * by another user — that is still alive, and reporting it as dead would
  * let one user's session sweep another's record out of a shared registry
- * directory.
+ * directory. The zombie exclusion still applies on that path: the kernel
+ * permission-checks signal 0 regardless of the target's state, so a
+ * cross-user zombie reaches the catch too.
  */
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -38,7 +40,14 @@ export function isPidAlive(pid: number): boolean {
     // listed for its entire lifetime.
     return !isZombie(pid);
   } catch (err) {
-    return isNodeError(err) && (err.code === 'EPERM' || err.code === 'EACCES');
+    // `/proc/<pid>/stat` is world-readable by default, so the zombie
+    // check works here as well; where it is not readable (hidepid),
+    // `isZombie` degrades to false and behavior is unchanged.
+    return (
+      isNodeError(err) &&
+      (err.code === 'EPERM' || err.code === 'EACCES') &&
+      !isZombie(pid)
+    );
   }
 }
 
@@ -99,7 +108,7 @@ export function readProcStartToken(pid: number): string | null {
   if (process.platform !== 'linux') return null;
   if (!Number.isInteger(pid) || pid <= 0) return null;
 
-  const bootId = readBootId();
+  const bootId = readLocalBootId();
   if (bootId === null) return null;
 
   let raw: string;
@@ -135,10 +144,15 @@ export function readProcStartToken(pid: number): string | null {
  * first-read moments (startup registration, first concurrent sweep) are
  * fd-pressure moments, and pinning the cache to a transient EMFILE would
  * silently disable PID-reuse protection for the whole process lifetime.
+ *
+ * Exported for the session registry: two machines sharing one home can
+ * collide on PID number and even on PID-namespace inode (the initial
+ * namespace inode is a kernel constant), so a record's boot-id prefix
+ * is the only identity that proves which machine wrote it.
  */
 let cachedBootId: string | undefined;
 
-function readBootId(): string | null {
+export function readLocalBootId(): string | null {
   if (cachedBootId !== undefined) return cachedBootId;
   try {
     const value = fs

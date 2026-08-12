@@ -126,6 +126,21 @@ describe('isPidAlive', () => {
     expect(isPidAlive(4242)).toBe(false);
   });
 
+  it('treats another user’s zombie as dead despite EPERM', async () => {
+    // The kernel permission-checks signal 0 regardless of the target's
+    // state, so a cross-user zombie reaches the EPERM catch; without the
+    // zombie check there it stays listed until its parent reaps it.
+    const { mod } = await withFakeProc({
+      '/proc/4242/stat': statLine('qwen', '987654', 'Z'),
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('operation not permitted'), {
+        code: 'EPERM',
+      });
+    });
+    expect(mod.isPidAlive(4242)).toBe(false);
+  });
+
   // On Windows the "process exists but is owned by another user" errno is
   // EACCES, not EPERM; missing it there would let a sweep delete a live
   // session's record.
@@ -140,12 +155,25 @@ describe('isPidAlive', () => {
     // A zombie still answers kill(pid, 0): the PID exists until the parent
     // reaps it. Only the state field of /proc/<pid>/stat proves it has
     // already exited, so without the Z check the record stays listed for
-    // the parent's whole lifetime.
+    // the parent's whole lifetime. The comm carries a ')' so the
+    // lastIndexOf(')') anchoring is part of what this test pins.
     const { mod } = await withFakeProc({
-      '/proc/4242/stat': statLine('qwen', '987654', 'Z'),
+      '/proc/4242/stat': statLine('we ) ird', '987654', 'Z'),
     });
     vi.spyOn(process, 'kill').mockImplementation(() => true);
     expect(mod.isPidAlive(4242)).toBe(false);
+  });
+
+  it('does not read a zombie state out of a comm containing ")"', async () => {
+    // Anchoring on the FIRST ')' parses the rest of the comm as the
+    // state field, and a comm tail starting with 'Z' then marks a live
+    // process as a zombie — the sweep would delete a live session's
+    // record.
+    const { mod } = await withFakeProc({
+      '/proc/4242/stat': statLine('a)Zx', '987654'),
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(mod.isPidAlive(4242)).toBe(true);
   });
 
   it('keeps a live process whose /proc state cannot be read', async () => {
@@ -317,5 +345,20 @@ describe('isSameProcess', () => {
     expect(mod.isSameProcess(process.pid, 'a-token-we-cannot-compare')).toBe(
       true,
     );
+  });
+
+  it('rejects a zombie even when its start token still matches', async () => {
+    // A zombie's /proc/<pid>/stat persists with its original starttime
+    // until the parent reaps it, so the recorded token still agrees —
+    // only the liveness check (with its Z exclusion) can catch it. This
+    // pins the liveness-before-token ordering: a regression that
+    // compares tokens first (or folds the two /proc reads into one and
+    // drops the Z exclusion) keeps the zombie listed.
+    const { mod } = await withFakeProc({
+      [BOOT_ID_PATH]: `${FAKE_BOOT_ID}\n`,
+      '/proc/4242/stat': statLine('qwen', '987654', 'Z'),
+    });
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(mod.isSameProcess(4242, `${FAKE_BOOT_ID}:987654`)).toBe(false);
   });
 });
