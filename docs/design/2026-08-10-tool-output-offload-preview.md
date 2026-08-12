@@ -127,9 +127,8 @@ unbounded retention or data exposure):
 - Oversized results, counted against each result's own tool budget (resolved
   from the tool registry by canonicalized `functionResponse.name`, mirroring
   the scheduler; tools declaring none fall back to the configured global
-  threshold). Results already carrying a truncation marker (prefix, in-body
-  marker, or `<persisted-output>` stub) are skipped — a layer bounded them —
-  and the remaining results are only flagged beyond the combined-pass 2x
+  threshold). Results already carrying a truncation sentinel (prefix or
+  `<persisted-output>` stub) are skipped — a layer bounded them — and the remaining results are only flagged beyond the combined-pass 2x
   tolerance plus a small envelope slack, matching the headroom the scheduler
   itself allows. A retained result past that bound means a truncation layer
   was bypassed — the counter doubles as a regression alarm.
