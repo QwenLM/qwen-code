@@ -33,6 +33,8 @@ const FILE_PATH_WITH_LINES_REGEX =
 const KNOWN_FILE_EXTENSIONS =
   /\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|ya?ml|toml|xml|html|vue|svelte)$/i;
 
+const FILE_URI_PATTERN = /^file:\/\//i;
+
 const safeDecodePath = (value: string): string => {
   try {
     return decodeURIComponent(value);
@@ -42,35 +44,38 @@ const safeDecodePath = (value: string): string => {
 };
 
 const normalizeExplicitFileLink = (raw: string): string => {
-  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
+  const fragmentIndex = raw.indexOf('#');
+  const rawPath = fragmentIndex >= 0 ? raw.slice(0, fragmentIndex) : raw;
+  const fragment = fragmentIndex >= 0 ? raw.slice(fragmentIndex + 1) : '';
+  const decodedPath = safeDecodePath(rawPath).replace(/\\/g, '/');
 
-  // file:// URIs (e.g. from vscode.Uri.file().toString()) encode special
-  // characters like # as %23 in the path component. After decoding the
-  // full URI we can strip the scheme and return the filesystem path
-  // directly — no fragment splitting needed, because any # in the
-  // decoded result is a literal filename character, not an anchor.
-  if (/^file:\/\//i.test(decoded)) {
-    let filePath = decoded.replace(/^file:\/\/\//i, '');
-    // On Unix the path should start with /
-    if (!/^[a-zA-Z]:/.test(filePath) && !filePath.startsWith('/')) {
-      filePath = '/' + filePath;
+  // file:// URIs encode path characters separately from line fragments.
+  if (FILE_URI_PATTERN.test(decodedPath)) {
+    const uriPath = decodedPath.replace(FILE_URI_PATTERN, '');
+    let filePath: string;
+    if (uriPath.startsWith('/')) {
+      filePath = uriPath.slice(1);
+      if (!/^[a-zA-Z]:/.test(filePath)) {
+        filePath = '/' + filePath;
+      }
+    } else {
+      // Preserve the authority component for UNC paths.
+      filePath = `//${uriPath}`;
     }
-    return filePath;
+    const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
+    return lineMatch ? `${filePath}:${parseInt(lineMatch[1], 10)}` : filePath;
   }
 
-  const hashIndex = decoded.indexOf('#');
-  if (hashIndex < 0) {
-    return decoded;
+  if (!fragment) {
+    return decodedPath;
   }
 
-  const base = decoded.slice(0, hashIndex);
-  const fragment = decoded.slice(hashIndex + 1);
   const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
   if (lineMatch) {
-    return `${base}:${parseInt(lineMatch[1], 10)}`;
+    return `${decodedPath}:${parseInt(lineMatch[1], 10)}`;
   }
 
-  return base;
+  return decodedPath;
 };
 
 /**
@@ -98,7 +103,7 @@ const createMarkdownInstance = (): MarkdownIt => {
 
   const defaultValidateLink = md.validateLink;
   md.validateLink = (url: string): boolean =>
-    /^file:\/\//i.test(url) || defaultValidateLink(url);
+    FILE_URI_PATTERN.test(url) || defaultValidateLink(url);
 
   return md;
 };
@@ -224,7 +229,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         }
       }
 
-      if (/^(https?|mailto|ftp|data):/i.test(href)) {
+      if (
+        /^(https?|mailto|ftp|data):/i.test(href) ||
+        FILE_URI_PATTERN.test(href)
+      ) {
         return;
       }
 
@@ -318,12 +326,27 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     return container.innerHTML;
   };
 
+  const removeFileUriImages = (html: string): string => {
+    if (typeof document === 'undefined') {
+      return html;
+    }
+
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    for (const image of Array.from(container.querySelectorAll('img'))) {
+      if (FILE_URI_PATTERN.test(image.getAttribute('src') || '')) {
+        image.replaceWith(document.createTextNode(image.alt));
+      }
+    }
+    return container.innerHTML;
+  };
+
   /**
    * Render markdown content to HTML (memoized)
    */
   const renderedHtml = useMemo(() => {
     try {
-      let html = md.render(content);
+      let html = removeFileUriImages(md.render(content));
 
       if (enableFileLinks) {
         html = processFilePaths(html);
@@ -372,7 +395,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       const href = anyAnchor.getAttribute('href') || '';
 
       // Handle file:// URI links (e.g. from /export success messages).
-      if (/^file:\/\//i.test(href) && onFileClick) {
+      if (FILE_URI_PATTERN.test(href) && onFileClick) {
         const candidate = normalizeExplicitFileLink(href);
         e.preventDefault();
         e.stopPropagation();
@@ -381,7 +404,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       }
 
       // Skip external links — let browser handle them normally
-      if (/^(https?|mailto|ftp|data):/i.test(href)) {
+      if (
+        /^(https?|mailto|ftp|data):/i.test(href) ||
+        FILE_URI_PATTERN.test(href)
+      ) {
         return;
       }
 

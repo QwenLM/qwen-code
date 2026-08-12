@@ -46,10 +46,7 @@ vi.mock('node:url', async () => {
   return {
     ...actual,
     pathToFileURL: (filePath: string) => {
-      if (
-        process.platform !== 'win32' &&
-        filePath === 'D:\\aplikacja\\file.md'
-      ) {
+      if (process.platform !== 'win32' && /^[a-zA-Z]:\\/.test(filePath)) {
         return actual.pathToFileURL(filePath, { windows: true });
       }
       return actual.pathToFileURL(filePath);
@@ -525,855 +522,235 @@ describe('SessionMessageHandler', () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
-      }),
-      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn().mockResolvedValue({
-        id: 'session-1',
-        title: 'Existing session',
-        messages: [
-          { role: 'user', content: 'first', timestamp: 1 },
-          { role: 'assistant', content: 'first reply', timestamp: 2 },
-          { role: 'user', content: 'second', timestamp: 3 },
-        ],
-        createdAt: 1,
-        updatedAt: 3,
-      }),
-      addMessage: vi.fn(),
-      replaceMessages: vi.fn().mockResolvedValue(true),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: 1,
-      },
-    });
-
-    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
-    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
-      'session-1',
-      1,
-    );
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'conversationRewound',
-      data: { targetTurnIndex: 1 },
-    });
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      { type: 'text', text: 'edited prompt' },
-    ]);
-    expect(
-      conversationStore.truncateFromUserTurn.mock.invocationCallOrder[0],
-    ).toBeLessThan(agentManager.rewindSession.mock.invocationCallOrder[0]);
-    expect(agentManager.rewindSession.mock.invocationCallOrder[0]).toBeLessThan(
-      agentManager.sendMessage.mock.invocationCallOrder[0],
-    );
-  });
-
-  it('restores the edited conversation snapshot when replacement send fails', async () => {
-    mockProcessImageAttachments.mockResolvedValue({
-      formattedText: 'edited prompt',
-      displayText: 'edited prompt',
-      savedImageCount: 0,
-      promptImages: [],
-    });
-
-    const originalConversation = {
-      id: 'session-1',
-      title: 'Existing session',
-      messages: [
-        { role: 'user' as const, content: 'first', timestamp: 1 },
-        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
-        { role: 'user' as const, content: 'second', timestamp: 3 },
-        { role: 'assistant' as const, content: 'second reply', timestamp: 4 },
-      ],
-      createdAt: 1,
-      updatedAt: 4,
-    };
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
-      }),
-      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
-      sendMessage: vi.fn().mockRejectedValue(new Error('send failed')),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn().mockResolvedValue(originalConversation),
-      addMessage: vi.fn(),
-      replaceMessages: vi.fn().mockResolvedValue(true),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: 1,
-      },
-    });
-
-    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: [{ text: 'first' }] },
-    ]);
-    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
-      'session-1',
-      originalConversation.messages,
-    );
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'conversationLoaded',
-      data: originalConversation,
-    });
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: 'send failed' },
-    });
-  });
-
-  it('continues edits with ACP-only rewind when no local snapshot exists', async () => {
-    mockProcessImageAttachments.mockResolvedValue({
-      formattedText: 'edited prompt',
-      displayText: 'edited prompt',
-      savedImageCount: 0,
-      promptImages: [],
-    });
-
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
-      }),
-      restoreSessionHistory: vi.fn(),
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-      getSessionMessages: vi.fn().mockResolvedValue([]),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn().mockResolvedValue(null),
-      addMessage: vi.fn(),
-      replaceMessages: vi.fn(),
-      truncateFromUserTurn: vi.fn(),
-      upsertConversation: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: 1,
-      },
-    });
-
-    expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
-    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'conversationRewound',
-      data: { targetTurnIndex: 1 },
-    });
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      { type: 'text', text: 'edited prompt' },
-    ]);
-    expect(sendToWebView).not.toHaveBeenCalledWith({
-      type: 'sessionTitleUpdated',
-      data: {
-        sessionId: 'session-1',
-        title: 'edited prompt',
-      },
-    });
-    expect(sendToWebView).not.toHaveBeenCalledWith({
-      type: 'error',
-      data: expect.objectContaining({
-        message: 'Failed to capture conversation state before editing.',
-      }),
-    });
-  });
-
-  it('recovers a missing edit snapshot from persisted session messages', async () => {
-    mockProcessImageAttachments.mockResolvedValue({
-      formattedText: 'edited prompt',
-      displayText: 'edited prompt',
-      savedImageCount: 0,
-      promptImages: [],
-    });
-
-    const persistedMessages = [
-      { role: 'user' as const, content: 'first', timestamp: 1 },
-      { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
-      { role: 'user' as const, content: 'second', timestamp: 3 },
-    ];
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
-      }),
-      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-      getSessionMessages: vi.fn().mockResolvedValue(persistedMessages),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn().mockResolvedValue(null),
-      addMessage: vi.fn(),
-      replaceMessages: vi.fn(),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
-      upsertConversation: vi.fn().mockResolvedValue(undefined),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: 1,
-      },
-    });
-
-    expect(agentManager.getSessionMessages).toHaveBeenCalledWith('session-1');
-    expect(conversationStore.upsertConversation).toHaveBeenCalledWith({
-      id: 'session-1',
-      title: 'first',
-      messages: persistedMessages,
-      createdAt: 1,
-      updatedAt: 3,
-    });
-    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
-      'session-1',
-      1,
-    );
-    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      { type: 'text', text: 'edited prompt' },
-    ]);
-    expect(sendToWebView).not.toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: 'Failed to capture conversation state before editing.' },
-    });
-  });
-
-  it('restores the edited conversation snapshot when ACP rewind fails', async () => {
-    mockProcessImageAttachments.mockResolvedValue({
-      formattedText: 'edited prompt',
-      displayText: 'edited prompt',
-      savedImageCount: 0,
-      promptImages: [],
-    });
-
-    const originalConversation = {
-      id: 'session-1',
-      title: 'Existing session',
-      messages: [
-        { role: 'user' as const, content: 'first', timestamp: 1 },
-        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
-        { role: 'user' as const, content: 'second', timestamp: 3 },
-      ],
-      createdAt: 1,
-      updatedAt: 3,
-    };
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockRejectedValue(new Error('rewind failed')),
-      restoreSessionHistory: vi.fn(),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn().mockResolvedValue(originalConversation),
-      addMessage: vi.fn(),
-      replaceMessages: vi.fn().mockResolvedValue(true),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: 1,
-      },
-    });
-
-    expect(agentManager.restoreSessionHistory).not.toHaveBeenCalled();
-    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
-      'session-1',
-      originalConversation.messages,
-    );
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: 'rewind failed' },
-    });
-  });
-
-  it('restores store and ACP history when saving the edited user message fails', async () => {
-    mockProcessImageAttachments.mockResolvedValue({
-      formattedText: 'edited prompt',
-      displayText: 'edited prompt',
-      savedImageCount: 0,
-      promptImages: [],
-    });
-
-    const historyBeforeRewind = [{ role: 'user', parts: [{ text: 'first' }] }];
-    const originalConversation = {
-      id: 'session-1',
-      title: 'Existing session',
-      messages: [
-        { role: 'user' as const, content: 'first', timestamp: 1 },
-        { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
-        { role: 'user' as const, content: 'second', timestamp: 3 },
-      ],
-      createdAt: 1,
-      updatedAt: 3,
-    };
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({ historyBeforeRewind }),
-      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn().mockResolvedValue(originalConversation),
-      addMessage: vi.fn().mockRejectedValue(new Error('storage failed')),
-      replaceMessages: vi.fn().mockResolvedValue(true),
-      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: 1,
-      },
-    });
-
-    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith(
-      historyBeforeRewind,
-    );
-    expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
-      'session-1',
-      originalConversation.messages,
-    );
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: 'storage failed' },
-    });
-  });
-
-  it('rejects edit submissions with invalid target turn indexes', async () => {
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      rewindSession: vi.fn(),
-      restoreSessionHistory: vi.fn(),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-      replaceMessages: vi.fn(),
-      truncateFromUserTurn: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'editMessage',
-      data: {
-        text: 'edited prompt',
-        targetTurnIndex: -1,
-      },
-    });
-
-    expect(agentManager.rewindSession).not.toHaveBeenCalled();
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-    expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: 'Invalid message edit target.' },
-    });
-  });
-
-  it('keeps currentConversationId aligned with the archived sessionId when session/load falls back to a new ACP session', async () => {
-    const archivedSessionId = 'archived-session';
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'old-acp-session',
-      getSessionList: vi
-        .fn()
-        .mockResolvedValue([{ id: archivedSessionId, cwd: '/workspace' }]),
-      loadSessionViaAcp: vi
-        .fn()
-        .mockRejectedValue(new Error('session not found on server')),
-      getSessionMessages: vi.fn().mockResolvedValue([]),
-      createNewSession: vi.fn().mockResolvedValue('new-acp-session'),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      null,
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'switchQwenSession',
-      data: { sessionId: archivedSessionId },
-    });
-
-    // Backend-tracked current session must match the sessionId the webview sees,
-    // otherwise rename/delete/title-update flows will target the wrong session
-    // during the fallback window (see PR #3093 review).
-    expect(handler.getCurrentConversationId()).toBe(archivedSessionId);
-    expect(agentManager.createNewSession).toHaveBeenCalled();
-    expect(sendToWebView).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'qwenSessionSwitched',
-        data: expect.objectContaining({ sessionId: archivedSessionId }),
-      }),
-    );
-  });
-
-  it('forces a fresh ACP session when the webview requests a new session', async () => {
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      createNewSession: vi.fn().mockResolvedValue('session-2'),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'conversation-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'newQwenSession',
-    });
-
-    expect(handler.getCurrentConversationId()).toBeNull();
-    expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
-      forceNew: true,
-    });
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'conversationCleared',
-      data: {},
-    });
-  });
-
-  it('intercepts /export html and uses the VSCode export flow instead of sending a prompt', async () => {
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      getSessionList: vi
-        .fn()
-        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: '/export html',
-      },
-    });
-
-    expect(mockExportSessionToFile).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      cwd: '/workspace',
-      format: 'html',
-    });
-    expect(conversationStore.addMessage).not.toHaveBeenCalled();
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'message',
-      data: expect.objectContaining({
-        role: 'assistant',
-        content:
-          'Session exported to HTML: [export.html](file:///workspace/export.html)',
-      }),
-    });
-  });
-
-  it('prefers the active ACP session id over the local conversation id when exporting', async () => {
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      getSessionList: vi
-        .fn()
-        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'conv_local_123',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: '/export html',
-      },
-    });
-
-    expect(mockExportSessionToFile).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      cwd: '/workspace',
-      format: 'html',
-    });
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-  });
-
-  it('reports bare /export as a missing subcommand instead of exporting', async () => {
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      getSessionList: vi.fn(),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: '/export',
-      },
-    });
-
-    expect(mockExportSessionToFile).not.toHaveBeenCalled();
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: "Command '/export' requires a subcommand." },
-    });
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-  });
-
-  it('reports export failures back to the user', async () => {
-    mockExportSessionToFile.mockRejectedValue(new Error('disk full'));
-
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      getSessionList: vi
-        .fn()
-        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: '/export md',
-      },
-    });
-
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'error',
-      data: { message: 'Failed to export session: disk full' },
-    });
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
-  });
-
-  it('encodes exported file links before rendering markdown', async () => {
-    mockExportSessionToFile.mockResolvedValue({
-      filename: 'export (#1).html',
-      uri: { fsPath: '/workspace/export (#1).html' },
-    });
-
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      getSessionList: vi
-        .fn()
-        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: '/export html',
-      },
-    });
-
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'message',
-      data: expect.objectContaining({
-        role: 'assistant',
-        content:
-          'Session exported to HTML: [export (#1).html](file:///workspace/export%20(%231).html)',
-      }),
-    });
-  });
-
-  describe('handleSetModel вЂ” discontinued model defensive validation (Issue #3745)', () => {
-    it('rejects a non-runtime Qwen OAuth model and surfaces an error', async () => {
-      const setModelFromUi = vi.fn();
-      const agentManager = {
-        isConnected: true,
-        currentSessionId: 'session-1',
-        setModelFromUi,
-      };
-      const sendToWebView = vi.fn();
-      const handler = new SessionMessageHandler(
-        agentManager as never,
-        {} as never,
-        null,
-        sendToWebView,
-      );
-
-      await handler.handle({
-        type: 'setModel',
-        data: { modelId: 'qwen3-coder-plus(qwen-oauth)' },
-      });
-
-      expect(setModelFromUi).not.toHaveBeenCalled();
-      expect(mockShowErrorMessage).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Qwen OAuth free tier was discontinued on 2026-04-15',
-        ),
-      );
-      expect(sendToWebView).toHaveBeenCalledWith({
-        type: 'error',
-        data: expect.objectContaining({
-          message: expect.stringContaining('discontinued'),
-        }),
-      });
-    });
-
-    it('allows a runtime Qwen OAuth snapshot to pass through', async () => {
-      const setModelFromUi = vi.fn().mockResolvedValue(undefined);
-      const agentManager = {
-        isConnected: true,
-        currentSessionId: 'session-1',
-        setModelFromUi,
-      };
-      const sendToWebView = vi.fn();
-      const handler = new SessionMessageHandler(
-        agentManager as never,
-        {} as never,
-        null,
-        sendToWebView,
-      );
-
-      await handler.handle({
-        type: 'setModel',
-        data: {
-          modelId: '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
-        },
-      });
-
-      expect(setModelFromUi).toHaveBeenCalledWith(
-        '$runtime|qwen-oauth|qwen3-coder-plus(qwen-oauth)',
-      );
-      expect(mockShowErrorMessage).not.toHaveBeenCalled();
-    });
-
-    it('passes through other-provider models (regression вЂ” no false positives)', async () => {
-      const setModelFromUi = vi.fn().mockResolvedValue(undefined);
-      const agentManager = {
-        isConnected: true,
-        currentSessionId: 'session-1',
-        setModelFromUi,
-      };
-      const sendToWebView = vi.fn();
-      const handler = new SessionMessageHandler(
-        agentManager as never,
-        {} as never,
-        null,
-        sendToWebView,
-      );
-
-      await handler.handle({
-        type: 'setModel',
-        data: { modelId: 'gpt-4(openai)' },
-      });
-
-      expect(setModelFromUi).toHaveBeenCalledWith('gpt-4(openai)');
-      expect(mockShowErrorMessage).not.toHaveBeenCalled();
-    });
-  });
-  it('preserves the drive-letter colon in Windows exported file links', async () => {
-    mockExportSessionToFile.mockResolvedValue({
-      filename: 'file.md',
-      uri: { fsPath: 'D:\\aplikacja\\file.md' },
-    });
-
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      getSessionList: vi
-        .fn()
-        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
-      sendMessage: vi.fn(),
-    };
-    const conversationStore = {
-      createConversation: vi.fn(),
-      getConversation: vi.fn(),
-      addMessage: vi.fn(),
-    };
-    const sendToWebView = vi.fn();
-
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      'session-1',
-      sendToWebView,
-    );
-
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: '/export md',
-      },
-    });
-
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'message',
-      data: expect.objectContaining({
-        role: 'assistant',
-        content:
-          'Session exported to MD: [file.md](file:///D:/aplikacja/file.md)',
-      }),
-    });
-  });
-});
+      rewindSessionЯќx¶‰ћЛkєwµзH[ШЪФ›ШЩ\ЬТ[XYЩP]XЪY[ќЛ›[ШЪФ™\ЫЫ™Y[YJВ€›Ь›X]Y^€	ЩY]Y›Ы\	Л€\Ь^U^€	ЩY]Y›Ы\	Л€Ш]™Y[XYЩPЫЭ[ќ€€›Ы\[XYЩ\О€ЧK€JNВ‚€ЫЫњЭ\ЭЬћP™Y›Ь™T™]Ъ[™HЮИ›ЫN€	Э\Щ\‰Л\ќО€ЮИ^€	Щљ\њЭ	ИWHWNВ€ЫЫњЭЬљYЪ[[ЫЫќ™\њШ][Ы€HВ€Y€	ЬЩ\ЬЪ[Ы‹LIЛ€]N€	С^\Э[™ИЩ\ЬЪ[Ы‰Л€Y\ЬШYЩ\О€В€И›ЫN€	Э\Щ\‰И\ИЫЫњЭЫЫќ[ќ€	Щљ\њЭ	Л[Y\Э[\€HK€И›ЫN€	Ш\ЬЪ\Э[ќ	И\ИЫЫњЭЫЫќ[ќ€	Щљ\њЭ™\IЛ[Y\Э[\€€K€И›ЫN€	Э\Щ\‰И\ИЫЫњЭЫЫќ[ќ€	ЬЩXЫЫ™	Л[Y\Э[\€ИK€K€Ь™X]Y]€K€\]Y]€Л€NВ€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€™]Ъ[™Щ\ЬЪ[ЫЋ€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJИ\ЭЬћP™Y›Ь™T™]Ъ[™JK€™\ЭЬ™TЩ\ЬЪ[Ы’\ЭЬћN€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJ[™Yљ[™Y
+K€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJЬљYЪ[[ЫЫќ™\њШ][ЫЉK€YY\ЬШYЩN€љK™›Љ
+K›[ШЪФ™Z™XЭY[YJ™]И\њ›ЬЉ	ЬЭЬYЩHZ[Y	КJK€™\XЩSY\ЬШYЩ\О€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJќYJK€ќ[Ш]Qњ›ЫU\Щ\•\›Ћ€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJќYJK€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЩY]Y\ЬШYЩIЛ€]N€В€^€	ЩY]Y›Ы\	Л€\™Щ]\›’[™^€K€K€JNВ‚€^XЭ
+YЩ[ќX[YЩ\‹њ™\ЭЬ™TЩ\ЬЪ[Ы’\ЭЬћJKќТ]™P™Y[ђШ[YЪ]
+€\ЭЬћP™Y›Ь™T™]Ъ[™€
+NВ€^XЭ
+ЫЫќ™\њШ][Ы”ЭЬ™Kњ™\XЩSY\ЬШYЩ\КKќТ]™P™Y[ђШ[YЪ]
+€	ЬЩ\ЬЪ[Ы‹LIЛ€ЬљYЪ[[ЫЫќ™\њШ][Ы‹›Y\ЬШYЩ\Л€
+NВ€^XЭ
+YЩ[ќX[YЩ\‹њЩ[™Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	Щ\њ›Ь‰Л€]N€ИY\ЬШYЩN€	ЬЭЬYЩHZ[Y	ИK€JNВ€JNВ‚€]
+	Ь™Z™XЭИY]ЭX›Z\ЬЪ[ЫњИЪ][ќ[Y\™Щ]\›€[™^\ЙЛ\Ю[И
+
+HO€В€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€™]Ъ[™Щ\ЬЪ[ЫЋ€љK™›Љ
+K€™\ЭЬ™TЩ\ЬЪ[Ы’\ЭЬћN€љK™›Љ
+K€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€™\XЩSY\ЬШYЩ\О€љK™›Љ
+K€ќ[Ш]Qњ›ЫU\Щ\•\›Ћ€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЩY]Y\ЬШYЩIЛ€]N€В€^€	ЩY]Y›Ы\	Л€\™Щ]\›’[™^€LK€K€JNВ‚€^XЭ
+YЩ[ќX[YЩ\‹њ™]Ъ[™Щ\ЬЪ[ЫЉK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+YЩ[ќX[YЩ\‹њЩ[™Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+ЫЫќ™\њШ][Ы”ЭЬ™Kќќ[Ш]Qњ›ЫU\Щ\•\›ЉK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	Щ\њ›Ь‰Л€]N€ИY\ЬШYЩN€	Т[ќ[YY\ЬШYЩHY]\™Щ]‰ИK€JNВ€JNВ‚€]
+	ЪЩY\ИЭ\њ™[ќЫЫќ™\њШ][Ы’Y[YЫ™YЪ]H\Ъ]™YЩ\ЬЪ[Ы’YЪ[€Щ\ЬЪ[Ы‹ЫШY[ИXЪИИH™]ИPФЩ\ЬЪ[Ы‰Л\Ю[И
+
+HO€В€ЫЫњЭ\Ъ]™YЩ\ЬЪ[Ы’YH	Ш\Ъ]™Y\Щ\ЬЪ[Ы‰ОВ€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЫЫXXЬ\Щ\ЬЪ[Ы‰Л€Щ]Щ\ЬЪ[Ы“\Э€љB€™›Љ
+B€›[ШЪФ™\ЫЫ™Y[YJЮИY€\Ъ]™YЩ\ЬЪ[Ы’YЭЩ€	ЛЭЫЬљЬЬXЩIИWJK€ШYЩ\ЬЪ[Ы•љXPXЬ€љB€™›Љ
+B€›[ШЪФ™Z™XЭY[YJ™]И\њ›ЬЉ	ЬЩ\ЬЪ[Ы€›Э›Э[™Ы€Щ\ќ™\‰КJK€Щ]Щ\ЬЪ[Ы“Y\ЬШYЩ\О€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJЧJK€Ь™X]S™]ФЩ\ЬЪ[ЫЋ€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJ	Ы™]ЛXXЬ\Щ\ЬЪ[Ы‰КK€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€ќ[€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЭЪ]Ъ]Щ[”Щ\ЬЪ[Ы‰Л€]N€ИЩ\ЬЪ[Ы’Y€\Ъ]™YЩ\ЬЪ[Ы’YK€JNВ‚€ЛИXЪЩ[™]XЪЩYЭ\њ™[ќЩ\ЬЪ[Ы€]\ЭX]ЪHЩ\ЬЪ[Ы’YHЩXќљY]ИЩY\Л€ЛИЭ\ќЪ\ЩH™[[YKЩ[]KЭ]K]\]H›ЭЬИЪ[\™Щ]HЬ›Ы™ИЩ\ЬЪ[Ы‚€ЛИ\љ[™ИH[XЪИЪ[™ЭИ
+ЩYH€ММLИ™]љY]КK‚€^XЭ
+[™\‹™Щ]Э\њ™[ќЫЫќ™\њШ][Ы’Y
+
+JKќР™J\Ъ]™YЩ\ЬЪ[Ы’Y
+NВ€^XЭ
+YЩ[ќX[YЩ\‹Ь™X]S™]ФЩ\ЬЪ[ЫЉKќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+€^XЭ›Шљ™XЭЫЫќZ[љ[™КВ€\N€	Ь]Щ[”Щ\ЬЪ[Ы”ЭЪ]ЪY	Л€]N€^XЭ›Шљ™XЭЫЫќZ[љ[™КИЩ\ЬЪ[Ы’Y€\Ъ]™YЩ\ЬЪ[Ы’YJK€JK€
+NВ€JNВ‚€]
+	Щ›ЬЩ\ИHњ™\ЪPФЩ\ЬЪ[Ы€Ъ[€HЩXќљY]И™\]Y\ЭИH™]ИЩ\ЬЪ[Ы‰Л\Ю[И
+
+HO€В€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Ь™X]S™]ФЩ\ЬЪ[ЫЋ€љK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJ	ЬЩ\ЬЪ[Ы‹L‰КK€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ШЫЫќ™\њШ][Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	Ы™]Ф]Щ[”Щ\ЬЪ[Ы‰Л€JNВ‚€^XЭ
+[™\‹™Щ]Э\њ™[ќЫЫќ™\њШ][Ы’Y
+
+JKќР™Sќ[
+
+NВ€^XЭ
+YЩ[ќX[YЩ\‹Ь™X]S™]ФЩ\ЬЪ[ЫЉKќТ]™P™Y[ђШ[YЪ]
+	ЛЭЫЬљЬЬXЩIЛВ€›ЬЩS™]О€ќYK€JNВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	ШЫЫќ™\њШ][ЫђЫX\™Y	Л€]N€ЯK€JNВ€JNВ‚€]
+	Ъ[ќ\Щ\ИЩ^Ьќ[[™\Щ\ИH”РЫЩH^Ьќ›ЭИ[њЭXYЩ€Щ[™[™ИH›Ы\	Л\Ю[И
+
+HO€В€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ]Щ\ЬЪ[Ы“\Э€љB€™›Љ
+B€›[ШЪФ™\ЫЫ™Y[YJЮИЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛЭЩ€	ЛЭЫЬљЬЬXЩIИWJK€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ[™Y\ЬШYЩIЛ€]N€В€^€	ЛЩ^Ьќ[	Л€K€JNВ‚€^XЭ
+[ШЪС^ЬќЩ\ЬЪ[Ы•Сљ[JKќТ]™P™Y[ђШ[YЪ]
+В€Щ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€ЭЩ€	ЛЭЫЬљЬЬXЩIЛ€›Ь›X]€	Ъ[	Л€JNВ€^XЭ
+ЫЫќ™\њШ][Ы”ЭЬ™KYY\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+YЩ[ќX[YЩ\‹њЩ[™Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	ЫY\ЬШYЩIЛ€]N€^XЭ›Шљ™XЭЫЫќZ[љ[™КВ€›ЫN€	Ш\ЬЪ\Э[ќ	Л€ЫЫќ[ќ‚€	ФЩ\ЬЪ[Ы€^ЬќYИS€Щ^Ьќљ[Jљ[N‹ЛЛЭЫЬљЬЬXЩKЩ^Ьќљ[
+IЛ€JK€JNВ€JNВ‚€]
+	Ь™Y™\њИHXЭ]™HPФЩ\ЬЪ[Ы€YЭ™\€HШШ[ЫЫќ™\њШ][Ы€YЪ[€^Ьќ[™ЙЛ\Ю[И
+
+HO€В€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ]Щ\ЬЪ[Ы“\Э€љB€™›Љ
+B€›[ШЪФ™\ЫЫ™Y[YJЮИЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛЭЩ€	ЛЭЫЬљЬЬXЩIИWJK€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ШЫЫќ—ЫШШ[МLЊЙЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ[™Y\ЬШYЩIЛ€]N€В€^€	ЛЩ^Ьќ[	Л€K€JNВ‚€^XЭ
+[ШЪС^ЬќЩ\ЬЪ[Ы•Сљ[JKќТ]™P™Y[ђШ[YЪ]
+В€Щ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€ЭЩ€	ЛЭЫЬљЬЬXЩIЛ€›Ь›X]€	Ъ[	Л€JNВ€^XЭ
+YЩ[ќX[YЩ\‹њЩ[™Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€JNВ‚€]
+	Ь™\ЬќИ\™HЩ^Ьќ\ИHZ\ЬЪ[™ИЭXЫЫ[X[™[њЭXYЩ€^Ьќ[™ЙЛ\Ю[И
+
+HO€В€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ]Щ\ЬЪ[Ы“\Э€љK™›Љ
+K€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ[™Y\ЬШYЩIЛ€]N€В€^€	ЛЩ^Ьќ	Л€K€JNВ‚€^XЭ
+[ШЪС^ЬќЩ\ЬЪ[Ы•Сљ[JK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	Щ\њ›Ь‰Л€]N€ИY\ЬШYЩN€ђЫЫ[X[™	ЛЩ^Ьќ	И™\]Z\™\ИHЭXЫЫ[X[™€€K€JNВ€^XЭ
+YЩ[ќX[YЩ\‹њЩ[™Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€JNВ‚€]
+	Ь™\ЬќИ^ЬќZ[\™\ИXЪИИH\Щ\‰Л\Ю[И
+
+HO€В€[ШЪС^ЬќЩ\ЬЪ[Ы•Сљ[K›[ШЪФ™Z™XЭY[YJ™]И\њ›ЬЉ	Щ\ЪИќ[	КJNВ‚€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ]Щ\ЬЪ[Ы“\Э€љB€™›Љ
+B€›[ШЪФ™\ЫЫ™Y[YJЮИЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛЭЩ€	ЛЭЫЬљЬЬXЩIИWJK€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ[™Y\ЬШYЩIЛ€]N€В€^€	ЛЩ^ЬќY	Л€K€JNВ‚€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	Щ\њ›Ь‰Л€]N€ИY\ЬШYЩN€	СZ[YИ^ЬќЩ\ЬЪ[ЫЋ€\ЪИќ[	ИK€JNВ€^XЭ
+YЩ[ќX[YЩ\‹њЩ[™Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€JNВ‚€]
+	Щ[ЫЩ\И^ЬќYљ[H[љЬИ™Y›Ь™H™[™\љ[™ИX\љЩЭЫ‰Л\Ю[И
+
+HO€В€[ШЪС^ЬќЩ\ЬЪ[Ы•Сљ[K›[ШЪФ™\ЫЫ™Y[YJВ€љ[[[YN€	Щ^ЬќJKљ[	Л€\љN€ИњФ]€	ЛЭЫЬљЬЬXЩKЩ^ЬќJKљ[	ИK€JNВ‚€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ]Щ\ЬЪ[Ы“\Э€љB€™›Љ
+B€›[ШЪФ™\ЫЫ™Y[YJЮИЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛЭЩ€	ЛЭЫЬљЬЬXЩIИWJK€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ[™Y\ЬШYЩIЛ€]N€В€^€	ЛЩ^Ьќ[	Л€K€JNВ‚€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	ЫY\ЬШYЩIЛ€]N€^XЭ›Шљ™XЭЫЫќZ[љ[™КВ€›ЫN€	Ш\ЬЪ\Э[ќ	Л€ЫЫќ[ќ‚€	ФЩ\ЬЪ[Ы€^ЬќYИS€Щ^ЬќJKљ[Jљ[N‹ЛЛЭЫЬљЬЬXЩKЩ^Ьќ	LЊILЋKљ[
+IЛ€JK€JNВ€JNВ‚€\ШЬљX™J	Ъ[™TЩ][Щ[8 %\ШЫЫќ[ќYY[Щ[Y™[њЪ]™H[Y][Ы€
+\ЬЭYHМННJIЛ
+
+HO€В€]
+	Ь™Z™XЭИH›Ы‹\ќ[ќ[YH]Щ[€Р]][Щ[[™Э\™XЩ\И[€\њ›Ь‰Л\Ю[И
+
+HO€В€ЫЫњЭЩ][Щ[њ›ЫUZHHљK™›Љ
+NВ€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ][Щ[њ›ЫUZK€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЯH\И™]™\‹€ќ[€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ][Щ[	Л€]N€И[Щ[Y€	Ь]Щ[ЊЛXЫЩ\‹\\К]Щ[‹[Ш]]
+IИK€JNВ‚€^XЭ
+Щ][Щ[њ›ЫUZJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€^XЭ
+[ШЪФЪЭС\њ›Ь“Y\ЬШYЩJKќТ]™P™Y[ђШ[YЪ]
+€^XЭњЭљ[™РЫЫќZ[љ[™К€	Ф]Щ[€Р]]њ™YHY\€Ш\И\ШЫЫќ[ќYYЫ€ЊЌ‹LLMIЛ€
+K€
+NВ€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	Щ\њ›Ь‰Л€]N€^XЭ›Шљ™XЭЫЫќZ[љ[™КВ€Y\ЬШYЩN€^XЭњЭљ[™РЫЫќZ[љ[™К	Щ\ШЫЫќ[ќYY	КK€JK€JNВ€JNВ‚€]
+	Ш[ЭЬИHќ[ќ[YH]Щ[€Р]]Ы\ЪЭИ\ЬИ›ЭYЪ	Л\Ю[И
+
+HO€В€ЫЫњЭЩ][Щ[њ›ЫUZHHљK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJ[™Yљ[™Y
+NВ€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ][Щ[њ›ЫUZK€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЯH\И™]™\‹€ќ[€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ][Щ[	Л€]N€В€[Щ[Y€	Йќ[ќ[Y_]Щ[‹[Ш]]]Щ[ЊЛXЫЩ\‹\\К]Щ[‹[Ш]]
+IЛ€K€JNВ‚€^XЭ
+Щ][Щ[њ›ЫUZJKќТ]™P™Y[ђШ[YЪ]
+€	Йќ[ќ[Y_]Щ[‹[Ш]]]Щ[ЊЛXЫЩ\‹\\К]Щ[‹[Ш]]
+IЛ€
+NВ€^XЭ
+[ШЪФЪЭС\њ›Ь“Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€JNВ‚€]
+	Ь\ЬЩ\И›ЭYЪЭ\‹\›ЭљY\€[Щ[И
+™YЬ™\ЬЪ[Ы€8 %›И[ЩHЬЪ]]™\КIЛ\Ю[И
+
+HO€В€ЫЫњЭЩ][Щ[њ›ЫUZHHљK™›Љ
+K›[ШЪФ™\ЫЫ™Y[YJ[™Yљ[™Y
+NВ€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ][Щ[њ›ЫUZK€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЯH\И™]™\‹€ќ[€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ][Щ[	Л€]N€И[Щ[Y€	ЩЬM
+Ь[ZJIИK€JNВ‚€^XЭ
+Щ][Щ[њ›ЫUZJKќТ]™P™Y[ђШ[YЪ]
+	ЩЬM
+Ь[ZJIКNВ€^XЭ
+[ШЪФЪЭС\њ›Ь“Y\ЬШYЩJK››ЭќТ]™P™Y[ђШ[Y
+
+NВ€JNВ€JNВ€]
+	Ь™\Щ\ќ™\ИHљ]™K[]\€ЫЫЫ€[€Ъ[™ЭЬИ^ЬќYљ[H[љЬЙЛ\Ю[И
+
+HO€В€[ШЪС^ЬќЩ\ЬЪ[Ы•Сљ[K›[ШЪФ™\ЫЫ™Y[YJВ€љ[[[YN€	Щљ[K›Y	Л€\љN€ИњФ]€	С—\ZШXЪWљ[K›Y	ИK€JNВ‚€ЫЫњЭYЩ[ќX[YЩ\€HВ€\РЫЫ›™XЭY€ќYK€Э\њ™[ќЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ]Щ\ЬЪ[Ы“\Э€љB€™›Љ
+B€›[ШЪФ™\ЫЫ™Y[YJЮИЩ\ЬЪ[Ы’Y€	ЬЩ\ЬЪ[Ы‹LIЛЭЩ€	ЛЭЫЬљЬЬXЩIИWJK€Щ[™Y\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЫЫќ™\њШ][Ы”ЭЬ™HHВ€Ь™X]PЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€Щ]ЫЫќ™\њШ][ЫЋ€љK™›Љ
+K€YY\ЬШYЩN€љK™›Љ
+K€NВ€ЫЫњЭЩ[™ХЩX•љY]ИHљK™›Љ
+NВ‚€ЫЫњЭ[™\€H™]ИЩ\ЬЪ[Ы“Y\ЬШYЩR[™\Љ€YЩ[ќX[YЩ\€\И™]™\‹€ЫЫќ™\њШ][Ы”ЭЬ™H\И™]™\‹€	ЬЩ\ЬЪ[Ы‹LIЛ€Щ[™ХЩX•љY]Л€
+NВ‚€]ШZ][™\‹љ[™JВ€\N€	ЬЩ[™Y\ЬШYЩIЛ€]N€В€^€	ЛЩ^ЬќY	Л€K€JNВ‚€^XЭ
+Щ[™ХЩX•љY]КKќТ]™P™Y[ђШ[YЪ]
+В€\N€	ЫY\ЬШYЩIЛ€]N€^XЭ›Шљ™XЭЫЫќZ[љ[™КВ€›ЫN€	Ш\ЬЪ\Э[ќ	Л€ЫЫќ[ќ‚€	ФЩ\ЬЪ[Ы€^ЬќYИQ€Щљ[K›YJљ[N‹ЛЛС‹Ш\ZШXЪKЩљ[K›Y
+IЛ€JK€JNВ€JNВџJNВ
