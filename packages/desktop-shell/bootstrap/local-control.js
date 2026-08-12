@@ -20,7 +20,8 @@ const messages = {
     on: 'On',
     inactiveCopy:
       'Turn this on, then scan from a phone on the same trusted Wi-Fi.',
-    inactiveNotice: 'Uses unencrypted HTTP. Phone access stays closed until enabled.',
+    inactiveNotice:
+      'Uses unencrypted HTTP. Phone access stays closed until enabled.',
     qrLabel: 'Local Control QR code',
     turnOn: 'Turn on Local Control',
     disconnect: 'Disconnect phone access',
@@ -46,9 +47,7 @@ const messages = {
   },
 };
 
-const language = navigator.language.toLowerCase().startsWith('zh')
-  ? 'zh-CN'
-  : 'en';
+const language = navigator.language.toLowerCase() === 'zh-cn' ? 'zh-CN' : 'en';
 const t = (key) => messages[language][key];
 
 document.documentElement.lang = language;
@@ -70,9 +69,7 @@ function render(state) {
   toggle.className = enabled ? 'stop' : '';
   qr.innerHTML = enabled ? state.qrSvg || '' : '';
   url.textContent = enabled ? state.url || '' : '';
-  sleep.textContent = state.sleepInhibited
-    ? t('awake')
-    : t('maySleep');
+  sleep.textContent = state.sleepInhibited ? t('awake') : t('maySleep');
   error.hidden = true;
   error.textContent = '';
 }
