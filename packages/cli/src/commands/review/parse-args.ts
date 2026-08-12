@@ -23,7 +23,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { loadSettings } from '../../config/settings.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
@@ -407,7 +407,9 @@ export function parseReviewArgs(
     effortSource === 'explicit'
       ? `--effort ${effort} (the last valid occurrence) is in effect`
       : effortSource === 'forced-by-comment'
-        ? '`--comment` forces high effort'
+        ? commentRequestedByFlag
+          ? '`--comment` forces high effort'
+          : 'the `review.comment` setting forces high effort'
         : effortSource === 'forced-by-fix'
           ? '`--fix` forces at least medium effort'
           : effortSource === 'configured'
@@ -459,19 +461,22 @@ interface ParseArgsCliArgs {
 /**
  * The standing defaults from `settings.json` (`review.effort`,
  * `review.comment`), resolved for `parseReviewArgs`: `auto` effort means the
- * built-in rule, so it maps to undefined.
+ * built-in rule, so it maps to undefined — and so does any invalid value.
+ * The explicit-flag path validates case-insensitively via `asEffort`, and a
+ * configured value must not skip that normalization: `"Low"` unnormalized
+ * misses the exact `effort === 'low'` comparisons the forcings run.
  */
 function reviewDefaultsFromSettings(): {
   effort?: ReviewEffort;
   comment?: boolean;
 } {
-  const review = loadSettings().merged.review;
+  const review = operatorReviewSettings();
   return {
     effort:
-      review?.effort !== undefined && review.effort !== 'auto'
-        ? review.effort
-        : undefined,
-    comment: review?.comment ?? false,
+      review.effort === undefined || review.effort === 'auto'
+        ? undefined
+        : (asEffort(review.effort) ?? undefined),
+    comment: review.comment,
   };
 }
 

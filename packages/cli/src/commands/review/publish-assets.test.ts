@@ -46,7 +46,39 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: stderrSpy,
 }));
 
-const { runPublishAssets } = await import('./publish-assets.js');
+// The handler resolves `review.comment` from the operator's real
+// settings.json — pin it, or a developer running with the switch on reddens
+// the refusal assertions below.
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({})),
+);
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    // The production call carries `{ skipWorkspaceSettings: true }` — the
+    // authorisation default resolves from operator scopes only. A caller
+    // that forgets the flag reads the workspace-polluted view instead, and
+    // the refusal assertions redden.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
+  };
+});
+
+const { runPublishAssets, publishAssetsCommand } = await import(
+  './publish-assets.js'
+);
 
 // A 1x1 PNG, enough bytes to be a plausible file and stable to hash.
 const PNG = Buffer.from(
@@ -77,6 +109,7 @@ describe('publish-assets', () => {
     // dogfooding session's exported value must not leak into URL assertions.
     savedGhHostMain = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     // mockReset, not mockClear: a sibling block's persistent
@@ -158,6 +191,38 @@ describe('publish-assets', () => {
     writeFileSync(argsFile, '8346\n');
     happyGh();
     run({ files: [pngFile('a.png')], userAuthorized: true });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('the standing review.comment setting authorises publishing without --comment', () => {
+    // The two callers of the shared gate must agree on what authorises a
+    // run: submit accepts the setting, so publish-assets must too — or a
+    // run that posts the review still refuses to publish its evidence.
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    happyGh();
+    run({ files: [pngFile('a.png')], defaultComment: true });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('wires the standing review.comment setting through the handler', async () => {
+    // Wiring leg: dropping `defaultComment` from the handler call leaves the
+    // direct runPublishAssets test green while production refuses. The
+    // workspace-polluted mock stands guard on the scope flag at the same
+    // time — it answers a flag-less call with comment:true.
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({ comment: true });
+    happyGh();
+    await publishAssetsCommand.handler?.({
+      _: [],
+      $0: 'qwen',
+      pr: 8346,
+      files: [pngFile('wired.png')],
+      out: join(dir, 'manifest.json'),
+      'user-authorized': false,
+      'skill-args': argsFile,
+    } as never);
     expect(process.exitCode).toBeUndefined();
     expect(ghWithInputMock).toHaveBeenCalled();
   });
@@ -461,6 +526,7 @@ describe('publish-assets — round-2 review pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockClear();
@@ -594,6 +660,7 @@ describe('publish-assets — round-3 self-review pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockClear();
@@ -712,6 +779,7 @@ describe('publish-assets — round-4 pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -860,6 +928,7 @@ describe('publish-assets — empty is two different things', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -926,6 +995,7 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();

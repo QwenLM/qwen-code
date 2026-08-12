@@ -78,7 +78,7 @@ import {
   isFooterSafeModelId,
   reviewFooter,
 } from './lib/review-footer.js';
-import { loadSettings } from '../../config/settings.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -1028,17 +1028,21 @@ function composeReviewBody(
     'presubmit.downgradeReasons',
   );
   const modelId: unknown = input.modelId;
-  if (typeof modelId !== 'string' || modelId.trim() === '') {
-    throw new TypeError(
-      'compose-review: modelId is required (the public footer names the reviewing model)',
-    );
-  }
-  if (!isFooterSafeModelId(modelId)) {
-    throw new TypeError(
-      'compose-review: modelId is interpolated into the public footer ' +
-        'verbatim — it must be a single line that does not contain the ' +
-        'footer marker',
-    );
+  let footer = '';
+  if (attribution) {
+    if (typeof modelId !== 'string' || modelId.trim() === '') {
+      throw new TypeError(
+        'compose-review: modelId is required (the public footer names the reviewing model)',
+      );
+    }
+    if (!isFooterSafeModelId(modelId)) {
+      throw new TypeError(
+        'compose-review: modelId is interpolated into the public footer ' +
+          'verbatim — it must be a single line that does not contain the ' +
+          'footer marker',
+      );
+    }
+    footer = reviewFooter(modelId, cliVersion);
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
@@ -1157,7 +1161,6 @@ function composeReviewBody(
     }
   }
 
-  const footer = attribution ? reviewFooter(modelId, cliVersion) : '';
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -2314,7 +2317,7 @@ export const composeReviewCommand: CommandModule = {
       // compose time — a shared runner can rewrite the install mid-session.
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
-      loadSettings().merged.review?.attribution ?? true,
+      operatorReviewSettings().attribution,
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

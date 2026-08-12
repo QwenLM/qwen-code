@@ -227,7 +227,7 @@
       "type": "object",
       "properties": {
         "attribution": {
-          "description": "Append the attribution footer naming the model and CLI version (e.g. \"_— qwen3-coder via Qwen Code /review (v0.21.2)_\") to review bodies and inline comments posted to GitHub. Disable to post reviews without AI attribution.",
+          "description": "Append the attribution footer naming the model and CLI version (e.g. \"_— qwen3-coder via Qwen Code /review (v0.21.2)_\") to review bodies and inline comments posted to GitHub. Disable to post reviews without AI attribution. Note: with the footer off, presubmit duplicate detection still recognizes earlier posts by the same GitHub account, but footer-less posts from other accounts escape it.",
           "type": "boolean",
           "default": true
         },

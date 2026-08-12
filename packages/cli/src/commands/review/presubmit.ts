@@ -42,6 +42,7 @@ interface RawComment {
   line?: number;
   commit_id?: string;
   in_reply_to_id?: number;
+  user?: { login?: string };
 }
 
 interface CheckRun {
@@ -545,8 +546,21 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const allComments = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
   ) as RawComment[];
-  const qwenComments = allComments.filter((c) =>
-    /via Qwen Code \/review/.test(c.body ?? ''),
+  // Footer match first — and NOT the only match: with `review.attribution`
+  // off, posted comments carry no footer, and a filter keyed on the footer
+  // alone goes blind to every earlier attribution-off post — the overlap and
+  // stale classification (and the `blockOnExistingComments` gate that exists
+  // to stop duplicate posting) silently stop seeing them. Fall back to
+  // authorship for the reviewing account's own top-level comments: a reply
+  // the account made by hand is not a posted finding, so it stays excluded.
+  // Attribution-off posts from OTHER accounts still escape detection — no
+  // footer, no authorship signal — and the setting's description says so.
+  const qwenComments = allComments.filter(
+    (c) =>
+      /via Qwen Code \/review/.test(c.body ?? '') ||
+      (!c.in_reply_to_id &&
+        me !== '' &&
+        (c.user?.login ?? '').toLowerCase() === me.toLowerCase()),
   );
 
   const repliedToIds = new Set<number>();

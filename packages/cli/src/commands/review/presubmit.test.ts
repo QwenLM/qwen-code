@@ -694,6 +694,114 @@ describe('presubmitCommand', () => {
     }
     expect(setGhHostMock).toHaveBeenCalledWith(undefined);
   });
+
+  describe('existing-comment classification — self-comment detection', () => {
+    // The dedup set used to key on the attribution footer ALONE: with
+    // `review.attribution` off, every earlier post is footer-less, and the
+    // overlap/stale classification (and the blockOnExistingComments gate)
+    // went blind to them — a probe watched an identical finding re-post as a
+    // visual duplicate while a live comment sat on the same (path, line).
+    // Authorship of the reviewing account's own top-level comments is the
+    // footer-independent fallback.
+    async function presubmitWithComments(
+      comments: Array<Record<string, unknown>>,
+      newFindings: Array<{ path: string; line: number }>,
+    ) {
+      ghApiAllMock.mockReturnValue(comments);
+      ghApiMock.mockReturnValue(null);
+      readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+      const handler = presubmitCommand.handler;
+      if (!handler) throw new Error('presubmit handler missing');
+      await handler({
+        ...baseArgs,
+        'new-findings': '/tmp/findings.json',
+      } as unknown as Parameters<typeof handler>[0]);
+      const [, content] = writeFileSyncMock.mock.calls.find(
+        ([path]) => path === '/tmp/presubmit.json',
+      ) ?? [null, null];
+      return JSON.parse(String(content));
+    }
+
+    const FINDINGS = [{ path: 'a.ts', line: 12 }];
+
+    it('classifies footer-bearing comments regardless of their author', async () => {
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 1,
+            body: '**[Critical]** x _— model via Qwen Code /review (v0.21.2)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('classifies a footer-less comment by the reviewing account (attribution-off dedup)', async () => {
+      // Case-insensitive login match, as with self-PR detection.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: '**[Critical]** x',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'QWEN-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('ignores a footer-less comment from another account', async () => {
+      // No footer and not the reviewing account's: nothing presubmit can
+      // attribute — it stays outside the dedup set.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 3,
+            body: '**[Critical]** x',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('does not author-match replies — a hand reply is not a posted finding', async () => {
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 4,
+            body: 'we fixed this, thanks',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+  });
 });
 
 // The PR advancing mid-review means commits exist that no agent read. An

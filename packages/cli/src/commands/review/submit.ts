@@ -48,7 +48,7 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
-import { loadSettings } from '../../config/settings.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import {
   ghWithInput,
   isOwnerRepo,
@@ -636,10 +636,10 @@ export const submitCommand: CommandModule = {
     const cliVersion =
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
       (await getCliVersion());
-    const review = loadSettings().merged.review;
+    const review = operatorReviewSettings();
     runSubmit(argv as unknown as SubmitArgs, cliVersion, {
-      attribution: review?.attribution ?? true,
-      defaultComment: review?.comment ?? false,
+      attribution: review.attribution,
+      defaultComment: review.comment,
     });
   },
 };

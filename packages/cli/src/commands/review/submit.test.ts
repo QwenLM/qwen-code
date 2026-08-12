@@ -49,20 +49,36 @@ vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
 
-// The handler reads `review.attribution` from the operator's real
-// settings.json — a developer running with the switch off would watch the
-// footer assertions below redden through no fault of the code. Pin the one
-// value these tests read; the attribution-off path is covered by calling
+// The handler reads `review.attribution` / `review.comment` from the
+// operator's real settings.json — a developer running with either set would
+// watch the assertions below redden through no fault of the code. Pin the
+// values these tests read; the attribution-off path is covered by calling
 // runSubmit directly.
-const attributionMock = vi.hoisted(() => vi.fn(() => true));
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({ attribution: true })),
+);
 vi.mock('../../config/settings.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../config/settings.js')>();
   return {
     ...actual,
-    loadSettings: vi.fn(() => ({
-      merged: { review: { attribution: attributionMock() } },
-    })),
+    // The production call carries `{ skipWorkspaceSettings: true }` — these
+    // policy keys resolve from operator scopes only. A caller that forgets
+    // the flag reads the workspace-polluted view below instead, and the
+    // assertions redden: a repository's `.qwen/settings.json` must not
+    // control them.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
   };
 });
 
@@ -115,7 +131,7 @@ beforeEach(() => {
   ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
   writeStderrSpy.mockClear();
-  attributionMock.mockReturnValue(true);
+  reviewSettingsMock.mockReturnValue({ attribution: true });
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
@@ -505,9 +521,33 @@ describe('payload consistency — refuse before GitHub sees it', () => {
   });
 
   it('honours the review.attribution setting through the handler', async () => {
-    attributionMock.mockReturnValue(false);
+    reviewSettingsMock.mockReturnValue({ attribution: false });
     await submitCommand.handler?.(authorized({}) as never);
     expect(posted().body).not.toContain('via Qwen Code /review');
+  });
+
+  it('the standing review.comment setting authorises a post through the handler', async () => {
+    // Wiring leg: hardcoded or dropped `defaultComment` in the handler would
+    // leave the direct runSubmit test green while production submissions
+    // ignore the setting. The args file names the PR but carries no
+    // --comment; only the setting authorises.
+    reviewSettingsMock.mockReturnValue({ attribution: true, comment: true });
+    await submitCommand.handler?.(
+      args({ skillArgs: file('handler-comment-args.txt', '6771') }) as never,
+    );
+    expect(ghMock).toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('without the flag or the setting the handler refuses — and workspace settings cannot supply it', async () => {
+    // The mock answers a flag-less loadSettings call with a polluted view
+    // that carries comment:true; the handler's skipWorkspaceSettings flag
+    // keeps it out. Dropping the flag reddens this.
+    await submitCommand.handler?.(
+      args({ skillArgs: file('handler-noauth-args.txt', '6771') }) as never,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
   });
 
   it('falls back to the resolved CLI version when no startup version is inherited', async () => {
