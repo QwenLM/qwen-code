@@ -35,7 +35,7 @@ import {
   buildMcpServerInstructionsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
-import { getGitBranch } from '../utils/gitUtils.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
@@ -1036,7 +1036,7 @@ export class BackgroundAgentResumeService {
         sessionId: meta.parentSessionId,
         cwd: projectRoot,
         version: this.config.getCliVersion() || 'unknown',
-        gitBranch: getGitBranch(projectRoot),
+        gitBranch: getCachedGitBranch(projectRoot),
         initialUserPrompt: writerInitialPrompt,
         appendToExisting: true,
         initialParentUuid: recovery.lastStableUuid,
