@@ -162,11 +162,13 @@ describe('ExtensionStore', () => {
       { id: 'ba'.repeat(32), name: 'second' },
     ];
     await store.ensureInitialized(identities);
-    await store.setLegacyPathActivations(
-      identities,
-      workspacePath('batch'),
-      'disabled',
-    );
+    for (const identity of identities) {
+      await store.setLegacyPathActivation(
+        identity,
+        workspacePath('batch'),
+        'disabled',
+      );
+    }
     const before = await store.setWorkspaceActivations(
       identities,
       workspacePath('batch'),
@@ -195,36 +197,6 @@ describe('ExtensionStore', () => {
     }
   });
 
-  it('changes multiple legacy path activations in one generation', async () => {
-    const store = makeStore();
-    const identities = [
-      { id: 'b5'.repeat(32), name: 'first' },
-      { id: 'b6'.repeat(32), name: 'second' },
-    ];
-    const initial = await store.ensureInitialized(identities);
-
-    const snapshot = await store.setLegacyPathActivations(
-      identities,
-      workspacePath(),
-      'disabled',
-    );
-
-    expect(snapshot.generation).toBe(initial.generation + 1);
-    for (const identity of identities) {
-      expect(
-        store.getActivation(
-          snapshot,
-          identity.id,
-          identity.name,
-          workspacePath('child'),
-        ),
-      ).toMatchObject({
-        effective: 'disabled',
-        source: 'legacy_path_rule',
-      });
-    }
-  });
-
   it('does not commit a partial batch when an identity is missing', async () => {
     const store = makeStore();
     const installed = { id: 'b3'.repeat(32), name: 'installed' };
@@ -241,6 +213,17 @@ describe('ExtensionStore', () => {
     const snapshot = await store.readSnapshot();
     expect(snapshot.generation).toBe(initial.generation);
     expect(snapshot.extensions[installed.id]?.workspaceOverrides).toEqual({});
+  });
+
+  it('rejects a batch mutation before the store is initialized', async () => {
+    const store = makeStore();
+
+    await expect(
+      store.setDefaultActivations(
+        [{ id: 'bc'.repeat(32), name: 'missing' }],
+        'disabled',
+      ),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
   });
 
   it('re-keys a policy to a new id for the same name after an id-formula change', async () => {

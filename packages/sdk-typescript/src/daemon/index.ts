@@ -668,8 +668,6 @@ export type {
   ExtensionMarketplacePluginInteraction,
   ExtensionSettingInteraction,
   ExtensionOperationResult,
-  ExtensionBatchToggleItem,
-  ExtensionBatchToggleError,
   ExtensionDefaultActivationBatchItem,
   ExtensionWorkspaceActivationBatchItem,
   ExtensionBatchActivationError,

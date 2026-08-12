@@ -48,12 +48,3 @@ workspace batch is selected-runtime scoped: it resolves the exact workspace id
 or canonical path, requires that runtime to be trusted and open, writes only its
 canonical workspace override, and refreshes only that runtime. It never falls
 back to the primary runtime.
-
-## Legacy compatibility
-
-Retain `POST /workspace/extensions/enable` behind
-`workspace_extension_batch_toggle` for name-and-scope compatibility clients.
-Its `scope: "user"` continues to write a home-level legacy path rule, while
-`scope: "workspace"` continues to target the bound primary workspace. It is not
-an alias for either V2 batch route, and V2 clients must not use it to infer
-global default or selected-workspace behavior.

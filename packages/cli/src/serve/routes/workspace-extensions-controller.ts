@@ -103,7 +103,6 @@ export type ExtensionMutationEvent = {
   reason?: string;
   states?: Record<string, string>;
   results?: Array<
-    | { extensionName: string; enabled: boolean }
     | {
         extensionId: string;
         name: string;
@@ -116,18 +115,11 @@ export type ExtensionMutationEvent = {
         effectiveActivation: 'enabled' | 'disabled';
       }
   >;
-  errors?: Array<
-    | {
-        extensionName: string;
-        code: 'extension_not_found';
-        error: string;
-      }
-    | {
-        extensionId: string;
-        code: 'extension_not_found';
-        error: string;
-      }
-  >;
+  errors?: Array<{
+    extensionId: string;
+    code: 'extension_not_found';
+    error: string;
+  }>;
 };
 
 export type ExtensionPendingInteraction =

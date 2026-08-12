@@ -4084,22 +4084,9 @@ export interface ExtensionOperationResult {
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
   results?: Array<
-    | ExtensionBatchToggleItem
-    | ExtensionDefaultActivationBatchItem
-    | ExtensionWorkspaceActivationBatchItem
+    ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
   >;
-  errors?: Array<ExtensionBatchToggleError | ExtensionBatchActivationError>;
-}
-
-export interface ExtensionBatchToggleItem {
-  extensionName: string;
-  enabled: boolean;
-}
-
-export interface ExtensionBatchToggleError {
-  extensionName: string;
-  code: 'extension_not_found';
-  error: string;
+  errors?: ExtensionBatchActivationError[];
 }
 
 export interface ExtensionDefaultActivationBatchItem {

@@ -4992,33 +4992,6 @@ describe('DaemonClient', () => {
   });
 
   describe('extension operations', () => {
-    it('POSTs one batch extension toggle operation', async () => {
-      const { fetch, calls } = recordingFetch(() =>
-        jsonResponse(202, { accepted: true, operationId: 'op-batch' }),
-      );
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-
-      await expect(
-        client.setExtensionsEnabled(
-          ['first-extension', 'second-extension'],
-          false,
-          { scope: 'workspace' },
-          'client-1',
-        ),
-      ).resolves.toEqual({ accepted: true, operationId: 'op-batch' });
-
-      expect(calls[0]).toMatchObject({
-        url: 'http://daemon/workspace/extensions/enable',
-        method: 'POST',
-        body: JSON.stringify({
-          extensionNames: ['first-extension', 'second-extension'],
-          enabled: false,
-          scope: 'workspace',
-        }),
-      });
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
-    });
-
     it('POSTs an extension archive as a binary body', async () => {
       let capturedUrl = '';
       let capturedInit: RequestInit | undefined;

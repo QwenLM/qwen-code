@@ -460,7 +460,6 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_tool_toggle',
   'workspace_skill_toggle',
   'workspace_skill_batch_toggle',
-  'workspace_extension_batch_toggle',
   'extension_batch_activation_v2',
   'workspace_skill_manage',
   'workspace_permissions',
@@ -4865,7 +4864,6 @@ describe('createServeApp', () => {
       getLoadedExtensions?: () => Extension[];
       enableExtension?: () => Promise<unknown>;
       disableExtension?: () => Promise<unknown>;
-      setExtensionsEnabled?: () => Promise<unknown>;
       uninstallExtension?: () => Promise<unknown>;
       checkForAllExtensionUpdates?: (
         cb: (name: string, state: ExtensionUpdateState) => void,
@@ -4969,12 +4967,6 @@ describe('createServeApp', () => {
           .spyOn(ExtensionManager.prototype, 'disableExtension')
           .mockImplementation(
             (overrides?.disableExtension ??
-              (async () => ({ generation: ++generation }))) as never,
-          ),
-        vi
-          .spyOn(ExtensionManager.prototype, 'setExtensionsEnabled')
-          .mockImplementation(
-            (overrides?.setExtensionsEnabled ??
               (async () => ({ generation: ++generation }))) as never,
           ),
         vi
@@ -7573,132 +7565,6 @@ describe('createServeApp', () => {
           WS_BOUND,
           expect.any(Function),
         );
-      } finally {
-        restore();
-      }
-    });
-
-    it('queues one batch extension toggle with ordered target outcomes', async () => {
-      const restore = mockExtensionManagerMethods({
-        getLoadedExtensions: () => [
-          testExtension('test-ext'),
-          testExtension('other-ext'),
-        ],
-      });
-      try {
-        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
-        const app = createServeApp(
-          { ...tokenOpts, workspace: WS_BOUND },
-          undefined,
-          { bridge },
-        );
-
-        const accepted = await request(app)
-          .post('/workspace/extensions/enable')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret')
-          .set('X-Qwen-Client-Id', 'client-1')
-          .send({
-            extensionNames: [
-              ' TEST-EXT ',
-              'missing-ext',
-              'other-ext',
-              'test-ext',
-            ],
-            enabled: false,
-            scope: 'workspace',
-          });
-
-        expect(accepted.status).toBe(202);
-        await vi.waitFor(() => {
-          expect(
-            vi.mocked(ExtensionManager.prototype.setExtensionsEnabled),
-          ).toHaveBeenCalledWith(
-            ['test-ext', 'other-ext'],
-            false,
-            expect.anything(),
-            WS_BOUND,
-            expect.any(Function),
-          );
-        });
-
-        const operation = await request(app)
-          .get(`/workspace/extensions/operations/${accepted.body.operationId}`)
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
-        expect(operation.status).toBe(200);
-        expect(operation.body).toMatchObject({
-          operation: 'disable_batch',
-          status: 'succeeded',
-          result: {
-            status: 'disabled',
-            results: [
-              { extensionName: 'test-ext', enabled: false },
-              { extensionName: 'other-ext', enabled: false },
-            ],
-            errors: [
-              {
-                extensionName: 'missing-ext',
-                code: 'extension_not_found',
-                error: 'Extension "missing-ext" not found',
-              },
-            ],
-            refreshed: 1,
-            failed: 0,
-          },
-        });
-      } finally {
-        restore();
-      }
-    });
-
-    it('rejects malformed extension batches before queueing an operation', async () => {
-      const restore = mockExtensionManagerMethods();
-      try {
-        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
-        const app = createServeApp(
-          { ...tokenOpts, workspace: WS_BOUND },
-          undefined,
-          { bridge },
-        );
-        const invalidBodies = [
-          { extensionNames: [], enabled: false, scope: 'workspace' },
-          {
-            extensionNames: Array.from({ length: 101 }, () => 'test-ext'),
-            enabled: false,
-            scope: 'workspace',
-          },
-          {
-            extensionNames: ['   '],
-            enabled: false,
-            scope: 'workspace',
-          },
-          {
-            extensionNames: ['x'.repeat(257)],
-            enabled: false,
-            scope: 'workspace',
-          },
-          {
-            extensionNames: ['test-ext'],
-            enabled: 'false',
-            scope: 'workspace',
-          },
-        ];
-
-        for (const body of invalidBodies) {
-          const response = await request(app)
-            .post('/workspace/extensions/enable')
-            .set('Host', `127.0.0.1:${tokenOpts.port}`)
-            .set('Authorization', 'Bearer secret')
-            .set('X-Qwen-Client-Id', 'client-1')
-            .send(body);
-          expect(response.status).toBe(400);
-        }
-        expect(
-          vi.mocked(ExtensionManager.prototype.setExtensionsEnabled),
-        ).not.toHaveBeenCalled();
       } finally {
         restore();
       }

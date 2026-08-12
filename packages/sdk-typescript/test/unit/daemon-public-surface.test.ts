@@ -84,8 +84,6 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
-  ExtensionBatchToggleError,
-  ExtensionBatchToggleItem,
   ExtensionBatchActivationError,
   ExtensionDefaultActivationBatchItem,
   ExtensionMutationResponse,
@@ -326,21 +324,6 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       error: string;
       reason?: 'not_user_invocable' | 'inactive_extension' | 'locked';
       lockedScope?: 'system' | 'user' | 'systemDefaults';
-    }>();
-    expect(typeof Public.DaemonClient.prototype.setExtensionsEnabled).toBe(
-      'function',
-    );
-    expectTypeOf<
-      Awaited<ReturnType<DaemonClient['setExtensionsEnabled']>>
-    >().toEqualTypeOf<ExtensionMutationResponse>();
-    expectTypeOf<ExtensionBatchToggleItem>().toEqualTypeOf<{
-      extensionName: string;
-      enabled: boolean;
-    }>();
-    expectTypeOf<ExtensionBatchToggleError>().toEqualTypeOf<{
-      extensionName: string;
-      code: 'extension_not_found';
-      error: string;
     }>();
     expect(
       typeof Public.DaemonClient.prototype.setExtensionDefaultActivations,

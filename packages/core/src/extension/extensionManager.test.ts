@@ -2067,45 +2067,6 @@ describe('extension tests', () => {
   });
 
   describe('enableExtension / disableExtension', () => {
-    it('toggles multiple extensions with one store generation and refresh', async () => {
-      createExtension({
-        extensionsDir: userExtensionsDir,
-        name: 'first-extension',
-        version: '1.0.0',
-      });
-      createExtension({
-        extensionsDir: userExtensionsDir,
-        name: 'second-extension',
-        version: '1.0.0',
-      });
-      const manager = createExtensionManager();
-      await manager.refreshCache();
-      const initial = await manager.getExtensionStoreSnapshot();
-      const refreshTools = vi
-        .spyOn(manager, 'refreshTools')
-        .mockResolvedValue();
-      const onCommitted = vi.fn();
-
-      const snapshot = await manager.setExtensionsEnabled(
-        ['first-extension', 'second-extension'],
-        false,
-        SettingScope.Workspace,
-        tempWorkspaceDir,
-        onCommitted,
-      );
-
-      expect(snapshot.generation).toBe(initial.generation + 1);
-      expect(onCommitted).toHaveBeenCalledOnce();
-      expect(onCommitted).toHaveBeenCalledWith(snapshot.generation);
-      expect(refreshTools).toHaveBeenCalledOnce();
-      expect(manager.isEnabled('first-extension', tempWorkspaceDir)).toBe(
-        false,
-      );
-      expect(manager.isEnabled('second-extension', tempWorkspaceDir)).toBe(
-        false,
-      );
-    });
-
     it('sets multiple default activations with one generation and refresh', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,

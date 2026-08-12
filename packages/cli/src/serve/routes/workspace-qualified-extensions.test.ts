@@ -407,6 +407,53 @@ describe('extension management v2 REST', () => {
     }
   });
 
+  it('does not mutate or reconcile an all-missing global batch', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const missingExtensionId = 'c'.repeat(64);
+    try {
+      const started = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionIds: [missingExtensionId],
+            state: 'enabled',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_default_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          updated: false,
+          results: [],
+          errors: [
+            {
+              extensionId: missingExtensionId,
+              code: 'extension_not_found',
+            },
+          ],
+        },
+      });
+      expect(completed.result).not.toHaveProperty('refreshed');
+      expect(completed.result).not.toHaveProperty('failed');
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('stops request parsing after rejecting an invalid extension id', async () => {
     const h = await makeHarness();
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
@@ -462,10 +509,28 @@ describe('extension management v2 REST', () => {
           )
           .send({ extensionIds: [extensionId], state: 'invalid' }),
       );
+      const inheritedGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({ extensionIds: [extensionId], state: 'inherit' }),
+      );
 
       expect(invalidGlobal.status).toBe(400);
       expect(oversizedGlobal.status).toBe(400);
       expect(invalidWorkspace.status).toBe(400);
+      expect(inheritedGlobal.status).toBe(400);
+      expect(invalidGlobal.body).toMatchObject({
+        code: 'invalid_extension_id',
+      });
+      expect(oversizedGlobal.body).toMatchObject({
+        code: 'invalid_extension_ids',
+      });
+      expect(invalidWorkspace.body).toMatchObject({
+        code: 'invalid_extension_activation',
+      });
+      expect(inheritedGlobal.body).toMatchObject({
+        code: 'invalid_extension_activation',
+      });
       expect(
         ExtensionManager.prototype.setExtensionDefaultActivations,
       ).not.toHaveBeenCalled();
@@ -615,6 +680,120 @@ describe('extension management v2 REST', () => {
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('sets selected workspace overrides in one targeted batch', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+    ).mockReturnValue({
+      default: 'disabled',
+      workspace: 'enabled',
+      effective: 'enabled',
+      source: 'workspace_override',
+    });
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({ extensionIds: [extensionId], state: 'enabled' }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_workspace_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          results: [
+            {
+              extensionId,
+              name: 'demo',
+              workspaceActivation: 'enabled',
+              effectiveActivation: 'enabled',
+            },
+          ],
+          refreshed: 1,
+          failed: 0,
+        },
+      });
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).toHaveBeenCalledWith(
+        [extensionId],
+        h.secondary.workspaceCwd,
+        'enabled',
+        expect.any(Function),
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+      ).toHaveBeenCalledWith(
+        extensionId,
+        expect.objectContaining({ generation: 7 }),
+        h.secondary.workspaceCwd,
+      );
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not mutate or reconcile an all-missing workspace batch', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const missingExtensionId = 'c'.repeat(64);
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({
+            extensionIds: [missingExtensionId],
+            state: 'disabled',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_workspace_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          updated: false,
+          results: [],
+          errors: [
+            {
+              extensionId: missingExtensionId,
+              code: 'extension_not_found',
+            },
+          ],
+        },
+      });
+      expect(completed.result).not.toHaveProperty('refreshed');
+      expect(completed.result).not.toHaveProperty('failed');
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
       ).not.toHaveBeenCalled();

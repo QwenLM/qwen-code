@@ -187,8 +187,6 @@ const operation = await client.waitForExtensionOperation(workspaceHandle);
 
 The terminal operation result contains ordered `results` and per-target `extension_not_found` `errors`. Valid targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override and reports the resulting effective activation.
 
-Name-and-scope compatibility clients may instead pre-flight `workspace_extension_batch_toggle` and call `client.setExtensionsEnabled(...)`. Its user scope remains a home-level legacy path rule and its workspace scope remains bound to the primary workspace; it is not equivalent to either V2 helper.
-
 Workspace display names are optional presentation metadata. Pre-flight `capabilities.features.includes('workspace_display_name')`; workspace ids and canonical paths remain the only selectors, and duplicate display names are valid.
 
 ```ts

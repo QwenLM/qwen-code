@@ -1490,29 +1490,6 @@ export class DaemonClient {
     );
   }
 
-  /**
-   * Toggle up to 100 loaded Extensions in one queued operation.
-   *
-   * Pre-flight `workspace_extension_batch_toggle` before calling.
-   */
-  async setExtensionsEnabled(
-    extensionNames: readonly string[],
-    enabled: boolean,
-    params: ExtensionScopeRequest,
-    clientId?: string,
-  ): Promise<ExtensionMutationResponse> {
-    return await this.jsonRequest<ExtensionMutationResponse>(
-      '/workspace/extensions/enable',
-      'POST /workspace/extensions/enable',
-      {
-        method: 'POST',
-        body: { extensionNames: [...extensionNames], enabled, ...params },
-        clientId,
-        mode: 'rest',
-      },
-    );
-  }
-
   async updateExtension(
     name: string,
     clientId?: string,

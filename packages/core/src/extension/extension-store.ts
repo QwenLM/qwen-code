@@ -187,8 +187,8 @@ function setLegacyPathActivation(
 function clearWorkspaceActivation(
   policy: ExtensionPolicy,
   workspacePath: string,
+  canonicalWorkspace = canonicalizeWorkspacePath(workspacePath),
 ): void {
-  const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
   const legacyCandidates = [
     normalizeRulePath(workspacePath),
     normalizeRulePath(canonicalWorkspace),
@@ -787,8 +787,9 @@ export class ExtensionStore {
     identities: readonly ExtensionIdentity[],
     workspacePath: string,
   ): Promise<ExtensionStoreSnapshot> {
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspacePath);
     return await this.mutateMany(identities, (policy) => {
-      clearWorkspaceActivation(policy, workspacePath);
+      clearWorkspaceActivation(policy, workspacePath, canonicalWorkspace);
     });
   }
 
@@ -798,16 +799,6 @@ export class ExtensionStore {
     activation: ExtensionActivation,
   ): Promise<ExtensionStoreSnapshot> {
     return await this.mutate(identity, (policy) => {
-      setLegacyPathActivation(policy, scopePath, activation);
-    });
-  }
-
-  async setLegacyPathActivations(
-    identities: readonly ExtensionIdentity[],
-    scopePath: string,
-    activation: ExtensionActivation,
-  ): Promise<ExtensionStoreSnapshot> {
-    return await this.mutateMany(identities, (policy) => {
       setLegacyPathActivation(policy, scopePath, activation);
     });
   }

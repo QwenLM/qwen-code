@@ -122,8 +122,6 @@ Extension management: `extension_management_v2` adds the global `/extensions/*` 
 
 V2 Extension batch activation: `extension_batch_activation_v2` adds queued global default-activation and selected-workspace override batches to `extension_management_v2`. Clients must pre-flight it independently because older V2 daemons expose only singular activation routes.
 
-Legacy Extension batch activation: `workspace_extension_batch_toggle` adds one queued, atomic name-and-scope batch operation to the primary-workspace compatibility surface. It does not imply V2 global-default or selected-workspace semantics.
-
 Workspace-qualified session reads: `workspace_persisted_transcript`, `workspace_session_export`, `workspace_archived_session_export`. The active and archived export tags are independent from each other and from `session_export` and `workspace_qualified_rest_core`, so clients must pre-flight the exact storage state they intend to export. Persisted transcript paging permits an untrusted secondary under its bounded read policy; both full export paths remain trusted-only.
 
 Workspace mutation (Wave 4+): `workspace_memory`, `workspace_agents`, `workspace_agent_generate`, `workspace_acp_preheat`, `workspace_tool_toggle`, **`workspace_settings`** (conditional), `workspace_permissions`, `workspace_init`, `workspace_github_setup`, `workspace_trust`, `workspace_mcp_restart`, `workspace_mcp_manage`, `workspace_file_read`, `workspace_file_bytes`, `workspace_file_read_cursor`, `workspace_file_write`, **`workspace_reload`** (conditional).
