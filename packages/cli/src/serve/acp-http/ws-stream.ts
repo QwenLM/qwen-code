@@ -6,7 +6,11 @@
 
 import type { WebSocket } from 'ws';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { TransportStream } from './transport-stream.js';
+import type {
+  DeliveryResult,
+  TransportCloseReason,
+  TransportStream,
+} from './transport-stream.js';
 
 export class WsStream implements TransportStream {
   readonly kind = 'ws' as const;
@@ -14,6 +18,7 @@ export class WsStream implements TransportStream {
   private writeChain: Promise<void> = Promise.resolve();
   private _closed = false;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
+  private readonly activeSendClosers = new Set<() => void>();
 
   constructor(
     private readonly ws: WebSocket,
@@ -57,40 +62,68 @@ export class WsStream implements TransportStream {
   // (matches `AcpWsTransport.supportsReplay = false`).
   send(message: unknown, _id?: number): Promise<void> {
     const data = JSON.stringify(message);
-    const next = this.writeChain.then(
-      () =>
-        new Promise<void>((resolve, reject) => {
-          if (this._closed) {
-            resolve();
-            return;
-          }
-          this.ws.send(data, (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        }),
-    );
-    this.writeChain = next.catch((err: unknown) => {
-      if (!this._closed) {
-        writeStderrLine(
-          `qwen serve: /acp WS write failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+    return this.enqueueSend(data).then(() => undefined);
+  }
+
+  sendSerialized(data: Buffer, _id?: number): Promise<DeliveryResult> {
+    return this.enqueueSend(data, { binary: false });
+  }
+
+  private enqueueSend(
+    data: string | Buffer,
+    options?: { binary: boolean },
+  ): Promise<DeliveryResult> {
+    const next = this.writeChain
+      .then(
+        () =>
+          new Promise<DeliveryResult>((resolve) => {
+            if (this._closed) {
+              resolve('closed');
+              return;
+            }
+            let settled = false;
+            const settle = (result: DeliveryResult) => {
+              if (settled) return;
+              settled = true;
+              this.activeSendClosers.delete(onSocketClose);
+              resolve(result);
+            };
+            const onSocketClose = () => settle('closed');
+            const callback = (err?: Error) => {
+              settle(err ? 'failed' : this._closed ? 'closed' : 'delivered');
+            };
+            this.activeSendClosers.add(onSocketClose);
+            try {
+              if (options) this.ws.send(data, options, callback);
+              else this.ws.send(data, callback);
+            } catch {
+              settle('failed');
+            }
+          }),
+      )
+      .catch(() => 'failed' as const);
+    this.writeChain = next.then((result) => {
+      if (result === 'failed' && !this._closed) {
+        writeStderrLine('qwen serve: /acp WS write failed');
         this.close();
       }
     });
-    return this.writeChain;
+    return next;
   }
 
   get isClosed(): boolean {
     return this._closed;
   }
 
-  close(): void {
+  close(closeReason?: TransportCloseReason): void {
     if (this._closed) return;
     this._closed = true;
+    for (const settle of this.activeSendClosers) settle();
     if (this.heartbeat) clearInterval(this.heartbeat);
     try {
-      if (this.ws.readyState === this.ws.OPEN) this.ws.close(1000);
+      if (this.ws.readyState === this.ws.OPEN) {
+        this.ws.close(closeReason?.code ?? 1000, closeReason?.reason);
+      }
     } catch {
       /* socket gone */
     }

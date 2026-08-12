@@ -32,6 +32,19 @@ class MockWebSocket extends EventEmitter {
   }
 }
 
+class ControlledWebSocket extends MockWebSocket {
+  callback?: (err?: Error) => void;
+
+  override send(data: string, ...args: unknown[]) {
+    this.sent.push(data);
+    const callback = args.at(-1);
+    this.callback =
+      typeof callback === 'function'
+        ? (callback as (err?: Error) => void)
+        : undefined;
+  }
+}
+
 describe('WsStream', () => {
   let ws: MockWebSocket;
 
@@ -82,6 +95,19 @@ describe('WsStream', () => {
     expect(ws.sent).toEqual([]);
   });
 
+  it('close() settles an active send before its callback arrives', async () => {
+    const controlled = new ControlledWebSocket();
+    const stream = new WsStream(controlled as never);
+    const delivery = stream.sendSerialized(Buffer.from('{"ok":true}'));
+    await vi.waitFor(() => expect(controlled.callback).toBeDefined());
+
+    stream.close();
+    await expect(delivery).resolves.toBe('closed');
+
+    controlled.callback?.();
+    expect(stream.isClosed).toBe(true);
+  });
+
   it('isClosed starts false, becomes true after close()', () => {
     const stream = new WsStream(ws as never);
     expect(stream.isClosed).toBe(false);
@@ -97,6 +123,12 @@ describe('WsStream', () => {
     stream.close();
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(ws.closeCode).toBe(1000);
+  });
+
+  it('uses the supplied resource-fatal close code', () => {
+    const stream = new WsStream(ws as never);
+    stream.close({ code: 1013, reason: 'Resource limit' });
+    expect(ws.closeCode).toBe(1013);
   });
 
   it('close() calls onClose callback', () => {

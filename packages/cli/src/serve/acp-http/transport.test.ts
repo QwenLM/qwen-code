@@ -191,6 +191,8 @@ class FakeBridge {
     historyReplay?: string;
     clientId?: string;
   }> = [];
+  resumeRequests: string[] = [];
+  branchRequests: string[] = [];
   replaySnapshot: SessionReplaySnapshot | undefined;
   loadState: Record<string, unknown> = { replayed: true };
   loadPartial: true | undefined;
@@ -273,12 +275,26 @@ class FakeBridge {
   }
 
   async resumeSession(req: { sessionId: string }) {
+    this.resumeRequests.push(req.sessionId);
     return {
       sessionId: req.sessionId,
       workspaceCwd: TEST_WORKSPACE,
       attached: true,
       clientId: 'client-resume',
       state: { resumed: true },
+    };
+  }
+
+  async branchSession(sessionId: string) {
+    this.branchRequests.push(sessionId);
+    return {
+      sessionId: 'forked-1',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: false,
+      clientId: 'client-fork',
+      state: {},
+      displayName: 'Forked session',
+      forkedFrom: { sessionId, displayName: sessionId },
     };
   }
 
@@ -423,6 +439,7 @@ class FakeBridge {
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
+  detachThrowsSynchronously = false;
 
   async cancelSession(sessionId: string) {
     this.cancelled.push(sessionId);
@@ -434,8 +451,10 @@ class FakeBridge {
     if (this.closeError) throw this.closeError;
     if (this.closeShouldThrow) throw new Error('bridge close failed');
   }
-  async detachClient(sessionId: string, clientId?: string) {
+  detachClient(sessionId: string, clientId?: string): Promise<void> {
+    if (this.detachThrowsSynchronously) throw new Error('sync detach failed');
     this.detached.push({ sessionId, clientId });
+    return Promise.resolve();
   }
   async preheat() {}
 
@@ -887,12 +906,12 @@ function frameReader(res: Response) {
 }
 
 async function waitUntil(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs = 2000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((r) => setTimeout(r, 10));
   }
   throw new Error('Timed out waiting for condition');
@@ -1117,13 +1136,26 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   // Establish ownership of the fake bridge's session ('sess-1') so the
   // ownership-gated session stream + per-session POSTs are allowed.
   async function newSession(connId: string, id = 99): Promise<void> {
+    const conn = acpHandle?.registry.get(connId);
+    const needsDeliveryStream =
+      conn?.connStream === undefined || conn.connStream.isClosed;
+    const deliveryStream = needsDeliveryStream
+      ? await openStream(connId)
+      : undefined;
+    const delivered = deliveryStream
+      ? takeFrames(deliveryStream, 1)
+      : undefined;
     await post(connId, {
       jsonrpc: '2.0',
       id,
       method: 'session/new',
       params: {},
     });
-    await new Promise((r) => setTimeout(r, 30)); // let handle() register ownership
+    if (delivered) {
+      await delivered;
+    } else {
+      await new Promise((r) => setTimeout(r, 30));
+    }
   }
 
   async function withRuntimeDir<T>(
@@ -1380,6 +1412,142 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       'model',
       'mode',
     ]);
+  });
+
+  it('does not grant session ownership until the reply is delivered', async () => {
+    const connId = await initialize();
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 200,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const beforeDelivery = await openStream(connId, 'sess-1');
+    expect(beforeDelivery.status).toBe(403);
+
+    const connStream = await openStream(connId);
+    const [reply] = (await takeFrames(connStream, 1)) as Array<{
+      id: number;
+      result: { sessionId: string };
+    }>;
+    expect(reply).toMatchObject({
+      id: 200,
+      result: { sessionId: 'sess-1' },
+    });
+
+    const afterDelivery = await openStream(connId, 'sess-1');
+    expect(afterDelivery.status).toBe(200);
+    await afterDelivery.body?.cancel();
+  });
+
+  it('does not mutate sessions for ownership-granting notifications', async () => {
+    const connId = await initialize();
+    await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.lastSpawnScope).toBeUndefined();
+    expect(acpHandle?.registry.get(connId)?.ownedSessions.size).toBe(0);
+  });
+
+  it('does not load, resume, or fork for notification forms', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/resume',
+      params: { sessionId: 'resumed-1' },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/fork',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(bridge.loadRequests).toEqual([]);
+    expect(bridge.resumeRequests).toEqual([]);
+    expect(bridge.branchRequests).toEqual([]);
+    expect(acpHandle?.registry.get(connId)?.ownedSessions).toEqual(
+      new Set(['sess-1']),
+    );
+  });
+
+  it('rolls back an undelivered fresh session when the connection closes', async () => {
+    const connId = await initialize();
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 201,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
+    await waitUntil(() => bridge.killed.includes('sess-1'));
+    expect(acpHandle?.registry.get(connId)).toBeUndefined();
+  });
+
+  it('continues connection teardown when provisional detach throws synchronously', async () => {
+    bridge.spawnAttached = true;
+    bridge.detachThrowsSynchronously = true;
+    const connId = await initialize();
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 203,
+      method: 'session/new',
+      params: { cwd: TEST_WORKSPACE },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const response = await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
+
+    expect(response.status).toBe(202);
+    expect(acpHandle?.registry.get(connId)).toBeUndefined();
+  });
+
+  it('removes an undelivered persistent fork when the connection closes', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    await writeStoredSession('forked-1');
+    const connStream = acpHandle?.registry.get(connId)?.connStream;
+    connStream?.close();
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 202,
+      method: 'session/fork',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
+
+    await waitUntil(() => bridge.killed.includes('forked-1'));
+    await waitUntil(
+      async () =>
+        (await new SessionService(TEST_WORKSPACE).getSessionLocation(
+          'forked-1',
+        )) === undefined,
+    );
+    expect(acpHandle?.registry.get(connId)).toBeUndefined();
   });
 
   it('session/new rejects the daemon-owned Live Voice source namespace', async () => {
@@ -2117,7 +2285,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const voterConnStream = await openStream(voterConnId);
     const voterReader = frameReader(voterConnStream);
     try {
-      await voterReader.next(); // buffered session/new response on B
       await post(streamConnId, {
         jsonrpc: '2.0',
         id: 7,
@@ -2205,7 +2372,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 43,
@@ -2269,7 +2435,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 51,
@@ -2332,7 +2497,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       // Round 1: object _meta is preserved verbatim (nested shape survives).
       await post(connId, {
         jsonrpc: '2.0',
@@ -2424,7 +2588,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 49,
@@ -2552,7 +2715,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 7,
@@ -2674,7 +2836,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 22,
@@ -2728,7 +2889,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 24,
@@ -2819,7 +2979,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 30,
@@ -2892,7 +3051,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connStream = await openStream(connId);
     const connReader = frameReader(connStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 32,
@@ -2943,7 +3101,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 33,
@@ -3014,7 +3171,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 35,
@@ -3104,7 +3260,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     const sessReader = frameReader(sessStream);
     try {
-      await connReader.next(); // buffered session/new response
       await post(connId, {
         jsonrpc: '2.0',
         id: 37,
@@ -5029,9 +5184,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await newSession(connId);
     const connStream = await openStream(connId);
     const sessStream = await openStream(connId, 'sess-1');
-    // conn stream carries: buffered session/new reply (id 99), the close
-    // ack (id 91), AND the fallback prompt reply (id 90).
-    const connFrames = takeFrames(connStream, 3);
+    // The helper already delivered the session/new ownership grant. This
+    // stream carries the close ack and fallback prompt reply.
+    const connFrames = takeFrames(connStream, 2);
     await new Promise((r) => setTimeout(r, 50));
     await post(connId, {
       jsonrpc: '2.0',
@@ -5560,8 +5715,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     const connStream = await openStream(connId);
-    // 4 frames: buffered session/new reply (id 99) + the 3 below.
-    const got = takeFrames(connStream, 4);
+    const got = takeFrames(connStream, 3);
     await new Promise((r) => setTimeout(r, 50));
     await post(connId, {
       jsonrpc: '2.0',

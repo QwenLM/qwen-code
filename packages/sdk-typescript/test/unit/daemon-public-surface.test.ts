@@ -329,6 +329,20 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
     expectTypeOf<DaemonStatusReport['limits']>().toMatchTypeOf<{
       compactedReplayMaxBytes: number;
+      acpPreAttachMaxPayloadBytesGlobal: number | null;
+    }>();
+    expectTypeOf<
+      DaemonStatusReport['runtime']['transport']['acp']['preAttach']
+    >().toMatchTypeOf<{
+      usedFrames: number;
+      usedBytes: number;
+      guardFailures: number;
+    }>();
+    expectTypeOf<
+      NonNullable<DaemonStatusReport['full']>['acpConnections'][number]
+    >().toMatchTypeOf<{
+      preAttachOwnedFrames: number;
+      preAttachOwnedBytes: number;
     }>();
     expectTypeOf<DaemonStatusReport['daemon']>().toMatchTypeOf<{
       runId?: string;
