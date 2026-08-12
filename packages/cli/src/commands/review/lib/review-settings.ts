@@ -28,9 +28,15 @@ export interface OperatorReviewSettings {
 export function operatorReviewSettings(): OperatorReviewSettings {
   const review = loadSettings(undefined, { skipWorkspaceSettings: true }).merged
     .review;
+  // Settings loading performs no per-value type validation — the inferred
+  // `boolean` types do not hold for hand-edited files (`"false"` as a quoted
+  // string is the classic mistake), so each value is re-checked here. A
+  // non-boolean `attribution` falls back to the schema default (on); a
+  // non-boolean `comment` never enables auto-posting.
   return {
-    attribution: review?.attribution ?? true,
-    comment: review?.comment ?? false,
+    attribution:
+      typeof review?.attribution === 'boolean' ? review.attribution : true,
+    comment: review?.comment === true,
     effort: typeof review?.effort === 'string' ? review.effort : undefined,
   };
 }

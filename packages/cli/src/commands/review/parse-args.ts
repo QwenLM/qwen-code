@@ -192,11 +192,14 @@ export function parseReviewArgs(
   raw: string,
   defaults: {
     /**
-     * The standing default from `review.effort` (already resolved out of
-     * `auto`), applied when no `--effort` flag is present. An explicit flag
-     * still wins; the `--comment`/`--fix` forcings still override it.
+     * The standing default from `review.effort`, raw (`auto` already mapped
+     * to undefined by the caller), applied when no `--effort` flag is
+     * present. Validated case-insensitively exactly like an explicit flag —
+     * an invalid value warns and falls back instead of dropping silently.
+     * An explicit flag still wins; the `--comment`/`--fix` forcings still
+     * override it.
      */
-    effort?: ReviewEffort;
+    effort?: string;
     /**
      * The standing `review.comment` setting: treat a PR review as if
      * `--comment` was passed. The target binding is untouched — the run still
@@ -212,6 +215,22 @@ export function parseReviewArgs(
   let commentRequestedByFlag = false;
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
+
+  // The configured default gets the same validation as an explicit flag:
+  // settings loading performs no enum validation, so a hand-edited typo
+  // reaches this far raw. Discarding it silently would run every review at
+  // the built-in default while the operator believes another level is on —
+  // the flag path warns on the identical typo, so this one does too.
+  let configuredEffort: ReviewEffort | undefined;
+  let invalidConfiguredEffort: string | undefined;
+  if (defaults.effort !== undefined) {
+    const normalized = asEffort(defaults.effort);
+    if (normalized !== null) {
+      configuredEffort = normalized;
+    } else {
+      invalidConfiguredEffort = defaults.effort;
+    }
+  }
 
   // Warnings about a rejected `--effort` occurrence must state what effort
   // is ACTUALLY in effect — which is not known until every occurrence is
@@ -365,8 +384,8 @@ export function parseReviewArgs(
   if (explicitEffort !== null) {
     effort = explicitEffort;
     effortSource = 'explicit';
-  } else if (defaults.effort !== undefined) {
-    effort = defaults.effort;
+  } else if (configuredEffort !== undefined) {
+    effort = configuredEffort;
     effortSource = 'configured';
   } else {
     effort = isPr ? 'high' : 'medium';
@@ -439,6 +458,11 @@ export function parseReviewArgs(
         break;
     }
   }
+  if (invalidConfiguredEffort !== undefined) {
+    warnings.push(
+      `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
+    );
+  }
 
   return {
     target,
@@ -461,13 +485,13 @@ interface ParseArgsCliArgs {
 /**
  * The standing defaults from `settings.json` (`review.effort`,
  * `review.comment`), resolved for `parseReviewArgs`: `auto` effort means the
- * built-in rule, so it maps to undefined — and so does any invalid value.
- * The explicit-flag path validates case-insensitively via `asEffort`, and a
- * configured value must not skip that normalization: `"Low"` unnormalized
- * misses the exact `effort === 'low'` comparisons the forcings run.
+ * built-in rule, so it maps to undefined. Any other value passes through
+ * raw — `parseReviewArgs` validates it exactly like an explicit `--effort`
+ * (case normalization included), so a typo warns instead of dropping
+ * silently.
  */
 function reviewDefaultsFromSettings(): {
-  effort?: ReviewEffort;
+  effort?: string;
   comment?: boolean;
 } {
   const review = operatorReviewSettings();
@@ -475,7 +499,7 @@ function reviewDefaultsFromSettings(): {
     effort:
       review.effort === undefined || review.effort === 'auto'
         ? undefined
-        : (asEffort(review.effort) ?? undefined),
+        : review.effort,
     comment: review.comment,
   };
 }

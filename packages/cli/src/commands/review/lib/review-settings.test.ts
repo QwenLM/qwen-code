@@ -69,4 +69,23 @@ describe('operatorReviewSettings', () => {
     setReview({ effort: 42 });
     expect(operatorReviewSettings().effort).toBeUndefined();
   });
+
+  it('a hand-edited non-boolean attribution falls back to the schema default', () => {
+    // The quoted-JSON classic: `"attribution": "false"` is a truthy string
+    // — `?? true` once handed it straight to the truthiness checks and the
+    // disabled footer kept posting. Only a real boolean counts.
+    for (const attribution of ['false', 'true', 0, 1, null]) {
+      setReview({ attribution });
+      expect(operatorReviewSettings().attribution).toBe(true);
+    }
+  });
+
+  it('a hand-edited non-boolean comment never enables auto-posting', () => {
+    // A public write must open only on a real `true`; any other shape stays
+    // off, whatever its truthiness.
+    for (const comment of ['true', 1, 'yes', null]) {
+      setReview({ comment });
+      expect(operatorReviewSettings().comment).toBe(false);
+    }
+  });
 });

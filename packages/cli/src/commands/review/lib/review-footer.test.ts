@@ -90,11 +90,19 @@ describe('the review footer and the regex that strips it', () => {
     });
 
     it('returns a marker-less body unchanged — no regex, no rewrite', () => {
-      // The guard is the linearity contract: the regex scans quadratically on
-      // long whitespace runs when no marker is present, so a marker-less body
-      // must come back byte-identical without it ever running.
-      const body = `a finding${' '.repeat(10_000)}no footer here`;
+      // The guard is the linearity contract: the regex opens `\s*` under an
+      // unanchored search and scans quadratically on a long whitespace run,
+      // and a forged footer truncated mid-line (`_— ` without the marker)
+      // defeats the engine's literal prefilter — so only the guard keeps
+      // this linear. The output assertion alone has no teeth: an unguarded
+      // replace returns this body identically too. Bound the wall time
+      // instead — the guarded path is a literal scan at this size
+      // (microseconds), while the same replace without the guard runs for
+      // seconds and fails the ceiling by orders of magnitude.
+      const body = `a finding\n\n_— cut short${' '.repeat(200_000)}end`;
+      const start = performance.now();
       expect(stripReviewFooter(body)).toBe(body);
+      expect(performance.now() - start).toBeLessThan(2000);
     });
   });
 });

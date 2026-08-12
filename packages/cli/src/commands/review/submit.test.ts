@@ -212,6 +212,30 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(byFlag.ok).toBe(true);
     expect(byFlag.why).toContain('`--comment` was in the review arguments');
   });
+
+  it('a requested-but-unbindable comment names the missing PR, not a missing flag', () => {
+    // When comment was requested — by the flag or the standing setting — but
+    // the arguments name no PR, the refusal must say THAT. Blaming a missing
+    // `--comment` flag the operator never typed (and implying one would fix
+    // it) misdirects; the request itself is on record.
+    const bySetting = authFor('src/foo.ts', { defaultComment: true });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain('do not name a');
+    expect(bySetting.why).not.toContain(
+      '`--comment` was not in the review arguments',
+    );
+
+    const byFlag = authFor('src/foo.ts --comment');
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('do not name a');
+
+    // Neither source requested it: the original wording stands.
+    const neither = authFor('src/foo.ts');
+    expect(neither.ok).toBe(false);
+    expect(neither.why).toContain(
+      '`--comment` was not in the review arguments',
+    );
+  });
 });
 
 describe('the posting gate', () => {
