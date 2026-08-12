@@ -47,6 +47,10 @@ const expectedManifest = {
     },
     {
       paths: ['packages/core/src/skills/**'],
+      // Keep every bundled skill entrypoint, but deliberately leave nested
+      // implementations, tests, references, and scripts to the changed-file
+      // diff. Including bundled/*/** makes the all-rule union 129 files and
+      // violates the 128-item repository-context wire contract.
       relatedPaths: [
         'packages/core/src/skills/*.ts',
         'packages/core/src/skills/bundled/*/SKILL.md',
@@ -191,12 +195,39 @@ describe('committed review context manifest', () => {
     }
   });
 
+  it('keeps nested bundled-skill material out of automatic related context', () => {
+    const context = provideForRepo([
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
+    ]);
+
+    expect(context).not.toBeNull();
+    expect(context?.domains).toContain('core-skills');
+    expect(context?.relatedPaths).toContain(
+      'packages/core/src/skills/bundled/dataviz/SKILL.md',
+    );
+    expect(context?.relatedPaths).not.toContain(
+      'packages/core/src/skills/bundled/dataviz/references/palette.md',
+    );
+    expect(context?.relatedPaths).not.toContain(
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
+    );
+    expect(context?.relatedPaths).not.toContain(
+      'packages/core/src/skills/bundled/loop/autonomous-loop.ts',
+    );
+  });
+
   it('stays under the resolved-file bound when every rule co-matches', () => {
     const probes = expectedManifest.rules.flatMap((rule) =>
       rule.paths.map(probeFor),
     );
     const context = provideForRepo(probes);
     expect(context).not.toBeNull();
+
+    // At this revision the real provider resolves 115/128 files, leaving 13
+    // slots. The manifest grammar has no negation globs, and hooks/** is the
+    // fastest-growing remaining group, so this bound is the deliberate alarm
+    // for future rebalancing rather than permission to truncate the result.
+    expect(context?.relatedPaths).toHaveLength(115);
     expect(context?.relatedPaths.length).toBeLessThanOrEqual(MAX_ARRAY_ITEMS);
   });
 
