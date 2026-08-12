@@ -783,7 +783,7 @@ describe('Agent View PTY host process server', () => {
         globalDir: 'C:\\Users\\test\\.qwen',
         platform: 'win32',
       }),
-    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-pty-[a-f0-9]{16}$/);
+    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-pty-[a-f0-9]{12}$/);
 
     const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
       globalDir: path.join(os.tmpdir(), 'qwen-agent-view-test'.repeat(10)),
@@ -795,7 +795,7 @@ describe('Agent View PTY host process server', () => {
       path.join(os.tmpdir(), `qwen-avp-${uid}`),
       path.join('/tmp', `qwen-avp-${uid}`),
     ]).toContain(path.dirname(fallbackPath));
-    expect(path.basename(fallbackPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    expect(path.basename(fallbackPath)).toMatch(/^[a-f0-9]{12}\.sock$/);
     expect(Buffer.byteLength(fallbackPath)).toBeLessThan(100);
   });
 

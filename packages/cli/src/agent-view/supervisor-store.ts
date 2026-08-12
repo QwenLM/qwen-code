@@ -44,6 +44,7 @@ interface StoreOptions {
 }
 
 const rosterMutationQueues = new Map<string, Promise<void>>();
+const stateMutationQueues = new Map<string, Promise<void>>();
 
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
@@ -208,17 +209,19 @@ export async function patchAgentViewSessionState(
   patch: Partial<AgentViewSessionStateFile>,
   options: StoreOptions = {},
 ): Promise<void> {
-  const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecordForWrite(paths.statePath);
-  if (existing === undefined) {
-    return;
-  }
-  await writeJsonFile(paths.statePath, {
-    ...existing,
-    ...patch,
-    schemaVersion: 1,
+  return mutateAgentViewState(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.statePath);
+    if (existing === undefined) {
+      return;
+    }
+    await writeJsonFile(paths.statePath, {
+      ...existing,
+      ...patch,
+      schemaVersion: 1,
+    });
+    await fs.mkdir(paths.tmpDir, { recursive: true });
   });
-  await fs.mkdir(paths.tmpDir, { recursive: true });
 }
 
 export async function listAgentViewSessionStates(
@@ -444,6 +447,30 @@ async function mutateAgentViewRoster<T>(
     release();
     if (rosterMutationQueues.get(rosterPath) === current) {
       rosterMutationQueues.delete(rosterPath);
+    }
+  }
+}
+
+async function mutateAgentViewState<T>(
+  sessionId: string,
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const statePath = getAgentViewSessionPaths(sessionId, options).statePath;
+  const previous = stateMutationQueues.get(statePath) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const current = previous.catch(() => {}).then(() => gate);
+  stateMutationQueues.set(statePath, current);
+  await previous.catch(() => {});
+  try {
+    return await action();
+  } finally {
+    release();
+    if (stateMutationQueues.get(statePath) === current) {
+      stateMutationQueues.delete(statePath);
     }
   }
 }

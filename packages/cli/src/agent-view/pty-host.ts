@@ -20,6 +20,9 @@ const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
   'TERMCAP',
   'COLUMNS',
   'LINES',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  'CI',
 ]);
 
 export interface AgentViewPtySpawnOptions {
@@ -280,6 +283,7 @@ export function validateAgentViewLaunchConfig(
   validateOptionalString(value, 'model', errors);
   validateOptionalString(value, 'approvalMode', errors);
   validateOptionalString(value, 'sandbox', errors);
+  validateOptionalString(value, 'initialPrompt', errors);
   validateOptionalString(value, 'settingsDigest', errors);
   validateOptionalString(value, 'mcpDigest', errors);
   validateTerminal(value['terminal'], errors);
@@ -322,17 +326,18 @@ export async function launchAgentViewPtyHost(
   for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
     delete inheritedEnv[key];
   }
+  const term = launch.env['TERM'] || 'xterm-256color';
   const workerEnv: Record<string, string> = {
     ...inheritedEnv,
     ...launch.env,
-    TERM: 'xterm-256color',
+    TERM: term,
   };
   for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
     delete workerEnv[key];
   }
   const ptyProcess = pty.module.spawn(command[0], command.slice(1), {
     cwd: launch.activeCwd,
-    name: 'xterm-256color',
+    name: term,
     cols: launch.terminal.columns,
     rows: launch.terminal.rows,
     env: workerEnv,

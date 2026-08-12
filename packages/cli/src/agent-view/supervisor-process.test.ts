@@ -75,7 +75,7 @@ describe('Agent View supervisor process helpers', () => {
     });
     if (process.getuid === undefined) {
       expect(path.basename(path.dirname(socketPath))).toMatch(
-        /^qwen-agent-view-[a-f0-9]{16}$/,
+        /^qwen-agent-view-[a-f0-9]{12}$/,
       );
     } else {
       expect(path.dirname(socketPath)).toBe(
@@ -104,7 +104,7 @@ describe('Agent View supervisor process helpers', () => {
         path.join(runtimeDir, `qav-${uid}`),
       );
     }
-    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+    expect(path.basename(socketPath)).toMatch(/^[a-f0-9]{12}\.sock$/);
     expect(Buffer.byteLength(socketPath)).toBeLessThan(100);
   });
 
@@ -114,7 +114,7 @@ describe('Agent View supervisor process helpers', () => {
         globalDir: 'C:\\Users\\test\\.qwen',
         platform: 'win32',
       }),
-    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-view-[a-f0-9]{16}$/);
+    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-view-[a-f0-9]{12}$/);
   });
 
   it('creates a minimal default handler for status/list/shutdown', async () => {
@@ -3560,6 +3560,18 @@ describe('Agent View supervisor process helpers', () => {
     await patchSessionStateForTest(result.sessionId, globalDir, {
       processState: 'alive',
     });
+    // Simulate a real respawn: update the worker record with a running
+    // PID so refreshMissingWorkerState recognizes the session as alive.
+    const worker = await readAgentViewWorker(result.sessionId, {
+      globalDir,
+    });
+    if (worker) {
+      await writeAgentViewWorker(
+        result.sessionId,
+        { ...worker, hostPid: process.pid },
+        { globalDir },
+      );
+    }
     await expect(handler.tickIdleHibernation()).resolves.toEqual({
       hibernated: [],
       shutdownRequested: false,

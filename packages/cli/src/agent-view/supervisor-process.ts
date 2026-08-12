@@ -282,6 +282,8 @@ class AgentViewSupervisorProcessHandler
         // Per-session healing is best-effort: one unreadable session
         // directory must not reject the whole listing — fall back to the
         // cached snapshot and continue.
+        state = snapshot.state;
+        activity = snapshot.activity;
       }
       if (state !== snapshot.state || activity !== snapshot.activity) {
         changed = true;
@@ -415,202 +417,208 @@ class AgentViewSupervisorProcessHandler
   async adopt(params?: Record<string, unknown>) {
     const adoption = parseAdoptParams(params);
     const store = this.store;
-    const existingState = await readAgentViewSessionState(
-      adoption.sessionId,
-      store,
-    );
-    if (existingState?.ownership === 'managed') {
-      return {
-        sessionId: adoption.sessionId,
-        adopted: false,
-        alreadyManaged: true,
-      };
-    }
-    if (existingState?.ownership === 'adopting') {
-      const worker = await readAgentViewWorker(adoption.sessionId, store);
-      if (
-        this.workers.has(adoption.sessionId) ||
-        isPidRunning(worker?.hostPid) ||
-        isPidRunning(worker?.workerPid)
-      ) {
+    return this.workers.withHostSetupLock(adoption.sessionId, async () => {
+      const existingState = await readAgentViewSessionState(
+        adoption.sessionId,
+        store,
+      );
+      if (existingState?.ownership === 'managed') {
         return {
           sessionId: adoption.sessionId,
           adopted: false,
           alreadyManaged: true,
         };
       }
-      // Stale 'adopting' left by a supervisor crash mid-adopt: no live host
-      // or worker process remains, so allow the session to be re-adopted.
-    }
-    if (this.workers.has(adoption.sessionId)) {
-      throw new Error(
-        `Agent View session ${adoption.sessionId} is already running.`,
-      );
-    }
-
-    const token = randomUUID();
-    const now = new Date().toISOString();
-    const activeCwd = path.resolve(adoption.activeCwd);
-    const projectCwd = path.resolve(adoption.projectCwd);
-    const createdAt = existingState?.createdAt ?? now;
-    const adoptingState = {
-      schemaVersion: 1 as const,
-      sessionId: adoption.sessionId,
-      ownership: 'adopting' as const,
-      sessionState: 'idle' as const,
-      processState: 'starting' as const,
-      attachState: 'detached' as const,
-      projectCwd,
-      originalCwd: activeCwd,
-      activeCwd,
-      createdAt,
-      updatedAt: now,
-      worktree: { mode: 'none' as const },
-    };
-
-    try {
-      await writeAgentViewSessionState(adoptingState, store);
-      await writeAgentViewLaunch(
-        {
-          schemaVersion: 1,
-          sessionId: adoption.sessionId,
-          argv: buildResumeWorkerArgv(adoption.sessionId),
-          env: createAgentViewWorkerSidebandEnv({
+      if (existingState?.ownership === 'adopting') {
+        const worker = await readAgentViewWorker(adoption.sessionId, store);
+        if (
+          this.workers.has(adoption.sessionId) ||
+          isPidRunning(worker?.hostPid) ||
+          isPidRunning(worker?.workerPid)
+        ) {
+          return {
             sessionId: adoption.sessionId,
-            sidebandEndpoint: this.socketPath,
-            token,
-            activeCwd,
-          }),
-          entrypoint: getCurrentQwenCliEntrypoint(),
-          projectCwd,
-          activeCwd,
-          ...(adoption.approvalMode
-            ? { approvalMode: adoption.approvalMode }
-            : {}),
-          ...(adoption.sandbox ? { sandbox: adoption.sandbox } : {}),
-          includeDirectories: [],
-          terminal: adoption.terminal,
-        },
-        store,
-      );
-      await writeAgentViewActivity(
-        adoption.sessionId,
-        {
-          schemaVersion: 1,
-          summary: 'Backgrounded from native session',
-          lastActivityAt: now,
-          capabilities: [],
-        },
-        store,
-      );
-      await writeAgentViewWorker(
-        adoption.sessionId,
-        {
-          schemaVersion: 1,
-          endpoint: this.socketPath,
-          tokenDigest: digestAgentViewWorkerToken(token),
-          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
-          platform: process.platform,
-          recentOutputBytes: 0,
-        },
-        store,
-      );
-      await upsertAgentViewRosterEntry(
-        {
-          sessionId: adoption.sessionId,
-          projectCwd,
-          activeCwd,
-          createdAt,
-          updatedAt: now,
-        },
-        store,
-      );
-      const launch = await readAgentViewLaunch(adoption.sessionId, store);
-      if (!launch) {
-        throw new Error('Agent View adoption launch record was not written.');
+            adopted: false,
+            alreadyManaged: true,
+          };
+        }
+        // Stale 'adopting' left by a supervisor crash mid-adopt: no live host
+        // or worker process remains, so allow the session to be re-adopted.
       }
-      const ready = this.workers.waitForWorkerReadyIfNeeded(
-        adoption.sessionId,
+      if (this.workers.has(adoption.sessionId)) {
+        throw new Error(
+          `Agent View session ${adoption.sessionId} is already running.`,
+        );
+      }
+
+      const token = randomUUID();
+      const now = new Date().toISOString();
+      const activeCwd = path.resolve(adoption.activeCwd);
+      const projectCwd = path.resolve(adoption.projectCwd);
+      const createdAt = existingState?.createdAt ?? now;
+      const adoptingState = {
+        schemaVersion: 1 as const,
+        sessionId: adoption.sessionId,
+        ownership: 'adopting' as const,
+        sessionState: 'idle' as const,
+        processState: 'starting' as const,
+        attachState: 'detached' as const,
+        projectCwd,
+        originalCwd: activeCwd,
         activeCwd,
-      );
-      void ready.catch(() => {});
-      const host = await this.workers.launchPtyHostForSupervisor(launch, store);
-      await ensureSessionStillLaunchable(adoption.sessionId, store, host);
-      this.workers.set(adoption.sessionId, host);
-      const latestState =
-        (await readAgentViewSessionState(adoption.sessionId, store)) ??
-        adoptingState;
-      await patchAgentViewSessionState(
-        adoption.sessionId,
-        {
-          ownership: 'managed',
-          sessionState:
-            latestState.processState === 'alive'
-              ? latestState.sessionState
-              : 'starting',
-          processState:
-            latestState.processState === 'alive' ? 'alive' : 'starting',
-          attachState: 'detached',
-          updatedAt: new Date().toISOString(),
-        },
-        store,
-      );
-      await writeAgentViewWorker(
-        adoption.sessionId,
-        {
-          schemaVersion: 1,
-          hostPid: host.pid,
-          workerPid: host.workerPid,
-          ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
-          ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
-          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
-          platform: process.platform,
-          recentOutputBytes: 0,
-        },
-        store,
-      );
-      await ready;
-      await ensureSessionStillLaunchable(adoption.sessionId, store);
-      this.notifyChanged();
-      return { sessionId: adoption.sessionId, adopted: true };
-    } catch (error) {
-      this.workers.rejectPendingWorkerReady(adoption.sessionId, error);
-      this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
-      if (isStoppedError(error)) {
-        // A deliberate stop during the adopt ready wait must not be mislabeled
-        // as an adoption failure, matching dispatch()'s ready-wait catch.
-        await markStoppedSession(adoption.sessionId, store, 'exited');
-      } else {
-        const failedAt = new Date().toISOString();
-        // Never restore a stale 'adopting' record: re-persisting it would lock
-        // the session out of every managed operation. Fall through to the
-        // terminal adoption_failed state so a later adopt can retry.
-        const restorableState =
-          existingState && existingState.ownership !== 'adopting'
-            ? existingState
-            : undefined;
-        await writeAgentViewSessionState(
-          restorableState ?? {
-            ...adoptingState,
-            ownership: 'unmanaged',
-            processState: 'exited',
-            updatedAt: failedAt,
-            lastError: {
-              code: 'adoption_failed',
-              message:
-                error instanceof Error
-                  ? error.message
-                  : 'Agent View adoption failed.',
-              at: failedAt,
-            },
+        createdAt,
+        updatedAt: now,
+        worktree: { mode: 'none' as const },
+      };
+
+      try {
+        await writeAgentViewSessionState(adoptingState, store);
+        await writeAgentViewLaunch(
+          {
+            schemaVersion: 1,
+            sessionId: adoption.sessionId,
+            argv: buildResumeWorkerArgv(adoption.sessionId),
+            env: createAgentViewWorkerSidebandEnv({
+              sessionId: adoption.sessionId,
+              sidebandEndpoint: this.socketPath,
+              token,
+              activeCwd,
+            }),
+            entrypoint: getCurrentQwenCliEntrypoint(),
+            projectCwd,
+            activeCwd,
+            ...(adoption.approvalMode
+              ? { approvalMode: adoption.approvalMode }
+              : {}),
+            ...(adoption.sandbox ? { sandbox: adoption.sandbox } : {}),
+            includeDirectories: [],
+            terminal: adoption.terminal,
           },
           store,
         );
+        await writeAgentViewActivity(
+          adoption.sessionId,
+          {
+            schemaVersion: 1,
+            summary: 'Backgrounded from native session',
+            lastActivityAt: now,
+            capabilities: [],
+          },
+          store,
+        );
+        await writeAgentViewWorker(
+          adoption.sessionId,
+          {
+            schemaVersion: 1,
+            endpoint: this.socketPath,
+            tokenDigest: digestAgentViewWorkerToken(token),
+            protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+            platform: process.platform,
+            recentOutputBytes: 0,
+          },
+          store,
+        );
+        await upsertAgentViewRosterEntry(
+          {
+            sessionId: adoption.sessionId,
+            projectCwd,
+            activeCwd,
+            createdAt,
+            updatedAt: now,
+          },
+          store,
+        );
+        const launch = await readAgentViewLaunch(adoption.sessionId, store);
+        if (!launch) {
+          throw new Error('Agent View adoption launch record was not written.');
+        }
+        const ready = this.workers.waitForWorkerReadyIfNeeded(
+          adoption.sessionId,
+          activeCwd,
+        );
+        void ready.catch(() => {});
+        const host = await this.workers.launchPtyHostForSupervisor(
+          launch,
+          store,
+        );
+        await ensureSessionStillLaunchable(adoption.sessionId, store, host);
+        this.workers.set(adoption.sessionId, host);
+        const latestState =
+          (await readAgentViewSessionState(adoption.sessionId, store)) ??
+          adoptingState;
+        await patchAgentViewSessionState(
+          adoption.sessionId,
+          {
+            ownership: 'managed',
+            sessionState:
+              latestState.processState === 'alive'
+                ? latestState.sessionState
+                : 'starting',
+            processState:
+              latestState.processState === 'alive' ? 'alive' : 'starting',
+            attachState: 'detached',
+            updatedAt: new Date().toISOString(),
+          },
+          store,
+        );
+        await writeAgentViewWorker(
+          adoption.sessionId,
+          {
+            schemaVersion: 1,
+            hostPid: host.pid,
+            workerPid: host.workerPid,
+            ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
+            ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
+            protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+            platform: process.platform,
+            recentOutputBytes: 0,
+          },
+          store,
+        );
+        await ready;
+        await ensureSessionStillLaunchable(adoption.sessionId, store);
+        this.notifyChanged();
+        return { sessionId: adoption.sessionId, adopted: true };
+      } catch (error) {
+        if (isStoppedError(error)) {
+          // A deliberate stop during the adopt ready wait must not be
+          // mislabeled as an adoption failure, nor hard-kill the
+          // gracefully stopping host — matching dispatch()'s catch.
+          await markStoppedSession(adoption.sessionId, store, 'exited');
+        } else {
+          this.workers.rejectPendingWorkerReady(adoption.sessionId, error);
+          this.workers.terminateSession(adoption.sessionId, 'SIGTERM');
+          const failedAt = new Date().toISOString();
+          // Never restore a stale 'adopting' record: re-persisting it would
+          // lock the session out of every managed operation. Fall through to
+          // the terminal adoption_failed state so a later adopt can retry.
+          const restorableState =
+            existingState && existingState.ownership !== 'adopting'
+              ? existingState
+              : undefined;
+          await writeAgentViewSessionState(
+            restorableState ?? {
+              ...adoptingState,
+              ownership: 'unmanaged',
+              processState: 'exited',
+              updatedAt: failedAt,
+              lastError: {
+                code: 'adoption_failed',
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : 'Agent View adoption failed.',
+                at: failedAt,
+              },
+            },
+            store,
+          );
+        }
+        await removeAgentViewRosterEntry(adoption.sessionId, store);
+        this.notifyChanged();
+        throw error;
       }
-      await removeAgentViewRosterEntry(adoption.sessionId, store);
-      this.notifyChanged();
-      throw error;
-    }
+    });
   }
   async workerEvent(params?: Record<string, unknown>) {
     const event = parseWorkerEvent(params);
@@ -629,15 +637,16 @@ class AgentViewSupervisorProcessHandler
       await applyWorkerHeartbeatEvent(event, this.store);
       return { sessionId: event.sessionId, accepted: true };
     }
+    let applied = true;
     try {
-      await applyWorkerEvent(event, this.store);
+      applied = await applyWorkerEvent(event, this.store);
     } catch (error) {
       if (event.type === 'ready') {
         this.workers.rejectPendingWorkerReady(event.sessionId, error);
       }
       throw error;
     }
-    if (event.type === 'ready') {
+    if (event.type === 'ready' && applied) {
       this.workers.resolvePendingWorkerReady(event.sessionId);
     }
     this.notifyChanged();
@@ -1055,8 +1064,11 @@ class AgentViewSupervisorProcessHandler
     const hibernated: string[] = [];
     for (const snapshot of snapshots) {
       const host = this.workers.get(snapshot.sessionId);
+      if (!host) {
+        await this.workers.refreshMissingWorkerState(snapshot.state);
+        continue;
+      }
       if (
-        !host ||
         this.hasLiveAttach(snapshot.sessionId) ||
         this.hasPendingWorkerInputControl(snapshot.sessionId) ||
         this.hasPendingWorkerStopControl(snapshot.sessionId) ||
@@ -1091,6 +1103,7 @@ class AgentViewSupervisorProcessHandler
           if (
             !latestState ||
             latestState.sessionState === 'stopped' ||
+            latestState.sessionState === 'working' ||
             latestState.processState !== 'hibernating' ||
             this.hasLiveAttach(snapshot.sessionId) ||
             this.hasPendingWorkerInputControl(snapshot.sessionId) ||
@@ -1244,7 +1257,12 @@ class AgentViewSupervisorProcessHandler
         this.attachSockets.delete(sessionId);
       }
       this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
-      await writeAttachState(sessionId, 'detached', this.store);
+      try {
+        await writeAttachState(sessionId, 'detached', this.store);
+      } catch {
+        // Best-effort: a store error during detach must not mask
+        // the original error from the try block.
+      }
       socket.end();
     }
   }
@@ -1562,8 +1580,8 @@ class WorkerRegistry {
     );
     if (host) {
       queueStop();
-      await markStoppedSession(sessionId, this.store, 'alive');
       this.scheduleStopFallback(sessionId, host);
+      await markStoppedSession(sessionId, this.store, 'alive');
       return;
     }
     const storedWorker = await readAgentViewWorker(sessionId, this.store);
@@ -1626,7 +1644,7 @@ class WorkerRegistry {
 
   async shutdownAll(): Promise<number> {
     const entries = Array.from(this.ptyHosts.entries());
-    await Promise.all(
+    await Promise.allSettled(
       entries.map(async ([sessionId, host]) => {
         await this.shutdownHost(sessionId, host);
         await markStoppedSession(sessionId, this.store, 'exited');
@@ -2060,9 +2078,9 @@ class WorkerRegistry {
       } else if (!host) {
         await this.killStoredWorkerPids(sessionId, 'SIGTERM');
       }
-      await writeAgentViewSessionState(
+      await patchAgentViewSessionState(
+        sessionId,
         {
-          ...refreshedState,
           processState: 'exited',
           attachState: 'detached',
           updatedAt: new Date().toISOString(),
@@ -2629,7 +2647,7 @@ async function updateExitedSession(
         state.sessionState === 'failed' ||
         state.sessionState === 'completed'
           ? state.sessionState
-          : exitCode === 0
+          : exitCode === 0 && state.sessionState !== 'starting'
             ? 'completed'
             : 'failed',
       processState: 'exited',
@@ -2648,16 +2666,16 @@ async function markFailedSession(
   const state = await readAgentViewSessionState(sessionId, options);
   if (!state) return;
   if (state.ownership !== 'managed') return;
-  if (state.sessionState === 'stopped') {
+  if (state.sessionState === 'stopped' || state.sessionState === 'completed') {
     if (state.processState !== 'exited') {
       await markStoppedSession(sessionId, options, 'exited');
     }
     return;
   }
   const now = new Date().toISOString();
-  await writeAgentViewSessionState(
+  await patchAgentViewSessionState(
+    sessionId,
     {
-      ...state,
       sessionState: 'failed',
       processState: 'exited',
       updatedAt: now,
@@ -2674,7 +2692,7 @@ async function markFailedSession(
 async function applyWorkerEvent(
   event: AgentViewWorkerEvent,
   options: { globalDir?: string },
-): Promise<void> {
+): Promise<boolean> {
   const state = await readAgentViewSessionState(event.sessionId, options);
   if (!state) {
     throw new Error(`No Agent View session found for ${event.sessionId}.`);
@@ -2691,7 +2709,7 @@ async function applyWorkerEvent(
     // A buffered/in-flight event from a dead worker must not clobber the
     // exit verdict. A legitimate replacement worker's ready arrives only
     // after respawn writes processState 'starting'.
-    return;
+    return false;
   }
 
   const now = event.at ?? new Date().toISOString();
@@ -2777,6 +2795,7 @@ async function applyWorkerEvent(
     },
     options,
   );
+  return true;
 }
 
 async function applyWorkerHeartbeatEvent(
@@ -3260,5 +3279,5 @@ function storeOptions(options: AgentViewSupervisorProcessOptions): {
 }
 
 function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
 }
