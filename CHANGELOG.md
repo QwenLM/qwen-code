@@ -12,6 +12,70 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.21.10](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.10) - 2026-08-11
+
+### Highlights
+
+- Added ACP support for configuring reasoning effort levels from Default to Max via session configuration. ([#8526](https://github.com/QwenLM/qwen-code/pull/8526))
+- Clicking uploaded or pasted images in the Web Shell now opens a preview in the artifact panel with download support. ([#8930](https://github.com/QwenLM/qwen-code/pull/8930))
+- Fixed AutoFix timeouts by enabling streamed progress output to detect active work during long-running headless tasks. ([#8895](https://github.com/QwenLM/qwen-code/pull/8895))
+- Fixed Desktop Local Control to support enterprise LAN addresses by allowing non-private IPv4 routes on verified interfaces. ([#8866](https://github.com/QwenLM/qwen-code/pull/8866))
+- Improved Web Shell responsiveness by fixing animation stutter, scrolling stability, and line-change statistics for large files. ([#8915](https://github.com/QwenLM/qwen-code/pull/8915), [#8914](https://github.com/QwenLM/qwen-code/pull/8914), [#8924](https://github.com/QwenLM/qwen-code/pull/8924))
+- Fixed Windows bug where the desktop app failed to spawn the Node runtime due to unhandled verbatim path prefixes. ([#8936](https://github.com/QwenLM/qwen-code/pull/8936))
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- OpenAI API log cleanup now applies to non-interactive sessions, headless invocations, and daemon modes to reduce disk usage. ([#8893](https://github.com/QwenLM/qwen-code/pull/8893)) by @doudouOUC
+- Web Shell session lists now share cached data across components to improve loading performance and reduce network requests. ([#8891](https://github.com/QwenLM/qwen-code/pull/8891)) by @doudouOUC
+- Added ACP support for configuring reasoning effort levels, allowing clients to set options from Default to Max via session configuration. ([#8526](https://github.com/QwenLM/qwen-code/pull/8526)) by @zjunothing
+- Clicking uploaded or pasted images in the Web Shell now opens a preview in the right-hand artifact panel with download support. ([#8930](https://github.com/QwenLM/qwen-code/pull/8930)) by @ytahdn
+
+#### Bug Fixes
+
+- Fixed AutoFix timeouts by enabling streamed progress output so the system can detect active work during long-running headless tasks. ([#8895](https://github.com/QwenLM/qwen-code/pull/8895)) by @qqqys
+- Changed @ completion to use bare Left and Right arrow keys for switching category tabs instead of Ctrl+arrow or Ctrl+Tab. ([#8576](https://github.com/QwenLM/qwen-code/pull/8576)) by @LaZzyMan
+- Corrected the round-cap marker lifecycle to prevent contradictory stop disclosures and ensure markers clear properly upon convergence. ([#8850](https://github.com/QwenLM/qwen-code/pull/8850)) by @wenshao
+- Improved Web Shell subagent panel responsiveness by fixing animation stutter, elapsed time resets, and output scrolling behavior. ([#8915](https://github.com/QwenLM/qwen-code/pull/8915)) by @ytahdn
+- Fixed a bug where session load timeouts prevented retrying the same session by clearing the stale target identity upon expiration. ([#8883](https://github.com/QwenLM/qwen-code/pull/8883)) by @yiliang114
+- Restored Live Host release mirroring to Aliyun OSS by correcting workflow permissions and credential passing. ([#8917](https://github.com/QwenLM/qwen-code/pull/8917)) by @LaZzyMan
+- Context usage indicators no longer appear twice in the UI when the status line already displays context information. ([#8749](https://github.com/QwenLM/qwen-code/pull/8749)) by @yiliang114
+- Hyperlinks in chat output now correctly stop at full-width CJK punctuation to prevent broken URLs in Chinese text. ([#8755](https://github.com/QwenLM/qwen-code/pull/8755)) by @yiliang114
+- Web Shell now reliably reconciles mid-turn messages with daemon state to prevent duplicate submissions after refreshes. ([#8798](https://github.com/QwenLM/qwen-code/pull/8798)) by @ytahdn
+- Fixed banner duplication and screen flickering issues when resizing the terminal window or waking the application. ([#8831](https://github.com/QwenLM/qwen-code/pull/8831)) by @chiga0
+- Scrolling through long Web Shell transcripts is now stable and preserves visible messages during history pagination. ([#8914](https://github.com/QwenLM/qwen-code/pull/8914)) by @ytahdn
+- Made WebUI cross-session switching transactional to prevent data loss or state corruption when resuming sessions fails or times out. ([#8882](https://github.com/QwenLM/qwen-code/pull/8882)) by @doudouOUC
+- Fixed Desktop Local Control to support enterprise LAN addresses by allowing non-private IPv4 routes on verified physical interfaces. ([#8866](https://github.com/QwenLM/qwen-code/pull/8866)) by @yiliang114
+- Fixed Web Shell to correctly display line-change statistics for large edited files by replacing the previous comparison limit with a linear-time algorithm. ([#8924](https://github.com/QwenLM/qwen-code/pull/8924)) by @ytahdn
+- Fixed an issue where deferred MCP tools were missing in resumed sessions by re-revealing them when tool declarations are refreshed. ([#8475](https://github.com/QwenLM/qwen-code/pull/8475)) by @zjunothing
+- Fixed CLI VP mode to fully expand static history items when pressing Ctrl+S, ensuring long tables and output are no longer truncated. ([#8704](https://github.com/QwenLM/qwen-code/pull/8704)) by @zjunothing
+- Automatic session titles now exclude hook context to prevent long generic blocks from displacing the user's actual request. ([#8781](https://github.com/QwenLM/qwen-code/pull/8781)) by @zjunothing
+- Fixed a Windows bug where the desktop app failed to spawn the Node runtime due to unhandled verbatim path prefixes. ([#8936](https://github.com/QwenLM/qwen-code/pull/8936)) by @yiliang114
+- Added a structured error code for closing sessions to ensure reliable retry handling in the Web UI and Java clients. ([#8884](https://github.com/QwenLM/qwen-code/pull/8884)) by @yiliang114
+- Fixed provider version synchronization to correctly distinguish between installed model hashes and template refresh states. ([#8889](https://github.com/QwenLM/qwen-code/pull/8889)) by @yiliang114
+
+#### Performance
+
+- Improved CLI performance by caching persisted session catalogs for organized and filtered daemon lists, with automatic invalidation on metadata changes. ([#8892](https://github.com/QwenLM/qwen-code/pull/8892)) by @doudouOUC
+
+#### Documentation
+
+- Updated documentation to correct session resume and screen-reader verification steps for inline image testing. ([#8746](https://github.com/QwenLM/qwen-code/pull/8746)) by @zjunothing
+
+#### Internal Changes
+
+- Added regression tests to ensure the /remember command context refresh marker persists correctly during retry and notification turns. ([#8809](https://github.com/QwenLM/qwen-code/pull/8809)) by @ZijianZhang989
+- Refactored internal toolchain code for qwen review build-test without changing any CLI arguments, outputs, or npm behaviors. ([#8776](https://github.com/QwenLM/qwen-code/pull/8776)) by @wenshao
+- No user-facing changes; this update improves test stability for plan mode exits during LLM timeouts. ([#8881](https://github.com/QwenLM/qwen-code/pull/8881)) by @yiliang114
+- Fixed an infinite render loop in the Web Shell test harness that previously caused CI jobs to fail due to heap exhaustion. ([#8934](https://github.com/QwenLM/qwen-code/pull/8934)) by @ytahdn
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.21.9...v0.21.10
+
 ## [0.21.9](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.9) - 2026-08-10
 
 ### Highlights

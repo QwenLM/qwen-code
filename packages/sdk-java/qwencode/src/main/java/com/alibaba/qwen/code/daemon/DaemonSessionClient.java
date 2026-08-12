@@ -434,7 +434,8 @@ public final class DaemonSessionClient implements AutoCloseable {
             String responseSessionId = JsonSupport.optionalString(body, "sessionId");
             String code = JsonSupport.optionalString(body, "code");
             return session.getSessionId().equals(responseSessionId)
-                    && (code == null || "session_not_found".equals(code));
+                    && (code == null || "session_not_found".equals(code)
+                            || "session_closing".equals(code));
         } catch (DaemonProtocolException e) {
             return false;
         }

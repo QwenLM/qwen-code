@@ -268,9 +268,289 @@ describe('TextSelectionController', () => {
     selectHello(handler);
 
     handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1));
 
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
     expect(copyToClipboard).toHaveBeenLastCalledWith('hello');
+  });
+
+  it('does not highlight a bare char-mode click', () => {
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+
+    // Assert on press: release clears the highlight either way, so only the
+    // press call pins the bare-click suppression.
+    expect(setSelection).toHaveBeenLastCalledWith(null);
+
+    handler(makeEvent('left-release', 1));
+
+    expect(setSelection).toHaveBeenLastCalledWith(null);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('extends a double-click word selection word-wise on drag', () => {
+    frame = makeFrame('foo bar baz');
+    viewportRect = { x: 0, y: 0, width: 11, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2)); // first click on "foo"
+    handler(makeEvent('left-press', 2)); // double-click -> selects "foo"
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 2,
+      ey: 0,
+    });
+    handler(makeEvent('move', 10)); // drag to "baz"
+    handler(makeEvent('left-release', 10));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 10,
+      ey: 0,
+    });
+    // The press-time copy survives so a repaint before release cannot lose
+    // the word; the release overwrites it with the grown range.
+    expect(copyToClipboard).toHaveBeenCalledWith('foo');
+    expect(copyToClipboard).toHaveBeenCalledWith('foo bar baz');
+    expect(copyToClipboard).toHaveBeenCalledTimes(2);
+  });
+
+  it('extends a triple-click line selection line-wise on drag', () => {
+    frame = makeTwoLineFrame('hello', 'world!');
+    viewportRect = { x: 0, y: 0, width: 6, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1)); // double-click -> word "hello"
+    handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
+    handler(makeEvent('move', 3, 2)); // drag into the middle of line 1
+    handler(makeEvent('left-release', 3, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 5,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
+  });
+
+  it('extends a triple-click line selection across multi-word lines', () => {
+    frame = makeTwoLineFrame('foo bar', 'baz qux');
+    viewportRect = { x: 0, y: 0, width: 7, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1)); // double-click -> word "foo"
+    handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
+    handler(makeEvent('move', 2, 2)); // drag into 'baz' on line 1
+    handler(makeEvent('left-release', 2, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 6,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('foo bar\nbaz qux');
+  });
+
+  it('copies a single-character word on a no-drag double-click', () => {
+    frame = makeFrame('a b');
+    viewportRect = { x: 0, y: 0, width: 3, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1));
+    handler(makeEvent('left-press', 1)); // double-click -> selects "a"
+    handler(makeEvent('left-release', 1));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 0,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('a');
+    expect(copyToClipboard).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the double-click copy when streaming clears the selection before release', () => {
+    frame = makeFrame('foo bar');
+    viewportRect = { x: 0, y: 0, width: 7, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2));
+    handler(makeEvent('left-release', 2));
+    handler(makeEvent('left-press', 2)); // double-click -> copies "foo"
+    listener!(makeFrame('foo baz')); // streaming repaint clears the selection
+    handler(makeEvent('left-release', 2)); // release arrives after the clear
+    nowSpy.mockRestore();
+
+    expect(copyToClipboard).toHaveBeenCalledTimes(1);
+    expect(copyToClipboard).toHaveBeenCalledWith('foo');
+  });
+
+  it('copies a one-cell line on a no-drag triple-click', () => {
+    frame = makeFrame('x');
+    viewportRect = { x: 0, y: 0, width: 1, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1));
+    handler(makeEvent('left-press', 1));
+    handler(makeEvent('left-release', 1)); // double-click -> word "x"
+    handler(makeEvent('left-press', 1)); // triple-click -> line "x"
+    handler(makeEvent('left-release', 1));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 0,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('x');
+  });
+
+  it('extends a word drag to the release cell when no move event is emitted', () => {
+    frame = makeFrame('foo bar baz');
+    viewportRect = { x: 0, y: 0, width: 11, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2));
+    handler(makeEvent('left-press', 2)); // double-click -> selects "foo"
+    handler(makeEvent('left-release', 10)); // release over "baz" with no move
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 10,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('foo bar baz');
+  });
+
+  it('extends a double-click word selection backward when dragging left', () => {
+    frame = makeFrame('foo bar baz');
+    viewportRect = { x: 0, y: 0, width: 11, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 9)); // first click on "baz"
+    handler(makeEvent('left-press', 9)); // double-click -> selects "baz"
+    handler(makeEvent('move', 1)); // drag back onto "foo"
+    handler(makeEvent('left-release', 1));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 10,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('foo bar baz');
+  });
+
+  it('extends a triple-click line selection backward when dragging up', () => {
+    frame = makeTwoLineFrame('hello', 'world!');
+    viewportRect = { x: 0, y: 0, width: 6, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 2));
+    handler(makeEvent('left-release', 2, 2));
+    handler(makeEvent('left-press', 2, 2));
+    handler(makeEvent('left-release', 2, 2)); // double-click -> word "world!"
+    handler(makeEvent('left-press', 2, 2)); // triple-click -> line 1
+    handler(makeEvent('move', 2, 1)); // drag up onto line 0
+    handler(makeEvent('left-release', 2, 1));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 5,
+      ey: 1,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('hello\nworld!');
+  });
+
+  it('keeps covered-row trailing spaces in a multi-row line drag', () => {
+    frame = makeTwoLineFrame('aaa ', 'bbb');
+    viewportRect = { x: 0, y: 0, width: 4, height: 2 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1));
+    handler(makeEvent('left-press', 2, 1));
+    handler(makeEvent('left-release', 2, 1)); // double-click -> word "aaa"
+    handler(makeEvent('left-press', 2, 1)); // triple-click -> line 0
+    handler(makeEvent('move', 2, 2)); // drag onto line 1
+    handler(makeEvent('left-release', 2, 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 2,
+      ey: 1,
+    });
+    // Covered rows keep written trailing spaces (getSelectedText contract);
+    // only the final row ends at the line span's trimmed last content column.
+    expect(copyToClipboard).toHaveBeenLastCalledWith('aaa \nbbb');
+  });
+
+  it('falls back to the cursor cell when a word drag lands on whitespace', () => {
+    frame = makeFrame('foo bar baz');
+    viewportRect = { x: 0, y: 0, width: 11, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2));
+    handler(makeEvent('left-press', 2)); // double-click -> selects "foo"
+    handler(makeEvent('move', 4)); // drag onto the gap after "foo"
+    handler(makeEvent('left-release', 4));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 3,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenCalledWith('foo ');
+  });
+
+  it('keeps the triple-click chain across drift during a held double-click', () => {
+    frame = makeFrame('foo bar baz');
+    viewportRect = { x: 0, y: 0, width: 11, height: 1 };
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const handler = mount();
+    handler(makeEvent('left-press', 2));
+    handler(makeEvent('left-release', 2));
+    handler(makeEvent('left-press', 2)); // double-click -> selects "foo"
+    handler(makeEvent('move', 4)); // drift off the word while held
+    handler(makeEvent('left-release', 4));
+    handler(makeEvent('left-press', 2)); // third click -> selects the line
+    handler(makeEvent('left-release', 2));
+    nowSpy.mockRestore();
+
+    expect(setSelection).toHaveBeenLastCalledWith({
+      sx: 0,
+      sy: 0,
+      ex: 10,
+      ey: 0,
+    });
+    expect(copyToClipboard).toHaveBeenLastCalledWith('foo bar baz');
   });
 
   it('snaps a wide-character spacer to the leading cell', () => {

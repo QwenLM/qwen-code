@@ -81,6 +81,27 @@ describe('bundled review skill', () => {
     expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
 
+  it('launches the 3B convergence pair in the same response', () => {
+    // The pair's wall-clock saving exists only while both rounds go out
+    // together: a later edit serializing the skill while the prompt-builder
+    // tests stay green (they call each round builder themselves) restores
+    // the extra round wall. Bounded to the 3B section so the 3A pair's
+    // identical phrasing cannot satisfy it.
+    const body = skillBody();
+    const start = body.indexOf('**The convergence pair — 3B');
+    const end = body.indexOf('**Do not write the reverse auditor');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`--all-chunks --round 1`');
+    expect(section).toContain('`--all-chunks --round 2`');
+    expect(section).toContain('in the same response');
+    // The reporting transition is the fix for the round-0 blocker; a revert
+    // dropping it must fail here, not slip through.
+    expect(section).toContain('wait for BOTH fan-outs');
+    expect(section).toContain('every shard passed as `--round 2`');
+  });
+
   it('pins the bounded-tail protocol on the round-cap bullet', () => {
     // The ROUND CAP refusal message carries the same verify-only /
     // compose-floor contract; a revert of the bullet's protocol hunk must

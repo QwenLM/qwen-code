@@ -11,9 +11,13 @@ import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
 import { getScreenBuffer, type ScreenBuffer } from './screen-buffer.js';
-import { SelectionState } from './selection-state.js';
+import {
+  SelectionState,
+  type NormalizedSelection,
+  type SelectionMode,
+} from './selection-state.js';
 import { getSelectedText } from './selection-text.js';
-import { wordSpanAt, lineSpanAt } from './selection-span.js';
+import { spanAtForMode } from './selection-span.js';
 import {
   terminalToGrid,
   pointInViewport,
@@ -104,7 +108,15 @@ export function TextSelectionController(
   const baselineRectRef = useRef<ViewportRect | null>(null);
   const activeRectIndexRef = useRef<number | null>(null);
   const selectionGenerationRef = useRef(0);
+  // Generation of a queued frame-invalidation that has not run yet; a release
+  // in the same generation must not copy content the repaint already replaced.
+  const pendingInvalidationGenRef = useRef<number | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
+  // Anchor span and mode of an active word/line drag; null for char drags.
+  const anchorSpanRef = useRef<{
+    span: NormalizedSelection;
+    mode: Exclude<SelectionMode, 'char'>;
+  } | null>(null);
   const bufferRef = useRef<ScreenBuffer | undefined>(undefined);
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -120,6 +132,7 @@ export function TextSelectionController(
     selectionGenerationRef.current += 1;
     activeRectIndexRef.current = null;
     const selection = selectionRef.current;
+    anchorSpanRef.current = null;
     if (selection.isEmpty) {
       return;
     }
@@ -130,11 +143,9 @@ export function TextSelectionController(
   const applyHighlight = useCallback(() => {
     const selection = selectionRef.current;
     const normalized = selection.normalized();
-    // Highlight whenever there is a real range; a word/line span of a single
-    // cell still highlights, but a bare char-mode click (collapsed) does not.
-    const shouldHighlight =
-      normalized && (!selection.isCollapsed || selection.mode !== 'char');
-    getBuffer()?.setSelection(shouldHighlight ? normalized : null);
+    getBuffer()?.setSelection(
+      normalized && !selection.isBareClick ? normalized : null,
+    );
   }, [getBuffer]);
 
   const getSelectableRects = useCallback((): readonly ViewportRect[] => {
@@ -202,6 +213,45 @@ export function TextSelectionController(
     [getBuffer, stdout],
   );
 
+  // Extend an active word/line drag so the range spans from the original
+  // multi-click span to the word/line boundary at the current point (issue
+  // #8738). Falls back to a single cell when the cursor is over whitespace.
+  const extendSpanDrag = useCallback(
+    (point: { x: number; y: number }) => {
+      const anchor = anchorSpanRef.current;
+      if (!anchor) return;
+      const { span, mode } = anchor;
+      const selection = selectionRef.current;
+      const frame = getBuffer()?.frame ?? null;
+      const current = spanAtForMode(frame, mode, point) ?? {
+        sx: point.x,
+        sy: point.y,
+        ex: point.x,
+        ey: point.y,
+      };
+      const cursorAfter =
+        point.y > span.ey || (point.y === span.ey && point.x >= span.ex);
+      selection.anchor = cursorAfter
+        ? { x: span.sx, y: span.sy }
+        : { x: span.ex, y: span.ey };
+      selection.focus = cursorAfter
+        ? { x: current.ex, y: current.ey }
+        : { x: current.sx, y: current.sy };
+    },
+    [getBuffer],
+  );
+
+  const extendActiveDrag = useCallback(
+    (point: { x: number; y: number }) => {
+      if (anchorSpanRef.current) {
+        extendSpanDrag(point);
+      } else {
+        selectionRef.current.extend(point);
+      }
+    },
+    [extendSpanDrag],
+  );
+
   const handleMouse = useCallback(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
@@ -248,12 +298,19 @@ export function TextSelectionController(
 
         if (count >= 2) {
           const frame = getBuffer()?.frame ?? null;
-          const span =
-            count === 2
-              ? wordSpanAt(frame, point.x, point.y)
-              : lineSpanAt(frame, point.x, point.y);
+          const mode = count === 2 ? 'word' : 'line';
+          const span = spanAtForMode(frame, mode, point);
           if (span) {
-            selection.selectSpan(span, count === 2 ? 'word' : 'line');
+            // Enter a drag-capable word/line selection so a held double/triple
+            // click can extend by word/line on move (issue #8738). Copy at
+            // press too: a streaming repaint before release clears the
+            // selection, skipping the release copy. Release copies again when
+            // the drag grew the range.
+            selection.start({ x: span.sx, y: span.sy }, mode);
+            selection.extend({ x: span.ex, y: span.ey });
+            anchorSpanRef.current = { span, mode };
+            dragScrollTopRef.current =
+              propsRef.current.getScrollState().scrollTop;
             recordBaseline(rect);
             applyHighlight();
             copySelection();
@@ -261,6 +318,7 @@ export function TextSelectionController(
           }
         }
 
+        anchorSpanRef.current = null;
         selection.start(point);
         dragScrollTopRef.current = propsRef.current.getScrollState().scrollTop;
         recordBaseline(rect);
@@ -272,7 +330,11 @@ export function TextSelectionController(
         if (!selection.dragging) {
           return;
         }
-        lastClickRef.current = null;
+        // A held multi-click keeps its click record so pointer drift cannot
+        // break a triple-click; char drags still break the chain.
+        if (!anchorSpanRef.current) {
+          lastClickRef.current = null;
+        }
         // A scroll under a history drag invalidates its viewport coordinates.
         if (
           activeRectIndexRef.current === 0 &&
@@ -288,23 +350,33 @@ export function TextSelectionController(
           clearSelection();
           return;
         }
-        selection.extend(clampToViewport(point, rect));
+        extendActiveDrag(clampToViewport(point, rect));
         applyHighlight();
         return;
       }
 
       if (event.name === 'left-release') {
-        // Word/line click-selects are not drags; leave them intact.
         if (!selection.dragging) {
+          return;
+        }
+        // A repaint invalidated this selection but the deferred clear has not
+        // run yet; drop it without extending or copying the stale content.
+        if (
+          pendingInvalidationGenRef.current === selectionGenerationRef.current
+        ) {
+          clearSelection();
           return;
         }
         const point = mapEvent(event);
         const rect = getActiveRect();
         if (point && rect) {
-          selection.extend(clampToViewport(point, rect));
+          extendActiveDrag(clampToViewport(point, rect));
         }
+        // Clear the span drag only after extending, so the release cell still
+        // applies to a word/line drag when no move covered it.
+        anchorSpanRef.current = null;
         selection.finish();
-        if (selection.isCollapsed || selection.isEmpty) {
+        if (selection.isEmpty || selection.isBareClick) {
           clearSelection();
           return;
         }
@@ -322,6 +394,7 @@ export function TextSelectionController(
       getBuffer,
       getSelectableRects,
       getActiveRect,
+      extendActiveDrag,
     ],
   );
 
@@ -357,7 +430,9 @@ export function TextSelectionController(
         !sameViewportContent(baselineFrameRef.current, frame, activeRect)
       ) {
         const invalidatedGeneration = selectionGenerationRef.current;
+        pendingInvalidationGenRef.current = invalidatedGeneration;
         queueMicrotask(() => {
+          pendingInvalidationGenRef.current = null;
           if (selectionGenerationRef.current === invalidatedGeneration) {
             clearSelection();
           }
