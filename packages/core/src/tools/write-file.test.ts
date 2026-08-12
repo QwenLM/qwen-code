@@ -1404,6 +1404,43 @@ describe('WriteFileTool', () => {
       fs.unlinkSync(filePath);
     });
 
+    it('rejects an overwrite terminally when the filesystem reports ino 0', async () => {
+      // Same reasoning as the EditTool case: `ino: 0` means the cache
+      // cannot prove which file was read, and no amount of re-reading
+      // changes that, so the rejection must be terminal rather than an
+      // instruction to re-read.
+      const filePath = path.join(rootDir, 'enforce-zero-inode.txt');
+      fs.writeFileSync(filePath, 'untouched bytes', 'utf-8');
+      seedPriorRead(filePath);
+      const nativeStat = fs.promises.stat;
+      const stat = vi
+        .spyOn(fs.promises, 'stat')
+        .mockImplementation(async (target: fs.PathLike) => {
+          const stats = await nativeStat(target);
+          if (target === filePath) {
+            Object.defineProperty(stats, 'ino', { value: 0 });
+          }
+          return stats;
+        });
+
+      try {
+        const result = await tool
+          .build({ file_path: filePath, content: 'clobber attempt' })
+          .execute(abortSignal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
+        );
+        expect(result.error?.message).toMatch(/does not provide a verifiable/);
+        expect(result.error?.message).toMatch(/overwrite this file/);
+        expect(result.error?.message).not.toMatch(/Re-read it with/);
+        expect(fs.readFileSync(filePath, 'utf-8')).toBe('untouched bytes');
+      } finally {
+        stat.mockRestore();
+        fs.unlinkSync(filePath);
+      }
+    });
+
     it('allows a write after a ranged (offset/limit) read', async () => {
       // Aligns WriteFile with EditTool and Claude Code's
       // `readFileState`: any prior read clears enforcement. The

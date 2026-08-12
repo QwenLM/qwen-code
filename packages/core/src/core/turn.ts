@@ -285,9 +285,21 @@ export interface ServerToolCallConfirmationDetails {
   details: ToolCallConfirmationDetails;
 }
 
+export type ServerGeminiContentPart =
+  | { text: string }
+  | {
+      inlineData: {
+        data: string;
+        mimeType: string;
+        displayName?: string;
+      };
+    };
+
 export type ServerGeminiContentEvent = {
   type: GeminiEventType.Content;
   value: string;
+  /** Ordered display parts, present only when the chunk contains an image. */
+  parts?: ServerGeminiContentPart[];
 };
 
 export type ServerGeminiThoughtEvent = {
@@ -362,6 +374,8 @@ export type CompactionTriggerReason =
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
+  /** Whether newTokenCount ultimately came from a local estimate. */
+  newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;
   triggerReason?: CompactionTriggerReason;
   /** Set when the compaction model was swapped for the main model at runtime. */
@@ -457,6 +471,40 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiUserCancelledEvent
   | ServerGeminiSessionTokenLimitExceededEvent
   | ServerGeminiRetryEvent;
+
+function getDisplayContentParts(
+  response: GenerateContentResponse,
+): ServerGeminiContentPart[] {
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  const displayParts: ServerGeminiContentPart[] = [];
+
+  for (const part of parts) {
+    if (part.thought) {
+      continue;
+    }
+    if (typeof part.text === 'string' && part.text.length > 0) {
+      displayParts.push({ text: part.text });
+    }
+    const inlineData = part.inlineData;
+    if (
+      inlineData?.mimeType?.trim().toLowerCase().startsWith('image/') &&
+      typeof inlineData.data === 'string' &&
+      inlineData.data.length > 0
+    ) {
+      displayParts.push({
+        inlineData: {
+          data: inlineData.data,
+          mimeType: inlineData.mimeType,
+          ...(typeof inlineData.displayName === 'string'
+            ? { displayName: inlineData.displayName }
+            : {}),
+        },
+      });
+    }
+  }
+
+  return displayParts;
+}
 
 // A turn manages the agentic loop turn within the server context.
 export class Turn {
@@ -563,9 +611,15 @@ export class Turn {
           };
         }
 
-        const text = getResponseText(resp);
-        if (text) {
-          yield { type: GeminiEventType.Content, value: text };
+        const text = getResponseText(resp) ?? '';
+        const displayParts = getDisplayContentParts(resp);
+        const hasImage = displayParts.some((part) => 'inlineData' in part);
+        if (text || hasImage) {
+          yield {
+            type: GeminiEventType.Content,
+            value: text,
+            ...(hasImage ? { parts: displayParts } : {}),
+          };
         }
 
         // Handle function calls (requesting tool execution)
