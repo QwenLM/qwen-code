@@ -280,6 +280,48 @@ describe('agent-transcript', () => {
       );
     });
 
+    it('seeds an agent_retry system marker at the retry seam', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const first = makeWriter(jsonlPath, { initialUserPrompt: 'task' });
+      first.emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt one',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      first.cleanup();
+
+      const emitter = new AgentEventEmitter();
+      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
+        agentId: 'agent-x',
+        sessionId: 'session-1',
+        cwd: '/proj',
+        version: '1.2.3',
+        appendToExisting: true,
+        retryAttempt: 2,
+      });
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'attempt two',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+        ['user', undefined],
+        ['assistant', undefined],
+        ['system', 'agent_retry'],
+        ['assistant', undefined],
+      ]);
+      expect(records[2]?.systemPayload).toEqual({ attempt: 2 });
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+      expect(records[3]?.parentUuid).toBe(records[2]?.uuid);
+    });
+
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);

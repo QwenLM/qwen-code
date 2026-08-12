@@ -44,6 +44,13 @@ describe('getCachedGitBranch', () => {
       'git rev-parse --abbrev-ref HEAD',
       expect.objectContaining({ cwd: '/repo/cache-b' }),
     );
+
+    execSyncSpy.mockImplementation(() => {
+      throw new Error('not a git repository');
+    });
+    expect(getCachedGitBranch('/repo/no-git')).toBeUndefined();
+    expect(getCachedGitBranch('/repo/no-git')).toBeUndefined();
+    expect(execSyncSpy).toHaveBeenCalledTimes(3);
   });
 });
 

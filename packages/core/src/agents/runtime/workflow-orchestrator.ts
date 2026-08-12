@@ -31,9 +31,8 @@ import { AgentTerminateMode } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
-  getAgentJsonlPath,
+  buildAgentTranscriptAttach,
 } from '../agent-transcript.js';
-import { getCachedGitBranch } from '../../utils/gitUtils.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
   AgentToolCallEvent,
@@ -412,7 +411,7 @@ export function createProductionDispatch(
           prompt,
           opts,
           emitter,
-          attempt > 1,
+          attempt,
         );
         try {
           return await runSingleDispatch(
@@ -463,35 +462,26 @@ function attachDispatchTranscript(
   prompt: string,
   opts: WorkflowAgentOpts,
   emitter: AgentEventEmitter,
-  /** Retry attempt: append to the transcript the first attempt opened. */
-  append: boolean,
+  /** 1-based attempt; retries append to the transcript attempt 1 opened. */
+  attempt: number,
 ): () => void {
+  const append = attempt > 1;
   try {
-    const sessionId = config.getSessionId();
-    const projectRoot = config.getProjectRoot();
-    const { cleanup } = attachJsonlTranscriptWriter(
-      emitter,
-      getAgentJsonlPath(config.storage.getProjectDir(), sessionId, agentId),
-      {
-        agentId,
-        agentName:
-          typeof opts.label === 'string' && opts.label
-            ? opts.label
-            : 'workflow-agent',
-        sessionId,
-        cwd: projectRoot,
-        version: config.getCliVersion() || 'unknown',
-        gitBranch: getCachedGitBranch(projectRoot),
-        // The prompt the SCRIPT dispatched, seeded as the transcript's first
-        // user record — the same shape AgentTool writes, so a reader that
-        // recovers a launch prompt from a transcript needs no workflow-
-        // specific branch. A retry re-uses the first attempt's record rather
-        // than seeding a second one.
-        initialUserPrompt: append ? undefined : prompt,
-        appendToExisting: append,
-      },
-    );
-    return cleanup;
+    const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
+      agentName:
+        typeof opts.label === 'string' && opts.label
+          ? opts.label
+          : 'workflow-agent',
+      // The prompt the SCRIPT dispatched, seeded as the transcript's first
+      // user record — the same shape AgentTool writes, so a reader that
+      // recovers a launch prompt from a transcript needs no workflow-
+      // specific branch. A retry re-uses the first attempt's record rather
+      // than seeding a second one.
+      initialUserPrompt: append ? undefined : prompt,
+      appendToExisting: append,
+      retryAttempt: append ? attempt : undefined,
+    });
+    return attachJsonlTranscriptWriter(emitter, jsonlPath, options).cleanup;
   } catch (error) {
     debugLogger.warn(
       `[Workflow] failed to attach transcript for ${agentId}: ${error}`,

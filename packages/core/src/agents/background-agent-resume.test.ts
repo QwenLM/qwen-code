@@ -178,6 +178,7 @@ describe('BackgroundAgentResumeService', () => {
       getMaxToolCalls: () => -1,
       isTrustedFolder: () => true,
       isInteractive: () => false,
+      getSessionId: () => 'session-1',
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () =>

@@ -118,7 +118,7 @@ import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
-  getAgentJsonlPath,
+  buildAgentTranscriptAttach,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
@@ -129,7 +129,6 @@ import type {
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
-import { getCachedGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
 
@@ -3141,17 +3140,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const projectDir = this.config.storage.getProjectDir();
         const sessionId = this.config.getSessionId();
-        const jsonlPath = getAgentJsonlPath(
-          projectDir,
-          sessionId,
-          hookOpts.agentId,
-        );
+        const { jsonlPath, options: transcriptAttachOptions } =
+          buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            // Seed the JSONL with the launching prompt so the transcript is
+            // self-describing — readers don't need to consult .meta.json to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
+          });
         const metaPath = getAgentMetaPath(
           projectDir,
           sessionId,
           hookOpts.agentId,
         );
-        const projectRoot = this.config.getProjectRoot();
         try {
           // Register before writing the meta sidecar — see the matching
           // foreground call below for the full rationale. Keeping the
@@ -3243,21 +3247,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
           bgEventEmitter,
           jsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId,
-            cwd: projectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(projectRoot),
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-            bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
-          },
+          transcriptAttachOptions,
         );
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
@@ -3946,17 +3936,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const registry = this.config.getBackgroundTaskRegistry();
       const fgProjectDir = this.config.storage.getProjectDir();
       const fgSessionId = this.config.getSessionId();
-      const fgJsonlPath = getAgentJsonlPath(
-        fgProjectDir,
-        fgSessionId,
-        hookOpts.agentId,
-      );
+      const { jsonlPath: fgJsonlPath, options: fgTranscriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+          agentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          // Seed the JSONL with the launching prompt so the transcript
+          // is self-describing — readers don't need the meta sidecar to
+          // know what the agent was asked to do.
+          initialUserPrompt: this.params.prompt,
+        });
       const fgMetaPath = getAgentMetaPath(
         fgProjectDir,
         fgSessionId,
         hookOpts.agentId,
       );
-      const fgProjectRoot = this.config.getProjectRoot();
       // Declared `let` so the `finally` block can release the writer's
       // listeners + fd even if the attach itself throws partway through.
       // The attach happens inside the `try` below — keeping it outside
@@ -4023,19 +4016,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
           fgJsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId: fgSessionId,
-            cwd: fgProjectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(fgProjectRoot),
-            // Seed the JSONL with the launching prompt so the transcript
-            // is self-describing — readers don't need the meta sidecar to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-          },
+          fgTranscriptAttachOptions,
         ));
         // Register before writing the meta sidecar: if register() throws
         // (e.g. duplicate agent id), we leave no orphaned 'running' meta

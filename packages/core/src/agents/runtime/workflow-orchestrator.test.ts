@@ -4037,6 +4037,11 @@ describe('createProductionDispatch — subagent transcripts', () => {
     const records = recordsIn(names[0]!);
     const users = records.filter((r) => r['type'] === 'user');
     expect(users).toHaveLength(1);
+    // The retry seam is visible on disk: attempt 2 seeded an agent_retry
+    // system marker before its own records.
+    expect(records[1]!['type']).toBe('system');
+    expect(records[1]!['subtype']).toBe('agent_retry');
+    expect(records[1]!['systemPayload']).toEqual({ attempt: 2 });
     for (let i = 1; i < records.length; i++) {
       expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
       expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
