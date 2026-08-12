@@ -2249,6 +2249,33 @@ describe('ModelsConfig', () => {
       expect(gc.reasoning).toBeUndefined();
     });
 
+    it('derives modalities for a runtime snapshot that omits them', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+      });
+      const snapshotId = '$runtime|openai|qwen3.8-max-runtime';
+      modelsConfig['runtimeModelSnapshots'].set(snapshotId, {
+        id: snapshotId,
+        authType: AuthType.USE_OPENAI,
+        modelId: 'qwen3.8-max-runtime',
+        apiKey: 'sk-runtime',
+        baseUrl: 'https://runtime.example/v1',
+        generationConfig: {},
+        sources: {},
+        createdAt: Date.now(),
+      });
+
+      await modelsConfig.switchToRuntimeModel(snapshotId);
+
+      expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+        image: true,
+      });
+      expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      });
+    });
+
     it('restores generation config sources from a runtime snapshot', async () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,

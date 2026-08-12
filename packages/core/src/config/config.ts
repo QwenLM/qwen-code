@@ -3694,9 +3694,11 @@ export class Config {
     // (`reasoning === false`) carries no effort to capture, so preserve it
     // separately below only when the refresh keeps the same model.
     const modelId = this.modelsConfig.getModel();
+    const priorWasRuntimeSnapshot = Boolean(
+      this.modelsConfig.getActiveRuntimeModelSnapshot(),
+    );
     const priorModelHasReasoningControls = Boolean(
-      !this.modelsConfig.getActiveRuntimeModelSnapshot() &&
-        getModelReasoningControls(modelId),
+      !priorWasRuntimeSnapshot && getModelReasoningControls(modelId),
     );
     const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
     const priorReasoningEffort = priorReasoning
@@ -3741,7 +3743,9 @@ export class Config {
     const reasoningEffortToRestore =
       priorReasoningEffort &&
       (modelUnchanged ||
-        (!priorModelHasReasoningControls && !targetHasReasoningControls))
+        (!priorWasRuntimeSnapshot &&
+          !priorModelHasReasoningControls &&
+          !targetHasReasoningControls))
         ? priorReasoningEffort
         : targetHasReasoningControls
           ? undefined

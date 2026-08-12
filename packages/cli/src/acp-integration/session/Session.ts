@@ -7408,7 +7408,11 @@ export class Session implements SessionContext {
   }
 
   async #handleObservedModelChange(): Promise<void> {
-    this.syncReasoningSettingsForCurrentModel();
+    try {
+      this.syncReasoningSettingsForCurrentModel();
+    } catch (error) {
+      debugLogger.debug('observed model reasoning sync failed', error);
+    }
     const configOptions = this.buildConfigOptions?.(this.config);
     if (configOptions) {
       await this.sendConfigOptionsUpdate(configOptions);
@@ -7502,7 +7506,11 @@ export class Session implements SessionContext {
     } finally {
       this.sessionModelSwitchInProgress = false;
     }
-    this.syncReasoningSettingsForCurrentModel();
+    try {
+      this.syncReasoningSettingsForCurrentModel();
+    } catch (error) {
+      debugLogger.debug('post-switch reasoning sync failed', error);
+    }
 
     const after = this.config.getContentGeneratorConfig?.();
     const effectiveAuthType = after?.authType ?? selectedAuthType;

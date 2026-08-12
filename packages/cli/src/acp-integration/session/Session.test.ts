@@ -3057,6 +3057,40 @@ describe('Session', () => {
       });
     });
 
+    it('broadcasts an observed model change when reasoning settings cannot load', async () => {
+      session.dispose();
+      session = new Session(
+        'observed-model-session',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        undefined,
+        () => [],
+        () => {
+          throw new Error('settings unavailable');
+        },
+      );
+      currentModel = 'qwen3.8-max';
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockClient.extNotification).mockClear();
+
+      modelChangeListener?.('qwen3.8-max');
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          'qwen/notify/session/model-update',
+          expect.objectContaining({ sessionId: 'observed-model-session' }),
+        );
+      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'observed-model-session',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [],
+        },
+      });
+    });
+
     it('restores the persisted effort while thinking starts disabled', () => {
       currentModel = 'qwen3.8-max';
       const restoredSettings = {
@@ -3372,6 +3406,44 @@ describe('Session', () => {
       expect(mockConfig.setThinkingEnabled).toHaveBeenCalledWith(
         false,
         'medium',
+      );
+    });
+
+    it('completes a model switch when reasoning settings cannot load', async () => {
+      const switchingSession = new Session(
+        'model-switch-session',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        undefined,
+        () => [],
+        () => {
+          throw new Error('settings unavailable');
+        },
+      );
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]);
+
+      await expect(
+        switchingSession.setModel({
+          sessionId: 'model-switch-session',
+          modelId: `qwen3.8-max(${AuthType.USE_OPENAI})`,
+        }),
+      ).resolves.toBeDefined();
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-update',
+        expect.objectContaining({ sessionId: 'model-switch-session' }),
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.name',
+        'qwen3.8-max',
       );
     });
 

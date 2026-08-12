@@ -1389,6 +1389,15 @@ export class ModelsConfig {
           }
         }
       }
+      if (this._generationConfig.modalities === undefined) {
+        this._generationConfig.modalities = defaultModalities(
+          runtimeModelSnapshot.modelId,
+        );
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: 'auto-detected from model',
+        };
+      }
 
       const requiresRefresh = isAuthTypeChange;
 

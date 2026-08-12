@@ -4930,6 +4930,31 @@ describe('Server Config (config.ts)', () => {
           }
         ).globalReasoningEffortPreference,
       ).toBe('high');
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'fallback-key',
+          model: 'unregistered-fallback',
+          authType: sourceAuthType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(sourceAuthType);
+
+      expect(config.getContentGeneratorConfig().model).toBe(
+        'unregistered-fallback',
+      );
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'high',
+      });
+      expect(
+        (
+          config as unknown as {
+            globalReasoningEffortPreference?: string;
+          }
+        ).globalReasoningEffortPreference,
+      ).toBe('high');
     });
 
     it('keeps an effort selection as a preference before auth initializes', () => {
