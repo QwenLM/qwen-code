@@ -507,7 +507,19 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
+          # run's log captures the spike, and dump the full state on failure.
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; fi
+          exit "$RC"
 
       # Release guard for the Chrome extension: build, package, and scan real
       # artifacts for forbidden adapter signatures instead of leaving
@@ -805,7 +817,19 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
+          # run's log captures the spike, and dump the full state on failure.
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; fi
+          exit "$RC"
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
@@ -911,7 +935,19 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          # ENOSPC has failed test steps mid-suite while the host looks
+          # healthy afterwards — a transient spike, likely /tmp inodes or a
+          # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
+          # run's log captures the spike, and dump the full state on failure.
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)]" 2>/dev/null; sleep 10; done ) &
+          SAMPLER_PID=$!
+          set +e
           npm run test:ci
+          RC=$?
+          set -e
+          kill "$SAMPLER_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; fi
+          exit "$RC"
 
   post_coverage_comment:
     name: 'Post Coverage Comment'
