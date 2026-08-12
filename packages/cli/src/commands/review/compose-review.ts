@@ -78,6 +78,7 @@ import {
   isFooterSafeModelId,
   reviewFooter,
 } from './lib/review-footer.js';
+import { loadSettings } from '../../config/settings.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -483,8 +484,9 @@ function toBool(value: unknown, field: string): boolean {
 export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
+  attribution = true,
 ): ComposeReviewResult {
-  const result = composeReviewBody(input, cliVersion);
+  const result = composeReviewBody(input, cliVersion, attribution);
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
   // handler left the feature inert end to end: the marker reached only the
@@ -548,6 +550,7 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
+  attribution: boolean,
 ): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -1154,7 +1157,7 @@ function composeReviewBody(
     }
   }
 
-  const footer = reviewFooter(modelId, cliVersion);
+  const footer = attribution ? reviewFooter(modelId, cliVersion) : '';
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -1174,7 +1177,7 @@ function composeReviewBody(
       bilingual && zh !== en
         ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
         : en;
-    return `${text}\n\n${footer}`;
+    return footer === '' ? text : `${text}\n\n${footer}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
@@ -2311,6 +2314,7 @@ export const composeReviewCommand: CommandModule = {
       // compose time — a shared runner can rewrite the install mid-session.
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
+      loadSettings().merged.review?.attribution ?? true,
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit

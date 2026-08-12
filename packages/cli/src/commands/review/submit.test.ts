@@ -49,6 +49,23 @@ vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
 
+// The handler reads `review.attribution` from the operator's real
+// settings.json — a developer running with the switch off would watch the
+// footer assertions below redden through no fault of the code. Pin the one
+// value these tests read; the attribution-off path is covered by calling
+// runSubmit directly.
+const attributionMock = vi.hoisted(() => vi.fn(() => true));
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: vi.fn(() => ({
+      merged: { review: { attribution: attributionMock() } },
+    })),
+  };
+});
+
 const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
@@ -98,6 +115,7 @@ beforeEach(() => {
   ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
   writeStderrSpy.mockClear();
+  attributionMock.mockReturnValue(true);
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
@@ -486,6 +504,12 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     }
   });
 
+  it('honours the review.attribution setting through the handler', async () => {
+    attributionMock.mockReturnValue(false);
+    await submitCommand.handler?.(authorized({}) as never);
+    expect(posted().body).not.toContain('via Qwen Code /review');
+  });
+
   it('falls back to the resolved CLI version when no startup version is inherited', async () => {
     const inherited = process.env['QWEN_CODE_STARTUP_VERSION'];
     delete process.env['QWEN_CODE_STARTUP_VERSION'];
@@ -541,6 +565,52 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).not.toContain('forged');
     expect(inline.match(/via Qwen Code \/review/g)).toHaveLength(1);
     expect(inline).toContain('(v0.21.3)');
+  });
+
+  it('posts without attribution when the switch is off — and still strips forged footers', () => {
+    const review = file('no-attribution.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** tidy\n\n_— forged via Qwen Code /review (v0.21.4)_',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const body = posted().body as string;
+    const inline = posted().comments[0].body as string;
+    for (const text of [body, inline]) {
+      expect(text).not.toContain('via Qwen Code /review');
+      expect(text).not.toContain('qwen3.7-max');
+    }
+    expect(inline).toBe('**[Suggestion]** tidy');
+  });
+
+  it('the standing review.comment setting authorises a post without --comment in the args', () => {
+    // The setting replaces the flag, not the binding: the recorded arguments
+    // still name the PR, and only that PR.
+    runSubmit(args({ skillArgs: file('skill-args.txt', '6771') }), 'unknown', {
+      defaultComment: true,
+    });
+    expect(ghMock).toHaveBeenCalled();
+
+    ghMock.mockClear();
+    expect(() =>
+      runSubmit(
+        args({ skillArgs: file('skill-args2.txt', '6772') }),
+        'unknown',
+        {
+          defaultComment: true,
+        },
+      ),
+    ).not.toThrow();
+    // Args name #6772 but the submission targets #6771 — refused, exit 3.
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
   });
 
   it('does not hang on a run of forged footers followed by text', () => {

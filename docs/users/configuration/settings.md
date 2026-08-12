@@ -107,6 +107,14 @@ Settings are organized into categories. Most settings should be placed within th
 | `output.format`         | string  | The format of the CLI output.                                  | `"text"` | `"text"`, `"json"` |
 | `output.showTimestamps` | boolean | Show an `[HH:MM:SS]` timestamp before each assistant response. | `false`  |                    |
 
+#### review
+
+| Setting              | Type    | Description                                                                                                                                                                                                                                                                    | Default  |
+| -------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| `review.attribution` | boolean | Append the attribution footer naming the model and CLI version (e.g. `_— qwen3-coder via Qwen Code /review (v0.21.2)_`) to review bodies and inline comments posted by `/review`. Disable to post reviews without AI attribution.                                              | `true`   |
+| `review.effort`      | enum    | Default effort for `/review` when `--effort` is not given: `"low"`, `"medium"`, `"high"`, or `"auto"` (the built-in rule: high for PRs, medium for local changes). An explicit `--effort` wins; an effective `--comment` still forces high and `--fix` still floors at medium. | `"auto"` |
+| `review.comment`     | boolean | Treat every PR `/review` as if `--comment` was passed: findings are posted to the pull request without the flag. The post still binds to the PR named in the invocation. Enable only if you always want reviews published.                                                     | `false`  |
+
 #### ui
 
 | Setting                                 | Type             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Default       |

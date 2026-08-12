@@ -48,6 +48,7 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
+import { loadSettings } from '../../config/settings.js';
 import {
   ghWithInput,
   isOwnerRepo,
@@ -137,9 +138,12 @@ function normalizeInlineComments(
   comments: ReviewComment[],
   modelId: unknown,
   cliVersion: string,
+  attribution: boolean,
 ): ReviewComment[] {
-  if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
-  const footer = reviewFooter(modelId, cliVersion);
+  const footer =
+    attribution && typeof modelId === 'string' && modelId.trim() !== ''
+      ? reviewFooter(modelId, cliVersion)
+      : undefined;
   return comments.map((comment) =>
     // An empty body stays empty: this runs BEFORE the consistency check, and
     // a footer pasted onto '' would hide the emptiness from the refusal that
@@ -147,7 +151,12 @@ function normalizeInlineComments(
     typeof comment.body === 'string' && comment.body.trim() !== ''
       ? {
           ...comment,
-          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+          // Forged footers are stripped even with attribution off: a comment
+          // authored by the model must not carry one the operator turned off.
+          body:
+            footer === undefined
+              ? comment.body.replace(REVIEW_FOOTER_RE, '')
+              : `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
         }
       : comment,
   );
@@ -167,9 +176,13 @@ function normalizeInlineComments(
  * user typed, and why it binds to a target rather than acting as a bearer
  * token.
  */
-function authorization(args: SubmitArgs): { ok: boolean; why: string } {
+function authorization(
+  args: SubmitArgs,
+  defaultComment: boolean,
+): { ok: boolean; why: string } {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
+    defaultComment,
     skillArgs: args.skillArgs,
     pr: args.pr,
     repo: args.repo,
@@ -200,6 +213,7 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
 function compose(
   payload: ReviewPayload,
   cliVersion: string,
+  attribution: boolean,
 ): {
   event: string;
   body: string;
@@ -237,6 +251,7 @@ function compose(
       draftedComments: comments,
     },
     cliVersion,
+    attribution,
   );
   return { event: r.event, body: r.body, cappedBy: r.cappedBy };
 }
@@ -373,7 +388,17 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
+export function runSubmit(
+  args: SubmitArgs,
+  cliVersion = 'unknown',
+  opts: {
+    /** Append the model/version attribution footer (the `review.attribution` setting). */
+    attribution?: boolean;
+    /** The standing `review.comment` setting, for the authorization gate. */
+    defaultComment?: boolean;
+  } = {},
+): void {
+  const { attribution = true, defaultComment = false } = opts;
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
@@ -400,7 +425,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     );
   }
 
-  const auth = authorization(args);
+  const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
@@ -438,6 +463,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
       payload.comments ?? [],
       payload.state?.modelId,
       cliVersion,
+      attribution,
     ),
   };
 
@@ -446,7 +472,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   let body: string;
   let cappedBy: string[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion));
+    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -610,6 +636,10 @@ export const submitCommand: CommandModule = {
     const cliVersion =
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
       (await getCliVersion());
-    runSubmit(argv as unknown as SubmitArgs, cliVersion);
+    const review = loadSettings().merged.review;
+    runSubmit(argv as unknown as SubmitArgs, cliVersion, {
+      attribution: review?.attribution ?? true,
+      defaultComment: review?.comment ?? false,
+    });
   },
 };

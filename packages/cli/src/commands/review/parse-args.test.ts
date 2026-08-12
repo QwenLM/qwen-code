@@ -63,6 +63,18 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: vi.fn(),
 }));
 
+// The handler resolves `review.effort` / `review.comment` from the operator's
+// real settings.json — pin it empty, or a developer running with either set
+// reddens the wiring tests below.
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: vi.fn(() => ({ merged: {} })),
+  };
+});
+
 describe('tokenizeArgs', () => {
   it('splits on whitespace and collapses runs', () => {
     expect(tokenizeArgs('  6711   --comment ')).toEqual(['6711', '--comment']);
@@ -321,6 +333,65 @@ describe('parseReviewArgs', () => {
     const got = parseReviewArgs('6711 --effort low --effort medium');
     expect(got.effort).toBe('medium');
     expect(got.effortSource).toBe('explicit');
+  });
+});
+
+describe('parseReviewArgs — settings-provided defaults', () => {
+  it('applies the configured effort when --effort is absent', () => {
+    const got = parseReviewArgs('6711', { effort: 'medium' });
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('configured');
+  });
+
+  it('an explicit --effort beats the configured default', () => {
+    const got = parseReviewArgs('6711 --effort low', { effort: 'medium' });
+    expect(got.effort).toBe('low');
+    expect(got.effortSource).toBe('explicit');
+  });
+
+  it('an effective --comment still forces high over the configured effort', () => {
+    const got = parseReviewArgs('6711 --comment', { effort: 'low' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+  });
+
+  it('an effective --fix still floors the configured effort at medium', () => {
+    const got = parseReviewArgs('--fix', { effort: 'low' });
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('forced-by-fix');
+  });
+
+  it('the standing comment setting makes comment effective on a PR target', () => {
+    const got = parseReviewArgs('6711', { comment: true });
+    expect(got.comment.requested).toBe(false);
+    expect(got.comment.effective).toBe(true);
+    // The PR default is already high, so there is nothing to force.
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+  });
+
+  it('the standing comment setting forces high over a configured lower effort', () => {
+    const got = parseReviewArgs('6711', { comment: true, effort: 'low' });
+    expect(got.comment.effective).toBe(true);
+    // Posting still requires a verified review — and the warning says it was
+    // the setting, not a flag the user never typed.
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    expect(got.warnings.some((w) => w.includes('review.comment'))).toBe(true);
+  });
+
+  it('the standing comment setting stays inert on a local target', () => {
+    const got = parseReviewArgs('', { comment: true });
+    expect(got.comment.effective).toBe(false);
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('a configured effort above the built-in default applies to local targets', () => {
+    const got = parseReviewArgs('', { effort: 'high' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('configured');
   });
 });
 

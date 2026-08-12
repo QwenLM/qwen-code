@@ -42,6 +42,17 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
+// The handler reads `review.attribution` from the operator's real
+// settings.json — pin it, or a developer running with the switch off
+// reddens every handler-level footer assertion below.
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: vi.fn(() => ({ merged: {} })),
+  };
+});
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
@@ -422,6 +433,12 @@ describe('composeReview — the C/S table', () => {
     expect(
       r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
     ).toBe(true);
+  });
+
+  it('omits the footer entirely when attribution is off', () => {
+    const r = composeReview(base({}), '0.21.2', false);
+    expect(r.body).toBe('No issues found. LGTM! ✅');
+    expect(r.body).not.toContain(MODEL);
   });
 
   it('C=0, S≥1 → COMMENT with the no-blockers opener', () => {

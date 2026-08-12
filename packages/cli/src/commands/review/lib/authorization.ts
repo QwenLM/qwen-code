@@ -44,6 +44,13 @@ export interface WriteAuthorizationRequest {
    */
   userAuthorized: boolean;
   /**
+   * The standing `review.comment` setting, resolved by the caller from
+   * settings. When on, a PR review is treated as if `--comment` was passed —
+   * the target binding below still applies, so the write remains authorised
+   * only for the PR the recorded arguments name.
+   */
+  defaultComment?: boolean;
+  /**
    * Test seam only (there is no session id under vitest). Ignored whenever a
    * session id is present — honouring a caller-supplied path in a real run
    * would hand the gate back the model-writable file the design removed.
@@ -79,11 +86,12 @@ export interface WriteAuthorizationRequest {
 }
 
 /**
- * Exactly two things authorise a public write, and both are facts rather than
+ * Exactly three things authorise a public write, and all are facts rather than
  * impressions: `--comment` in the arguments the user typed (re-parsed from the
- * CLI's verbatim record), or `--user-authorized`. Authorisation is for a
- * *target*, not a mood: the recorded arguments must name the same pull request
- * (and, for a URL target, the same repo and host) as the write being attempted.
+ * CLI's verbatim record), the standing `review.comment` setting, or
+ * `--user-authorized`. Authorisation is for a *target*, not a mood: the
+ * recorded arguments must name the same pull request (and, for a URL target,
+ * the same repo and host) as the write being attempted.
  */
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
@@ -110,7 +118,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     };
   }
 
-  const verdict = parseReviewArgs(raw);
+  const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
   if (!verdict.comment.effective) {
     return {
       ok: false,
@@ -167,6 +175,8 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
 
   return {
     ok: true,
-    why: `\`--comment\` was in the review arguments for #${authorisedPr}`,
+    why: verdict.comment.requested
+      ? `\`--comment\` was in the review arguments for #${authorisedPr}`
+      : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
   };
 }
