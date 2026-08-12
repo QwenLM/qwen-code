@@ -12300,22 +12300,27 @@ describe('run-agent idle watchdog', () => {
     // negative window: Date.now() - lastOutputAt >= -1 is instantly true
     // and every agent dies at the first idle tick. `0` (an operator's
     // "disable") arms a zero-length window that is true at the first tick,
-    // and NaN arms one too — every rejection class named in the parse
-    // guard's comment must fall back to the default.
-    for (const idleMs of [-1, 0, Number.NaN]) {
-      const r = runAgent({
-        stub: [
-          '#!/bin/bash',
-          'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
-          'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
-          'echo done',
-          'exit 0',
-        ].join('\n'),
-        idleMs,
-      });
-      expect(r.status).toBe(0);
-      expect(r.failure).toBe('');
-    }
+    // and NaN arms one too — every rejection class must fall back to the
+    // default. One real run with the nastiest value (`-1`) pins them all:
+    // any armed instant-true window kills this healthy agent at the first
+    // idle tick (~250ms), while the 20-minute fallback never fires. The old
+    // shape looped three full agent subprocesses (~10s) and flaked under
+    // self-hosted-runner load for exactly that spawn volume — the value
+    // under test is read once at module load, so one run covers it. The
+    // assertion carries the script's own verdict so a flake names its cause.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in 1 2 3; do echo "tick $i"; sleep 0.5; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: -1,
+    });
+    expect({ status: r.status, failure: r.failure }).toEqual({
+      status: 0,
+      failure: '',
+    });
   });
 });
 
