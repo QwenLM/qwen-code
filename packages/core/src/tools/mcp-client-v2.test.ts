@@ -1,0 +1,369 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  PROTOCOL_VERSION_META_KEY,
+  type JSONRPCMessage,
+  type JSONRPCRequest,
+} from '@modelcontextprotocol/client';
+import { describe, expect, it, vi } from 'vitest';
+import type { MCPServerConfig } from '../config/config.js';
+import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import {
+  connectToMcpServer,
+  invokeMcpPrompt,
+  listMcpPrompts,
+  listMcpResources,
+} from './mcp-client.js';
+
+type RequestMessage = JSONRPCRequest;
+
+function response(
+  request: RequestMessage,
+  result: Record<string, unknown>,
+): JSONRPCMessage {
+  return { jsonrpc: '2.0', id: request.id, result } as JSONRPCMessage;
+}
+
+function workspaceContext(): WorkspaceContext {
+  return {
+    getDirectories: vi.fn().mockReturnValue([]),
+    onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+  } as unknown as WorkspaceContext;
+}
+
+describe('configured MCP SDK v2 negotiation', () => {
+  it('connects to a modern-only server and reuses cache-hinted tool lists', async () => {
+    const requests: RequestMessage[] = [];
+    const send = vi.fn(async (_serverName: string, message: JSONRPCMessage) => {
+      const request = message as RequestMessage;
+      requests.push(request);
+
+      switch (request.method) {
+        case 'server/discover':
+          return response(request, {
+            supportedVersions: ['2026-07-28'],
+            capabilities: { tools: {}, prompts: {}, resources: {} },
+            ttlMs: 60_000,
+            cacheScope: 'private',
+          });
+        case 'tools/list':
+          return response(request, {
+            resultType: 'complete',
+            tools: [
+              {
+                name: 'echo',
+                description: 'Echo input',
+                inputSchema: { type: 'object' },
+              },
+            ],
+            ttlMs: 60_000,
+            cacheScope: 'private',
+          });
+        case 'tools/call':
+          return response(request, {
+            resultType: 'complete',
+            content: [{ type: 'text', text: 'ok' }],
+          });
+        case 'prompts/list':
+          return response(request, {
+            resultType: 'complete',
+            prompts: [{ name: 'modern-prompt' }],
+            ttlMs: 60_000,
+            cacheScope: 'private',
+          });
+        case 'prompts/get':
+          return response(request, {
+            resultType: 'complete',
+            messages: [
+              {
+                role: 'user',
+                content: { type: 'text', text: 'modern-prompt-result' },
+              },
+            ],
+          });
+        case 'resources/list':
+          return response(request, {
+            resultType: 'complete',
+            resources: [{ uri: 'file:///modern.txt', name: 'modern.txt' }],
+            ttlMs: 60_000,
+            cacheScope: 'private',
+          });
+        default:
+          throw new Error(`Unexpected modern MCP method: ${request.method}`);
+      }
+    });
+
+    const client = await connectToMcpServer(
+      'modern-only',
+      { type: 'sdk' } as MCPServerConfig,
+      false,
+      workspaceContext(),
+      send,
+    );
+
+    try {
+      expect(client.getProtocolEra()).toBe('modern');
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: 'echo' }],
+      });
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: 'echo' }],
+      });
+      await expect(
+        client.callTool({ name: 'echo', arguments: { text: 'hello' } }),
+      ).resolves.toMatchObject({
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      await expect(listMcpPrompts('modern-only', client)).resolves.toHaveLength(
+        1,
+      );
+      await expect(listMcpPrompts('modern-only', client)).resolves.toHaveLength(
+        1,
+      );
+      await expect(
+        invokeMcpPrompt('modern-only', client, 'modern-prompt', {}),
+      ).resolves.toMatchObject({
+        messages: [{ content: { text: 'modern-prompt-result' } }],
+      });
+      await expect(
+        listMcpResources('modern-only', client),
+      ).resolves.toHaveLength(1);
+      await expect(
+        listMcpResources('modern-only', client),
+      ).resolves.toHaveLength(1);
+
+      expect(requests.map((request) => request.method)).toEqual([
+        'server/discover',
+        'tools/list',
+        'tools/call',
+        'prompts/list',
+        'prompts/get',
+        'resources/list',
+      ]);
+      expect(requests.some((request) => request.method === 'initialize')).toBe(
+        false,
+      );
+      for (const request of requests) {
+        expect(request.params?._meta).toMatchObject({
+          [PROTOCOL_VERSION_META_KEY]: '2026-07-28',
+          [CLIENT_INFO_META_KEY]: expect.objectContaining({
+            name: 'qwen-code-mcp-client',
+          }),
+          [CLIENT_CAPABILITIES_META_KEY]: expect.any(Object),
+        });
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('sends the modern protocol headers over HTTP', async () => {
+    const http = await import('node:http');
+    const requests: Array<{
+      method: string;
+      protocolVersion: string | string[] | undefined;
+      mcpMethod: string | string[] | undefined;
+      mcpName: string | string[] | undefined;
+    }> = [];
+    const server = http.createServer((request, responseStream) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk: string) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        const message = JSON.parse(body) as RequestMessage;
+        requests.push({
+          method: message.method,
+          protocolVersion: request.headers['mcp-protocol-version'],
+          mcpMethod: request.headers['mcp-method'],
+          mcpName: request.headers['mcp-name'],
+        });
+
+        let result: Record<string, unknown>;
+        switch (message.method) {
+          case 'server/discover':
+            result = {
+              supportedVersions: ['2026-07-28'],
+              capabilities: { tools: {} },
+            };
+            break;
+          case 'tools/list':
+            result = {
+              resultType: 'complete',
+              tools: [{ name: 'echo', inputSchema: { type: 'object' } }],
+              ttlMs: 60_000,
+              cacheScope: 'private',
+            };
+            break;
+          case 'tools/call':
+            result = {
+              resultType: 'complete',
+              content: [{ type: 'text', text: 'ok' }],
+            };
+            break;
+          default:
+            responseStream.writeHead(500);
+            responseStream.end();
+            return;
+        }
+
+        responseStream.writeHead(200, { 'Content-Type': 'application/json' });
+        responseStream.end(JSON.stringify(response(message, result)));
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected the test server to listen on a TCP port');
+    }
+
+    let client: Awaited<ReturnType<typeof connectToMcpServer>> | undefined;
+    try {
+      client = await connectToMcpServer(
+        'modern-http',
+        {
+          httpUrl: `http://127.0.0.1:${address.port}/mcp`,
+        } as MCPServerConfig,
+        false,
+        workspaceContext(),
+      );
+      await client.listTools();
+      await client.callTool({ name: 'echo' });
+      expect(requests).toEqual([
+        {
+          method: 'server/discover',
+          protocolVersion: '2026-07-28',
+          mcpMethod: 'server/discover',
+          mcpName: undefined,
+        },
+        {
+          method: 'tools/list',
+          protocolVersion: '2026-07-28',
+          mcpMethod: 'tools/list',
+          mcpName: undefined,
+        },
+        {
+          method: 'tools/call',
+          protocolVersion: '2026-07-28',
+          mcpMethod: 'tools/call',
+          mcpName: 'echo',
+        },
+      ]);
+    } finally {
+      await client?.close();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('falls back to the legacy initialize flow', async () => {
+    const requests: RequestMessage[] = [];
+    const send = vi.fn(async (_serverName: string, message: JSONRPCMessage) => {
+      if (!('id' in message)) {
+        return {
+          jsonrpc: '2.0',
+          id: 0,
+          result: {},
+        } as JSONRPCMessage;
+      }
+
+      const request = message as RequestMessage;
+      requests.push(request);
+      switch (request.method) {
+        case 'server/discover':
+          return {
+            jsonrpc: '2.0',
+            id: request.id,
+            error: { code: -32601, message: 'Method not found' },
+          } as JSONRPCMessage;
+        case 'initialize':
+          return response(request, {
+            protocolVersion: '2025-06-18',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'legacy-server', version: '1.0.0' },
+          });
+        case 'tools/list':
+          return response(request, {
+            tools: [{ name: 'echo', inputSchema: { type: 'object' } }],
+          });
+        case 'tools/call':
+          return response(request, {
+            content: [{ type: 'text', text: 'legacy-ok' }],
+          });
+        case 'prompts/list':
+          return response(request, {
+            prompts: [{ name: 'legacy-prompt' }],
+          });
+        case 'prompts/get':
+          return response(request, {
+            messages: [
+              {
+                role: 'user',
+                content: { type: 'text', text: 'legacy-prompt-result' },
+              },
+            ],
+          });
+        case 'resources/list':
+          return response(request, {
+            resources: [{ uri: 'file:///legacy.txt', name: 'legacy.txt' }],
+          });
+        default:
+          throw new Error(`Unexpected legacy MCP method: ${request.method}`);
+      }
+    });
+
+    const client = await connectToMcpServer(
+      'legacy',
+      { type: 'sdk' } as MCPServerConfig,
+      false,
+      workspaceContext(),
+      send,
+    );
+
+    try {
+      expect(client.getProtocolEra()).toBe('legacy');
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: 'echo' }],
+      });
+      await expect(client.callTool({ name: 'echo' })).resolves.toMatchObject({
+        content: [{ type: 'text', text: 'legacy-ok' }],
+      });
+      await expect(listMcpPrompts('legacy', client)).resolves.toMatchObject([
+        { name: 'legacy-prompt', serverName: 'legacy' },
+      ]);
+      await expect(
+        invokeMcpPrompt('legacy', client, 'legacy-prompt', {}),
+      ).resolves.toMatchObject({
+        messages: [{ content: { text: 'legacy-prompt-result' } }],
+      });
+      await expect(listMcpResources('legacy', client)).resolves.toMatchObject([
+        { uri: 'file:///legacy.txt', serverName: 'legacy' },
+      ]);
+      expect(requests.map((request) => request.method)).toEqual([
+        'server/discover',
+        'initialize',
+        'tools/list',
+        'tools/call',
+        'prompts/list',
+        'prompts/get',
+        'resources/list',
+      ]);
+      expect(
+        requests.find((request) => request.method === 'tools/list')?.params
+          ?._meta,
+      ).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  });
+});

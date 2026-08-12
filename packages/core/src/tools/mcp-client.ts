@@ -4,27 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { SSEClientTransportOptions } from '@modelcontextprotocol/sdk/client/sse.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type {
-  GetPromptResult,
-  JSONRPCMessage,
-  Prompt,
-  ReadResourceResult,
-  Resource,
-} from '@modelcontextprotocol/sdk/types.js';
+import {
+  Client,
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+  type GetPromptResult,
+  type JSONRPCMessage,
+  type Prompt,
+  type ReadResourceResult,
+  type Resource,
+  type SSEClientTransportOptions,
+  type StreamableHTTPClientTransportOptions,
+  type Transport,
+} from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import type { Client as GenAiMcpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   GetPromptResultSchema,
   ListPromptsResultSchema,
   ListResourcesResultSchema,
-  ListRootsRequestSchema,
   ReadResourceResultSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+} from '@modelcontextprotocol/core';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
@@ -349,6 +349,13 @@ export type DiscoveredMCPResource = Resource & {
   serverName: string;
 };
 
+function createMcpClient(name: string): Client {
+  return new Client(
+    { name, version: '0.0.1' },
+    { versionNegotiation: { mode: 'auto' } },
+  );
+}
+
 /**
  * Enum representing the overall MCP discovery state
  */
@@ -398,10 +405,7 @@ export class McpClient {
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.client = new Client({
-      name: `qwen-cli-mcp-client-${this.serverName}`,
-      version: '0.0.1',
-    });
+    this.client = createMcpClient(`qwen-cli-mcp-client-${this.serverName}`);
   }
 
   /**
@@ -447,7 +451,7 @@ export class McpClient {
         roots: {},
       });
 
-      this.client.setRequestHandler(ListRootsRequestSchema, async () => {
+      this.client.setRequestHandler('roots/list', async () => {
         const roots = [];
         for (const dir of this.workspaceContext.getDirectories()) {
           roots.push({
@@ -707,9 +711,13 @@ export class McpClient {
     // but under-declares the `resources` capability would otherwise have its
     // resources discovered, listed in `/mcp`, and offered in `@server:`
     // completion, yet fail on read with a misleading "does not support
-    // resources" error. The underlying `request` is the raw `Protocol.request`
-    // (no capability assertion); a server that genuinely lacks resources
-    // answers `-32601`, which surfaces naturally to the caller.
+    // resources" error. Modern sessions use the cache-aware typed helper;
+    // legacy sessions retain the raw request path so an under-declared server
+    // can still answer. A server that genuinely lacks resources returns
+    // `-32601`, which surfaces naturally to the caller.
+    if (this.client.getProtocolEra?.() === 'modern') {
+      return this.client.readResource({ uri }, options);
+    }
     return this.client.request(
       { method: 'resources/read', params: { uri } },
       ReadResourceResultSchema,
@@ -1341,7 +1349,9 @@ export async function discoverTools(
 ): Promise<DiscoveredMCPTool[]> {
   try {
     const { mcpToTool } = await import('@google/genai');
-    const mcpCallableTool = mcpToTool(mcpClient, {
+    // @google/genai still types this structural adapter against SDK v1. Its
+    // discovery path only calls listTools(); execution stays on the v2 client.
+    const mcpCallableTool = mcpToTool(mcpClient as unknown as GenAiMcpClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
     const tool = await retryWithBackoff(
@@ -1467,10 +1477,9 @@ function isMethodNotFound(error: unknown): boolean {
  * under-declare (or omit) the `prompts` capability in their `initialize`
  * response; gating on the declared capability made those servers' prompts
  * silently invisible in qwen-code (no `/`-menu entry) while lenient
- * clients still surfaced them. The underlying `mcpClient.request` is the
- * raw `Protocol.request` (the SDK only asserts capabilities for its typed
- * `listPrompts()` helper, which we don't use), so attempting the call is
- * safe: a server that truly lacks prompts answers `-32601 Method not
+ * clients still surfaced them. Modern sessions use the cache-aware typed
+ * helper; legacy sessions retain the raw request path without a capability
+ * assertion. A server that truly lacks prompts answers `-32601 Method not
  * found`, which the catch below swallows silently.
  */
 export async function listMcpPrompts(
@@ -1480,10 +1489,12 @@ export async function listMcpPrompts(
   try {
     const response = await retryWithBackoff(
       () =>
-        mcpClient.request(
-          { method: 'prompts/list', params: {} },
-          ListPromptsResultSchema,
-        ),
+        mcpClient.getProtocolEra?.() === 'modern'
+          ? mcpClient.listPrompts()
+          : mcpClient.request(
+              { method: 'prompts/list', params: {} },
+              ListPromptsResultSchema,
+            ),
       `${mcpServerName}/prompts/list`,
     );
 
@@ -1548,16 +1559,17 @@ export async function invokeMcpPrompt(
   promptParams: Record<string, unknown>,
 ): Promise<GetPromptResult> {
   try {
-    const response = await mcpClient.request(
-      {
-        method: 'prompts/get',
-        params: {
-          name: promptName,
-          arguments: promptParams,
-        },
-      },
-      GetPromptResultSchema,
-    );
+    const params = {
+      name: promptName,
+      arguments: promptParams as Record<string, string>,
+    };
+    const response =
+      mcpClient.getProtocolEra?.() === 'modern'
+        ? await mcpClient.getPrompt(params)
+        : await mcpClient.request(
+            { method: 'prompts/get', params },
+            GetPromptResultSchema,
+          );
 
     return response;
   } catch (error) {
@@ -1579,14 +1591,13 @@ export async function invokeMcpPrompt(
  * into its own registry. Mirrors `listMcpPrompts`.
  *
  * As with prompts, we do NOT gate on `getServerCapabilities()?.resources`:
- * some servers expose resources but under-declare the capability, and the
- * raw `mcpClient.request` does not assert capabilities. A server with no
- * resources answers `-32601 Method not found`, swallowed below.
+ * some servers expose resources but under-declare the capability. Modern
+ * sessions use the cache-aware typed helper; legacy sessions retain the raw
+ * request path without a capability assertion. A server with no resources
+ * answers `-32601 Method not found`, swallowed below.
  *
- * Note: cursor pagination is not followed (matching `listMcpPrompts`);
- * only the first page of resources is returned. Servers that paginate
- * their resource list would have later pages omitted — acceptable parity
- * with the prompt path and rare in practice.
+ * Modern sessions aggregate cursor pagination in the v2 helper. Legacy
+ * sessions preserve the existing first-page behavior.
  */
 export async function listMcpResources(
   mcpServerName: string,
@@ -1595,10 +1606,12 @@ export async function listMcpResources(
   try {
     const response = await retryWithBackoff(
       () =>
-        mcpClient.request(
-          { method: 'resources/list', params: {} },
-          ListResourcesResultSchema,
-        ),
+        mcpClient.getProtocolEra?.() === 'modern'
+          ? mcpClient.listResources()
+          : mcpClient.request(
+              { method: 'resources/list', params: {} },
+              ListResourcesResultSchema,
+            ),
       `${mcpServerName}/resources/list`,
     );
 
@@ -1671,10 +1684,7 @@ export async function connectToMcpServer(
   sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
   clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
-  const mcpClient = new Client({
-    name: 'qwen-code-mcp-client',
-    version: '0.0.1',
-  });
+  const mcpClient = createMcpClient('qwen-code-mcp-client');
 
   mcpClient.registerCapabilities({
     roots: {
@@ -1682,7 +1692,7 @@ export async function connectToMcpServer(
     },
   });
 
-  mcpClient.setRequestHandler(ListRootsRequestSchema, async () => {
+  mcpClient.setRequestHandler('roots/list', async () => {
     const roots = [];
     for (const dir of workspaceContext.getDirectories()) {
       roots.push({

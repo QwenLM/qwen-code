@@ -5,10 +5,12 @@
  */
 
 import * as GenAiLib from '@google/genai';
-import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import * as ClientLib from '@modelcontextprotocol/client';
+import {
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+} from '@modelcontextprotocol/client';
+import * as SdkClientStdioLib from '@modelcontextprotocol/client/stdio';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AuthProviderType,
@@ -69,8 +71,12 @@ const TEST_MCP_TOOL_IDLE_TIMEOUT_MS = 300000;
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
 }));
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
-vi.mock('@modelcontextprotocol/sdk/client/index.js');
+vi.mock('@modelcontextprotocol/client/stdio');
+vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@modelcontextprotocol/client')>();
+  return { ...actual, Client: vi.fn() };
+});
 vi.mock('@google/genai');
 vi.mock('../mcp/oauth-provider.js');
 vi.mock('../mcp/oauth-token-storage.js');
@@ -1300,6 +1306,41 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(mockedClient.request).toHaveBeenCalledWith(
         { method: 'resources/read', params: { uri: 'res://doc' } },
         expect.anything(),
+        undefined,
+      );
+      expect((result.contents[0] as { text: string }).text).toBe('BODY');
+    });
+
+    it('readResource uses the cache-aware helper for modern sessions', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        readResource: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'BODY' }],
+        }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const result = await client.readResource('res://doc');
+      expect(mockedClient.readResource).toHaveBeenCalledWith(
+        { uri: 'res://doc' },
         undefined,
       );
       expect((result.contents[0] as { text: string }).text).toBe('BODY');
@@ -2911,7 +2952,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
         expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const authProvider = (transport as any)._authProvider;
+        const authProvider = (transport as any)._oauthProvider;
         expect(authProvider).toBeInstanceOf(GoogleCredentialProvider);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((transport as any)._fetch).toEqual(expect.any(Function));
@@ -2932,7 +2973,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
         expect(transport).toBeInstanceOf(SSEClientTransport);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const authProvider = (transport as any)._authProvider;
+        const authProvider = (transport as any)._oauthProvider;
         expect(authProvider).toBeInstanceOf(GoogleCredentialProvider);
       });
 

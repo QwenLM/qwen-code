@@ -160,7 +160,7 @@ type ToolParams = Record<string, unknown>;
 
 /**
  * Minimal interface for the raw MCP Client's callTool method.
- * This avoids a direct import of @modelcontextprotocol/sdk in this file,
+ * This avoids a direct import of the MCP SDK in this file,
  * keeping the dependency contained in mcp-client.ts.
  */
 export interface McpDirectClient {
@@ -170,7 +170,6 @@ export interface McpDirectClient {
       arguments?: Record<string, unknown>;
       _meta?: Record<string, unknown>;
     },
-    resultSchema?: unknown,
     options?: {
       onprogress?: (progress: {
         progress: number;
@@ -551,7 +550,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
               }
             : {}),
         },
-        undefined,
         {
           onprogress: (progress) => {
             // Reset idle timeout on progress
