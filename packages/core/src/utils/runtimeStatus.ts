@@ -120,13 +120,22 @@ export async function writeRuntimeStatus(
  */
 export async function readRuntimeStatus(
   filePath: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<RuntimeStatus | null> {
   let raw: string;
   try {
-    raw = await fs.readFile(filePath, 'utf-8');
+    options.signal?.throwIfAborted();
+    raw = options.signal
+      ? await fs.readFile(filePath, {
+          encoding: 'utf-8',
+          signal: options.signal,
+        })
+      : await fs.readFile(filePath, 'utf-8');
   } catch {
+    options.signal?.throwIfAborted();
     return null;
   }
+  options.signal?.throwIfAborted();
 
   let data: unknown;
   try {
@@ -134,6 +143,7 @@ export async function readRuntimeStatus(
   } catch {
     return null;
   }
+  options.signal?.throwIfAborted();
 
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     return null;
