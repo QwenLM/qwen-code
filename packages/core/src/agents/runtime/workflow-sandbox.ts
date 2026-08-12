@@ -1398,6 +1398,12 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // NOTE: this init script is a host-side template literal — no
         // backticks anywhere below, in code or comments.
         //
+        // A non-number stallMs is silently dropped downstream and the
+        // default watchdog applies, contradicting "0 disables the watchdog"
+        // — refuse it loudly like the other option gates.
+        if (agentOpts.stallMs !== undefined && (typeof agentOpts.stallMs !== 'number' || !Number.isFinite(agentOpts.stallMs))) {
+          throw new Error("agent({stallMs}): must be a finite number of milliseconds (0 disables the watchdog).");
+        }
         // workingDir pins the agent to a worktree the CALLER already owns;
         // isolation creates and reaps one. Asking for both is a contradiction
         // about who owns the directory's lifetime, so name it here rather than

@@ -54,7 +54,7 @@ describe('resolveExternalWorktreeDir', () => {
       '.qwen/tmp/review-pr-7',
     );
     expect(result).toEqual({
-      path: '/repo/.qwen/tmp/review-pr-7',
+      path: path.resolve('/repo', '.qwen/tmp/review-pr-7'),
       branch: 'pr-7',
       slug: 'review-pr-7',
       repoRoot: '/repo',
@@ -75,7 +75,7 @@ describe('resolveExternalWorktreeDir', () => {
       '../review-pr-1-base',
     );
     expect(result).toMatchObject({
-      path: '/repo/.qwen/tmp/review-pr-1-base',
+      path: path.resolve('/repo/.qwen/tmp/review-pr-1', '../review-pr-1-base'),
     });
   });
 
@@ -85,7 +85,7 @@ describe('resolveExternalWorktreeDir', () => {
   it('accepts a registered worktree outside the repository directory', async () => {
     const result = await resolveExternalWorktreeDir(config, '/elsewhere/wt');
     expect(result).toEqual({
-      path: '/elsewhere/wt',
+      path: path.resolve('/elsewhere/wt'),
       branch: 'pr-7',
       slug: 'wt',
       repoRoot: '/repo',
@@ -128,7 +128,10 @@ describe('resolveExternalWorktreeDir', () => {
       null as unknown as { branch: string },
     );
     const result = await resolveExternalWorktreeDir(config, 'wt');
-    expect(result).toMatchObject({ path: '/repo/wt', branch: '' });
+    expect(result).toMatchObject({
+      path: path.resolve('/repo', 'wt'),
+      branch: '',
+    });
   });
 
   // The same resolver serves AgentTool's `working_dir` and a workflow's

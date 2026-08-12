@@ -115,14 +115,18 @@ const WORKFLOW_PARAM_SCHEMA = {
         'is removed. Use it when the directory the agent must work in already ' +
         'exists and its uncommitted state is the point (a review worktree, a ' +
         'checkout a previous step provisioned) — exactly the case isolation ' +
-        'cannot serve. Mutually exclusive with `isolation`. The path must live ' +
-        'inside the repository and be a linked worktree registered via ' +
-        '`git worktree add` — the main checkout is not eligible. ' +
+        'cannot serve. Mutually exclusive with `isolation`. The path must ' +
+        'be a linked worktree of this repository registered via ' +
+        '`git worktree add` (it may live anywhere on disk) — the main ' +
+        'checkout is not eligible. ' +
         '`stallMs` (number, ms): a no-progress watchdog, not a wall-clock cap. ' +
         'The dispatch is aborted and retried (up to ' +
         `${MAX_STALL_ATTEMPTS} attempts total) after this many milliseconds ` +
-        'with no observable subagent progress; the timer is suspended while ' +
-        'a tool is in flight, so a legitimately slow tool is not a stall. ' +
+        'with no observable subagent progress once progress has begun ' +
+        '(a dispatch that produces no first response is bounded by the ' +
+        'subagent time cap, not this watchdog); the timer is suspended ' +
+        'while a tool is in flight, so a legitimately slow tool is not ' +
+        'a stall. ' +
         `Default ${DEFAULT_STALL_MS}; \`0\` disables the watchdog. Wall time ` +
         'per attempt is bounded separately. ' +
         'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +

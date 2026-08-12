@@ -275,10 +275,16 @@ describe('GitWorktreeService.getMainWorktreePath() (real git)', () => {
     });
 
     const fromWorktree = new GitWorktreeService(wt);
-    expect(await fromWorktree.getMainWorktreePath()).toBe(repo);
-    expect(await fromWorktree.getRepoTopLevel()).toBe(wt);
+    // Git emits forward slashes on Windows while `repo`/`wt` come from
+    // Node's fs APIs (backslashes); compare normalized forms so this asserts
+    // the resolved path, not the platform's separator style.
+    const mainFromWorktree = (await fromWorktree.getMainWorktreePath()) ?? '';
+    expect(path.normalize(mainFromWorktree)).toBe(path.normalize(repo));
+    const topFromWorktree = (await fromWorktree.getRepoTopLevel()) ?? '';
+    expect(path.normalize(topFromWorktree)).toBe(path.normalize(wt));
     const fromMain = new GitWorktreeService(repo);
-    expect(await fromMain.getMainWorktreePath()).toBe(repo);
+    const mainFromMain = (await fromMain.getMainWorktreePath()) ?? '';
+    expect(path.normalize(mainFromMain)).toBe(path.normalize(repo));
   });
 
   // A newline inside the main-tree path splits the porcelain first entry;

@@ -1705,6 +1705,41 @@ describe('createWorkflowSandbox security', () => {
     ).rejects.toThrow(/incompatible options/);
   });
 
+  // The schema advertises "0 disables the watchdog", but a non-number used
+  // to be silently dropped downstream where the DEFAULT watchdog applied —
+  // the dispatch the author meant to leave unwatched got aborted + retried.
+  it('agent({stallMs}) rejects non-numeric values', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: "0" });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: NaN });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+    await expect(
+      sandbox.run(`return agent("x", { stallMs: true });`),
+    ).rejects.toThrow(/stallMs.*finite number/);
+  });
+
+  it('agent({stallMs: 0}) passes through and disables the watchdog', async () => {
+    const seen: Array<{ prompt: string; opts: unknown }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, opts });
+        return 'done';
+      },
+    });
+    const result = await sandbox.run(
+      `return await agent("x", { stallMs: 0 });`,
+    );
+    expect(result).toBe('done');
+    expect((seen[0].opts as { stallMs?: unknown }).stallMs).toBe(0);
+  });
+
   it('agent({isolation:"remote"}) is passed through to dispatch in P3', async () => {
     const seen: Array<{ prompt: string; opts: unknown }> = [];
     const sandbox = createWorkflowSandbox({

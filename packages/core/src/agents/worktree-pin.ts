@@ -117,8 +117,8 @@ export async function resolveExternalWorktreeDir(
       error:
         `${label} "${resolvedPath}" is not a registered linked worktree of ` +
         `this repository (it is the main working tree, is absent from \`git ` +
-        `worktree list\`, or its git metadata could not be read) — pinning an ` +
-        `agent there would not isolate it. Pass a worktree created via ` +
+        `worktree list\`, or its git metadata could not be read) — pinning a ` +
+        `sub-agent there would not isolate it. Pass a worktree created via ` +
         `\`git worktree add\`.`,
     };
   }
