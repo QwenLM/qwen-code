@@ -118,6 +118,7 @@ function toolBlock(
     details: overrides.details,
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
+    serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -247,7 +248,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       expect(messages).toHaveLength(2);
       expect(messages[0]).toMatchObject({
         role: 'tool_group',
-        tools: [{ callId: 'agent-call', status: expectedStatus, endTime: 2 }],
+        tools: [{ callId: 'agent-call', status: expectedStatus }],
       });
       expect(messages[1]).toMatchObject({
         role: 'system',
@@ -300,7 +301,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
-      tools: [{ callId: 'agent-call', status: 'completed', endTime: 2 }],
+      tools: [{ callId: 'agent-call', status: 'completed' }],
     });
     expect(messages[1]).toMatchObject({
       role: 'system',
@@ -312,6 +313,81 @@ describe('transcriptBlocksToDaemonMessages', () => {
         toolUseId: 'agent-call',
       },
     });
+  });
+
+  it('omits timing for a completed background agent', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 100_000, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+        serverTimestamp: 5_000,
+      }),
+      textBlock(
+        'agent-terminal',
+        'user',
+        'background agent finished',
+        200_000,
+        false,
+        {
+          serverTimestamp: 15_000,
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'completed',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).not.toHaveProperty('startTime');
+    expect(tool).not.toHaveProperty('endTime');
+  });
+
+  it('does not apply timing from a non-terminal background notification', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 100_000, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+        serverTimestamp: 5_000,
+      }),
+      textBlock(
+        'agent-running',
+        'user',
+        'background agent running',
+        200_000,
+        false,
+        {
+          serverTimestamp: 15_000,
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'running',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call', status: 'pending', startTime: 100_000 }],
+    });
+    if (messages[0]?.role === 'tool_group') {
+      expect(messages[0].tools[0]).not.toHaveProperty('endTime');
+    }
   });
 
   it('does not apply a non-agent background notification to an agent tool', () => {
@@ -1072,7 +1148,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
           {
             callId: 'agent-1',
             status: 'completed',
-            endTime: 35,
             rawOutput: {
               status: 'cancelled',
               reason: 'Agent was cancelled by user',
@@ -1089,7 +1164,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
             callId: 'agent-2',
             status: 'completed',
             title: 'Agent: second done',
-            endTime: 45,
             rawOutput: { result: 'second result' },
           },
         ],
@@ -1630,7 +1704,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
       title: 'Shell complete',
       status: 'completed',
       rawOutput: 'output text',
-      endTime: 4,
     });
   });
 
@@ -1854,7 +1927,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
         {
           callId: 'agent-1',
           status: 'completed',
-          endTime: 30,
           rawOutput: {
             status: 'cancelled',
             reason: 'Agent was cancelled by user',
@@ -2003,6 +2075,105 @@ describe('transcriptBlocksToDaemonMessages', () => {
         ],
       },
     ]);
+  });
+
+  it('keeps completed timing hidden after merging a permission placeholder', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Allow shell?',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'tc-1',
+          kind: 'execute',
+          toolName: 'run_shell_command',
+          rawInput: { command: 'ls' },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 1_000,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+        resolved: 'selected:proceed_once',
+      },
+      toolBlock('tool-1', 'tc-1', 'completed', 3_000, {
+        toolName: 'run_shell_command',
+        updatedAt: 13_000,
+        serverTimestamp: 5_000,
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).not.toHaveProperty('startTime');
+    expect(tool).not.toHaveProperty('endTime');
+  });
+
+  it('keeps completed timing hidden when the tool precedes the permission', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'tc-1', 'completed', 3_000, {
+        toolName: 'run_shell_command',
+        updatedAt: 13_000,
+        serverTimestamp: 5_000,
+      }),
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Allow shell?',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'tc-1',
+          kind: 'execute',
+          toolName: 'run_shell_command',
+          rawInput: { command: 'ls' },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 110_000,
+        createdAt: 110_000,
+        updatedAt: 111_000,
+        resolved: 'selected:proceed_once',
+      },
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).not.toHaveProperty('startTime');
+    expect(tool).not.toHaveProperty('endTime');
+  });
+
+  it('clears running timing when a permission is rejected', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'tc-1', 'in_progress', 1_000, {
+        toolName: 'ReadFile',
+      }),
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Denied read',
+        options: [{ optionId: 'cancel', label: 'Deny', raw: {} }],
+        toolCall: {
+          toolCallId: 'tc-1',
+          toolName: 'ReadFile',
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 2_000,
+        createdAt: 2_000,
+        updatedAt: 2_000,
+        resolved: 'selected:cancel',
+      },
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({ callId: 'tc-1', status: 'failed' });
+    expect(tool).not.toHaveProperty('startTime');
+    expect(tool).not.toHaveProperty('endTime');
   });
 
   it('uses text content as raw output when a tool has no raw output', () => {
@@ -2568,7 +2739,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
         callId: 'mcp-1',
         status: 'completed',
         rawOutput: '{"approved":true}',
-        endTime: 3,
       });
     },
   );
@@ -2610,7 +2780,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
       expect(agentGroup.tools[0]).toMatchObject({
         callId: 'agent-1',
         status: 'failed',
-        endTime: 3,
       });
     }
     // Third: second thinking, fourth: response (not absorbed into agent subContent)
@@ -2650,7 +2819,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agent).toMatchObject({
       callId: 'agent-1',
       status: 'failed',
-      endTime: 2,
     });
   });
 
@@ -2897,6 +3065,46 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps the local observation start for an unstamped running tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'call-1', 'in_progress', 100_000, {
+        updatedAt: 106_000,
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ startTime: 100_000 }],
+    });
+  });
+
+  it('omits a synthetic offline start for an unfinished tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'call-1', 'in_progress', 0, {
+        serverTimestamp: 1_000,
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).not.toHaveProperty('startTime');
+    expect(tool).not.toHaveProperty('endTime');
+  });
+
+  it('omits timing for a completed tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('tool-1', 'call-1', 'completed', 100_000, {
+        serverTimestamp: 1_000,
+        updatedAt: 106_000,
+      }),
+    ]);
+
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).not.toHaveProperty('startTime');
+    expect(tool).not.toHaveProperty('endTime');
+  });
+
   it('handles nested subagent via parentToolCallId', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('parent-start', 'parent-1', 'in_progress', 10, {
@@ -3138,7 +3346,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool?.status).toBe('completed');
-    expect(tool?.endTime).toBe(25);
+    expect(tool?.endTime).toBeUndefined();
     expect(tool?.rawOutput).toBeUndefined();
   });
 
@@ -3255,7 +3463,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(tool?.title).toBe('Agent: work done');
     expect(tool?.status).toBe('completed');
-    expect(tool?.endTime).toBe(25);
+    expect(tool?.endTime).toBeUndefined();
     expect(tool?.rawOutput).toEqual({
       type: 'task_execution',
       totalTokens: 500,
@@ -3374,7 +3582,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     const agentTool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     expect(agentTool?.status).toBe('failed');
-    expect(agentTool?.endTime).toBe(25);
+    expect(agentTool?.endTime).toBeUndefined();
     expect(agentTool?.subContent).toBe('Looking into it');
     expect(messages[1]).toMatchObject({
       role: 'assistant',
@@ -3405,7 +3613,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tools?.[1]?.status).toBe('pending');
     expect(tools?.[2]?.status).toBe('failed');
     expect(tool4?.status).toBe('completed');
-    expect(tool4?.endTime).toBe(5);
+    expect(tool4?.endTime).toBeUndefined();
   });
 
   it('parented blocks after completed subAgent remain nested', () => {

@@ -13,7 +13,6 @@ import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
   return {
-    CompactModeContext: createContext(false),
     TodoTimelineContext: createContext(new Map()),
     TodoDetailContext: createContext(new Map()),
   };
@@ -98,7 +97,7 @@ function renderToolGroup(
 
 const t = (key: string, values?: Record<string, string | number>): string => {
   if (key === 'toolGroup.running') {
-    return `Running ${values?.name ?? 'tool'}${values?.duration ? ` ${values.duration}` : ''}${
+    return `Running ${values?.name ?? 'tool'}${
       Number(values?.count ?? 0) > 1 ? ` · ${values?.count ?? 0} tools` : ''
     }`;
   }
@@ -184,6 +183,78 @@ describe('tool group summary logic', () => {
     ];
 
     expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+  });
+
+  it('describes every active foreground tool until all tools finish', () => {
+    const tools = [
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+      makeTool({ callId: 'done', status: 'completed' }),
+    ];
+
+    const summary = formatToolGroupSummary(tools, t);
+    expect(summary).toContain('ReadFile package.json');
+    expect(summary).toContain('ToolGroup');
+    expect(summary).toContain('3 tools');
+  });
+
+  it('keeps workspace-relative paths in multi-tool summaries', () => {
+    const tools = [
+      makeTool({
+        callId: 'first',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: '/workspace/src/index.ts' },
+      }),
+      makeTool({
+        callId: 'second',
+        toolName: 'ReadFile',
+        status: 'pending',
+        args: { file_path: '/workspace/test/index.ts' },
+      }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t, '/workspace')).toBe(
+      'Running ReadFile src/index.ts · ReadFile test/index.ts · 2 tools',
+    );
+  });
+
+  it('excludes a running background agent from a multi-tool summary', () => {
+    const tools = [
+      makeTool({
+        callId: 'agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        args: { run_in_background: true },
+      }),
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+    ];
+
+    const summary = formatToolGroupSummary(tools, t);
+    expect(summary).toBe(
+      "Running ReadFile package.json · Grep 'ToolGroup' in path './' · 3 tools",
+    );
   });
 
   it('localizes active tool names in running summaries', () => {
@@ -537,6 +608,96 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it('renders the aggregate summary for a multi-tool group', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+    ]);
+
+    expect(container.querySelector('button')?.textContent).toContain(
+      'package.json',
+    );
+    expect(container.querySelector('button')?.textContent).toContain(
+      'ToolGroup',
+    );
+  });
+
+  it('does not show elapsed time in a running summary', () => {
+    const container = renderToolGroup([
+      makeTool({ status: 'in_progress', startTime: 1_000 }),
+      makeTool({ callId: 'done', status: 'completed' }),
+    ]);
+
+    expect(container.querySelector('button')?.textContent).not.toMatch(
+      /\d+[sm]/,
+    );
+  });
+
+  it('keeps elapsed time updating in a running tool row', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(6_000);
+
+    try {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status: 'in_progress',
+          startTime: 1_000,
+        }),
+      );
+      expect(container.textContent).toContain('5s');
+
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('6s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not show elapsed time after a tool completes', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        status: 'completed',
+        startTime: 1_000,
+        endTime: 6_000,
+      }),
+    );
+
+    expect(container.textContent).not.toContain('5s');
+  });
+
+  it('shows a tool-kind icon on every expanded group row', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'read', toolName: 'ReadFile' }),
+      makeTool({ callId: 'edit', toolName: 'edit' }),
+    ]);
+    const summary = container.querySelector('button');
+    act(() => summary?.click());
+
+    const rows = container.querySelectorAll(
+      '[class*="chatSummaryGroup"] [class*="lineMain"]',
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(
+        row.querySelector('svg[class*="chatSummaryToolIcon"]'),
+      ).not.toBeNull();
+    }
+  });
+
   it('shows failed status in the collapsed chat summary', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'Shell', status: 'failed' }),

@@ -54,7 +54,14 @@ interface TranscriptMessageOptions {
 
 interface BackgroundAgentTaskUpdate {
   status: string;
-  endTime: number;
+}
+
+function getToolTiming(
+  block: DaemonToolTranscriptBlock,
+  complete: boolean,
+): { startTime?: number } {
+  if (complete) return {};
+  return block.clientReceivedAt === 0 ? {} : { startTime: block.createdAt };
 }
 
 function collectBackgroundAgentTaskUpdates(
@@ -74,10 +81,7 @@ function collectBackgroundAgentTaskUpdates(
     const toolUseId = getString(task, 'toolUseId');
     const status = getString(task, 'status');
     if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
-    updates.set(toolUseId, {
-      status,
-      endTime: block.serverTimestamp ?? block.clientReceivedAt,
-    });
+    updates.set(toolUseId, { status });
   }
   return updates;
 }
@@ -90,22 +94,23 @@ function applyBackgroundAgentTaskUpdate(
   switch (update.status) {
     case 'completed':
       tool.status = 'completed';
-      tool.endTime = update.endTime;
       break;
     case 'failed':
       tool.status = 'failed';
-      tool.endTime = update.endTime;
       break;
     case 'cancelled':
     case 'canceled':
       tool.status = 'completed';
-      tool.endTime = update.endTime;
       tool.rawOutput = {
         ...(getRecord(tool.rawOutput) ?? {}),
         status: 'cancelled',
       };
       break;
+    default:
+      return;
   }
+  delete tool.startTime;
+  delete tool.endTime;
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -564,6 +569,10 @@ export function transcriptBlocksToDaemonMessages(
 
         if (existingTool) {
           mergeToolCall(existingTool, toolCall);
+          if (isTerminalToolStatus(toolCall.status)) {
+            delete existingTool.startTime;
+            delete existingTool.endTime;
+          }
           break;
         }
 
@@ -657,26 +666,32 @@ export function transcriptBlocksToDaemonMessages(
         if (existingPermission) {
           const previousStatus = existingPermission.status;
           const previousEndTime = existingPermission.endTime;
+          const approved = isApprovedPermissionResolution(permBlock.resolved);
           permissionToolCall.toolName = existingPermission.toolName;
-          if (permBlock.resolved) {
-            if (isApprovedPermissionResolution(permBlock.resolved)) {
-              permissionToolCall.status = isSubAgentPermission
-                ? permissionToolCall.status
-                : 'in_progress';
-            } else {
-              permissionToolCall.status = 'failed';
-              permissionToolCall.endTime = permBlock.updatedAt;
-            }
-          }
+          permissionToolCall.status = approved
+            ? isSubAgentPermission
+              ? permissionToolCall.status
+              : 'in_progress'
+            : 'failed';
+          // Do not replace the tool's observed start with the permission block's time.
+          permissionToolCall.startTime = undefined;
           mergeToolCall(existingPermission, permissionToolCall);
           if (
             isTerminalToolStatus(previousStatus) ||
-            (permBlock.resolved &&
-              isSubAgentPermission &&
-              isApprovedPermissionResolution(permBlock.resolved))
+            (isSubAgentPermission && approved)
           ) {
             existingPermission.status = previousStatus;
-            existingPermission.endTime = previousEndTime;
+            if (previousEndTime !== undefined) {
+              existingPermission.endTime = previousEndTime;
+            } else {
+              delete existingPermission.endTime;
+            }
+            if (isTerminalToolStatus(previousStatus)) {
+              delete existingPermission.startTime;
+            }
+          } else if (!approved) {
+            delete existingPermission.startTime;
+            delete existingPermission.endTime;
           }
           break;
         }
@@ -703,7 +718,7 @@ export function transcriptBlocksToDaemonMessages(
             needsNewContentMessage = true;
           } else {
             permissionToolCall.status = 'failed';
-            permissionToolCall.endTime = permBlock.updatedAt;
+            delete permissionToolCall.startTime;
             appendToolCallMessage(
               messages,
               block.id,
@@ -895,7 +910,8 @@ function mergeToolCall(
   target.toolName = source.toolName ?? target.toolName;
   target.kind = source.kind ?? target.kind;
   target.content = source.content ?? target.content;
-  target.endTime = source.endTime ?? target.endTime;
+  if (source.startTime !== undefined) target.startTime = source.startTime;
+  if (source.endTime !== undefined) target.endTime = source.endTime;
   target.rawOutput = source.rawOutput ?? target.rawOutput;
   target.args = source.args ?? target.args;
   target.locations = source.locations ?? target.locations;
@@ -997,6 +1013,7 @@ function daemonToolBlockToToolCall(
     block.status === 'failed' ||
     block.status === 'cancelled' ||
     block.status === 'canceled';
+  const timing = getToolTiming(block, isComplete && !isBackgroundAgent);
 
   return {
     callId: block.toolCallId,
@@ -1010,8 +1027,7 @@ function daemonToolBlockToToolCall(
     rawOutput,
     args: block.rawInput as Record<string, unknown> | undefined,
     parentToolCallId: block.parentToolCallId,
-    startTime: block.createdAt,
-    endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
+    ...timing,
     ...(content ? { content } : {}),
   };
 }

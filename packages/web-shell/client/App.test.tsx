@@ -4613,6 +4613,40 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('App compact mode', () => {
+  async function toggleCompactMode() {
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          key: 'o',
+        }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  it('uses Ctrl+O and persists the existing workspace setting', async () => {
+    renderApp();
+    await toggleCompactMode();
+
+    expect(settingsSetValue).toHaveBeenCalledWith(
+      'workspace',
+      'ui.compactMode',
+      true,
+    );
+
+    await toggleCompactMode();
+    expect(settingsSetValue).toHaveBeenLastCalledWith(
+      'workspace',
+      'ui.compactMode',
+      false,
+    );
+  });
+});
+
 describe('App plan todos', () => {
   it('gates the exit-plan workflow on the experimental setting', async () => {
     const approvedEntries = [
