@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
@@ -39,6 +40,7 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
@@ -53,6 +55,138 @@ try {
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+async function testBootstrapWorkspaceVisibility() {
+  const bootstrapHtml = fs.readFileSync(
+    path.join(packageDir, 'bootstrap', 'index.html'),
+    'utf8',
+  );
+  assert.match(bootstrapHtml, /class="mark" src="qwen-code-logo\.svg"/);
+  assert.ok(
+    fs.existsSync(path.join(packageDir, 'bootstrap', 'qwen-code-logo.svg')),
+    'The bootstrap splash mark must ship with the frontendDist directory.',
+  );
+  assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
+  const primary = await createBootstrapHarness();
+  const { body, commands, element, listeners, resolveBootstrapState } = primary;
+
+  listeners['runtime-starting']({
+    payload: '/Users/example/Projects/qwen-code',
+  });
+  assert.equal(body.dataset.state, 'starting');
+  assert.equal(element('#workspace').hidden, true);
+
+  listeners['runtime-failed']({ payload: 'runtime failed' });
+  assert.equal(body.dataset.state, 'error');
+  assert.equal(element('#workspace').hidden, false);
+  assert.equal(
+    element('#workspace').textContent,
+    '/Users/example/Projects/qwen-code',
+  );
+  await element('#logs').listeners.click();
+  assert.equal(element('#workspace').hidden, false);
+
+  element('#retry').listeners.click();
+  assert.equal(commands.at(-1), 'restart_runtime');
+  assert.equal(body.dataset.state, 'starting');
+  assert.equal(element('#workspace').hidden, true);
+
+  resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'starting',
+    workspace: '/Users/example/Documents',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('#title').textContent, 'Restarting Qwen Code');
+  assert.equal(
+    element('#workspace').hidden,
+    true,
+    'A stale bootstrap snapshot must not overwrite a newer recovery action.',
+  );
+
+  const failed = await createBootstrapHarness();
+  failed.listeners['runtime-failed']({ payload: 'runtime failed' });
+  failed.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'runtime failed',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(failed.element('#workspace').hidden, false);
+  assert.equal(
+    failed.element('#workspace').textContent,
+    '/Users/example/Documents/Qwen',
+  );
+
+  const cancelled = await createBootstrapHarness();
+  cancelled.listeners['runtime-starting']({
+    payload: '/Users/example/Documents/Qwen',
+  });
+  cancelled.listeners['runtime-failed']({ payload: 'runtime failed' });
+  await cancelled.element('#choose').listeners.click();
+  assert.equal(cancelled.body.dataset.state, 'idle');
+  assert.equal(cancelled.element('#workspace').hidden, false);
+  assert.equal(
+    cancelled.element('#workspace').textContent,
+    '/Users/example/Documents/Qwen',
+  );
+}
+
+async function createBootstrapHarness() {
+  const elements = {};
+  const element = (selector) => {
+    elements[selector] ??= {
+      addEventListener(event, listener) {
+        this.listeners ??= {};
+        this.listeners[event] = listener;
+      },
+      style: {},
+    };
+    return elements[selector];
+  };
+  const listeners = {};
+  const commands = [];
+  const body = { dataset: {} };
+  let resolveBootstrapState;
+  const tauri = {
+    core: {
+      invoke: async (command) => {
+        commands.push(command);
+        if (command === 'bootstrap_state') {
+          return new Promise((resolve) => {
+            resolveBootstrapState = resolve;
+          });
+        }
+        if (command === 'open_logs') throw new Error('no file handler');
+        if (command === 'choose_workspace') return null;
+        if (command === 'restart_runtime') return new Promise(() => {});
+        throw new Error(`Unexpected desktop command: ${command}`);
+      },
+    },
+    event: {
+      listen: async (event, listener) => {
+        listeners[event] = listener;
+      },
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(packageDir, 'bootstrap', 'bootstrap.js'), 'utf8'),
+    {
+      document: { body, querySelector: element },
+      window: { __TAURI__: tauri },
+    },
+    { timeout: 5000 },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    body,
+    commands,
+    element,
+    listeners,
+    resolveBootstrapState: (state) => resolveBootstrapState(state),
+  };
 }
 
 function testLegacyApplicationIdentity() {
