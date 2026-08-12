@@ -295,13 +295,27 @@ function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
   return app;
 }
 
-afterEach(() => {
+function stopCreatedApps() {
   for (const app of createdApps) {
     (
       app.locals as { stopExtensionGenerationReconciler?: () => void }
     ).stopExtensionGenerationReconciler?.();
   }
   createdApps.clear();
+}
+
+afterEach(stopCreatedApps);
+
+it('stops extension generation reconcilers for direct app tests', () => {
+  const stopExtensionGenerationReconciler = vi.fn();
+  createdApps.add({
+    locals: { stopExtensionGenerationReconciler },
+  } as ReturnType<typeof createServeAppImpl>);
+
+  stopCreatedApps();
+
+  expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+  expect(createdApps.size).toBe(0);
 });
 
 function fakeDaemonLog(): DaemonLogger {

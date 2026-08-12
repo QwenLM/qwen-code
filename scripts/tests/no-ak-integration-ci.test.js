@@ -41,9 +41,10 @@ describe('no-AK integration CI wiring', () => {
             'Run tests and generate reports',
           );
           const start = testStep.indexOf('export TMPDIR=');
-          expect(start, `${jobName}: TMPDIR routing block`).toBeGreaterThanOrEqual(
-            0,
-          );
+          expect(
+            start,
+            `${jobName}: TMPDIR routing block`,
+          ).toBeGreaterThanOrEqual(0);
           const end = testStep.indexOf('\n          ( while true', start);
           expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
           return testStep.slice(start, end);
@@ -85,6 +86,8 @@ describe('no-AK integration CI wiring', () => {
         expect(
           workflow.match(/mktemp -d \/var\/tmp\/qwen-ci-XXXXXX/g),
         ).toHaveLength(3);
+        expect(workflow).toContain('QWEN_CI_TMPDIR="$(mktemp -d');
+        expect(workflow).toContain('if [ -n "$QWEN_CI_TMPDIR" ]; then');
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -108,6 +111,7 @@ describe('no-AK integration CI wiring', () => {
         'npm run test:ci',
         'RC=$?',
         'set -e',
+        'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
         'kill "$SAMPLER_PID" 2>/dev/null || true',
         'exit "$RC"',
       ]) {
