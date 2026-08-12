@@ -4710,6 +4710,142 @@ describe('Session', () => {
       });
     });
 
+    it('truncates astral (emoji) labels on a code-point boundary', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // 90 code points / 180 UTF-16 units — the cut must land on a whole
+      // code point (77 emoji + '...'), never splitting a surrogate pair.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        {
+          id: 'monitor-1',
+          description: '\u{1F600}'.repeat(90),
+          droppedLines: 0,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "…" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: '\u{1F600}'.repeat(77) + '...',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('leaves an exactly-80-char label unchanged', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // Exactly at the cap: the boundary is inclusive, no fake ellipsis.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-1', description: 'x'.repeat(80), droppedLines: 0 },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "…" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: 'x'.repeat(80),
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('leaves an astral label at the 80-code-point cap unchanged', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // 80 code points but 160 UTF-16 units: the cap is measured in code
+      // points, so this must NOT be "truncated" into a longer string.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        {
+          id: 'monitor-1',
+          description: '\u{1F600}'.repeat(80),
+          droppedLines: 0,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "…" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: '\u{1F600}'.repeat(80),
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
     it('collapses whitespace in short structured labels', async () => {
       mockChat.sendMessageStream = vi
         .fn()

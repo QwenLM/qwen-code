@@ -126,10 +126,15 @@ export const SystemMessage = memo(function SystemMessage({
     isTaskNotification && typeof data === 'object' && data !== null
       ? (data as Record<string, unknown>)
       : undefined;
-  const taskStatus =
-    typeof notificationData?.status === 'string'
-      ? notificationData.status
-      : undefined;
+  const stringField = (key: string): string | undefined => {
+    const value = notificationData?.[key];
+    return typeof value === 'string' ? value : undefined;
+  };
+  const numberField = (key: string): number | undefined => {
+    const value = notificationData?.[key];
+    return typeof value === 'number' ? value : undefined;
+  };
+  const taskStatus = stringField('status');
   const taskNotificationLabel =
     taskStatus === 'completed'
       ? t('system.taskCompleted')
@@ -153,26 +158,11 @@ export const SystemMessage = memo(function SystemMessage({
           ? CircleMinusIcon
           : InfoIcon;
 
-  const taskKind =
-    typeof notificationData?.kind === 'string'
-      ? notificationData.kind
-      : undefined;
-  const taskCommandLabel =
-    typeof notificationData?.commandLabel === 'string'
-      ? notificationData.commandLabel
-      : undefined;
-  const taskDescription =
-    typeof notificationData?.description === 'string'
-      ? notificationData.description
-      : undefined;
-  const taskEventCount =
-    typeof notificationData?.eventCount === 'number'
-      ? notificationData.eventCount
-      : undefined;
-  const taskDroppedLines =
-    typeof notificationData?.droppedLines === 'number'
-      ? notificationData.droppedLines
-      : undefined;
+  const taskKind = stringField('kind');
+  const taskCommandLabel = stringField('commandLabel');
+  const taskDescription = stringField('description');
+  const taskEventCount = numberField('eventCount');
+  const taskDroppedLines = numberField('droppedLines');
   const taskI18nText = (() => {
     if (!taskKind || !taskStatus) return undefined;
     if (

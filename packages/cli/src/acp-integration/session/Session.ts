@@ -180,7 +180,7 @@ import {
   runWithRuntimeContentGenerator,
   getInvocationContext,
   runWithInvocationContext,
-  stripDisplayControlChars,
+  truncateNotificationLabel,
   buildBackgroundEntryLabel,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -1136,23 +1136,6 @@ export interface BackgroundNotificationQueueItem {
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
-}
-
-/** Max length for a notification command/description label shown in the UI. */
-const NOTIFICATION_LABEL_MAX_LENGTH = 80;
-
-/** Collapse whitespace and truncate a task label for compact UI display. */
-function truncateNotificationLabel(label: string): string {
-  const normalized = stripDisplayControlChars(label)
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (normalized.length <= NOTIFICATION_LABEL_MAX_LENGTH) {
-    return normalized;
-  }
-  // Slice by code point so the cut cannot split a surrogate pair.
-  return (
-    [...normalized].slice(0, NOTIFICATION_LABEL_MAX_LENGTH - 3).join('') + '...'
-  );
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the

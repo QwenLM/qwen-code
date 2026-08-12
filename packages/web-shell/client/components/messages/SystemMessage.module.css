@@ -23,18 +23,8 @@
   margin-top: 0.55em;
 }
 
-.noMarker::before {
-  display: none;
-}
-
 .content {
   min-width: 0;
-}
-
-.notificationContent {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
 }
 
 .notificationIcon {
