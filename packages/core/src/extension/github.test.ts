@@ -39,6 +39,7 @@ import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { AGENT_PLUGIN_SCHEMA } from './agent-plugins-v1/index.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -2045,6 +2046,30 @@ describe('git extension helpers', () => {
       await expect(
         fs.readFile(path.join(tempDir, 'system-prompt.md'), 'utf-8'),
       ).resolves.toBe('# System context');
+    });
+
+    it('should extract and flatten a wrapped Agent Plugin archive', async () => {
+      const archivePath = path.join(tempDir, 'wrapped-agent-plugin.zip');
+      const manifest = JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable-plugin',
+      });
+      const skill =
+        '---\nname: direct\ndescription: Direct skill\n---\nPortable instructions.';
+      const archive = await createZipBuffer(tempDir, [
+        { name: 'wrapped/plugin.json', content: manifest },
+        { name: 'wrapped/skills/direct/SKILL.md', content: skill },
+      ]);
+      await fs.writeFile(archivePath, archive);
+
+      await extractArchiveFile(archivePath, tempDir);
+
+      await expect(
+        fs.readFile(path.join(tempDir, 'plugin.json'), 'utf8'),
+      ).resolves.toBe(manifest);
+      await expect(
+        fs.readFile(path.join(tempDir, 'skills', 'direct', 'SKILL.md'), 'utf8'),
+      ).resolves.toBe(skill);
     });
 
     it('should flatten wrapped archives when the archive file is in the destination', async () => {

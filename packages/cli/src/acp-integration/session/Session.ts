@@ -147,8 +147,10 @@ import {
   getToolCallRepeatKey,
   shouldHaltOnTurnToolCallCap,
   logLoopDetected,
+  logRepeatedToolFailureGuard,
   LoopDetectedEvent,
   LoopType,
+  RepeatedToolFailureGuardEvent,
   acquireSleepInhibitor,
   didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
@@ -177,6 +179,8 @@ import {
   runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
@@ -310,6 +314,17 @@ import {
   DaemonTodoStopGuard,
   type TodoStopGuardContinuation,
 } from './daemon-todo-stop-guard.js';
+import {
+  createRepeatedToolFailureGuardState,
+  reduceRepeatedToolFailureGuard,
+  REPEATED_TOOL_FAILURE_REMINDER,
+  REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+  parseRepeatedToolFailureGuardMode,
+  type RepeatedToolFailureBatch,
+  type RepeatedToolFailureGuardMode,
+  type RepeatedToolFailureGuardDecision,
+  type RepeatedToolFailureGuardState,
+} from './repeated-tool-failure-guard.js';
 
 const debugLogger = createDebugLogger('SESSION');
 const permissionRequestTails = new WeakMap<
@@ -399,6 +414,7 @@ type RunToolResult = {
   stopAfterPermissionCancel: boolean;
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
+  repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
 };
 
@@ -413,6 +429,7 @@ type TodoStopGuardClaimResult = 'claimed' | 'queued' | 'unavailable';
 type NextMessageAfterToolRun = {
   message: Content | null;
   hadMidTurnUserInput: boolean;
+  stoppedByRepeatedToolFailure?: boolean;
 };
 
 type TodoStopGuardBackgroundBaseline = {
@@ -450,6 +467,10 @@ type PendingToolResultRecord = {
   toolName: string;
   responseParts: Part[];
   persistedOutputFiles?: string[];
+  policyToolName?: string;
+  toolType?: 'native' | 'mcp';
+  executionErrorType?: ToolErrorType;
+  providerDuplicate?: boolean;
   metadata: Omit<Partial<ToolCallResponseInfo>, 'executionStatus'> & {
     status: 'success' | 'error' | 'cancelled';
     executionStatus: ToolExecutionStatus;
@@ -469,6 +490,8 @@ export type DaemonToolLoopState = {
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
+  repeatedToolFailureMode: RepeatedToolFailureGuardMode;
+  repeatedToolFailureState: RepeatedToolFailureGuardState;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -483,14 +506,95 @@ const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
 
-function createDaemonToolLoopState(): DaemonToolLoopState {
+function createDaemonToolLoopState(
+  repeatedToolFailureMode: RepeatedToolFailureGuardMode,
+): DaemonToolLoopState {
   return {
     totalToolCalls: 0,
     invalidToolParamErrors: new Map(),
     toolCallKeyCounts: new Map(),
     maxToolCallKeyRepeat: 0,
     loopDetected: false,
+    repeatedToolFailureMode,
+    repeatedToolFailureState: createRepeatedToolFailureGuardState(),
   };
+}
+
+function repeatedToolFailureCountBucket(
+  count: number,
+): '0' | '1-2' | '3-4' | '5-7' | '8+' {
+  if (count === 0) return '0';
+  if (count <= 2) return '1-2';
+  if (count <= 4) return '3-4';
+  if (count <= 7) return '5-7';
+  return '8+';
+}
+
+function repeatedToolFailureBatchBucket(count: number): '0' | '1' | '2' | '3+' {
+  if (count === 0) return '0';
+  if (count === 1) return '1';
+  if (count === 2) return '2';
+  return '3+';
+}
+
+function recordRepeatedToolFailureDecision(
+  promptId: string,
+  mode: RepeatedToolFailureGuardMode,
+  previousState: RepeatedToolFailureGuardState,
+  decision: RepeatedToolFailureGuardDecision,
+  batch: RepeatedToolFailureBatch,
+): void {
+  if (mode === 'off' || decision.kind === 'none') {
+    return;
+  }
+
+  const countState = decision.kind === 'reset' ? previousState : decision.state;
+  const telemetryDecision =
+    decision.kind === 'warn'
+      ? 'warned'
+      : decision.kind === 'stop'
+        ? 'stopped'
+        : decision.kind;
+  const key = decision.kind === 'reset' ? undefined : decision.state.key;
+  const matchingToolTypes = new Set(
+    key
+      ? batch.observations
+          .filter(
+            (observation) =>
+              !observation.providerDuplicate &&
+              observation.policyToolName === key.policyToolName &&
+              observation.executionErrorType === key.executionErrorType,
+          )
+          .map((observation) => observation.toolType)
+          .filter((toolType) => toolType !== undefined)
+      : [],
+  );
+  const toolType =
+    matchingToolTypes.size === 1 ? [...matchingToolTypes][0] : undefined;
+
+  logRepeatedToolFailureGuard(
+    new RepeatedToolFailureGuardEvent({
+      prompt_id: promptId,
+      route: 'acp_foreground',
+      mode,
+      phase_before: previousState.phase,
+      phase_after: decision.state.phase,
+      decision: telemetryDecision,
+      failure_count_bucket: repeatedToolFailureCountBucket(
+        countState.failureCount,
+      ),
+      batch_count_bucket: repeatedToolFailureBatchBucket(countState.batchCount),
+      candidate_ordinal: countState.candidateOrdinal,
+      ...(decision.kind === 'reset'
+        ? { reset_reason: decision.reason }
+        : {
+            terminal_status: 'error',
+            execution_status: 'error',
+            execution_error_type: key?.executionErrorType,
+            tool_type: toolType,
+          }),
+    }),
+  );
 }
 
 function recordDaemonLoopDetected(
@@ -499,12 +603,17 @@ function recordDaemonLoopDetected(
   loopType: LoopType,
   message: string,
   loopState: DaemonToolLoopState,
+  options: { recordToQwenLogger?: boolean } = {},
 ): true {
   if (!loopState.loopDetected) {
     loopState.loopDetected = true;
     debugLogger.warn(message);
     try {
-      logLoopDetected(config, new LoopDetectedEvent(loopType, promptId));
+      logLoopDetected(
+        config,
+        new LoopDetectedEvent(loopType, promptId),
+        options,
+      );
     } catch (error) {
       debugLogger.debug(
         '[Session] Failed to record loop detection telemetry',
@@ -1395,6 +1504,7 @@ export class Session implements SessionContext {
   // `#drainMidTurnUserMessages`.
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
   private readonly todoStopGuard: DaemonTodoStopGuard;
+  private readonly repeatedToolFailureGuardMode: RepeatedToolFailureGuardMode;
   private todoStopGuardBackgroundBaseline: TodoStopGuardBackgroundBaseline;
   private readonly relatedAgentIds = new Set<string>();
   private readonly provisionalRelatedAgentCounts = new Map<string, number>();
@@ -1491,6 +1601,16 @@ export class Session implements SessionContext {
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
+    const configuredGuardMode =
+      process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
+    const parsedGuardMode =
+      parseRepeatedToolFailureGuardMode(configuredGuardMode);
+    this.repeatedToolFailureGuardMode = parsedGuardMode ?? 'shadow';
+    if (configuredGuardMode?.trim() && parsedGuardMode === undefined) {
+      debugLogger.warn(
+        `${ENV_ACP_REPEATED_TOOL_FAILURE_GUARD} has an invalid value; defaulting to shadow. Expected off, shadow, warn, or enforce.`,
+      );
+    }
     this.todoStopGuardBackgroundBaseline =
       this.#captureTodoStopGuardBackgroundBaseline();
 
@@ -3543,7 +3663,11 @@ export class Session implements SessionContext {
 
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
-            const toolLoopState = createDaemonToolLoopState();
+            const toolLoopState = createDaemonToolLoopState(
+              promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
+                ? 'off'
+                : this.repeatedToolFailureGuardMode,
+            );
 
             // conversation_finished must fire on every terminal path of the
             // turn — the loop below has cancel/abort/no-stream early-returns
@@ -3806,9 +3930,17 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                       promptId,
+                      toolLoopState,
                       onFullTurnModel,
                     );
                   nextMessage = nextAfterTools.message;
+                  if (nextAfterTools.stoppedByRepeatedToolFailure) {
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
+                  }
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(
@@ -3922,7 +4054,7 @@ export class Session implements SessionContext {
 
       if (this.todoStopGuard.needsStopInspection) {
         const drained = await this.#drainMidTurnInput(pendingSend.signal, {
-          watchQueuedPromptForTodoStopGuard: true,
+          watchQueuedPrompt: true,
           onFullTurnModel,
         });
         if (drained.parts.length > 0) {
@@ -4022,7 +4154,7 @@ export class Session implements SessionContext {
 
         if (this.todoStopGuard.needsStopInspection) {
           const drained = await this.#drainMidTurnInput(pendingSend.signal, {
-            watchQueuedPromptForTodoStopGuard: true,
+            watchQueuedPrompt: true,
             onFullTurnModel,
           });
           if (drained.parts.length > 0) {
@@ -4216,7 +4348,7 @@ export class Session implements SessionContext {
             candidate,
           )
         : [...candidate];
-    const toolLoopState = createDaemonToolLoopState();
+    const toolLoopState = createDaemonToolLoopState('off');
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
@@ -4299,7 +4431,7 @@ export class Session implements SessionContext {
                   const drained = await this.#drainMidTurnInput(
                     pendingSend.signal,
                     {
-                      watchQueuedPromptForTodoStopGuard: true,
+                      watchQueuedPrompt: true,
                       onFullTurnModel: options.onFullTurnModel,
                     },
                   );
@@ -4780,6 +4912,7 @@ export class Session implements SessionContext {
           toolRun,
           pendingSend.signal,
           toolPromptId,
+          toolLoopState,
           options.onFullTurnModel,
         );
         nextMessage = nextAfterTools.message;
@@ -5217,6 +5350,7 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
     promptId: string,
+    toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
@@ -5231,6 +5365,7 @@ export class Session implements SessionContext {
       return { message: null, hadMidTurnUserInput: false };
     }
     const drained = await this.#drainMidTurnInput(abortSignal, {
+      watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
     });
     const hadMidTurnUserInput = drained.parts.length > 0;
@@ -5238,11 +5373,93 @@ export class Session implements SessionContext {
       this.todoStopGuard.acceptMidTurnUserInput();
     }
     const activeTodoReminder = this.config.takeActiveTodoReminder(promptId);
+    if (abortSignal.aborted) {
+      return {
+        message: {
+          role: 'user',
+          parts: [
+            ...toolRun.parts,
+            ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+            ...drained.parts,
+          ],
+        },
+        hadMidTurnUserInput,
+      };
+    }
+    const previousRepeatedToolFailureState =
+      toolLoopState.repeatedToolFailureState;
+    const repeatedToolFailureBatch = toolRun.repeatedToolFailureBatch ?? {
+      complete: false,
+      observations: [],
+    };
+    const repeatedToolFailureDecision = reduceRepeatedToolFailureGuard(
+      previousRepeatedToolFailureState,
+      {
+        mode: toolLoopState.repeatedToolFailureMode,
+        batch: repeatedToolFailureBatch,
+        hasExternalInput: hadMidTurnUserInput,
+        hasQueuedPrompt: drained.hasQueuedPrompt,
+        inputReliable: drained.reliable,
+      },
+    );
+    recordRepeatedToolFailureDecision(
+      promptId,
+      toolLoopState.repeatedToolFailureMode,
+      previousRepeatedToolFailureState,
+      repeatedToolFailureDecision,
+      repeatedToolFailureBatch,
+    );
+    toolLoopState.repeatedToolFailureState = repeatedToolFailureDecision.state;
+    if (repeatedToolFailureDecision.kind !== 'none') {
+      const { state } = repeatedToolFailureDecision;
+      debugLogger.debug(
+        `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
+      );
+    }
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+      ...(repeatedToolFailureDecision.kind === 'warn'
+        ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
+        : []),
       ...drained.parts,
     ];
+    if (repeatedToolFailureDecision.kind === 'stop') {
+      this.todoStopGuard.suspend();
+      this.#preserveUnsentMessageHistory(
+        {
+          role: 'user',
+          parts: [
+            ...parts,
+            { text: `System: ${REPEATED_TOOL_FAILURE_STOP_MESSAGE}` },
+          ],
+        },
+        true,
+      );
+      await this.messageRewriter?.waitForPendingRewrites();
+      recordDaemonLoopDetected(
+        this.config,
+        promptId,
+        LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+        REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+        toolLoopState,
+        { recordToQwenLogger: false },
+      );
+      try {
+        await this.messageEmitter.emitAgentMessage(
+          REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
+        );
+      }
+      return {
+        message: null,
+        hadMidTurnUserInput,
+        stoppedByRepeatedToolFailure: true,
+      };
+    }
     return {
       message: { role: 'user', parts },
       hadMidTurnUserInput,
@@ -5366,7 +5583,7 @@ export class Session implements SessionContext {
   async #drainMidTurnInput(
     abortSignal: AbortSignal,
     options: {
-      watchQueuedPromptForTodoStopGuard?: boolean;
+      watchQueuedPrompt?: boolean;
       onFullTurnModel?: (model: string) => boolean;
     } = {},
   ): Promise<MidTurnDrainResult> {
@@ -5389,7 +5606,8 @@ export class Session implements SessionContext {
     try {
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
-        ...(options.watchQueuedPromptForTodoStopGuard
+        // Keep the legacy wire name for ACP host compatibility.
+        ...(options.watchQueuedPrompt
           ? { todoStopGuardWatchQueuedPrompt: true }
           : {}),
       });
@@ -5409,7 +5627,7 @@ export class Session implements SessionContext {
       this.midTurnDrainTimeoutStrikes = 0;
       const reliable = isValidMidTurnDrainResponse(
         response,
-        options.watchQueuedPromptForTodoStopGuard === true,
+        options.watchQueuedPrompt === true,
       );
       return {
         parts: await this.#buildMidTurnParts(
@@ -5996,7 +6214,7 @@ export class Session implements SessionContext {
                   { text: modelText },
                 ],
               };
-              const toolLoopState = createDaemonToolLoopState();
+              const toolLoopState = createDaemonToolLoopState('off');
 
               while (nextMessage !== null) {
                 turnCount++;
@@ -6163,6 +6381,7 @@ export class Session implements SessionContext {
                       toolRun,
                       ac.signal,
                       promptId,
+                      toolLoopState,
                     );
                   nextMessage = nextAfterTools.message;
                   if (toolRun.loopDetected) {
@@ -6609,7 +6828,7 @@ export class Session implements SessionContext {
               ...notificationParts,
             ],
           };
-          const toolLoopState = createDaemonToolLoopState();
+          const toolLoopState = createDaemonToolLoopState('off');
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -6764,6 +6983,7 @@ export class Session implements SessionContext {
                 toolRun,
                 ac.signal,
                 promptId,
+                toolLoopState,
               );
               nextMessage = nextAfterTools.message;
               if (toolRun.loopDetected) {
@@ -7273,11 +7493,28 @@ export class Session implements SessionContext {
     const finalizeRunToolResult = async (
       result: RunToolResult,
     ): Promise<RunToolResult> => {
-      if (pendingToolResultRecords.length === 0) return result;
       const orderedRecords = [...pendingToolResultRecords].sort(
         (left, right) =>
           left.ordinal - right.ordinal || left.sequence - right.sequence,
       );
+      const repeatedToolFailureBatch: RepeatedToolFailureBatch = {
+        complete:
+          orderedRecords.length === dedupedFunctionCalls.length &&
+          new Set(orderedRecords.map((record) => record.ordinal)).size ===
+            dedupedFunctionCalls.length,
+        observations: orderedRecords.map((record) => ({
+          callId: record.callId,
+          policyToolName: record.policyToolName,
+          toolType: record.toolType,
+          terminalStatus: record.metadata.status,
+          executionStatus: record.metadata.executionStatus,
+          executionErrorType: record.executionErrorType,
+          providerDuplicate: record.providerDuplicate,
+        })),
+      };
+      if (orderedRecords.length === 0) {
+        return { ...result, repeatedToolFailureBatch };
+      }
       const finalized = await finalizeToolResponses(
         this.config,
         orderedRecords.map((record) => ({
@@ -7295,6 +7532,7 @@ export class Session implements SessionContext {
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
+        repeatedToolFailureBatch,
       };
     };
     let skippedToolCallCounter = 0;
@@ -7448,6 +7686,7 @@ export class Session implements SessionContext {
         toolName: request.name,
         responseParts: response.responseParts,
         persistedOutputFiles: response.persistedOutputFiles,
+        providerDuplicate: true,
         metadata: {
           callId: response.callId,
           status: 'error',
@@ -7880,6 +8119,7 @@ export class Session implements SessionContext {
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
+    const guardContext: { policyToolName?: string } = {};
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -8000,6 +8240,12 @@ export class Session implements SessionContext {
         callId,
         toolName,
         responseParts: errorParts,
+        policyToolName: guardContext.policyToolName,
+        toolType,
+        executionErrorType:
+          executionStatus === 'error'
+            ? (executionErrorType ?? opts.errorType)
+            : undefined,
         metadata: {
           callId,
           status: opts.status,
@@ -8080,6 +8326,7 @@ export class Session implements SessionContext {
     mcpServerName =
       tool instanceof DiscoveredMCPTool ? tool.serverName : undefined;
     const policyToolName = tool.name;
+    guardContext.policyToolName = policyToolName;
     const originalPolicyRequestArgs =
       policyToolName === ToolNames.SHELL || policyToolName === ToolNames.MONITOR
         ? structuredClone(args)
@@ -9606,6 +9853,10 @@ export class Session implements SessionContext {
             toolName,
             responseParts,
             persistedOutputFiles: toolResult.persistedOutputFiles,
+            policyToolName,
+            toolType,
+            executionErrorType:
+              executionStatus === 'error' ? executionErrorType : undefined,
             metadata: {
               callId,
               status,

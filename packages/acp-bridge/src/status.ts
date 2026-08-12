@@ -21,6 +21,7 @@ export const SERVE_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',
@@ -53,6 +54,18 @@ export class BridgeTimeoutError extends Error {
     this.name = 'BridgeTimeoutError';
     this.label = label;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+export class SessionRestoreTimeoutError extends BridgeTimeoutError {
+  readonly sessionId: string;
+  readonly action: 'load' | 'resume';
+
+  constructor(sessionId: string, action: 'load' | 'resume', timeoutMs: number) {
+    super(`session/${action}`, timeoutMs);
+    this.name = 'SessionRestoreTimeoutError';
+    this.sessionId = sessionId;
+    this.action = action;
   }
 }
 
@@ -1069,7 +1082,8 @@ export type ServeExtensionOriginSource =
   | 'QwenCode'
   | 'Claude'
   | 'Gemini'
-  | 'Qoder';
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface ServeExtensionCapabilities {
   mcpServerCount: number;
@@ -1415,6 +1429,7 @@ const MODEL_CONFIG_ERROR_NAMES: ReadonlySet<string> = new Set([
 export function mapDomainErrorToErrorKind(
   err: unknown,
 ): ServeErrorKind | undefined {
+  if (err instanceof SessionRestoreTimeoutError) return 'restore_timeout';
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
   if (err instanceof BridgeChannelClosedError) return 'protocol_error';
   if (err instanceof MissingCliEntryError) return 'missing_binary';

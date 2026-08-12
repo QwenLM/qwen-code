@@ -35,6 +35,11 @@ import {
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
 } from '../acp-session-bridge.js';
+import type {
+  BridgeChannelQuarantinedError,
+  RestoreInProgressError,
+  SessionRestoreTimeoutError,
+} from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -46,6 +51,7 @@ import {
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
@@ -114,6 +120,7 @@ import {
 } from '../workspace-agents.js';
 import {
   InvalidCursorError,
+  invalidateWorkspaceSessionListCache,
   listWorkspaceSessionsForResponse,
 } from '../server.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
@@ -398,6 +405,14 @@ const MAX_NAME_LENGTH = 256;
 const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;
+
+/**
+ * Config-option ids this HTTP transport's `session/set_config_option` can
+ * route. Shared by `configOptionsFor`'s advertisement filter and the
+ * setter's rejection message so the advertised set and the set reported as
+ * supported cannot drift apart.
+ */
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
 
 class AcpParamError extends Error {}
 
@@ -758,6 +773,62 @@ export function toRpcError(err: unknown): {
   }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
+    case 'SessionRestoreTimeoutError': {
+      const restoreError = err as SessionRestoreTimeoutError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: restoreError.message,
+        data: {
+          code: 'session_restore_timeout',
+          errorKind: 'restore_timeout',
+          httpStatus: 504,
+          retryable: true,
+          retryAfterSeconds: restoreRetryAfterSeconds(restoreError.timeoutMs),
+          sessionId: restoreError.sessionId,
+          action: restoreError.action,
+          timeoutMs: restoreError.timeoutMs,
+        },
+      };
+    }
+    case 'RestoreInProgressError': {
+      // Without this case the fence degrades to the default arm — an opaque
+      // `internal` 500 with no code, reason, or hint. SDK transport
+      // negotiation prefers acp-ws and acp-http over REST, so unpinned
+      // clients land exactly here: they cannot distinguish a retryable fence
+      // from a genuine internal error, and cannot honor the longer backoff
+      // the protocol reference tells them to.
+      const fenceError = err as RestoreInProgressError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: fenceError.message,
+        data: {
+          code: 'restore_in_progress',
+          errorKind: 'restore_in_progress',
+          httpStatus: 409,
+          retryable: true,
+          reason: fenceError.reason,
+          retryAfterSeconds: fenceError.retryAfterSeconds,
+          sessionId: fenceError.sessionId,
+          activeAction: fenceError.activeAction,
+          requestedAction: fenceError.requestedAction,
+        },
+      };
+    }
+    case 'BridgeChannelQuarantinedError': {
+      const unavailableError = err as BridgeChannelQuarantinedError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: unavailableError.message,
+        data: {
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          httpStatus: 503,
+          retryable: true,
+          reason: unavailableError.reason,
+          retryAfterSeconds: unavailableError.retryAfterSeconds,
+        },
+      };
+    }
     case 'SessionArchivedError':
       return {
         code: RPC.INTERNAL_ERROR,
@@ -902,6 +973,27 @@ export class AcpDispatcher {
     }),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
+  }
+
+  private invalidateSessionLists(
+    archiveStates: readonly SessionArchiveState[],
+  ): void {
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: this.sessionRuntimeBaseDir,
+      workspaceCwd: this.boundWorkspace,
+      archiveStates,
+    });
+  }
+
+  private async runWithSessionListInvalidation<T>(
+    archiveStates: readonly SessionArchiveState[],
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await mutation();
+    } finally {
+      this.invalidateSessionLists(archiveStates);
+    }
   }
 
   private removeOrphanSession(
@@ -1061,9 +1153,14 @@ export class AcpDispatcher {
   }
 
   /**
-   * The session's ACP-shaped config options (model/mode/…), read from the
-   * child's own session state. Returned in `session/new` and as the result
-   * of `session/set_config_option`. Best-effort — `undefined` on error.
+   * The session's ACP-shaped config options supported by this HTTP transport
+   * (currently model and mode), read from the child's own session state.
+   * Every response built from this helper (`session/new`,
+   * `session/load`/`session/resume`, `session/fork`, and the
+   * `session/set_config_option` result) is gated to the ids the transport
+   * can route. Raw-state surfaces (context status, REST load/resume state)
+   * intentionally carry the child's full unfiltered set — they report session
+   * state. Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
@@ -1074,7 +1171,13 @@ export class AcpDispatcher {
         state?: { configOptions?: unknown };
       };
       const co = ctx?.state?.configOptions;
-      return Array.isArray(co) ? co : undefined;
+      return Array.isArray(co)
+        ? co.filter(
+            (option) =>
+              isObject(option) &&
+              HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string),
+          )
+        : undefined;
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp configOptionsFor(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
@@ -1895,6 +1998,7 @@ export class AcpDispatcher {
               parentSessionId,
               ...parsedSource,
             },
+            { runtimeBaseDir: this.sessionRuntimeBaseDir },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -1991,6 +2095,7 @@ export class AcpDispatcher {
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
+            this.invalidateSessionLists(['active']);
           }
           closeLocalSessionStream();
           this.replyConn(conn, id, {});
@@ -2436,6 +2541,8 @@ export class AcpDispatcher {
                 ctx,
               );
             } else {
+              // Ids advertised by raw-state surfaces but unroutable here
+              // (e.g. reasoning_effort) must fail loud, not fall into mode.
               if (id !== undefined) {
                 this.replySession(
                   conn,
@@ -2445,7 +2552,7 @@ export class AcpDispatcher {
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    `Unknown configId: ${configId}`,
+                    `ConfigId not supported by this transport: ${configId} (supported: ${HTTP_ACP_CONFIG_OPTION_IDS.join(', ')})`,
                   ),
                 );
               }
@@ -2575,13 +2682,18 @@ export class AcpDispatcher {
             const metadata = isObject(params['metadata'])
               ? (params['metadata'] as Record<string, unknown>)
               : {};
-            const result = this.bridge.updateSessionMetadata(
-              sessionId,
-              metadata as unknown as Parameters<
-                HttpAcpBridge['updateSessionMetadata']
-              >[1],
-              this.sessionCtx(conn, sessionId, loopback),
-            );
+            let result: ReturnType<HttpAcpBridge['updateSessionMetadata']>;
+            try {
+              result = this.bridge.updateSessionMetadata(
+                sessionId,
+                metadata as unknown as Parameters<
+                  HttpAcpBridge['updateSessionMetadata']
+                >[1],
+                this.sessionCtx(conn, sessionId, loopback),
+              );
+            } finally {
+              this.invalidateSessionLists(['active']);
+            }
             this.replyConn(conn, id, result as unknown);
           });
           return;
@@ -4244,19 +4356,23 @@ export class AcpDispatcher {
           const ids = this.parseSessionIds(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace);
-          const result = await deleteDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            bridge: this.bridge,
-            coordinator: this.archiveCoordinator,
-            onError: ({ phase, sessionId, error }) => {
-              const safeSessionId = logSafe(sessionId.slice(0, 8));
-              const safeMessage = logSafe(error);
-              writeStderrLine(
-                `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
-              );
-            },
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              deleteDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                bridge: this.bridge,
+                coordinator: this.archiveCoordinator,
+                onError: ({ phase, sessionId, error }) => {
+                  const safeSessionId = logSafe(sessionId.slice(0, 8));
+                  const safeMessage = logSafe(error);
+                  writeStderrLine(
+                    `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
+                  );
+                },
+              }),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -4267,12 +4383,16 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
-          const result = await archiveDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            bridge: this.bridge,
-            coordinator: this.archiveCoordinator,
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              archiveDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                bridge: this.bridge,
+                coordinator: this.archiveCoordinator,
+              }),
+          );
           this.replyConn(conn, id, {
             archived: result.archived,
             alreadyArchived: result.alreadyArchived,
@@ -4287,11 +4407,15 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
-          const result = await unarchiveDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            coordinator: this.archiveCoordinator,
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              unarchiveDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                coordinator: this.archiveCoordinator,
+              }),
+          );
           this.replyConn(conn, id, {
             unarchived: result.unarchived,
             alreadyActive: result.alreadyActive,

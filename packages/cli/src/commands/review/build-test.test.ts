@@ -14,6 +14,10 @@ import {
   unresolvedWorkspaceDeps,
   buildRunEnv,
 } from './build-test.js';
+import {
+  npmToolchainAdapter,
+  unresolvedWorkspaceDeps as toolchainUnresolvedWorkspaceDeps,
+} from './lib/npm-toolchain.js';
 import type { WorkspacePackage } from './lib/workspaces.js';
 
 const statfsSyncMock = vi.hoisted(() => vi.fn());
@@ -35,6 +39,13 @@ const PKGS: WorkspacePackage[] = [
 ];
 
 describe('unresolvedWorkspaceDeps', () => {
+  it('re-exports the npm-toolchain implementation', () => {
+    // Pins the module boundary this PR establishes (npm specifics live in
+    // lib/npm-toolchain.ts): reverting the re-export to an inline copy ships
+    // green unless this identity is asserted.
+    expect(unresolvedWorkspaceDeps).toBe(toolchainUnresolvedWorkspaceDeps);
+  });
+
   it('finds the workspace package a TS2307 names', () => {
     const out =
       "src/a.ts(23,8): error TS2307: Cannot find module '@x/webui' or its " +
@@ -117,10 +128,17 @@ describe('runBuildTest', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('reports `unsupported` for a repo with no workspaces, rather than guessing', () => {
+  it('treats a package.json with no build role as no npm project at all', () => {
+    // Docs sites, husky, and lint configs put a script-less package.json in
+    // repos with nothing npm can scope. It must not make npm apply, or such a
+    // root would claim the selection away from a second adapter that could
+    // have verified the diff.
+    // The handoff note is still npm's precise one: the repo IS npm-shaped,
+    // and naming why it cannot be scoped beats a generic "no project here".
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
     writePlan(['src/a.ts']);
     const rep = runBuildTest({
@@ -129,9 +147,127 @@ describe('runBuildTest', () => {
       timeout: 5,
       install: false,
     });
+    expect(rep).toEqual({
+      toolchain: 'unsupported',
+      affected: [],
+      buildSet: [],
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      ok: true,
+      timedOut: [],
+      note:
+        'No npm package here to scope (no workspaces, and the root has no build/test ' +
+        'script). Fall back to the build/test precedence in your brief — installing ' +
+        'dependencies first — and give each command a deadline it can actually meet.',
+    });
+  });
+
+  it('surfaces the declared-but-empty workspaces note when no adapter applies', () => {
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    writePlan(['src/a.ts']);
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      install: false,
+    });
     expect(rep.toolchain).toBe('unsupported');
-    expect(rep.ok).toBe(true);
-    expect(rep.build).toEqual([]);
+    expect(rep.note).toContain(
+      'declares npm workspaces, but none resolve to a package',
+    );
+  });
+
+  it('keeps the complete generic unsupported report when no adapter applies', () => {
+    writePlan(['src/a.java']);
+
+    expect(
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 5,
+        install: false,
+      }),
+    ).toEqual({
+      toolchain: 'unsupported',
+      affected: [],
+      buildSet: [],
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      ok: true,
+      timedOut: [],
+      note:
+        'No supported npm project here to scope. Fall back to the ' +
+        'build/test precedence in your brief — installing dependencies first — ' +
+        'and give each command a deadline it can actually meet.',
+    });
+  });
+
+  it('coerces fractional and zero deadlines at the spawn boundary', () => {
+    // spawnSync validates `timeout` as an unsigned integer: a decimal
+    // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no
+    // report, no --out file), and --timeout 0 armed no kill timer at all.
+    pkg('.', { name: 'r', scripts: { test: 'vitest run' } });
+    writePlan(['src/a.ts']);
+
+    // 1.005s * 1000 = 1004.9999999999999 in IEEE-754: exactly the value
+    // spawnSync rejects. 0.1 rounds to an integer and would mask the
+    // regression; the explicit --budget keeps the wall-clock remainder
+    // above the fractional deadline so it is the binding term.
+    const fractional = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 1.005,
+      budget: 600,
+      install: false,
+    });
+    expect(fractional.toolchain).toBe('npm');
+    expect(fractional.test).toHaveLength(1);
+    expect(fractional.test[0]?.deadlineMs).toBe(1005);
+
+    // Same explicit budget: without it a zero --timeout also zeroes the
+    // whole-call budget, and the run discloses instead of reaching the spawn
+    // boundary this case is about.
+    const zero = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 0,
+      budget: 600,
+      install: false,
+    });
+    expect(zero.test[0]?.deadlineMs).toBe(1);
+  });
+
+  it('rejects non-finite --timeout and --budget with a descriptive error', () => {
+    // yargs `type: 'number'` hands over NaN for `--timeout abc`; NaN
+    // defeats every budget comparison and reaches spawnSync as an
+    // invalid deadline — ERR_OUT_OF_RANGE with no report at all.
+    pkg('.', { name: 'r', scripts: { test: 'vitest run' } });
+    writePlan(['src/a.ts']);
+
+    expect(() =>
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: Number.NaN,
+        install: false,
+      }),
+    ).toThrow(/--timeout must be a finite number/);
+    expect(() =>
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        timeout: 60,
+        budget: Number.POSITIVE_INFINITY,
+        install: false,
+      }),
+    ).toThrow(/--budget must be a finite number/);
   });
 
   it('reports `unsupported` — not a false "nothing to build" — for an unmodeled glob', () => {
@@ -155,7 +291,12 @@ describe('runBuildTest', () => {
       install: false,
     });
     expect(rep.toolchain).toBe('unsupported');
-    expect(rep.note).toContain('does not model');
+    // The unscopable npm half no longer applies at selection — but the repo
+    // IS an npm project whose layout cannot be scoped, so the note is npm's
+    // precise unmodeled-glob wording, not the generic "no project here".
+    expect(rep.note).toContain(
+      'uses a workspace glob shape this command does not model',
+    );
     expect(rep.note).not.toContain('no package to build');
   });
 
@@ -1264,6 +1405,107 @@ describe('runBuildTest', () => {
     expect(rep.testScope?.notRun).toEqual(['packages/core', 'packages/leaf']);
     expect(rep.note).toContain('not built: packages/core, packages/leaf');
     expect(rep.note).toContain('before any suite could run');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('names budget-stopped UNTESTABLE suites in notRun too', () => {
+    // The budget-break push must be UNFILTERED: a suite the build phase
+    // left unbuilt (untestable) and the budget then never attempted
+    // otherwise stayed in testScope.workspaces — reported as run and
+    // passed though zero test commands executed.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', {
+      name: '@x/a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/d', {
+      name: '@x/d',
+      dependencies: { '@x/a': '*', '@x/x': '*' },
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    pkg('packages/x', {
+      name: '@x/x',
+      scripts: { build: 'exit 0' },
+    });
+    writePlan(['packages/a/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 16,
+      install: false,
+      exec: (command) => {
+        if (command.startsWith('npm run build')) {
+          // Real wall clock, so the budget actually drains.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    // `a` builds (2s), then the floor stops the build phase with x and d
+    // unbuilt, and the test phase starts below the floor.
+    expect(rep.test).toEqual([]);
+    expect(rep.testScope?.workspaces).toEqual([]);
+    expect(rep.testScope?.notRun).toEqual(['packages/a', 'packages/d']);
+    expect(rep.note).toContain('not run: packages/a, packages/d');
+    expect(rep.ok).toBe(true);
+  });
+
+  it('discloses a budget-stopped single-root suite instead of claiming no test script', () => {
+    // The workspace branch names the budget when every suite was trimmed;
+    // a single-root repo carries no testScope, and its note used to claim
+    // the package defines no test script — though the script is exactly
+    // why the suite sits in notRun.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: 'r',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      }),
+    );
+    writePlan(['src/a.ts']);
+
+    const calls: string[] = [];
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      budget: 16,
+      install: false,
+      exec: (command) => {
+        calls.push(command);
+        if (command.startsWith('npm run build')) {
+          // Real wall clock, so the budget actually drains.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+        }
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '',
+        };
+      },
+    });
+
+    expect(calls).toEqual(['npm run build']);
+    expect(rep.test).toEqual([]);
+    expect(rep.note).toContain(
+      'whole-call budget was spent before any suite could run',
+    );
+    expect(rep.note).not.toContain('defines no test script');
+    expect(rep.note).toContain('not run: .');
     expect(rep.ok).toBe(true);
   });
 
@@ -2412,5 +2654,87 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('infrastructure');
     expect(rep.note).not.toContain('Critical');
     expect(rep.note).not.toContain('Correlate');
+  });
+
+  it('routes the run through the selected toolchain adapter (pins the delegation)', () => {
+    // This PR's whole change is that runBuildTest selects an adapter and delegates
+    // to adapter.run. Nothing else pinned that boundary: reverting the facade to the
+    // old inline implementation kept every report-shape test green. Spy on the
+    // adapter so a revert (adapter never called) turns this red.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    const runSpy = vi.spyOn(npmToolchainAdapter, 'run');
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: okExec,
+    });
+
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    // The arguments are forwarded to the adapter unchanged.
+    expect(runSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        root,
+        changedFiles: ['packages/a/src/x.ts'],
+        timeout: 60,
+        install: false,
+        exec: expect.any(Function),
+      }),
+    );
+    // And the report runBuildTest returns IS the adapter's report.
+    expect(rep).toBe(runSpy.mock.results[0]?.value);
+    runSpy.mockRestore();
+  });
+
+  it('defaults the adapter exec to the real runner when none is injected', () => {
+    // Every other test injects a fake exec, so the production default path
+    // (args.exec undefined -> the real `run`) had zero coverage. Dropping the
+    // `?? run` fallback would hand the adapter exec: undefined and crash the first
+    // real `qwen review build-test`. Mock the adapter to capture the args it
+    // receives (so no real npm spawns) and pin that exec is a function.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/a', { name: '@x/a', scripts: { build: 'exit 0' } });
+    writePlan(['packages/a/src/x.ts']);
+
+    let receivedExec: unknown;
+    const runSpy = vi
+      .spyOn(npmToolchainAdapter, 'run')
+      .mockImplementation((args) => {
+        receivedExec = args.exec;
+        return {
+          toolchain: 'npm',
+          affected: [],
+          buildSet: [],
+          widenedWith: [],
+          install: null,
+          build: [],
+          test: [],
+          ok: true,
+          timedOut: [],
+          note: '',
+        };
+      });
+
+    runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      // no `exec` — exercise the production default path
+    });
+
+    expect(receivedExec).toBeTypeOf('function');
+    runSpy.mockRestore();
   });
 });

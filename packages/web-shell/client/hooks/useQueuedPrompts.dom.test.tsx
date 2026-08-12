@@ -4,7 +4,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionActions } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonTranscriptStore } from '@qwen-code/sdk/daemon';
+import {
+  DaemonHttpError,
+  type DaemonTranscriptStore,
+} from '@qwen-code/sdk/daemon';
 import { getTranslator } from '../i18n';
 import {
   useQueuedPrompts,
@@ -12,7 +15,21 @@ import {
 } from './useQueuedPrompts';
 
 const sdk = vi.hoisted(() => ({
-  pendingEvents: [],
+  pendingEvents: [] as Array<{
+    type:
+      | 'pending_prompt_started'
+      | 'pending_prompt_completed'
+      | 'turn_complete'
+      | 'turn_error';
+    originatorClientId?: string;
+    data: {
+      sessionId: string;
+      promptId?: string;
+      text?: string;
+      state?: string;
+      stopReason?: string;
+    };
+  }>,
   batches: [] as Array<{
     sessionId: string;
     messages: readonly string[];
@@ -20,6 +37,7 @@ const sdk = vi.hoisted(() => ({
     originatorClientId?: string;
   }>,
   consume: vi.fn(),
+  ownerVersion: 0,
 }));
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
@@ -31,6 +49,12 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useDaemonMidTurnInjected: () => ({
     batches: sdk.batches,
     consume: sdk.consume,
+  }),
+  useDaemonSessionOwnerGuard: () => ({
+    capture: () => {
+      const ownerVersion = sdk.ownerVersion;
+      return { isCurrent: () => sdk.ownerVersion === ownerVersion };
+    },
   }),
 }));
 
@@ -57,12 +81,15 @@ function mount(
   streamingState: 'idle' | 'waiting' | 'responding' | 'thinking',
   sessionActions: DaemonSessionActions,
   canMutateMidTurn = true,
+  connected = false,
+  writeBlocked = false,
 ) {
   const editor = {
     getText: vi.fn(() => ''),
     setText: vi.fn(),
     focus: vi.fn(),
     restoreImages: vi.fn(),
+    restoreInputAnnotations: vi.fn(),
   };
   const store = {
     appendLocalUserMessage: vi.fn(),
@@ -70,12 +97,24 @@ function mount(
   } as unknown as DaemonTranscriptStore;
   const reportError = vi.fn();
 
-  function Harness({ state }: { state: typeof streamingState }) {
+  function Harness({
+    state,
+    activeSessionId,
+    blocked,
+  }: {
+    state: typeof streamingState;
+    activeSessionId: string;
+    blocked: boolean;
+  }) {
     latest = useQueuedPrompts({
-      connected: false,
-      sessionId: 'session-1',
+      connected,
+      writeBlocked: blocked,
+      sessionId: activeSessionId,
+      workspaceCwd: '/workspace',
       clientId: 'client-1',
       canMutateMidTurn,
+      // This suite pins the legacy local-fallback lifecycle.
+      canQueryMidTurn: false,
       streamingState: state,
       sessionActions,
       store,
@@ -86,19 +125,42 @@ function mount(
     return null;
   }
 
-  const render = (state: typeof streamingState) => {
-    act(() => root.render(<Harness state={state} />));
+  let activeSessionId = 'session-1';
+  let blocked = writeBlocked;
+  const render = (
+    state: typeof streamingState,
+    nextSessionId = activeSessionId,
+    replaceOwner = false,
+    nextWriteBlocked = blocked,
+  ) => {
+    if (replaceOwner) sdk.ownerVersion += 1;
+    activeSessionId = nextSessionId;
+    blocked = nextWriteBlocked;
+    act(() =>
+      root.render(
+        <Harness
+          state={state}
+          activeSessionId={activeSessionId}
+          blocked={blocked}
+        />,
+      ),
+    );
   };
   render(streamingState);
-  return { editor, render, reportError };
+  return { editor, render, reportError, store };
 }
 
 function createActions() {
-  const pendingSubmit = deferred<{ promptId: string }>();
+  const pendingSubmit = deferred<{
+    promptId: string;
+    removedAfterAbort?: true;
+  }>();
   return {
     actions: {
       enqueueMidTurnMessage: vi.fn(),
       removeMidTurnMessage: vi.fn(),
+      removePendingPrompt: vi.fn(),
+      getPendingPrompts: vi.fn().mockResolvedValue({ pendingPrompts: [] }),
       submitPrompt: vi.fn(() => pendingSubmit.promise),
     } as unknown as DaemonSessionActions,
     pendingSubmit,
@@ -110,7 +172,9 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   sdk.batches = [];
+  sdk.pendingEvents = [];
   sdk.consume.mockReset();
+  sdk.ownerVersion = 0;
 });
 
 afterEach(() => {
@@ -119,6 +183,597 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it('restores an unaccepted mid-turn prompt when its owner is replaced', () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+      new Promise(() => undefined),
+    );
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('belongs to the source attachment'));
+    expect(latest.queuedPrompts).toHaveLength(1);
+
+    render('responding', 'session-1', true);
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).toHaveBeenCalledWith(
+      'belongs to the source attachment',
+    );
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('queues and submits an image-only prompt without using mid-turn text insertion', () => {
+    const { actions } = createActions();
+    mount('responding', actions);
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+
+    act(() => latest.enqueuePrompt('', images));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      '',
+      expect.objectContaining({
+        images,
+        optimisticUserMessage: false,
+      }),
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '',
+        images,
+        payloadCompleteness: 'complete',
+        serverState: 'submitting',
+      },
+    ]);
+  });
+
+  it('materializes daemon-only queue rows as summary-only payloads', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.getPendingPrompts).mockResolvedValue({
+      pendingPrompts: [
+        {
+          promptId: 'server-image',
+          text: '[image]',
+          state: 'queued',
+        },
+      ],
+    });
+    const { editor } = mount('responding', actions, true, true);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '[image]',
+        serverPromptId: 'server-image',
+        serverState: 'queued',
+        payloadCompleteness: 'summary-only',
+      },
+    ]);
+    await act(async () => latest.editQueuedPrompt(1));
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(editor.restoreImages).not.toHaveBeenCalled();
+  });
+
+  it('buffers an image-only started event until its exact response binds', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-image',
+          text: '[image]',
+        },
+      },
+    ];
+    render('responding');
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-image' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '',
+      [{ data: 'Ym1w', mimeType: 'image/bmp' }],
+      undefined,
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '',
+        images,
+        serverPromptId: 'server-image',
+        serverState: 'queued',
+      },
+    ]);
+  });
+
+  it('keeps another prompt started buffer when one admission is unknown', async () => {
+    const firstSubmit = deferred<{ promptId: string }>();
+    const secondSubmit = deferred<{ promptId: string }>();
+    const { actions } = createActions();
+    vi.mocked(actions.submitPrompt)
+      .mockReturnValueOnce(firstSubmit.promise)
+      .mockReturnValueOnce(secondSubmit.promise);
+    const { render, store } = mount('responding', actions);
+    const firstImages = [{ data: 'Zmlyc3Q=', media_type: 'image/png' }];
+    const secondImages = [{ data: 'c2Vjb25k', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', firstImages));
+    act(() => latest.enqueuePrompt('', secondImages));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-second',
+          text: '[image]',
+        },
+      },
+    ];
+    render('responding');
+
+    await act(async () => {
+      firstSubmit.reject(new TypeError('response lost'));
+      await Promise.resolve();
+      secondSubmit.resolve({ promptId: 'server-second' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '',
+      [{ data: 'c2Vjb25k', mimeType: 'image/png' }],
+      undefined,
+    );
+  });
+
+  it('binds an image prompt when its terminal event precedes admission response', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+    const images = [{ data: 'dGVybWluYWw=', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-terminal',
+          text: '[image]',
+        },
+      },
+      {
+        type: 'turn_complete',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-terminal',
+        },
+      },
+    ];
+    render('responding');
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-terminal' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '',
+      [{ data: 'dGVybWluYWw=', mimeType: 'image/png' }],
+      undefined,
+    );
+  });
+
+  it('does not append text twice when its terminal precedes admission response', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('idle', actions);
+
+    act(() => latest.enqueuePrompt('run once'));
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_started',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-text-terminal',
+          text: 'run once',
+        },
+      },
+      {
+        type: 'turn_complete',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-text-terminal',
+        },
+      },
+    ];
+    render('idle');
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-text-terminal' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+  });
+
+  it('does not append a prompt removed before its admission response', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('', [
+        { data: 'cmVtb3ZlZA==', media_type: 'image/png' },
+      ]),
+    );
+    sdk.pendingEvents = [
+      {
+        type: 'pending_prompt_completed',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-removed',
+          state: 'removed',
+        },
+      },
+      {
+        type: 'turn_complete',
+        originatorClientId: 'client-1',
+        data: {
+          sessionId: 'session-1',
+          promptId: 'server-removed',
+          stopReason: 'cancelled',
+        },
+      },
+    ];
+    render('idle');
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-removed' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not create a duplicate summary while an image response is pending', async () => {
+    const { actions } = createActions();
+    const refresh = deferred<{
+      pendingPrompts: Array<{
+        promptId: string;
+        text: string;
+        state: 'queued';
+      }>;
+    }>();
+    vi.mocked(actions.getPendingPrompts).mockReturnValue(refresh.promise);
+    mount('responding', actions, true, true);
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    await act(async () => {
+      refresh.resolve({
+        pendingPrompts: [
+          { promptId: 'server-image', text: '[image]', state: 'queued' },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toHaveLength(1);
+    expect(latest.queuedPrompts[0]).toMatchObject({
+      text: '',
+      images,
+      serverState: 'submitting',
+      payloadCompleteness: 'complete',
+    });
+  });
+
+  it('refreshes deferred server summaries after an image response binds exactly', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const initialRefresh = deferred<{
+      pendingPrompts: Array<{
+        promptId: string;
+        text: string;
+        state: 'queued';
+      }>;
+    }>();
+    vi.mocked(actions.getPendingPrompts)
+      .mockReturnValueOnce(initialRefresh.promise)
+      .mockResolvedValue({
+        pendingPrompts: [
+          { promptId: 'server-image', text: '[image]', state: 'queued' },
+          { promptId: 'server-other', text: 'other', state: 'queued' },
+        ],
+      });
+    mount('responding', actions, true, true);
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    await act(async () => {
+      initialRefresh.resolve({
+        pendingPrompts: [
+          { promptId: 'server-image', text: '[image]', state: 'queued' },
+          { promptId: 'server-other', text: 'other', state: 'queued' },
+        ],
+      });
+      await Promise.resolve();
+    });
+    expect(latest.queuedPrompts).toHaveLength(1);
+
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'server-image' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(actions.getPendingPrompts).toHaveBeenCalledTimes(2);
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '',
+        images,
+        serverPromptId: 'server-image',
+        payloadCompleteness: 'complete',
+      },
+      {
+        text: 'other',
+        serverPromptId: 'server-other',
+        payloadCompleteness: 'summary-only',
+      },
+    ]);
+  });
+
+  it('ignores an old submit response after an S1 to S2 to S1 owner change', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('', [{ data: 'b2xk', media_type: 'image/png' }]),
+    );
+    render('responding', 'session-2');
+    render('responding', 'session-1');
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'old-server-prompt' });
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.removePendingPrompt).not.toHaveBeenCalled();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('fences an old submit before the replacement owner rerenders', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { render, store } = mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('', [{ data: 'b2xk', media_type: 'image/png' }]),
+    );
+    sdk.ownerVersion += 1;
+    await act(async () => {
+      pendingSubmit.resolve({ promptId: 'old-server-prompt' });
+      await Promise.resolve();
+    });
+
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    render('responding', 'session-1');
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('ignores an old refresh after an S1 to S2 to S1 owner change', async () => {
+    const { actions } = createActions();
+    const oldRefresh = deferred<{
+      pendingPrompts: Array<{
+        promptId: string;
+        text: string;
+        state: 'queued';
+      }>;
+    }>();
+    vi.mocked(actions.getPendingPrompts)
+      .mockReturnValueOnce(oldRefresh.promise)
+      .mockResolvedValue({ pendingPrompts: [] });
+    const { render } = mount('responding', actions, true, true);
+
+    render('responding', 'session-2');
+    render('responding', 'session-1');
+    await act(async () => {
+      oldRefresh.resolve({
+        pendingPrompts: [
+          { promptId: 'stale-prompt', text: 'stale', state: 'queued' },
+        ],
+      });
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('restores image-only payloads exactly once after definite rejection', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    const images = [{ data: 'cG5n', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    await act(async () => {
+      pendingSubmit.reject(new DaemonHttpError(413, undefined, 'Too large'));
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(editor.restoreImages).toHaveBeenCalledOnce();
+    expect(editor.restoreImages).toHaveBeenCalledWith(images);
+  });
+
+  it('does not change an existing draft when restoring image-only payloads', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    vi.mocked(editor.getText).mockReturnValue('current draft');
+    const images = [{ data: 'cG5n', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    await act(async () => {
+      pendingSubmit.reject(new DaemonHttpError(413, undefined, 'Too large'));
+      await Promise.resolve();
+    });
+
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(editor.restoreImages).toHaveBeenCalledWith(images);
+  });
+
+  it('does not duplicate attachments when restored text is already present', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    vi.mocked(editor.getText).mockReturnValue('describe');
+    const images = [{ data: 'cG5n', media_type: 'image/png' }];
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: 'describe',
+        reference: { id: 'file:describe', kind: 'file', value: 'describe' },
+      },
+    ];
+
+    act(() =>
+      latest.enqueuePrompt('describe', images, undefined, inputAnnotations),
+    );
+    await act(async () => {
+      pendingSubmit.reject(new DaemonHttpError(413, undefined, 'Too large'));
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(editor.restoreImages).not.toHaveBeenCalled();
+    expect(editor.restoreInputAnnotations).not.toHaveBeenCalled();
+  });
+
+  it('restores an uncertain local payload only after an explicit action', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor, reportError } = mount('responding', actions);
+    const images = [{ data: 'cG5n', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('', images));
+    await act(async () => {
+      pendingSubmit.reject(new TypeError('network disconnected'));
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '',
+        images,
+        admissionOutcome: 'unknown',
+        serverState: undefined,
+        payloadAvailable: true,
+      },
+    ]);
+    expect(editor.restoreImages).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith(
+      expect.any(TypeError),
+      t('queue.admissionUnknown'),
+    );
+
+    act(() => {
+      expect(latest.restoreUnknownQueuedPrompt(1)).toBe(true);
+    });
+    expect(editor.restoreImages).toHaveBeenCalledOnce();
+    expect(editor.restoreImages).toHaveBeenCalledWith(images);
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '',
+        images: undefined,
+        admissionOutcome: 'unknown',
+        payloadAvailable: false,
+      },
+    ]);
+    expect(latest.restoreUnknownQueuedPrompt(1)).toBe(false);
+    expect(editor.restoreImages).toHaveBeenCalledOnce();
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores queued input annotations with the local payload', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: '@file.ts',
+        reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+      },
+    ];
+
+    act(() =>
+      latest.enqueuePrompt(
+        '@file.ts\n\nfix it',
+        undefined,
+        undefined,
+        inputAnnotations,
+      ),
+    );
+    await act(async () => {
+      pendingSubmit.reject(new TypeError('response lost'));
+      await Promise.resolve();
+    });
+    act(() => {
+      expect(latest.restoreUnknownQueuedPrompt(1)).toBe(true);
+    });
+
+    expect(editor.restoreInputAnnotations).toHaveBeenCalledWith(
+      inputAnnotations,
+    );
+  });
+
+  it('discards an uncertain local payload without sending it again', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor } = mount('responding', actions);
+    const images = [{ data: 'cG5n', media_type: 'image/png' }];
+
+    act(() => latest.enqueuePrompt('describe', images));
+    await act(async () => {
+      pendingSubmit.reject(new TypeError('network disconnected'));
+      await Promise.resolve();
+    });
+    act(() => {
+      expect(latest.discardUnknownQueuedPrompt(1)).toBe(true);
+    });
+
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(editor.restoreImages).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '',
+        images: undefined,
+        admissionOutcome: 'unknown',
+        payloadAvailable: false,
+      },
+    ]);
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps an accepted message queued until its injection event', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
@@ -210,6 +865,26 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toMatchObject([
       { text: '下一步', serverState: 'submitting' },
     ]);
+  });
+
+  it('freezes mid-turn fallback while a session switch is preparing', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('留在当前会话'));
+    render('responding', 'session-1', false, true);
+    await act(async () => admission.resolve({ accepted: false }));
+    render('idle', 'session-1', false, true);
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: '留在当前会话', midTurnState: 'submitting' },
+    ]);
+
+    render('idle', 'session-1', false, false);
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 
   it('falls back once when the running turn ends before injection', async () => {
@@ -313,6 +988,87 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toEqual([]);
     expect(editor.setText).toHaveBeenCalledWith('修改我');
     expect(editor.focus).toHaveBeenCalled();
+  });
+
+  it('restores an edited prompt after a same-id attachment replacement', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-edit',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('修改后保留'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-1', true);
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
+
+    expect(editor.setText).toHaveBeenCalledWith('修改后保留');
+    expect(editor.setText).toHaveBeenCalledOnce();
+    expect(editor.focus).toHaveBeenCalled();
+  });
+
+  it('restores an edited prompt when switching to a different session', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-cross-session-edit',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('切换后保留'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true);
+    await act(async () => {
+      removal.resolve({ removed: true });
+      await editPromise;
+    });
+
+    expect(editor.setText).toHaveBeenCalledWith('切换后保留');
+    expect(editor.setText).toHaveBeenCalledOnce();
+    expect(latest.queuedPrompts).toEqual([]);
+  });
+
+  it('does not restore an edited prompt when cross-session removal loses', async () => {
+    const { actions } = createActions();
+    const removal = deferred<{ removed: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'mid-cross-session-edit-lost',
+    });
+    vi.mocked(actions.removeMidTurnMessage).mockReturnValue(removal.promise);
+    const { editor, render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('仍在服务端'));
+    await act(async () => {});
+    let editPromise!: Promise<void>;
+    act(() => {
+      editPromise = latest.editQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true);
+    expect(editor.setText).not.toHaveBeenCalled();
+    await act(async () => {
+      removal.resolve({ removed: false });
+      await editPromise;
+    });
+
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('keeps the row when removal loses the race with drain or idle', async () => {
@@ -490,7 +1246,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
   });
 
-  it('retains mid-turn rows and clears ordinary rows on clearQueuedPrompts', async () => {
+  it('retains mid-turn rows and marks in-flight admissions unknown on clear', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -508,9 +1264,39 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() => latest.clearQueuedPrompts());
 
     expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: '普通排队',
+        admissionOutcome: 'unknown',
+        payloadAvailable: true,
+      },
       { text: '中途消息', midTurnState: 'queued', midTurnMessageId: 'mid-1' },
     ]);
     expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
+  });
+
+  it('clears a submitting row after the server confirms abort cleanup', async () => {
+    const { actions, pendingSubmit } = createActions();
+    mount('responding', actions);
+
+    act(() =>
+      latest.enqueuePrompt('clear me', [
+        { data: 'eA==', media_type: 'image/png' },
+      ]),
+    );
+    act(() => latest.clearQueuedPrompts());
+    expect(latest.queuedPrompts[0]).toMatchObject({
+      admissionOutcome: 'unknown',
+    });
+
+    await act(async () => {
+      pendingSubmit.resolve({
+        promptId: 'server-cleared',
+        removedAfterAbort: true,
+      });
+      await Promise.resolve();
+    });
+
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('edits the last mid-turn row via editLastQueuedPrompt', async () => {

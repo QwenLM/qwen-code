@@ -280,9 +280,30 @@ describe('<Footer />', () => {
     });
   });
 
-  it('renders the component', () => {
-    const { lastFrame } = renderWithWidth(120, createMockUIState());
-    expect(lastFrame()).toBeDefined();
+  it('passes the left-column width after a right pill reserves space', async () => {
+    const originalSandbox = process.env['SANDBOX'];
+    process.env['SANDBOX'] = 'qwen-code-docker';
+    useStatusLineMock.mockReturnValue({
+      lines: [],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: true,
+    });
+    const { unmount } = renderAtLayoutWidth(110, createMockUIState());
+
+    try {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(useStatusLineMock).toHaveBeenCalledWith(false, 99);
+    } finally {
+      unmount();
+      if (originalSandbox === undefined) {
+        delete process.env['SANDBOX'];
+      } else {
+        process.env['SANDBOX'] = originalSandbox;
+      }
+    }
   });
 
   it('shows the "workflow active" indicator when the keyword trigger is armed', () => {
