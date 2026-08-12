@@ -80,7 +80,7 @@ export class SessionRouter {
     (sessionId: string, target: SessionTarget | undefined) => void
   >();
   private persistPath: string | undefined;
-  private persistSuspended = false;
+  private persistSuspendDepth = 0;
   private persistRequestedWhileSuspended = false;
   private readonly recoveryMode: SessionRecoveryMode;
 
@@ -369,7 +369,9 @@ export class SessionRouter {
       // microtask): retiring it then would discard a session a concurrent
       // message is about to prompt, or auto-cancel its pending approvals and
       // drop its late output — so the bound is enforced on the next message
-      // instead.
+      // instead. Each deferred message enqueues a turn of its own, so a route
+      // whose messages never pause defers until the first idle gap; that
+      // limit is documented in the Session Rotation docs.
       if (
         existing &&
         !this.creatingSessions.has(key) &&
@@ -828,7 +830,9 @@ export class SessionRouter {
   /**
    * Restore session mappings from a previous bridge.
    * Called after bridge restart — attempts loadSession for each saved mapping.
-   * Failed loads are dropped (new session on next message).
+   * Failed loads are dropped (new session on next message). Overlapping
+   * restores (e.g. a reconnect READY mid cold-start restore) are safe:
+   * persistence stays suspended until the last one finishes.
    */
   async restoreSessions(): Promise<{
     restored: number;
@@ -853,9 +857,11 @@ export class SessionRouter {
 
     // Released waiters route (and persist) while this loop still restores
     // later keys; suspend persistence so a store holding only the restored
-    // prefix cannot become durable. The flush after the loop writes the
-    // whole store instead.
-    this.persistSuspended = true;
+    // prefix cannot become durable. Restores can overlap (a reconnect READY
+    // can fire while a cold-start restore still runs), so suspension is a
+    // depth and only the last restore to finish flushes the whole store.
+    this.persistSuspendDepth++;
+    let completed = false;
     try {
       // Reserve every persisted key up front so inbound messages during restart
       // wait for restore instead of returning stale IDs or creating duplicates.
@@ -930,20 +936,24 @@ export class SessionRouter {
       } finally {
         this.endSessionLoad(loadWindow);
       }
+      completed = true;
     } finally {
-      this.persistSuspended = false;
-    }
-
-    const flushRequested = this.persistRequestedWhileSuspended;
-    this.persistRequestedWhileSuspended = false;
-    // Update persist file to only include successfully restored sessions.
-    // A persist requested while suspended counts: the mid-restore write was
-    // skipped to keep a truncated store from becoming durable.
-    if (
-      (changed || flushRequested) &&
-      restoreGeneration === this.lifecycleGeneration
-    ) {
-      this.persist();
+      this.persistSuspendDepth--;
+      // Update persist file to only include successfully restored sessions.
+      // A persist requested while suspended counts: the mid-restore write
+      // was skipped to keep a truncated store from becoming durable. An
+      // earlier finisher leaves the suspension and the pending flush to the
+      // restore still running — flushing sooner would persist the other
+      // restore's partial prefix.
+      if (
+        completed &&
+        this.persistSuspendDepth === 0 &&
+        (changed || this.persistRequestedWhileSuspended) &&
+        restoreGeneration === this.lifecycleGeneration
+      ) {
+        this.persistRequestedWhileSuspended = false;
+        this.persist();
+      }
     }
 
     return { restored, failed };
@@ -1077,7 +1087,7 @@ export class SessionRouter {
 
   private persist(): void {
     if (!this.persistPath) return;
-    if (this.persistSuspended) {
+    if (this.persistSuspendDepth > 0) {
       // Mid-restore the store holds only the restored prefix; let
       // restoreSessions() flush once the store is whole again.
       this.persistRequestedWhileSuspended = true;

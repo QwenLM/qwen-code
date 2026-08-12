@@ -1840,6 +1840,102 @@ describe('SessionRouter', () => {
       expect(persisted['ch:alice:chat1'].sessionId).toBe(sessionId);
     });
 
+    it('keeps the store whole when a second restore overlaps the first', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+          'ch:carol:chat3': {
+            sessionId: 'old-carol',
+            target: {
+              channelName: 'ch',
+              senderId: 'carol',
+              chatId: 'chat3',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      // Drop the setup write: only router writes count below.
+      mockWriteFileSync.mockClear();
+
+      // A reconnect READY fires a second restore while the cold-start one
+      // still runs: the first has restored alice already, and the second's
+      // reservation pass drops alice back out of the store before the first
+      // finishes — the truncation window.
+      const first = router.restoreSessions();
+      await drainMicrotasks();
+      loadResolvers[0]!('old-alice');
+      await drainMicrotasks();
+      const second = router.restoreSessions();
+      await drainMicrotasks();
+      expect(loadResolvers).toHaveLength(3);
+
+      // A new route created mid-overlap persists only through the flush of
+      // the LAST restore to finish: the earlier finisher must not consume
+      // the request or lift the suspension.
+      const dave = await router.resolve('ch', 'dave', 'chat4');
+      router.releaseRoutingLease(dave);
+
+      loadResolvers[1]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[3]!('old-carol');
+      await drainMicrotasks();
+      loadResolvers[2]!('old-alice');
+      await drainMicrotasks();
+      loadResolvers[4]!('old-bob');
+      await drainMicrotasks();
+      loadResolvers[5]!('old-carol');
+
+      await expect(first).resolves.toEqual({ restored: 3, failed: 0 });
+      await expect(second).resolves.toEqual({ restored: 3, failed: 0 });
+
+      // Every write holds the whole store: an earlier finisher flushing the
+      // later restore's partial prefix is the truncation this guards.
+      expect(mockWriteFileSync).toHaveBeenCalled();
+      for (const call of mockWriteFileSync.mock.calls) {
+        const written = JSON.parse(String(call[1])) as Record<
+          string,
+          { sessionId: string }
+        >;
+        expect(written['ch:alice:chat1']?.sessionId).toBe('old-alice');
+        expect(written['ch:bob:chat2']?.sessionId).toBe('old-bob');
+        expect(written['ch:carol:chat3']?.sessionId).toBe('old-carol');
+        expect(written['ch:dave:chat4']).toBeDefined();
+      }
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(Object.keys(persisted)).toHaveLength(4);
+    });
+
     it('clears a bound when the channel re-registers without one', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelRotation('ch', { maxTurns: 2 });
