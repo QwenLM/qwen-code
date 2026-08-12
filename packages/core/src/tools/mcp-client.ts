@@ -23,6 +23,7 @@ import {
   GetPromptResultSchema,
   ListPromptsResultSchema,
   ListResourcesResultSchema,
+  ListToolsResultSchema,
   ReadResourceResultSchema,
 } from '@modelcontextprotocol/core';
 import { parse } from 'shell-quote';
@@ -1374,9 +1375,29 @@ export async function discoverTools(
 ): Promise<DiscoveredMCPTool[]> {
   try {
     const { mcpToTool } = await import('@google/genai');
+    const listedTools: Array<
+      Awaited<ReturnType<Client['listTools']>>['tools'][number]
+    > = [];
+    let didListTools = false;
+    const listTools = async (params?: { cursor?: string }) => {
+      const result =
+        typeof mcpClient.getProtocolEra !== 'function' ||
+        mcpClient.getProtocolEra() === 'modern'
+          ? await mcpClient.listTools(params)
+          : await mcpClient.request(
+              { method: 'tools/list', params: params ?? {} },
+              ListToolsResultSchema,
+            );
+      didListTools = true;
+      listedTools.push(...result.tools);
+      return result;
+    };
     // @google/genai still types this structural adapter against SDK v1. Its
     // discovery path only calls listTools(); execution stays on the v2 client.
-    const mcpCallableTool = mcpToTool(mcpClient as unknown as GenAiMcpClient, {
+    // Legacy listTools must remain lenient because some servers implement
+    // tools/list without declaring the tools capability during initialization.
+    const discoveryClient = { listTools } as unknown as GenAiMcpClient;
+    const mcpCallableTool = mcpToTool(discoveryClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
     const tool = await retryWithBackoff(
@@ -1397,8 +1418,8 @@ export async function discoverTools(
     const supportsMcpApps =
       serverExtensions?.[MCP_APPS_EXTENSION_ID] !== undefined;
     try {
-      const listToolsResult = await mcpClient.listTools();
-      for (const mcpTool of listToolsResult.tools) {
+      if (!didListTools) await listTools();
+      for (const mcpTool of listedTools) {
         if (mcpTool.annotations) {
           annotationsMap.set(mcpTool.name, mcpTool.annotations);
         }

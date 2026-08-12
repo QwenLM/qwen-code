@@ -12,11 +12,12 @@ import {
   type JSONRPCRequest,
 } from '@modelcontextprotocol/client';
 import { describe, expect, it, vi } from 'vitest';
-import type { MCPServerConfig } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   getMcpAppResourceUri,
   connectToMcpServer,
+  discoverTools,
   invokeMcpPrompt,
   listMcpPrompts,
   listMcpResources,
@@ -299,7 +300,7 @@ describe('configured MCP SDK v2 negotiation', () => {
         case 'initialize':
           return response(request, {
             protocolVersion: '2025-06-18',
-            capabilities: { tools: {} },
+            capabilities: {},
             serverInfo: { name: 'legacy-server', version: '1.0.0' },
           });
         case 'tools/list':
@@ -342,9 +343,15 @@ describe('configured MCP SDK v2 negotiation', () => {
 
     try {
       expect(client.getProtocolEra()).toBe('legacy');
-      await expect(client.listTools()).resolves.toMatchObject({
-        tools: [{ name: 'echo' }],
-      });
+      await expect(client.listTools()).resolves.toEqual({ tools: [] });
+      const tools = await discoverTools(
+        'legacy',
+        { type: 'sdk' } as MCPServerConfig,
+        client,
+        {} as Config,
+        { applyConfigFilters: false },
+      );
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['echo']);
       await expect(client.callTool({ name: 'echo' })).resolves.toMatchObject({
         content: [{ type: 'text', text: 'legacy-ok' }],
       });
