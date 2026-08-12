@@ -109,6 +109,7 @@ import {
   deleteBranch,
 } from '../server/git-branch-ops.js';
 import {
+  MAX_VIRTUAL_SESSION_ID_PART_LENGTH,
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
@@ -2397,8 +2398,8 @@ export function registerSessionRoutes(
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
 
-  app.get('/session/:id/subagents/:toolCallId', async (req, res) => {
-    const route = 'GET /session/:id/subagents/:toolCallId';
+  app.get('/session/:id/subagents/:subagentRef', async (req, res) => {
+    const route = 'GET /session/:id/subagents/:subagentRef';
     const sessionId = requireSessionId(req, res);
     if (!sessionId) return;
     if (!virtualSubagentSessions) {
@@ -2409,11 +2410,14 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const toolCallId = req.params['toolCallId'];
-    if (!toolCallId || toolCallId.length > 500) {
+    const subagentRef = req.params['subagentRef'];
+    if (
+      !subagentRef ||
+      subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+    ) {
       res.status(400).json({
-        error: '`toolCallId` must be a non-empty tool call id',
-        code: 'invalid_tool_call_id',
+        error: '`subagentRef` must be a non-empty subagent reference',
+        code: 'invalid_subagent_ref',
       });
       return;
     }
@@ -2429,14 +2433,14 @@ export function registerSessionRoutes(
       const resolved = await virtualSubagentSessions.resolve(
         runtime,
         sessionId,
-        toolCallId,
+        subagentRef,
       );
       if (!resolved) {
         res.status(404).json({
           error: 'Subagent session not found',
           code: 'session_not_found',
           sessionId,
-          toolCallId,
+          subagentRef,
         });
         return;
       }
@@ -2447,10 +2451,10 @@ export function registerSessionRoutes(
   });
 
   app.post(
-    '/session/:id/subagents/:toolCallId/cancel',
+    '/session/:id/subagents/:subagentRef/cancel',
     mutate(),
     async (req, res) => {
-      const route = 'POST /session/:id/subagents/:toolCallId/cancel';
+      const route = 'POST /session/:id/subagents/:subagentRef/cancel';
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
       if (!virtualSubagentSessions) {
@@ -2461,11 +2465,14 @@ export function registerSessionRoutes(
         });
         return;
       }
-      const toolCallId = req.params['toolCallId'];
-      if (!toolCallId || toolCallId.length > 500) {
+      const subagentRef = req.params['subagentRef'];
+      if (
+        !subagentRef ||
+        subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+      ) {
         res.status(400).json({
-          error: '`toolCallId` must be a non-empty tool call id',
-          code: 'invalid_tool_call_id',
+          error: '`subagentRef` must be a non-empty subagent reference',
+          code: 'invalid_subagent_ref',
         });
         return;
       }
@@ -2481,14 +2488,14 @@ export function registerSessionRoutes(
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
           sessionId,
-          toolCallId,
+          subagentRef,
         );
         if (!resolved) {
           res.status(404).json({
             error: 'Subagent session not found',
             code: 'session_not_found',
             sessionId,
-            toolCallId,
+            subagentRef,
           });
           return;
         }
@@ -3256,12 +3263,18 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
-        res.status(200).json(
-          await runtime.bridge.continueSession(sessionId, {
-            ...(clientId !== undefined ? { clientId } : {}),
+        const result = await runtime.bridge.continueSession(sessionId, {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId,
+        });
+        if (daemonLog && result.accepted) {
+          daemonLog.info('continuation enqueued', {
+            sessionId,
             promptId,
-          }),
-        );
+            clientId,
+          });
+        }
+        res.status(200).json(result);
       },
     ),
   );

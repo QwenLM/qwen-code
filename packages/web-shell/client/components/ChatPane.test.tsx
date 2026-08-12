@@ -110,6 +110,9 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     workspaceCwd: '/primary',
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
+  useDaemonSessionOwnerGuard: () => ({
+    capture: () => ({ isCurrent: () => true }),
+  }),
 }));
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({

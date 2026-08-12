@@ -9,6 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { format } from 'node:util';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
@@ -1440,6 +1441,41 @@ describe('createAcpSessionBridge', () => {
       currentCwd: target,
       attached: true,
     });
+    await bridge.shutdown();
+  });
+
+  it('releases a queued cwd change when its session transport fails', async () => {
+    const failure = deferred<unknown>();
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? new Promise(() => {})
+          : {},
+    });
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+    };
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const cwdChange = bridge.changeSessionCwd(session.sessionId, {
+      path: WS_B,
+    });
+    await vi.waitFor(() =>
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+        }),
+      ),
+    );
+    failure.resolve(
+      Object.assign(new Error('transport queue failed'), {
+        code: 'ndjson_queue_limit_exceeded',
+      }),
+    );
+
+    await expect(cwdChange).rejects.toBeInstanceOf(BridgeChannelClosedError);
     await bridge.shutdown();
   });
 
@@ -2920,6 +2956,263 @@ describe('createAcpSessionBridge', () => {
     expect(send).toHaveBeenCalledTimes(2);
 
     await bridge.shutdown();
+  });
+
+  it('redacts client request errors before the ACP SDK logs them', async () => {
+    const secret = 'SECRET_MCP_SERVER'.repeat(128);
+    const renderedResponseErrors: string[] = [];
+    const stderr = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      renderedResponseErrors.push(format(args[2]));
+    });
+    const handle = makeChannel({});
+    const transportFailure = deferred<unknown>();
+    const reservePreparedResponse = vi.fn(() => {
+      throw new Error('prepared response budget exhausted');
+    });
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: transportFailure.promise,
+      transportGuard: {
+        maxActiveHandlers: 256,
+        maxActiveHandlerBytes: 64 * 1024 * 1024,
+        reserveOutboundOperation: () => () => {},
+        reservePreparedResponse,
+        fail: (error) => transportFailure.resolve(error),
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      clientMcpSender: () => undefined,
+    });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+          {
+            server: secret,
+            payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: 'Invalid params',
+      });
+      await vi.waitFor(() => expect(renderedResponseErrors).toHaveLength(1));
+      expect(renderedResponseErrors[0]).toContain('payloadOmitted: true');
+      expect(renderedResponseErrors[0]).not.toContain(secret);
+      expect(reservePreparedResponse).toHaveBeenCalledOnce();
+      expect(reservePreparedResponse).toHaveBeenCalledWith(
+        expect.objectContaining({ code: -32602 }),
+      );
+    } finally {
+      stderr.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('keeps legacy ACP error text on an unbounded public bridge', async () => {
+    const secret = 'legacy-server-name';
+    const handle = makeChannel({});
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      clientMcpSender: () => undefined,
+    });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+          {
+            server: secret,
+            payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: expect.stringContaining(secret),
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('fails the bounded channel when active ACP handlers reach the cap', async () => {
+    const transportFailure = deferred<unknown>();
+    const sendGates = [
+      deferred<Record<string, unknown>>(),
+      deferred<Record<string, unknown>>(),
+    ];
+    const send = vi
+      .fn()
+      .mockImplementation((_payload: unknown, _context: unknown) => {
+        const gate = sendGates[send.mock.calls.length - 1];
+        return gate?.promise ?? Promise.resolve({});
+      });
+    const handle = makeChannel({});
+    const fail = vi.fn((error: unknown) => transportFailure.resolve(error));
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: transportFailure.promise,
+      transportGuard: {
+        maxActiveHandlers: 2,
+        maxActiveHandlerBytes: 8_192,
+        reserveOutboundOperation: () => () => {},
+        reservePreparedResponse: vi.fn(),
+        fail,
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      clientMcpSender: () => send,
+    });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const calls = [1, 2, 3].map((id) =>
+        handle.agentConnection
+          .extMethod(SERVE_CONTROL_EXT_METHODS.clientMcpMessage, {
+            server: 'bounded-server',
+            payload: { jsonrpc: '2.0', id, method: 'tools/list' },
+          })
+          .catch((error: unknown) => error),
+      );
+      await vi.waitFor(() => expect(fail).toHaveBeenCalledOnce());
+      expect(fail).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'acp_handler_limit_exceeded' }),
+      );
+      expect(send).toHaveBeenCalledTimes(2);
+
+      sendGates[0]!.resolve({ jsonrpc: '2.0', id: 1, result: {} });
+      sendGates[1]!.resolve({ jsonrpc: '2.0', id: 2, result: {} });
+      await Promise.all(calls);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('fails the bounded channel before an ACP handler exceeds its byte cap', async () => {
+    const transportFailure = deferred<unknown>();
+    const fail = vi.fn((error: unknown) => transportFailure.resolve(error));
+    const send = vi.fn().mockResolvedValue({});
+    const handle = makeChannel({});
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: transportFailure.promise,
+      transportGuard: {
+        maxActiveHandlers: 8,
+        maxActiveHandlerBytes: 2_200,
+        reserveOutboundOperation: () => () => {},
+        reservePreparedResponse: vi.fn(),
+        fail,
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      clientMcpSender: () => send,
+    });
+
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod(
+          SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+          {
+            server: 'bounded-server',
+            payload: {
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'tools/call',
+              params: { text: 'x'.repeat(512) },
+            },
+          },
+        ),
+      ).rejects.toMatchObject({ code: -32603, message: 'Internal error' });
+      expect(fail).toHaveBeenCalledOnce();
+      expect(fail).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'acp_handler_limit_exceeded' }),
+      );
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('bounds outbound operations before they enter the ACP SDK write queue', async () => {
+    const transportFailure = deferred<unknown>();
+    const promptGate = deferred<PromptResponse>();
+    const handle = makeChannel({ promptImpl: () => promptGate.promise });
+    let activeOutbound = 0;
+    const fail = vi.fn((error: unknown) => transportFailure.resolve(error));
+    const reserveOutboundOperation = vi.fn(() => {
+      if (activeOutbound >= 1) {
+        const error = Object.assign(new Error('outbound queue full'), {
+          code: 'ndjson_queue_limit_exceeded',
+        });
+        fail(error);
+        throw error;
+      }
+      activeOutbound++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        activeOutbound--;
+      };
+    });
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: transportFailure.promise,
+      transportGuard: {
+        maxActiveHandlers: 8,
+        maxActiveHandlerBytes: 8192,
+        reserveOutboundOperation,
+        reservePreparedResponse: vi.fn(),
+        fail,
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      sessionScope: 'thread',
+      maxSessions: 3,
+    });
+
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const firstPrompt = bridge
+        .sendPrompt(first.sessionId, {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        })
+        .catch((error: unknown) => error);
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      await expect(
+        bridge.sendPrompt(second.sessionId, {
+          sessionId: second.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        }),
+      ).rejects.toBeDefined();
+      expect(fail).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'ndjson_queue_limit_exceeded' }),
+      );
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await expect(firstPrompt).resolves.toBeInstanceOf(
+        BridgeChannelClosedError,
+      );
+    } finally {
+      promptGate.resolve({ stopReason: 'cancelled' });
+      await bridge.shutdown();
+    }
   });
 
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
@@ -4444,9 +4737,11 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('rejects a bounded refresh when the session starts closing', async () => {
+  it('preserves session_closing when bounded refresh overlaps channel teardown', async () => {
     const transcriptPage = deferred<Record<string, unknown>>();
     const closeResult = deferred<Record<string, unknown>>();
+    const transportFailure = deferred<unknown>();
+    const termination = deferred<void>();
     const handle = makeChannel({
       extMethodImpl: (method, _params) => {
         if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
@@ -4458,6 +4753,15 @@ describe('createAcpSessionBridge', () => {
         throw new Error(`unexpected extMethod ${method}`);
       },
     });
+    const originalKill = handle.channel.kill;
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: transportFailure.promise,
+      kill: async () => {
+        await termination.promise;
+        await originalKill();
+      },
+    };
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const loaded = await bridge.loadSession({
       sessionId: 'persisted-live-refresh-closing',
@@ -4477,7 +4781,14 @@ describe('createAcpSessionBridge', () => {
     const close = bridge.closeSession(loaded.sessionId, {
       clientId: loaded.clientId,
     });
+    void close.catch(() => {});
     await vi.waitFor(() => expect(handle.agent.extMethodCalls).toHaveLength(2));
+    transportFailure.resolve(
+      Object.assign(new Error('transport queue failed'), {
+        code: 'ndjson_queue_limit_exceeded',
+      }),
+    );
+    await Promise.resolve();
     transcriptPage.resolve({
       v: 1,
       sessionId: loaded.sessionId,
@@ -4485,9 +4796,12 @@ describe('createAcpSessionBridge', () => {
       hasMore: false,
     });
 
-    await expect(refresh).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(refresh).rejects.toMatchObject({
+      code: 'session_closing',
+    });
     closeResult.resolve({});
-    await close;
+    termination.resolve();
+    await expect(close).rejects.toBeInstanceOf(BridgeChannelClosedError);
     await bridge.shutdown();
   });
 
@@ -5291,6 +5605,204 @@ describe('createAcpSessionBridge', () => {
     // Coalesced waiter sees the same state, not `{}`.
     expect(r2.state).toEqual({ _meta: { tag: 'restored-baz' } });
 
+    await bridge.shutdown();
+  });
+
+  it('coalesces response restores with the same history page', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    load.resolve({ _meta: { tag: 'same-page' } });
+    const [owner, waiter] = await Promise.all([first, second]);
+
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    expect(handle.agent.loadSessionCalls[0]?._meta).toMatchObject({
+      'qwen.session.loadReplayMode': 'bulk',
+      'qwen.session.loadReplayPageSize': 100,
+    });
+    expect(owner).toMatchObject({
+      attached: false,
+      state: { _meta: { tag: 'same-page' } },
+    });
+    expect(waiter).toMatchObject({
+      attached: true,
+      state: { _meta: { tag: 'same-page' } },
+    });
+    expect(waiter.clientId).not.toBe(owner.clientId);
+
+    await bridge.shutdown();
+  });
+
+  it.each([0, 501, 1.5])(
+    'rejects invalid response history page %s before restore',
+    async (historyPageSize) => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'invalid-page',
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+          historyPageSize,
+        }),
+      ).rejects.toThrow('Invalid historyPageSize');
+      expect(handle.agent.loadSessionCalls).toHaveLength(0);
+      await bridge.shutdown();
+    },
+  );
+
+  it.each([
+    ['a different explicit page', 500],
+    ['an omitted page', undefined],
+  ] as const)(
+    'rejects response restore coalescing with %s',
+    async (_label, historyPageSize) => {
+      const load = deferred<LoadSessionResponse>();
+      const handle = makeChannel({ loadSessionImpl: () => load.promise });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const first = bridge.loadSession({
+        sessionId: 'mismatched-page',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+      for (
+        let i = 0;
+        i < 50 && handle.agent.loadSessionCalls.length !== 1;
+        i++
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'mismatched-page',
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+          ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+        }),
+      ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+      load.resolve({});
+      const restored = await first;
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      await bridge.killSession(restored.sessionId, {
+        requireZeroAttaches: true,
+      });
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    },
+  );
+
+  it('ignores history pages when coalescing streamed loads', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'stream-pages-ignored',
+      workspaceCwd: WS_A,
+      historyReplay: 'stream',
+      historyPageSize: 100,
+    });
+    for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = bridge.loadSession({
+      sessionId: 'stream-pages-ignored',
+      workspaceCwd: WS_A,
+      historyReplay: 'stream',
+      historyPageSize: 500,
+    });
+
+    load.resolve({});
+    await Promise.all([first, second]);
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    expect(handle.agent.loadSessionCalls[0]?._meta).not.toHaveProperty(
+      'qwen.session.loadReplayPageSize',
+    );
+    await bridge.shutdown();
+  });
+
+  it('ignores history pages when coalescing resumes', async () => {
+    const resume = deferred<ResumeSessionResponse>();
+    const handle = makeChannel({
+      resumeSessionImpl: () => resume.promise,
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.resumeSession({
+      sessionId: 'resume-pages-ignored',
+      workspaceCwd: WS_A,
+      historyPageSize: 100,
+    });
+    for (
+      let i = 0;
+      i < 50 && handle.agent.resumeSessionCalls.length !== 1;
+      i++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = bridge.resumeSession({
+      sessionId: 'resume-pages-ignored',
+      workspaceCwd: WS_A,
+      historyPageSize: 500,
+    });
+
+    resume.resolve({});
+    await Promise.all([first, second]);
+    expect(handle.agent.resumeSessionCalls).toHaveLength(1);
+    await bridge.shutdown();
+  });
+
+  it('rejects restore coalescing with different inherited-history policies', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-inherited-policy',
+      workspaceCwd: WS_A,
+      hideInheritedHistory: true,
+    });
+    for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'coalesce-inherited-policy',
+        workspaceCwd: WS_A,
+        hideInheritedHistory: false,
+      }),
+    ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+    load.resolve({});
+    await first;
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
     await bridge.shutdown();
   });
 
@@ -7861,6 +8373,246 @@ describe('createAcpSessionBridge', () => {
     // pattern as the BkUyD test above. The test runner GCs the
     // dangling promises when this `it` returns.
     void killPromise;
+  });
+
+  it('transport failure marks the channel dying before process exit', async () => {
+    const handles: ChannelHandle[] = [];
+    const failures: Array<ReturnType<typeof deferred<unknown>>> = [];
+    const event = vi.fn();
+    const channelLifecycle = vi.fn();
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event,
+      injectPromptContext: (request) => request,
+      metrics: {
+        sessionLifecycle: vi.fn(),
+        channelLifecycle,
+        promptQueueWait: vi.fn(),
+        promptDuration: vi.fn(),
+        cancelled: vi.fn(),
+      },
+    };
+    const factory: ChannelFactory = async () => {
+      const handle = makeChannel({
+        sessionIdPrefix: `transport-${handles.length}`,
+        promptImpl: () => new Promise(() => {}),
+        loadSessionImpl: () => new Promise(() => {}),
+        extMethodImpl: (method) =>
+          method === SERVE_STATUS_EXT_METHODS.sessionTranscript
+            ? new Promise(() => {})
+            : {},
+      });
+      const failure = deferred<unknown>();
+      handle.channel = {
+        ...handle.channel,
+        transportFailed: failure.promise,
+        // Keep the first process inside its termination grace window.
+        kill: () => new Promise(() => {}),
+      };
+      handles.push(handle);
+      failures.push(failure);
+      return handle.channel;
+    };
+    const bridge = makeBridge({
+      channelFactory: factory,
+      telemetry,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(handles).toHaveLength(1);
+
+    const prompt = bridge.sendPrompt(first.sessionId, {
+      sessionId: first.sessionId,
+      prompt: [{ type: 'text', text: 'stay pending' }],
+    });
+    await vi.waitFor(() =>
+      expect(handles[0]!.agent.promptCalls).toHaveLength(1),
+    );
+    const replayAttach = bridge.loadSession({
+      sessionId: first.sessionId,
+      workspaceCwd: WS_A,
+      historyPageSize: 10,
+      clientId: 'rejected-load-client',
+    });
+    await vi.waitFor(() =>
+      expect(handles[0]!.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        }),
+      ),
+    );
+    failures[0]!.resolve(
+      Object.assign(new Error('bounded transport failed'), {
+        code: 'ndjson_frame_too_large',
+      }),
+    );
+    await expect(prompt).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    await expect(replayAttach).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      bridge.resumeSession({
+        sessionId: first.sessionId,
+        workspaceCwd: WS_A,
+        clientId: 'rejected-resume-client',
+      }),
+    ).rejects.toThrow(/channel is unavailable/u);
+    expect(bridge.knownClientIds()).not.toContain('rejected-load-client');
+    expect(bridge.knownClientIds()).not.toContain('rejected-resume-client');
+
+    await expect(bridge.spawnOrAttach({ workspaceCwd: WS_A })).rejects.toThrow(
+      /channel is unavailable/u,
+    );
+    expect(handles).toHaveLength(1);
+
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(handles).toHaveLength(2);
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(handles[1]!.agent.newSessionCalls).toHaveLength(1);
+    handles[0]!.crash({ exitCode: null, signalCode: 'SIGTERM' });
+
+    const restore = bridge.loadSession({
+      sessionId: 'persisted-transport-session',
+      workspaceCwd: WS_A,
+    });
+    await vi.waitFor(() =>
+      expect(handles[1]!.agent.loadSessionCalls).toHaveLength(1),
+    );
+    failures[1]!.resolve(
+      Object.assign(new Error('bounded transport queue failed'), {
+        code: 'ndjson_queue_limit_exceeded',
+      }),
+    );
+    await expect(restore).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    handles[1]!.crash({ exitCode: null, signalCode: 'SIGTERM' });
+
+    await vi.waitFor(() => {
+      expect(channelLifecycle).toHaveBeenCalledWith('exit', false);
+      expect(event).toHaveBeenCalledWith(
+        'channel.exited',
+        expect.objectContaining({
+          'qwen-code.daemon.channel.transport_failed': true,
+          'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+          'qwen-code.daemon.channel.transport_error_code':
+            'ndjson_frame_too_large',
+        }),
+      );
+    });
+    bridge.killAllSync();
+  });
+
+  it('does not publish a channel whose transport fails during initialize', async () => {
+    const failure = deferred<unknown>();
+    const transportError = Object.assign(new Error('frame failed'), {
+      code: 'ndjson_frame_too_large',
+    });
+    const handle = makeChannel({
+      initializeImpl: async () => {
+        failure.resolve(transportError);
+        await Promise.resolve();
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          agentInfo: { name: 'fake-agent', version: '0' },
+          authMethods: [],
+          agentCapabilities: {},
+        };
+      },
+    });
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+    };
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    expect(handle.killed).toBe(true);
+    expect(handle.agent.newSessionCalls).toHaveLength(0);
+  });
+
+  it('keeps a planned teardown expected when the pipe fails secondarily', async () => {
+    const failure = deferred<unknown>();
+    const channelLifecycle = vi.fn();
+    const event = vi.fn();
+    const killStarted = vi.fn();
+    const handle = makeChannel();
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+      kill: () => {
+        killStarted();
+        return new Promise(() => {});
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry: {
+        captureContext: () => undefined,
+        runWithContext: async (_captured, fn) => await fn(),
+        withSpan: async (_operation, _attributes, fn) => await fn(),
+        event,
+        injectPromptContext: (request) => request,
+        metrics: {
+          sessionLifecycle: vi.fn(),
+          channelLifecycle,
+          promptQueueWait: vi.fn(),
+          promptDuration: vi.fn(),
+          cancelled: vi.fn(),
+        },
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const closing = bridge.killSession(session.sessionId);
+    await vi.waitFor(() => expect(killStarted).toHaveBeenCalledOnce());
+    failure.resolve(
+      Object.assign(new Error('EOF during planned termination'), {
+        code: 'ndjson_incomplete_frame',
+      }),
+    );
+    await Promise.resolve();
+    handle.crash({ exitCode: null, signalCode: 'SIGTERM' });
+
+    await vi.waitFor(() => {
+      expect(channelLifecycle).toHaveBeenCalledWith('exit', true);
+      expect(event).toHaveBeenCalledWith(
+        'channel.exited',
+        expect.objectContaining({
+          'qwen-code.daemon.channel.transport_failed': true,
+          'qwen-code.daemon.channel.transport_failure_initiated_teardown': false,
+        }),
+      );
+    });
+    bridge.killAllSync();
+    void closing;
+  });
+
+  it('does not register a session whose transport fails with newSession', async () => {
+    const failure = deferred<unknown>();
+    const transportError = Object.assign(new Error('queue failed'), {
+      code: 'ndjson_queue_limit_exceeded',
+    });
+    const handle = makeChannel({
+      newSessionImpl: async () => {
+        failure.resolve(transportError);
+        await Promise.resolve();
+        return { sessionId: 'response-before-fatal' };
+      },
+    });
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+    };
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+    ).rejects.toBeInstanceOf(BridgeChannelClosedError);
+    expect(handle.killed).toBe(true);
+    expect(bridge.sessionCount).toBe(0);
   });
 
   it('doSpawn newSession-failure marks the empty channel dying so the next spawn gets a fresh one', async () => {
@@ -14649,6 +15401,53 @@ describe('createAcpSessionBridge', () => {
       shellSpy.mockRestore();
     });
 
+    it('does not hang a completed shell on transport-failed history injection', async () => {
+      const failure = deferred<unknown>();
+      const shellSpy = mockShellExecute('done\n');
+      const handle = makeChannel({
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionShellHistory
+            ? new Promise(() => {})
+            : {},
+      });
+      handle.channel = {
+        ...handle.channel,
+        transportFailed: failure.promise,
+      };
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const shell = bridge.executeShellCommand(
+        session.sessionId,
+        'echo done',
+        undefined,
+        { clientId: session.clientId },
+      );
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toContainEqual(
+          expect.objectContaining({
+            method: SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
+          }),
+        ),
+      );
+      failure.resolve(
+        Object.assign(new Error('transport frame failed'), {
+          code: 'ndjson_frame_too_large',
+        }),
+      );
+
+      await expect(shell).resolves.toEqual({
+        exitCode: 0,
+        output: 'done\n',
+        aborted: false,
+      });
+      await bridge.shutdown();
+      shellSpy.mockRestore();
+    });
+
     it('executes direct shell in each session effective cwd', async () => {
       const shellSpy = mockShellExecute();
       const handle = makeChannel({
@@ -15075,6 +15874,66 @@ describe('createAcpSessionBridge', () => {
           sessionScope: 'thread',
         }),
       ).resolves.toMatchObject({ attached: false });
+      await bridge.shutdown();
+    });
+
+    it('restores approval mode when an attach loses a close race', async () => {
+      const approvalResult = deferred<void>();
+      const closeResult = deferred<Record<string, unknown>>();
+      const closeStarted = deferred<void>();
+      const modeCalls: string[] = [];
+      let currentMode: ApprovalMode = ApprovalMode.DEFAULT;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+            const mode = (params as { mode: ApprovalMode }).mode;
+            modeCalls.push(mode);
+            if (modeCalls.length === 1) await approvalResult.promise;
+            const previous = currentMode;
+            currentMode = mode;
+            return { previous, current: mode };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            closeStarted.resolve();
+            return closeResult.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionScope: 'single',
+        sessionReapIntervalMs: 1,
+        sessionIdleTimeoutMs: 1,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      const attach = bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'single',
+        approvalMode: ApprovalMode.YOLO,
+      });
+      await vi.waitFor(() => expect(modeCalls).toEqual([ApprovalMode.YOLO]));
+      await closeStarted.promise;
+      approvalResult.resolve();
+
+      await expect(attach).rejects.toMatchObject({ code: 'session_closing' });
+      expect(modeCalls).toEqual([ApprovalMode.YOLO, ApprovalMode.DEFAULT]);
+      expect(currentMode).toBe(ApprovalMode.DEFAULT);
+      expect(
+        bridge.getDaemonStatusSnapshot().sessions[0]?.currentApprovalMode,
+      ).toBe(ApprovalMode.DEFAULT);
+
+      closeResult.resolve({
+        closed: false,
+        holds: [agentHold('late-agent')],
+      });
+      await vi.waitFor(() => expect(bridge.activeWork).toBe(true));
+      expect(bridge.sessionCount).toBe(1);
       await bridge.shutdown();
     });
 
@@ -18261,6 +19120,53 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('releases branch admission when transport fails during restore cleanup', async () => {
+      const failure = deferred<unknown>();
+      const releases: string[] = [];
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            return { newSessionId: 'branch-transport-failure' };
+          }
+          return {};
+        },
+        loadSessionImpl: () => new Promise(() => {}),
+      });
+      handle.channel = {
+        ...handle.channel,
+        transportFailed: failure.promise,
+      };
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        freshSessionAdmission: (context) => ({
+          release: () => releases.push(context.operation),
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      releases.length = 0;
+
+      const branch = bridge.branchSession(session.sessionId, {
+        name: 'Transport failure',
+      });
+      await vi.waitFor(() =>
+        expect(handle.agent.loadSessionCalls).toHaveLength(1),
+      );
+      failure.resolve(
+        Object.assign(new Error('bounded frame failed'), {
+          code: 'ndjson_frame_too_large',
+        }),
+      );
+
+      await expect(branch).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      expect(releases).toEqual(['branch']);
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
     it('Stage 1.5: killSession on one of N sessions does NOT kill the shared channel', async () => {
       // Counterpart guarantee: tearing down one session must not take
       // its siblings with it. The channel stays alive while
@@ -21302,6 +22208,44 @@ describe('session idle reaper', () => {
     expect(closedEv).toBeDefined();
     expect((closedEv!.data as { reason: string }).reason).toBe('client_close');
 
+    await bridge.shutdown();
+  });
+
+  it('does not cancel a session the agent already closed', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: true }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.closeSession(session.sessionId);
+
+    expect(handle.agent.cancelCalls).toEqual([]);
+    await bridge.shutdown();
+  });
+
+  it('cancels a session the agent did not close', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionClose
+          ? { closed: false }
+          : {},
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.closeSession(session.sessionId);
+
+    expect(handle.agent.cancelCalls).toEqual([
+      { sessionId: session.sessionId },
+    ]);
     await bridge.shutdown();
   });
 

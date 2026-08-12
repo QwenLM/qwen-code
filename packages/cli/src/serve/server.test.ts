@@ -8791,53 +8791,70 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('resolves and cancels a virtual subagent through its routes', async () => {
-      const bridge = fakeBridge({
-        cancelSessionTaskImpl: async () => ({ cancelled: true }),
-      });
-      const resolveSpy = vi
-        .spyOn(VirtualSubagentSessions.prototype, 'resolve')
-        .mockResolvedValue({
-          sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
-          taskId: 'agent-1',
-          title: 'Investigate',
-          status: 'running',
+    it.each([
+      ['agent%3A8', 'agent:8'],
+      ['agent%2F8', 'agent/8'],
+    ])(
+      'resolves and cancels a virtual subagent through its routes: %s',
+      async (encodedSubagentRef, subagentRef) => {
+        const taskId = `general-purpose-${subagentRef}`;
+        const bridge = fakeBridge({
+          cancelSessionTaskImpl: async () => ({ cancelled: true }),
         });
-      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const app = createServeApp(
-        { ...tokenOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+        const resolveSpy = vi
+          .spyOn(VirtualSubagentSessions.prototype, 'resolve')
+          .mockResolvedValue({
+            sessionId: createVirtualSubagentSessionId('s-1', taskId),
+            taskId,
+            title: 'Investigate',
+            status: 'running',
+          });
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      try {
-        const resolveRes = await request(app)
-          .get('/session/s-1/subagents/tool-1')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
-        const cancelRes = await request(app)
-          .post('/session/s-1/subagents/tool-1/cancel')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
+        try {
+          const resolveRes = await request(app)
+            .get(`/session/s-1/subagents/${encodedSubagentRef}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const cancelRes = await request(app)
+            .post(`/session/s-1/subagents/${encodedSubagentRef}/cancel`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
 
-        expect(resolveRes.status).toBe(200);
-        expect(resolveRes.headers['cache-control']).toBe('no-store');
-        expect(resolveRes.body).toMatchObject({
-          taskId: 'agent-1',
-          status: 'running',
-        });
-        expect(cancelRes.status).toBe(200);
-        expect(cancelRes.body).toEqual({ cancelled: true });
-        expect(resolveSpy).toHaveBeenCalledTimes(2);
-        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'tool-1']);
-        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'tool-1']);
-        expect(bridge.cancelSessionTaskCalls).toEqual([
-          { sessionId: 's-1', taskId: 'agent-1', taskKind: 'agent' },
-        ]);
-      } finally {
-        resolveSpy.mockRestore();
-      }
-    });
+          expect(resolveRes.status).toBe(200);
+          expect(resolveRes.headers['cache-control']).toBe('no-store');
+          expect(resolveRes.body).toMatchObject({
+            taskId,
+            status: 'running',
+          });
+          expect(cancelRes.status).toBe(200);
+          expect(cancelRes.body).toEqual({ cancelled: true });
+          expect(resolveSpy).toHaveBeenCalledTimes(2);
+          expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual([
+            's-1',
+            subagentRef,
+          ]);
+          expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual([
+            's-1',
+            subagentRef,
+          ]);
+          expect(bridge.cancelSessionTaskCalls).toEqual([
+            {
+              sessionId: 's-1',
+              taskId,
+              taskKind: 'agent',
+            },
+          ]);
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      },
+    );
 
     it('requires the parent runtime for virtual heartbeat and detach', async () => {
       const primaryBridge = fakeBridge();
@@ -9057,18 +9074,20 @@ describe('createServeApp', () => {
           interruption: 'interrupted_prompt',
         }),
       });
+      const daemonLog = fakeDaemonLog();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, daemonLog },
       );
 
       const res = await request(app)
         .post('/session/s-1/continue')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('X-Qwen-Client-Id', 'client-xyz');
+        .set('X-Qwen-Client-Id', 'client-xyz')
+        .send({ prompt: 'must not appear in logs' });
 
       expect(res.status).toBe(200);
       // The originator + a generated promptId must reach the bridge so the
@@ -9077,7 +9096,47 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
       });
-      expect(typeof bridge.continueSessionContexts[0]?.promptId).toBe('string');
+      const promptId = bridge.continueSessionContexts[0]?.promptId;
+      expect(typeof promptId).toBe('string');
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.filter(
+            ([message]) => message === 'continuation enqueued',
+          ),
+      ).toEqual([
+        [
+          'continuation enqueued',
+          { sessionId: 's-1', promptId, clientId: 'client-xyz' },
+        ],
+      ]);
+      expect(
+        JSON.stringify(vi.mocked(daemonLog.info).mock.calls),
+      ).not.toContain('must not appear in logs');
+    });
+
+    it('does not log a continuation that was not accepted', async () => {
+      const bridge = fakeBridge();
+      const daemonLog = fakeDaemonLog();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false, interruption: 'none' });
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.some(([message]) => message === 'continuation enqueued'),
+      ).toBe(false);
     });
 
     it('maps session continue bridge errors', async () => {
@@ -9086,11 +9145,12 @@ describe('createServeApp', () => {
           throw new SessionNotFoundError(sessionId);
         },
       });
+      const daemonLog = fakeDaemonLog();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, daemonLog },
       );
 
       const res = await request(app)
@@ -9100,6 +9160,11 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.some(([message]) => message === 'continuation enqueued'),
+      ).toBe(false);
     });
   });
 

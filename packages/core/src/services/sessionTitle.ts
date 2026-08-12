@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
@@ -220,7 +221,8 @@ function filterToDialog(history: Content[]): Content[] {
   for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
     const textParts: Part[] = [];
-    for (const part of msg.parts ?? []) {
+    const parts = stripTrailingUserPromptSubmitContextPart(msg.parts ?? []);
+    for (const part of parts) {
       if (
         typeof part?.text !== 'string' ||
         part.text.trim() === '' ||
