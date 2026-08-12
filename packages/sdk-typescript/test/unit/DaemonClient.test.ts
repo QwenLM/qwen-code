@@ -4317,16 +4317,18 @@ describe('DaemonClient', () => {
       const result = await client.enqueueMidTurnMessage(
         's-1',
         'also check tests',
+        { messageId: 'client-mid-1' },
       );
       expect(result).toEqual({ accepted: true, messageId: 'mid-1' });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/mid-turn-message');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]?.body as string)).toEqual({
         message: 'also check tests',
+        messageId: 'client-mid-1',
       });
     });
 
-    it('returns accepted:false verbatim when the session is idle', async () => {
+    it('returns accepted:false verbatim when the daemon rejects admission', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(200, { accepted: false }),
       );
@@ -4392,6 +4394,37 @@ describe('DaemonClient', () => {
       await expect(
         client.enqueueMidTurnMessage('s-1', 'hi'),
       ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
+  describe('getMidTurnMessages', () => {
+    it('GETs the encoded session snapshot with client identity and signal', async () => {
+      const snapshot = {
+        messages: [{ messageId: 'mid-1', text: 'shared message' }],
+        settledMessageIds: ['mid-2'],
+        promotedMessageIds: ['mid-3'],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+
+      await expect(
+        client.getMidTurnMessages('s/1', {
+          clientId: 'client-1',
+          signal: ctrl.signal,
+        }),
+      ).resolves.toEqual(snapshot);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/mid-turn-messages',
+      );
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      const forwarded = calls[0]?.signal;
+      expect(forwarded?.aborted).toBe(false);
+      ctrl.abort();
+      expect(forwarded?.aborted).toBe(true);
     });
   });
 

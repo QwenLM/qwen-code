@@ -44,7 +44,8 @@ import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
-  expectedRoundSeconds,
+  clearBudgetStop,
+  expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
@@ -1861,12 +1862,17 @@ function requireAuditableChunks(report: PlanReport): DiffChunk[] {
  * round was refused: the caller builds nothing. The admission STAMP is not
  * written here — it lands after the build succeeds, in each build path: the
  * stamp is what the next round's gate measures cost from, and a build that
- * throws must not leave one behind.
+ * throws must not leave one behind. `fanOutWidth` is the auditors this
+ * round fans out (1 for a whole-diff round): when the previous round is
+ * still in flight — the convergence pair's second member — the price
+ * covers both members' wall in waves of the tool-concurrency pool, not
+ * just this round's (deadline.ts `expectedAdmissionSeconds`).
  */
 function admitReverseAuditRound(
   planPath: string,
   round: number | undefined,
   cap: number,
+  fanOutWidth: number,
 ): boolean {
   // The plan's round cap first: deterministic, and cheaper than the
   // deadline arithmetic. The full cap normally; a reduced cap for a huge
@@ -1885,15 +1891,21 @@ function admitReverseAuditRound(
         `not rebuild or retry. A marker has been recorded and compose-review ` +
         `will cap the verdict; still add \`${roundCapStopEntry(cap)}\` to ` +
         `unreviewedDimensions so the terminal report agrees. If the cap ` +
-        `round reported findings whose verdicts have not landed, launch ` +
-        `their verifiers alone and wait, then proceed to Step 6.`,
+        `round reported findings whose verdicts have not landed, verify them ` +
+        `ONLY through \`agent-prompt --role verify\` (never a hand-rolled ` +
+        `agent) — it is gated on the compose floor and will refuse once too ` +
+        `little time remains; when the deadline is within that floor, stop ` +
+        `waiting on any verifier batch still out and compose with the tags ` +
+        `in hand. Do NOT re-verify findings already confirmed in earlier ` +
+        `rounds, and do NOT invent a fresh re-verification pass. Then ` +
+        `proceed to Step 6.`,
     );
     process.exitCode = 4;
     return false;
   }
   const spent = reverseAuditBudgetExhausted(
     process.env,
-    expectedRoundSeconds(planPath, round),
+    expectedAdmissionSeconds(planPath, round, fanOutWidth, process.env),
   );
   if (spent !== null) {
     writeBudgetStop(planPath, spent, round);
@@ -1909,13 +1921,27 @@ function admitReverseAuditRound(
  * twice over, so another round would audit nothing the history has not
  * already answered. Not an error and not a gap — no record, no stamp, no
  * disclosure owed; a round that builds nothing was never admitted.
+ *
+ * Clears any same-run stop marker first: a converged exit can follow an
+ * over-cap round the gate already refused (round 4 refused under cap 3,
+ * then round 5's schedule is converged — the convergence check runs before
+ * the cap gate), and that stale round-cap marker would otherwise cap a
+ * verdict the audit legitimately converged. The message also recalls the
+ * relay channel: the earlier refusal told the orchestrator to add its stop
+ * entry to unreviewedDimensions, and once the marker is gone the
+ * compose-review splice that dedups it no longer runs — only this
+ * instruction removes it.
  */
-function refuseConverged(): void {
+function refuseConverged(planPath: string): void {
+  clearBudgetStop(planPath);
   writeStderrLine(
     'CONVERGED: every chunk holds two consecutive substantive dry audits; ' +
       'the reverse audit has converged — stop the loop and proceed to ' +
       'Step 6. This is a clean convergence, not a gap: no ' +
-      'unreviewedDimensions entry is owed.',
+      'unreviewedDimensions entry is owed. If an earlier round-cap or ' +
+      'budget refusal told you to add its stop entry to ' +
+      'unreviewedDimensions, remove it now — this convergence supersedes ' +
+      'it.',
   );
   process.exitCode = 5;
 }
@@ -1968,7 +1994,7 @@ function runAllChunks(
   }
 
   if (schedule !== null && schedule.converged) {
-    refuseConverged();
+    refuseConverged(planPath);
     return;
   }
 
@@ -1988,6 +2014,7 @@ function runAllChunks(
       planPath,
       round,
       reverseAuditRoundCap(report.budget),
+      chunks.length,
     )
   ) {
     return;
@@ -2382,7 +2409,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // admits on the reserve alone hands the terminal round a start right at
   // the boundary, which is the killed-mid-verification failure one round
   // wide. The round's cost is the previous round's, measured admission to
-  // admission. The admission is stamped AFTER the build succeeds (below),
+  // admission — except when this round launches with the previous one still
+  // in flight (the convergence pair), where it covers both. The admission is
+  // stamped AFTER the build succeeds (below),
   // never here: the stamp is what the next round's gate measures cost from,
   // and a build that throws must not leave one behind — priced from a
   // failed build, the next round would be floored to the 600s minimum,
@@ -2400,6 +2429,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       args.plan,
       args.round,
       reverseAuditRoundCap(report.budget),
+      1,
     )
   ) {
     return;
@@ -2450,14 +2480,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     hasChunk &&
     !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
   ) {
+    const planChunkIds = (
+      Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : []
+    )
+      .map((c) => c?.id)
+      .filter((id): id is number => typeof id === 'number');
     if (args.round !== undefined) {
       let schedule: RoundSchedule | null = null;
       try {
         schedule = scheduleReverseAuditRound(
           args.plan,
-          (Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : [])
-            .map((c) => c?.id)
-            .filter((id): id is number => typeof id === 'number'),
+          planChunkIds,
           args.round,
           process.env,
           typeof report.diffPathAbsolute === 'string'
@@ -2470,7 +2503,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         schedule = null;
       }
       if (schedule !== null && schedule.converged) {
-        refuseConverged();
+        refuseConverged(args.plan);
         return;
       }
     }
@@ -2479,6 +2512,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         args.plan,
         args.round,
         reverseAuditRoundCap(report.budget),
+        planChunkIds.length,
       )
     )
       return;

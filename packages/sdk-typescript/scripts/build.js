@@ -80,9 +80,9 @@ const rootDir = join(__dirname, '..');
 // Bumped from 178KB to 184KB for side-task session APIs and source metadata.
 // Bumped from 184KB to 185KB for the Live Voice lifecycle helpers on both
 // daemon client classes.
-// Bumped from 185KB to 187KB for historical branch sessions and transcript
-// branch-point projection.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 187 * 1024;
+// Bumped from 185KB to 188KB for daemon-owned mid-turn message APIs,
+// historical branch sessions, and transcript branch-point projection.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 188 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

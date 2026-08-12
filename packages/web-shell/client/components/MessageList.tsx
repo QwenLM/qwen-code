@@ -64,6 +64,8 @@ interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -1561,7 +1563,8 @@ export function applyTurnCollapse(
     const head = items[start] as Extract<DisplayItem, { type: 'message' }>;
     const turnId = head.message.id;
     const promptTs = head.message.timestamp;
-    const isActiveTurn = k === userIdxs.length - 1 && isResponding;
+    const isLastTurn = k === userIdxs.length - 1;
+    const isActiveTurn = isLastTurn && isResponding;
     const hasActiveAgent = turnHasActiveAgent(items, start, end);
     const hasAutomaticallyExpandedAgent = turnHasAutomaticallyExpandedAgent(
       items,
@@ -1570,7 +1573,7 @@ export function applyTurnCollapse(
       automaticallyExpandedAgentKeys,
     );
     const awaitsBackgroundSummary =
-      k === userIdxs.length - 1 &&
+      isLastTurn &&
       backgroundSummaryGraceActive &&
       turnAwaitsBackgroundSummary(items, start, end);
     const hasPendingApproval = turnOwnsCallId(
@@ -1660,8 +1663,8 @@ export function applyTurnCollapse(
     }
 
     // A turn with foldable steps gets a chevron and defaults to expanded while
-    // streaming, while a subagent is still active, when the turn errored, or
-    // when there is no final answer; otherwise it collapses once complete. A
+    // streaming, while a subagent is still active, or when the latest turn is
+    // incomplete; otherwise it collapses once a newer turn starts. A
     // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
     // expanded and shows a chevron-less metrics line. An explicit user toggle
     // always wins.
@@ -1670,8 +1673,7 @@ export function applyTurnCollapse(
       hasActiveAgent ||
       hasAutomaticallyExpandedAgent ||
       awaitsBackgroundSummary ||
-      hasTurnError ||
-      answerIdx < 0;
+      ((hasTurnError || answerIdx < 0) && isLastTurn);
     const expanded =
       hiddenCount === 0
         ? true
@@ -1823,7 +1825,8 @@ const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
 const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
-const LOAD_OLDER_HISTORY_THRESHOLD_PX = 48;
+const LOAD_OLDER_HISTORY_THRESHOLD_PX = 160;
+const OLDER_HISTORY_ANCHOR_WAIT_FRAMES = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
@@ -1832,6 +1835,13 @@ export function shouldUseVirtualScroll(
   threshold = VIRTUAL_SCROLL_THRESHOLD,
 ): boolean {
   return totalCount > threshold;
+}
+
+export function shouldAdjustVirtualScrollPosition(
+  itemEnd: number,
+  scrollOffset: number,
+): boolean {
+  return itemEnd <= scrollOffset;
 }
 
 function formatDuration(ms: number): string {
@@ -2431,6 +2441,7 @@ export const MessageList = memo(
       messages,
       pendingApproval,
       onShowContextDetail,
+      onImagePreview,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -2711,8 +2722,10 @@ export const MessageList = memo(
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
     const olderHistoryLoadInFlight = useRef(false);
+    const olderHistoryLoadGeneration = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const pendingBottomFollowAfterCooldown = useRef(false);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const didTrackLastUserMsgRef = useRef(false);
@@ -2736,6 +2749,10 @@ export const MessageList = memo(
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
     const olderHistoryRetryBlocked = useRef(false);
+    const olderHistoryAnchorFrame = useRef<number | undefined>(undefined);
+    const olderHistoryAnchorWaitFrame = useRef<number | undefined>(undefined);
+    const olderHistoryTopCheckFrame = useRef<number | undefined>(undefined);
+    const pendingOlderHistoryTopLoad = useRef<number | undefined>(undefined);
     const reloadTranscriptTimer = useRef<number | undefined>(undefined);
     const reloadTranscriptAbort = useRef<AbortController | undefined>(
       undefined,
@@ -2758,23 +2775,19 @@ export const MessageList = memo(
     const [olderHistoryAnchor, setOlderHistoryAnchor] = useState<{
       scrollHeight: number;
       scrollTop: number;
+      messageCount: number;
+      virtual: boolean;
+      settled: boolean;
+      generation: number;
+      rowKey?: string;
+      rowTop?: number;
     } | null>(null);
+    const restoringOlderHistoryRef = useRef(false);
+    restoringOlderHistoryRef.current = olderHistoryAnchor?.virtual === true;
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
-
-    useLayoutEffect(() => {
-      if (!olderHistoryAnchor) return;
-      const current = containerRef.current;
-      if (current) {
-        current.scrollTop =
-          olderHistoryAnchor.scrollTop +
-          Math.max(0, current.scrollHeight - olderHistoryAnchor.scrollHeight);
-      }
-      olderHistoryLoadInFlight.current = false;
-      setOlderHistoryAnchor(null);
-    }, [olderHistoryAnchor]);
 
     useEffect(() => {
       if (!hasOlderHistory) {
@@ -2876,6 +2889,15 @@ export const MessageList = memo(
       mergedMessages,
       automaticallyExpandedAgentKeys,
     ]);
+    const visibleItemsRef = useRef(visibleItems);
+    visibleItemsRef.current = visibleItems;
+    const hasVisibleRowKey = useCallback(
+      (key: string) =>
+        visibleItemsRef.current.some(
+          (item) => String(getDisplayItemVirtualKey(item)) === key,
+        ),
+      [],
+    );
     const visibleTurnIdByDisplayIndex = useMemo(
       () => getTurnIdByDisplayIndex(visibleItems),
       [visibleItems],
@@ -3097,6 +3119,15 @@ export const MessageList = memo(
         if (pendingOverflowFrame.current !== undefined) {
           window.cancelAnimationFrame(pendingOverflowFrame.current);
         }
+        if (olderHistoryAnchorFrame.current !== undefined) {
+          window.cancelAnimationFrame(olderHistoryAnchorFrame.current);
+        }
+        if (olderHistoryAnchorWaitFrame.current !== undefined) {
+          window.cancelAnimationFrame(olderHistoryAnchorWaitFrame.current);
+        }
+        if (olderHistoryTopCheckFrame.current !== undefined) {
+          window.cancelAnimationFrame(olderHistoryTopCheckFrame.current);
+        }
         cancelTranscriptReload();
         if (transcriptBottomScrollFrame.current !== undefined) {
           window.cancelAnimationFrame(transcriptBottomScrollFrame.current);
@@ -3252,6 +3283,7 @@ export const MessageList = memo(
         const el = getScrollElement();
         if (!el) return;
         if (el.scrollHeight <= el.clientHeight) return;
+        pendingBottomFollowAfterCooldown.current = false;
         scrollCooldownCount.current += 1;
         const gen = scrollCooldownCount.current;
         scrollCooldown.current = true;
@@ -3264,9 +3296,21 @@ export const MessageList = memo(
         lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
         reportCanScrollToBottom();
         const releaseCooldown = () => {
-          if (scrollCooldownCount.current === gen) {
-            scrollCooldown.current = false;
-          }
+          if (scrollCooldownCount.current !== gen) return;
+          scrollCooldown.current = false;
+          if (!pendingBottomFollowAfterCooldown.current) return;
+          pendingBottomFollowAfterCooldown.current = false;
+          if (catchingUpRef.current || followPausedByUserRef.current) return;
+          const current = getScrollElement();
+          if (!current || current.scrollHeight <= current.clientHeight) return;
+          setShouldFollow(true);
+          current.scrollTop = current.scrollHeight;
+          scheduleScrollOverflowReport();
+          lastScrollTop.current = Math.max(
+            0,
+            current.scrollHeight - current.clientHeight,
+          );
+          reportCanScrollToBottom();
         };
         if (behavior === 'smooth') {
           setTimeout(releaseCooldown, 350);
@@ -3274,7 +3318,12 @@ export const MessageList = memo(
           requestAnimationFrame(releaseCooldown);
         }
       },
-      [getScrollElement, reportCanScrollToBottom, scheduleScrollOverflowReport],
+      [
+        getScrollElement,
+        reportCanScrollToBottom,
+        scheduleScrollOverflowReport,
+        setShouldFollow,
+      ],
     );
 
     const resumeBottomFollow = useCallback(
@@ -3299,9 +3348,120 @@ export const MessageList = memo(
         return ESTIMATE_MESSAGE;
       },
       overscan: 20,
+      anchorTo: 'end',
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,
+      directDomUpdates: true,
     });
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (
+      item,
+      _delta,
+      instance,
+    ) =>
+      shouldAdjustVirtualScrollPosition(
+        item.end,
+        containerRef.current?.scrollTop ?? instance.scrollOffset ?? 0,
+      );
+    const measureVirtualRow = useCallback(
+      (node: HTMLDivElement | null) => {
+        virtualizer.measureElement(node);
+        if (!node || !restoringOlderHistoryRef.current) return;
+        const index = Number(node.dataset.index);
+        if (
+          Number.isFinite(index) &&
+          !virtualizer.itemSizeCache.has(getItemKey(index))
+        ) {
+          virtualizer.resizeItem(index, node.offsetHeight);
+        }
+      },
+      [getItemKey, virtualizer],
+    );
+    useLayoutEffect(() => {
+      if (!olderHistoryAnchor) return;
+      const current = containerRef.current;
+      if (
+        olderHistoryAnchor.rowKey &&
+        !hasVisibleRowKey(olderHistoryAnchor.rowKey)
+      ) {
+        if (
+          olderHistoryAnchor.generation === olderHistoryLoadGeneration.current
+        ) {
+          olderHistoryLoadGeneration.current += 1;
+        }
+        olderHistoryLoadInFlight.current = false;
+        pendingOlderHistoryTopLoad.current = undefined;
+        setSuppressOlderHistoryLoadingStatus(false);
+        setOlderHistoryAnchor(null);
+        return;
+      }
+      if (!olderHistoryAnchor.settled) return;
+      if (!current) {
+        olderHistoryLoadInFlight.current = false;
+        setOlderHistoryAnchor(null);
+        return;
+      }
+      const unchanged = olderHistoryAnchor.virtual
+        ? mergedMessages.length === olderHistoryAnchor.messageCount
+        : current.scrollHeight === olderHistoryAnchor.scrollHeight;
+      if (unchanged) {
+        if (olderHistoryAnchorFrame.current !== undefined) return;
+        olderHistoryAnchorFrame.current = requestAnimationFrame(() => {
+          olderHistoryAnchorFrame.current = undefined;
+          if (
+            olderHistoryAnchor.generation !== olderHistoryLoadGeneration.current
+          ) {
+            return;
+          }
+          olderHistoryLoadInFlight.current = false;
+          setOlderHistoryAnchor((anchor) =>
+            anchor === olderHistoryAnchor ? null : anchor,
+          );
+        });
+        return;
+      }
+      if (olderHistoryAnchorFrame.current !== undefined) {
+        cancelAnimationFrame(olderHistoryAnchorFrame.current);
+        olderHistoryAnchorFrame.current = undefined;
+      }
+      olderHistoryAnchorFrame.current = requestAnimationFrame(() => {
+        olderHistoryAnchorFrame.current = undefined;
+        if (
+          olderHistoryAnchor.generation !== olderHistoryLoadGeneration.current
+        ) {
+          return;
+        }
+        if (
+          olderHistoryAnchor.rowKey &&
+          !hasVisibleRowKey(olderHistoryAnchor.rowKey)
+        ) {
+          olderHistoryLoadInFlight.current = false;
+          setOlderHistoryAnchor(null);
+          return;
+        }
+        const anchorRow = olderHistoryAnchor.rowKey
+          ? Array.from(
+              current.querySelectorAll<HTMLElement>('[data-message-row-key]'),
+            ).find(
+              (row) => row.dataset.messageRowKey === olderHistoryAnchor.rowKey,
+            )
+          : undefined;
+        if (anchorRow && olderHistoryAnchor.rowTop !== undefined) {
+          current.scrollTop +=
+            anchorRow.getBoundingClientRect().top - olderHistoryAnchor.rowTop;
+        } else {
+          current.scrollTop =
+            olderHistoryAnchor.scrollTop +
+            Math.max(0, current.scrollHeight - olderHistoryAnchor.scrollHeight);
+        }
+        olderHistoryLoadInFlight.current = false;
+        setOlderHistoryAnchor(null);
+      });
+    }, [
+      hasVisibleRowKey,
+      mergedMessages.length,
+      olderHistoryAnchor,
+      visibleItems,
+    ]);
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
     const sessionTimelineRangeState = useRef<{
@@ -3565,29 +3725,156 @@ export const MessageList = memo(
         }
         olderHistoryRetryBlocked.current = false;
         olderHistoryLoadInFlight.current = true;
-        setSuppressOlderHistoryLoadingStatus(!allowRetry);
+        const generation = ++olderHistoryLoadGeneration.current;
+        setSuppressOlderHistoryLoadingStatus(!force);
+        let virtualAnchor:
+          | {
+              rowKey: string;
+              rowTop: number;
+            }
+          | undefined;
+        if (useVirtualScroll) {
+          const firstMessageKey = String(getItemKey(headerOffset));
+          let remainingFrames = OLDER_HISTORY_ANCHOR_WAIT_FRAMES;
+          virtualAnchor = await new Promise<
+            | {
+                rowKey: string;
+                rowTop: number;
+              }
+            | undefined
+          >((resolve) => {
+            const waitForTopRange = () => {
+              olderHistoryAnchorWaitFrame.current = undefined;
+              if (
+                generation !== olderHistoryLoadGeneration.current ||
+                containerRef.current !== el ||
+                !hasVisibleRowKey(firstMessageKey) ||
+                remainingFrames-- <= 0
+              ) {
+                resolve(undefined);
+                return;
+              }
+              const firstMessageRow = Array.from(
+                el.querySelectorAll<HTMLElement>('[data-message-row-key]'),
+              ).find((row) => row.dataset.messageRowKey === firstMessageKey);
+              if (firstMessageRow) {
+                resolve({
+                  rowKey: firstMessageKey,
+                  rowTop: firstMessageRow.getBoundingClientRect().top,
+                });
+              } else {
+                olderHistoryAnchorWaitFrame.current =
+                  requestAnimationFrame(waitForTopRange);
+              }
+            };
+            olderHistoryAnchorWaitFrame.current =
+              requestAnimationFrame(waitForTopRange);
+          });
+          if (!virtualAnchor) {
+            if (generation === olderHistoryLoadGeneration.current) {
+              olderHistoryLoadInFlight.current = false;
+              pendingOlderHistoryTopLoad.current = undefined;
+              setSuppressOlderHistoryLoadingStatus(false);
+            }
+            return;
+          }
+        }
         const previousHeight = el.scrollHeight;
         const previousTop = el.scrollTop;
+        const viewportTop = el.getBoundingClientRect().top;
+        const anchorRow = virtualAnchor
+          ? undefined
+          : Array.from(
+              el.querySelectorAll<HTMLElement>('[data-message-row-key]'),
+            ).find((row) => {
+              const key = row.dataset.messageRowKey;
+              return (
+                key !== undefined &&
+                key.startsWith('msg:') &&
+                row.getBoundingClientRect().bottom > viewportTop
+              );
+            });
         followPausedByUserRef.current = true;
+        setOlderHistoryAnchor({
+          scrollHeight: previousHeight,
+          scrollTop: previousTop,
+          messageCount: mergedMessages.length,
+          virtual: useVirtualScroll,
+          settled: false,
+          generation,
+          ...(virtualAnchor ??
+            (anchorRow
+              ? {
+                  rowKey: anchorRow.dataset.messageRowKey,
+                  rowTop: anchorRow.getBoundingClientRect().top,
+                }
+              : {})),
+        });
         try {
           await onLoadOlderHistory(force ? { force: true } : undefined);
-          setOlderHistoryAnchor({
-            scrollHeight: previousHeight,
-            scrollTop: previousTop,
-          });
+          if (generation === olderHistoryLoadGeneration.current) {
+            setOlderHistoryAnchor((anchor) =>
+              anchor?.generation === generation
+                ? { ...anchor, settled: true }
+                : anchor,
+            );
+          }
         } catch {
-          olderHistoryRetryBlocked.current = true;
-          olderHistoryLoadInFlight.current = false;
+          if (generation === olderHistoryLoadGeneration.current) {
+            olderHistoryRetryBlocked.current = true;
+            olderHistoryLoadInFlight.current = false;
+            setOlderHistoryAnchor(null);
+          }
         } finally {
-          setSuppressOlderHistoryLoadingStatus(false);
+          if (generation === olderHistoryLoadGeneration.current) {
+            setSuppressOlderHistoryLoadingStatus(false);
+          }
         }
       },
-      [loadingOlderHistory, onLoadOlderHistory, historyPaginationError],
+      [
+        loadingOlderHistory,
+        onLoadOlderHistory,
+        historyPaginationError,
+        getItemKey,
+        hasVisibleRowKey,
+        headerOffset,
+        mergedMessages.length,
+        useVirtualScroll,
+      ],
     );
 
     const retryOlderHistory = useCallback(() => {
       void loadOlderHistory(true, true);
     }, [loadOlderHistory]);
+
+    useEffect(() => {
+      const pendingGeneration = pendingOlderHistoryTopLoad.current;
+      if (
+        pendingGeneration === undefined ||
+        loadingOlderHistory ||
+        olderHistoryAnchor ||
+        olderHistoryLoadInFlight.current
+      ) {
+        return;
+      }
+      pendingOlderHistoryTopLoad.current = undefined;
+      if (
+        !hasOlderHistory ||
+        pendingGeneration !== olderHistoryLoadGeneration.current
+      ) {
+        return;
+      }
+      const el = getScrollElement();
+      if (el && el.scrollTop <= LOAD_OLDER_HISTORY_THRESHOLD_PX) {
+        void loadOlderHistory(true);
+      }
+    }, [
+      getScrollElement,
+      hasOlderHistory,
+      loadOlderHistory,
+      loadingOlderHistory,
+      olderHistoryAnchor,
+    ]);
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
     // Runs synchronously in the scroll handler — no rAF needed since
@@ -3599,7 +3886,8 @@ export const MessageList = memo(
       if (hasOlderHistory && curr <= LOAD_OLDER_HISTORY_THRESHOLD_PX) {
         void loadOlderHistory(true);
       }
-      if (scrollCooldown.current) {
+      const hasUserScrollIntent = Date.now() <= userScrollIntentUntil.current;
+      if (scrollCooldown.current && !hasUserScrollIntent) {
         lastScrollTop.current = curr;
         return;
       }
@@ -3614,14 +3902,13 @@ export const MessageList = memo(
         // Container resizes can clamp scrollTop downward while the viewport is
         // still at the tail. Treat that as follow mode, not a manual scroll-up.
         const isNearBottom = distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX;
-        const hasUserScrollIntent = Date.now() <= userScrollIntentUntil.current;
-        if (isNearBottom) {
-          followPausedByUserRef.current = false;
-          setShouldFollow(true);
-        } else if (hasUserScrollIntent) {
+        if (hasUserScrollIntent) {
           cancelTranscriptReload();
           followPausedByUserRef.current = true;
           setShouldFollow(false);
+        } else if (isNearBottom) {
+          followPausedByUserRef.current = false;
+          setShouldFollow(true);
         } else if (!followPausedByUserRef.current) {
           cancelTranscriptReload();
           setShouldFollow(false);
@@ -3699,22 +3986,32 @@ export const MessageList = memo(
     useEffect(() => {
       const el = getScrollElement();
       if (!el) return;
-      const retryOlderHistoryAtTop = () => {
-        if (
-          olderHistoryRetryBlocked.current &&
-          el.scrollTop <= LOAD_OLDER_HISTORY_THRESHOLD_PX
-        ) {
-          void loadOlderHistory(true);
+      const loadOlderHistoryAtTop = () => {
+        olderHistoryTopCheckFrame.current = undefined;
+        if (el.scrollTop > LOAD_OLDER_HISTORY_THRESHOLD_PX) return;
+        if (loadingOlderHistory || olderHistoryLoadInFlight.current) {
+          pendingOlderHistoryTopLoad.current =
+            olderHistoryLoadGeneration.current;
+          return;
         }
+        void loadOlderHistory(true);
+      };
+      const scheduleOlderHistoryTopCheck = () => {
+        if (olderHistoryTopCheckFrame.current !== undefined) {
+          cancelAnimationFrame(olderHistoryTopCheckFrame.current);
+        }
+        olderHistoryTopCheckFrame.current = requestAnimationFrame(
+          loadOlderHistoryAtTop,
+        );
       };
       const markFromWheel = (event: WheelEvent) => {
         markUserScrollIntent();
-        if (event.deltaY < 0) retryOlderHistoryAtTop();
+        if (event.deltaY < 0) scheduleOlderHistoryTopCheck();
       };
       const markFromTouch = () => {
         markUserScrollIntent();
-        retryOlderHistoryAtTop();
       };
+      const markFromTouchMove = () => scheduleOlderHistoryTopCheck();
       const markFromPointer = (event: PointerEvent) => {
         const rect = el.getBoundingClientRect();
         const scrollbarEdge = 20;
@@ -3741,7 +4038,7 @@ export const MessageList = memo(
             event.key === 'PageUp' ||
             event.key === 'Home'
           ) {
-            retryOlderHistoryAtTop();
+            scheduleOlderHistoryTopCheck();
           }
         }
       };
@@ -3749,15 +4046,26 @@ export const MessageList = memo(
       el.addEventListener('touchstart', markFromTouch, {
         passive: true,
       });
+      el.addEventListener('touchmove', markFromTouchMove, { passive: true });
       el.addEventListener('pointerdown', markFromPointer, { passive: true });
       el.addEventListener('keydown', markFromKey, { passive: true });
       return () => {
         el.removeEventListener('wheel', markFromWheel);
         el.removeEventListener('touchstart', markFromTouch);
+        el.removeEventListener('touchmove', markFromTouchMove);
         el.removeEventListener('pointerdown', markFromPointer);
         el.removeEventListener('keydown', markFromKey);
+        if (olderHistoryTopCheckFrame.current !== undefined) {
+          cancelAnimationFrame(olderHistoryTopCheckFrame.current);
+          olderHistoryTopCheckFrame.current = undefined;
+        }
       };
-    }, [getScrollElement, loadOlderHistory, markUserScrollIntent]);
+    }, [
+      getScrollElement,
+      loadOlderHistory,
+      loadingOlderHistory,
+      markUserScrollIntent,
+    ]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -3765,6 +4073,9 @@ export const MessageList = memo(
       const observer = new ResizeObserver(() => {
         scheduleScrollOverflowReport();
         loadOlderHistoryIfUnderfilled();
+        if (catchingUpRef.current || followPausedByUserRef.current) return;
+        setShouldFollow(true);
+        scrollToBottom();
       });
       observer.observe(el);
       for (const child of Array.from(el.children)) {
@@ -3791,6 +4102,8 @@ export const MessageList = memo(
       getScrollElement,
       loadOlderHistoryIfUnderfilled,
       scheduleScrollOverflowReport,
+      scrollToBottom,
+      setShouldFollow,
     ]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
@@ -3799,6 +4112,7 @@ export const MessageList = memo(
     useEffect(() => {
       if (messages.length === 0) {
         followPausedByUserRef.current = false;
+        pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
@@ -4098,6 +4412,7 @@ export const MessageList = memo(
               message={displayItem.message}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onImagePreview={onImagePreview}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
               showRetryHint={showRetryHint}
@@ -4157,6 +4472,7 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onImagePreview,
         generateContent,
         headerOffset,
         visibleItems,
@@ -4197,7 +4513,12 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       if (catchingUp) return;
       const isNewUserMessage = pendingNewUserSmoothScroll.current;
-      if (scrollCooldown.current && !isNewUserMessage) return;
+      if (scrollCooldown.current && !isNewUserMessage) {
+        if (!followPausedByUserRef.current) {
+          pendingBottomFollowAfterCooldown.current = true;
+        }
+        return;
+      }
       // Preserve the new-prompt scroll even if a previous disclosure resize is
       // still settling; it targets the latest virtualizer size from this render.
       if (pendingFollowRecheck.current && !isNewUserMessage) return;
@@ -4276,17 +4597,12 @@ export const MessageList = memo(
           onSelect={scrollToMessage}
         />
         {useVirtualScroll ? (
-          <div
-            className={styles.virtualSizer}
-            style={{
-              height: totalVirtualSize,
-            }}
-          >
+          <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
             {virtualItems.map((virtualRow) => (
               <div
                 key={virtualRow.key}
                 data-index={virtualRow.index}
-                ref={virtualizer.measureElement}
+                ref={measureVirtualRow}
                 className={joinClassNames(
                   styles.virtualRow,
                   getRowClassName(
@@ -4300,7 +4616,6 @@ export const MessageList = memo(
                   top: 0,
                   left: 0,
                   right: 0,
-                  transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
                 {renderVirtualItem(virtualRow.index)}

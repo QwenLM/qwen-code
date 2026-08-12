@@ -144,6 +144,8 @@ export interface ListSessionsOptions {
    * @default 'active'
    */
   archiveState?: SessionArchiveState;
+  /** Aborts an in-progress catalog scan. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -257,6 +259,7 @@ export interface ResumedSessionData {
  * This is a safety limit to prevent performance issues with very large chat directories.
  */
 const MAX_FILES_TO_PROCESS = 10000;
+const SESSION_LIST_CANCEL_YIELD_INTERVAL = 128;
 
 /**
  * Maximum character length for a session custom title.
@@ -507,7 +510,9 @@ export class SessionService {
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    signal?.throwIfAborted();
     if (getProjectHash(recordCwd) === this.projectHash) {
       return true;
     }
@@ -530,9 +535,11 @@ export class SessionService {
       }
     }
 
-    const status = await readRuntimeStatus(
-      this.storage.getRuntimeStatusPath(sessionId),
-    );
+    const runtimeStatusPath = this.storage.getRuntimeStatusPath(sessionId);
+    const status = signal
+      ? await readRuntimeStatus(runtimeStatusPath, { signal })
+      : await readRuntimeStatus(runtimeStatusPath);
+    signal?.throwIfAborted();
     return (
       status?.sessionId === sessionId &&
       getProjectHash(status.workDir) === this.projectHash
@@ -1075,35 +1082,44 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20, archiveState = 'active' } = options;
+    const { cursor, size = 20, archiveState = 'active', signal } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
+    signal?.throwIfAborted();
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
     try {
       const fileNames = fs.readdirSync(chatsDir);
-      for (const name of fileNames) {
-        // Only process files matching session file pattern
-        if (!SESSION_FILE_PATTERN.test(name)) continue;
-        const filePath = path.join(chatsDir, name);
-        try {
-          const stats = fs.statSync(filePath);
-          files.push({ name, mtime: stats.mtimeMs });
-        } catch {
-          // Skip files we can't stat
-          continue;
+      signal?.throwIfAborted();
+      for (const [index, name] of fileNames.entries()) {
+        if (SESSION_FILE_PATTERN.test(name)) {
+          const filePath = path.join(chatsDir, name);
+          try {
+            const stats = fs.statSync(filePath);
+            files.push({ name, mtime: stats.mtimeMs });
+          } catch {
+            // Skip files we can't stat
+          }
+        }
+        if (signal && (index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+          signal.throwIfAborted();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
         }
       }
     } catch (error) {
+      signal?.throwIfAborted();
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { items: [], hasMore: false };
       }
       throw error;
     }
+    signal?.throwIfAborted();
 
     // Sort by mtime descending (most recent first)
     files.sort((a, b) => b.mtime - a.mtime);
+    signal?.throwIfAborted();
 
     // Apply cursor filter (items with mtime < cursor)
     if (cursor !== undefined) {
@@ -1126,6 +1142,7 @@ export class SessionService {
     const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const file of files) {
+      signal?.throwIfAborted();
       // Safety limit to prevent performance issues
       if (filesProcessed >= MAX_FILES_TO_PROCESS) {
         hasMoreFiles = true;
@@ -1142,10 +1159,12 @@ export class SessionService {
       lastProcessedMtime = file.mtime;
 
       const filePath = path.join(chatsDir, file.name);
-      const records = await jsonl.readLines<ChatRecord>(
-        filePath,
-        MAX_PROMPT_SCAN_LINES,
-      );
+      const records = signal
+        ? await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES, {
+            signal,
+          })
+        : await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES);
+      signal?.throwIfAborted();
 
       if (records.length === 0) continue;
       const firstRecord = records[0];
@@ -1154,6 +1173,7 @@ export class SessionService {
         !(await this.sessionBelongsToCurrentProject(
           firstRecord.sessionId,
           firstRecord.cwd,
+          signal,
         ))
       ) {
         continue;
@@ -1161,7 +1181,9 @@ export class SessionService {
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
+      signal?.throwIfAborted();
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      signal?.throwIfAborted();
       const source = this.extractCreationMetadataFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
@@ -1183,6 +1205,7 @@ export class SessionService {
         isArchived,
       });
     }
+    signal?.throwIfAborted();
 
     // Determine next cursor (mtime of last processed file)
     // Only set if there are more files to process
@@ -2363,7 +2386,11 @@ export class SessionService {
    * @remarks Only checks active sessions. Use `getSessionLocation()` or
    * `sessionExistsInAnyState()` for archive-aware lookups.
    */
-  async sessionExists(sessionId: string): Promise<boolean> {
+  async sessionExists(
+    sessionId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    options.signal?.throwIfAborted();
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
@@ -2371,12 +2398,22 @@ export class SessionService {
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      const records = options.signal
+        ? await jsonl.readLines<ChatRecord>(filePath, 1, options)
+        : await jsonl.readLines<ChatRecord>(filePath, 1);
+      options.signal?.throwIfAborted();
       if (records.length === 0) {
         return false;
       }
-      return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
+      const belongsToCurrentProject = await this.sessionBelongsToCurrentProject(
+        sessionId,
+        records[0].cwd,
+        options.signal,
+      );
+      options.signal?.throwIfAborted();
+      return belongsToCurrentProject;
     } catch {
+      options.signal?.throwIfAborted();
       return false;
     }
   }
