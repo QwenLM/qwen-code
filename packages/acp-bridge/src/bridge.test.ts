@@ -5397,6 +5397,130 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  it('accounts growth across bridges sharing one daemon-wide pool', async () => {
+    // `runQwenServe` wires every bridge to ONE aggregate: a shared
+    // provider set plus one aggregator handed to each bridge. Two
+    // sibling workspaces breaching concurrently must therefore share a
+    // single pool — the first growth exhausts it and the second bridge
+    // truncates, where per-bridge pools would have funded both.
+    const providers = new Set<() => readonly number[]>();
+    const journalGrowthSessionLimits = (): readonly number[] => {
+      const limits: number[] = [];
+      for (const provider of providers) limits.push(...provider());
+      return limits;
+    };
+    const registerJournalGrowthSessionLimits = (
+      provider: () => readonly number[],
+    ): (() => void) => {
+      providers.add(provider);
+      return () => {
+        providers.delete(provider);
+      };
+    };
+    const sharedGrowthOpts = {
+      maxJournalEvents: 2,
+      journalGrowthPoolBytes: 8 * 1024 * 1024,
+      journalGrowthSessionLimits,
+      registerJournalGrowthSessionLimits,
+    };
+    const gates = new Map<
+      string,
+      { promise: Promise<void>; resolve: (value: void) => void }
+    >();
+    const heldPromptImpl = async (req: { sessionId: string }) => {
+      const gate = gates.get(req.sessionId);
+      if (gate) await gate.promise;
+      return { stopReason: 'end_turn' as const };
+    };
+    const handleA = makeChannel({ promptImpl: heldPromptImpl });
+    // A distinct agent-side id prefix keeps the two sessions' gates
+    // apart — the default prefix would synthesize the same
+    // `sess:<cwd>` id on both channels.
+    const handleB = makeChannel({
+      promptImpl: heldPromptImpl,
+      sessionIdPrefix: 'sess-b',
+    });
+    const bridgeA = makeBridge({
+      channelFactory: async () => handleA.channel,
+      ...sharedGrowthOpts,
+    });
+    const bridgeB = makeBridge({
+      channelFactory: async () => handleB.channel,
+      ...sharedGrowthOpts,
+    });
+
+    const sessionA = await bridgeA.spawnOrAttach({ workspaceCwd: WS_A });
+    gates.set(sessionA.sessionId, deferred<void>());
+    const promptA = bridgeA.sendPrompt(
+      sessionA.sessionId,
+      {
+        sessionId: sessionA.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { clientId: sessionA.clientId, promptId: 'prompt-a' },
+    );
+    await vi.waitFor(() => expect(handleA.agent.promptCalls).toHaveLength(1));
+    for (const text of ['a-1', 'a-2', 'a-3']) {
+      await handleA.agentConnection.sessionUpdate({
+        sessionId: sessionA.sessionId,
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+
+    const sessionB = await bridgeB.spawnOrAttach({ workspaceCwd: WS_A });
+    gates.set(sessionB.sessionId, deferred<void>());
+    const promptB = bridgeB.sendPrompt(
+      sessionB.sessionId,
+      {
+        sessionId: sessionB.sessionId,
+        prompt: [{ type: 'text', text: 'second' }],
+      },
+      undefined,
+      { clientId: sessionB.clientId, promptId: 'prompt-b' },
+    );
+    await vi.waitFor(() => expect(handleB.agent.promptCalls).toHaveLength(1));
+    for (const text of ['b-1', 'b-2', 'b-3']) {
+      await handleB.agentConnection.sessionUpdate({
+        sessionId: sessionB.sessionId,
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+
+    // A's doubling consumed the whole shared pool; B's breach must see
+    // A's grown cap through the aggregator and fall back to eviction.
+    const snapA = await bridgeA.loadSession({
+      sessionId: sessionA.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      snapA.liveJournal?.find((event) => event.type === 'history_truncated'),
+    ).toBeUndefined();
+
+    const snapB = await bridgeB.loadSession({
+      sessionId: sessionB.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      snapB.liveJournal?.find((event) => event.type === 'history_truncated'),
+    ).toMatchObject({ data: { scope: 'live_journal' } });
+
+    gates.get(sessionA.sessionId)?.resolve();
+    gates.get(sessionB.sessionId)?.resolve();
+    await promptA;
+    await promptB;
+    await bridgeA.shutdown();
+    await bridgeB.shutdown();
+  }, 15_000);
+
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {
     // Live-session regression: recordId is only stamped during replay of
     // the persisted transcript, never on the live stream. A seeded replay

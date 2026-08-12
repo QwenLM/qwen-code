@@ -403,12 +403,18 @@ export class EventBus {
   }
 
   /**
-   * The engine's current live-journal byte cap — may have grown past the
+   * The engine's current live-journal caps — may have grown past the
    * configured baseline under adaptive growth. Read by the bridge's
-   * growth policy to account granted headroom across its live sessions.
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
    */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
   journalLimitBytes(): number | undefined {
-    return this.compactionEngine?.journalLimits?.().maxBytes;
+    return this.journalLimits()?.maxBytes;
   }
 
   private markCompactionDegraded(err: unknown): void {

@@ -170,7 +170,11 @@ export interface TurnBoundaryCompactionEngineOptions {
    * the caps above. Absent → behavior is exactly the fixed-cap eviction.
    */
   onJournalGrowth?: JournalGrowthAdvisor;
-  /** Test seam for the growth-refusal throttle. */
+  /**
+   * Test seam for the growth-refusal throttle. Must be a monotonic
+   * millisecond clock; defaults to `performance.now()`, so a backward
+   * wall-clock correction cannot stretch a throttle window.
+   */
   now?: () => number;
 }
 
@@ -255,7 +259,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
     this.maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
     this.onJournalGrowth = opts.onJournalGrowth;
-    this.now = opts.now ?? Date.now;
+    this.now = opts.now ?? (() => performance.now());
     this.onReplayWindowEviction = opts.onReplayWindowEviction;
   }
 
@@ -504,19 +508,26 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   /**
    * Consults the growth advisor once the journal breaches its caps and
    * applies a grant in place, so the eviction loop below only drops what
-   * still exceeds the (possibly raised) caps. Never throws: a misbehaving
-   * advisor degrades to plain eviction, matching the engine's
-   * best-effort contract.
+   * still exceeds the (possibly raised) caps. A grant that would retain no
+   * additional entries is refused without raising the caps. Never throws:
+   * a misbehaving advisor degrades to plain eviction, matching the
+   * engine's best-effort contract.
    */
   private maybeGrowJournalLimits(): void {
     const advisor = this.onJournalGrowth;
     if (!advisor || this.closed) return;
     const now = this.now();
-    if (
-      this.journalGrowthDeniedAt !== undefined &&
-      now - this.journalGrowthDeniedAt < JOURNAL_GROWTH_REASK_INTERVAL_MS
-    ) {
-      return;
+    if (this.journalGrowthDeniedAt !== undefined) {
+      const sinceDenialMs = now - this.journalGrowthDeniedAt;
+      // A negative reading means the injected clock jumped backward; treat
+      // the window as elapsed rather than refusing asks until the old
+      // wall-clock time is reached again.
+      if (
+        sinceDenialMs >= 0 &&
+        sinceDenialMs < JOURNAL_GROWTH_REASK_INTERVAL_MS
+      ) {
+        return;
+      }
     }
     let grant: JournalLimits | undefined;
     try {
@@ -532,7 +543,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       Number.isSafeInteger(grant.maxBytes) &&
       Number.isSafeInteger(grant.maxEvents) &&
       grant.maxBytes > this.maxJournalBytes &&
-      grant.maxEvents >= this.maxJournalEvents
+      grant.maxEvents >= this.maxJournalEvents &&
+      this.retainsMoreWith(grant.maxEvents, grant.maxBytes)
     ) {
       this.maxJournalBytes = grant.maxBytes;
       this.maxJournalEvents = grant.maxEvents;
@@ -540,6 +552,36 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       return;
     }
     this.journalGrowthDeniedAt = now;
+  }
+
+  /**
+   * True when eviction under the granted caps would retain strictly more
+   * journal entries than under the current caps. A grant that cannot
+   * change the eviction result — an entry larger than the granted cap
+   * survives as the sole retained entry either way — is refused, so the
+   * shared pool is never charged for growth that preserves no replay.
+   */
+  private retainsMoreWith(maxEvents: number, maxBytes: number): boolean {
+    return (
+      this.retainedTailCount(maxEvents, maxBytes) >
+      this.retainedTailCount(this.maxJournalEvents, this.maxJournalBytes)
+    );
+  }
+
+  /** Entries of the newest-first tail the eviction loop would retain. */
+  private retainedTailCount(maxEvents: number, maxBytes: number): number {
+    let count = 0;
+    let bytes = 0;
+    for (let i = this.liveJournal.length - 1; i >= 0; i--) {
+      const entryBytes = this.journalEntryBytes[i] ?? 0;
+      if (count + 1 > maxEvents) break;
+      // Mirror the eviction loop: a single entry is always kept, even one
+      // that alone exceeds the byte cap.
+      if (count >= 1 && bytes + entryBytes > maxBytes) break;
+      count += 1;
+      bytes += entryBytes;
+    }
+    return count;
   }
 
   private classifySessionUpdate(event: BridgeEvent): void {

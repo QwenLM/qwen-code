@@ -1967,6 +1967,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
         })
       : undefined;
+  // Daemon-wired shared-pool accounting (see BridgeOptions): the
+  // aggregator reports every sharing session's current cap, this
+  // bridge's included. Absent on standalone bridges.
+  const journalGrowthSessionLimits = opts.journalGrowthSessionLimits;
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -3008,6 +3012,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // the ACP request returns. Keep a temporary bus so those replay frames land in
   // the ring, then promote the same bus into the registered SessionEntry.
   const pendingRestoreEvents = new Map<string, EventBus>();
+
+  // Current journal byte caps of this bridge's live sessions, including
+  // in-flight restores whose buses are not registered in byId yet. Shared
+  // with sibling bridges through the daemon-wide aggregator so ONE pool
+  // covers every workspace; without it the advisor accounts this
+  // bridge's sessions only.
+  const journalSessionLimitBytes = (): number[] => {
+    const limits = [...byId.values()].map(
+      (entry) => entry.events.journalLimitBytes() ?? maxJournalBytes,
+    );
+    for (const [restoreId, bus] of pendingRestoreEvents) {
+      if (!byId.has(restoreId)) {
+        limits.push(bus.journalLimitBytes() ?? maxJournalBytes);
+      }
+    }
+    return limits;
+  };
+  const unregisterJournalGrowthSessionLimits =
+    journalGrowthPolicy !== undefined &&
+    opts.registerJournalGrowthSessionLimits !== undefined
+      ? opts.registerJournalGrowthSessionLimits(journalSessionLimitBytes)
+      : undefined;
 
   const createClientId = (): string => `client_${randomUUID()}`;
 
@@ -4848,26 +4874,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 maxEvents: number;
                 maxBytes: number;
               }) => {
-                const allSessionLimitBytes = [...byId.values()].map(
-                  (entry) =>
-                    entry.events.journalLimitBytes() ?? maxJournalBytes,
-                );
-                // During a restore the session's bus exists but its entry
-                // is not registered in byId yet; account its current caps
-                // explicitly so the pool is not over-granted.
-                if (!byId.has(sessionId)) {
+                // The daemon-wired aggregator already covers every
+                // sharing bridge's live sessions (this bridge's included);
+                // standalone bridges fall back to their own enumeration.
+                const allSessionLimitBytes = journalGrowthSessionLimits
+                  ? [...journalGrowthSessionLimits()]
+                  : journalSessionLimitBytes();
+                // A requester whose bus lives outside both maps (defensive
+                // — today it is either registered or mid-restore) must
+                // still be charged at its current cap.
+                if (
+                  !byId.has(sessionId) &&
+                  !pendingRestoreEvents.has(sessionId)
+                ) {
                   allSessionLimitBytes.push(current.maxBytes);
-                }
-                // Other sessions concurrently mid-restore are invisible
-                // to byId too; without their caps each restore sees the
-                // full pool as available and concurrent restores
-                // over-grant it.
-                for (const [restoreId, bus] of pendingRestoreEvents) {
-                  if (restoreId !== sessionId && !byId.has(restoreId)) {
-                    allSessionLimitBytes.push(
-                      bus.journalLimitBytes() ?? maxJournalBytes,
-                    );
-                  }
                 }
                 const grant = journalGrowthPolicy.grant({
                   currentMaxEvents: current.maxEvents,
@@ -6667,6 +6687,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           compactedReplayMaxBytes,
           maxJournalEvents,
           maxJournalBytes,
+          journalGrowth:
+            journalGrowthPoolBytes !== undefined
+              ? {
+                  poolBytes: journalGrowthPoolBytes,
+                  hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                }
+              : null,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
         },
@@ -6674,28 +6701,33 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         pendingPermissionCount: permissionMediator.pendingCount,
         channelLive: !!liveChannelInfo(),
         permissionPolicy: permissionMediator.policy,
-        sessions: [...byId.values()].map((entry) => ({
-          sessionId: entry.sessionId,
-          workspaceCwd: entry.workspaceCwd,
-          createdAt: entry.createdAt,
-          ...(entry.displayName ? { displayName: entry.displayName } : {}),
-          clientCount: entry.clientIds.size,
-          subscriberCount: entry.events.subscriberCount,
-          attachCount: entry.attachCount,
-          pendingPromptCount: entry.pendingPromptCount,
-          pendingPermissionCount: entry.pendingPermissionIds.size,
-          hasActivePrompt: entry.promptActive,
-          lastEventId: entry.events.lastEventId,
-          ...(entry.sessionLastSeenAt !== undefined
-            ? { lastSeenAt: entry.sessionLastSeenAt }
-            : {}),
-          ...(entry.currentModelId
-            ? { currentModelId: entry.currentModelId }
-            : {}),
-          ...(entry.currentApprovalMode
-            ? { currentApprovalMode: entry.currentApprovalMode }
-            : {}),
-        })),
+        sessions: [...byId.values()].map((entry) => {
+          const journalLimits = entry.events.journalLimits();
+          return {
+            sessionId: entry.sessionId,
+            workspaceCwd: entry.workspaceCwd,
+            createdAt: entry.createdAt,
+            ...(entry.displayName ? { displayName: entry.displayName } : {}),
+            clientCount: entry.clientIds.size,
+            subscriberCount: entry.events.subscriberCount,
+            attachCount: entry.attachCount,
+            pendingPromptCount: entry.pendingPromptCount,
+            pendingPermissionCount: entry.pendingPermissionIds.size,
+            hasActivePrompt: entry.promptActive,
+            lastEventId: entry.events.lastEventId,
+            ...(entry.sessionLastSeenAt !== undefined
+              ? { lastSeenAt: entry.sessionLastSeenAt }
+              : {}),
+            ...(entry.currentModelId
+              ? { currentModelId: entry.currentModelId }
+              : {}),
+            ...(entry.currentApprovalMode
+              ? { currentApprovalMode: entry.currentApprovalMode }
+              : {}),
+            maxJournalEvents: journalLimits?.maxEvents ?? maxJournalEvents,
+            maxJournalBytes: journalLimits?.maxBytes ?? maxJournalBytes,
+          };
+        }),
       };
     },
 
@@ -10817,6 +10849,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // entered the bridge.shutdown() phase fails fast instead of
         // spawning a child this teardown won't see.
         shuttingDown = true;
+        unregisterJournalGrowthSessionLimits?.();
         cancelIdleTimer();
         stopSessionReaper();
         const entries = Array.from(byId.values());

@@ -1507,7 +1507,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       // eviction loop must still trim the excess and stamp the marker.
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalBytes: 300,
-        onJournalGrowth: () => ({ maxEvents: 10_000, maxBytes: 400 }),
+        onJournalGrowth: () => ({ maxEvents: 10_000, maxBytes: 450 }),
       });
       engine.ingest(makeUserMessage(1, 'first large event'), 150);
       engine.ingest(makeUserMessage(2, 'second large event'), 150);
@@ -1515,14 +1515,76 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       expect(engine.journalLimits()).toEqual({
         maxEvents: 10_000,
-        maxBytes: 400,
+        maxBytes: 450,
+      });
+      const snap = engine.snapshot();
+      expect(markerOf(snap)?.data).toMatchObject({
+        scope: 'live_journal',
+        truncatedEvents: 1,
+        maxBytes: 450,
+      });
+      expect(
+        snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
+      ).toEqual([2, 3]);
+    });
+
+    it('refuses a grant that cannot retain more than eviction already keeps', () => {
+      // The newest entry alone exceeds the granted cap, so eviction retains
+      // exactly one entry with or without the grant. Accepting it would
+      // charge the shared pool while buying zero replay; the caps must stay
+      // at the baseline and eviction still keeps the oversized survivor.
+      const advisor = vi.fn(() => ({ maxEvents: 10_000, maxBytes: 400 }));
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 300,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'first large event'), 150);
+      engine.ingest(makeUserMessage(2, 'second large event'), 150);
+      engine.ingest(makeUserMessage(3, 'third large event'), 300);
+
+      expect(advisor).toHaveBeenCalledTimes(1);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 10_000,
+        maxBytes: 300,
       });
       const snap = engine.snapshot();
       expect(markerOf(snap)?.data).toMatchObject({
         scope: 'live_journal',
         truncatedEvents: 2,
-        maxBytes: 400,
+        maxBytes: 300,
       });
+      expect(
+        snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
+      ).toEqual([3]);
+    });
+
+    it('never charges growth for a stream of events above the hard cap', () => {
+      // Each oversized event is retained as the sole survivor regardless of
+      // the caps, so repeated breaches must not ratchet the caps up toward
+      // the hard cap — the pool would drain while preserving nothing extra.
+      let clockMs = 0;
+      const advisor = vi.fn((current: { maxBytes: number }) => ({
+        maxEvents: 10_000,
+        maxBytes: current.maxBytes * 2,
+      }));
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 300,
+        now: () => clockMs,
+        onJournalGrowth: advisor,
+      });
+      for (let i = 1; i <= 3; i++) {
+        clockMs += 10_000; // clear the refusal throttle between breaches
+        engine.ingest(makeUserMessage(i, `oversized-${i}`), 1000);
+      }
+
+      // The first breach is a length-1 journal (no ask: the survivor is
+      // kept regardless), the next two breach with two entries each.
+      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 10_000,
+        maxBytes: 300,
+      });
+      const snap = engine.snapshot();
       expect(
         snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
       ).toEqual([3]);
@@ -1601,6 +1663,26 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       clockMs += 10_000;
       engine.ingest(makeUserMessage(5, 'e'));
+      expect(advisor).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-asks after a refusal when the clock source jumps backward', () => {
+      // A wall-clock source can move backward (NTP correction, manual set);
+      // the throttle window must expire rather than suppress asks until the
+      // old reading is reached again.
+      let clockMs = 100_000;
+      const advisor = vi.fn(() => undefined);
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 1,
+        now: () => clockMs,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'a'));
+      engine.ingest(makeUserMessage(2, 'b'));
+      expect(advisor).toHaveBeenCalledTimes(1);
+
+      clockMs = 50_000;
+      engine.ingest(makeUserMessage(3, 'c'));
       expect(advisor).toHaveBeenCalledTimes(2);
     });
 

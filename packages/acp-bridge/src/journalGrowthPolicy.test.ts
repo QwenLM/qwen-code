@@ -118,4 +118,25 @@ describe('createJournalGrowthPolicy', () => {
     // Extra already granted to the requester: 8 MiB; left: 12 MiB.
     expect(grant).toEqual({ maxBytes: 28 * MiB, maxEvents: 35_000 });
   });
+  it('clamps the proportional event cap to the safe-integer range', () => {
+    // Every input is a valid safe integer, but with a 1-byte baseline the
+    // proportional entry cap is 256 MiB x MAX_SAFE_INTEGER — far past the
+    // safe range. An unsafe maxEvents would make the engine reject the whole
+    // grant, including an otherwise-funded byte grant.
+    const policy = createJournalGrowthPolicy({
+      baselineEvents: Number.MAX_SAFE_INTEGER,
+      baselineBytes: 1,
+      poolBytes: 64 * MiB,
+      hardCapBytes: HARD_CAP_BYTES,
+    });
+    const grant = policy.grant({
+      currentMaxEvents: Number.MAX_SAFE_INTEGER,
+      currentMaxBytes: BASELINE_BYTES,
+      allSessionLimitBytes: [BASELINE_BYTES],
+    });
+    expect(grant).toBeDefined();
+    expect(Number.isSafeInteger(grant?.maxEvents)).toBe(true);
+    expect(grant?.maxEvents).toBe(Number.MAX_SAFE_INTEGER);
+    expect(grant?.maxBytes).toBe(16 * MiB);
+  });
 });

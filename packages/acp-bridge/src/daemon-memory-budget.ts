@@ -30,9 +30,9 @@ export const MAX_ROOT_RESERVE_MB = 1_024;
  * Adaptive live-journal growth: the pool (carved from the effective
  * budget) that per-session journal caps may grow into beyond their
  * baseline when an in-flight turn outgrows them. Derived once here and
- * handed to each bridge, which accounts its own live sessions against it.
- * A ceiling, not a preallocation — nothing is reserved until a session
- * actually grows.
+ * shared by every bridge the daemon constructs, which together account
+ * every live session against the ONE aggregate pool. A ceiling, not a
+ * preallocation — nothing is reserved until a session actually grows.
  */
 export const JOURNAL_GROWTH_POOL_FRACTION = 0.05;
 export const MIN_JOURNAL_GROWTH_POOL_MB = 32;
@@ -203,19 +203,41 @@ export function recommendedChildShareMb(
 }
 
 /**
- * Per-bridge pool, in MB, that adaptive live-journal growth may draw on.
+ * Daemon-wide pool, in MB, that adaptive live-journal growth may draw on.
  * Divides the same capacity denominator as the child policy; the journal
  * lives in the daemon heap rather than in a child, but the budget is the
  * single figure this module offers and 5% of it keeps the pool a rounding
  * error next to child heaps while still covering several fully-grown
- * sessions (per-session growth hard-caps at 256 MiB).
+ * sessions (per-session growth hard-caps at 256 MiB). Returns 0 — growth
+ * disabled — on a host too small for the minimum budget, where the floor
+ * would carve capacity out of a budget that cannot back it, and never
+ * exceeds the headroom left after the root reserve.
  */
 export function journalGrowthPoolMb(budget: DaemonMemoryBudget): number {
-  return clamp(
-    Math.floor(budget.effectiveBudgetMb * JOURNAL_GROWTH_POOL_FRACTION),
-    MIN_JOURNAL_GROWTH_POOL_MB,
-    MAX_JOURNAL_GROWTH_POOL_MB,
+  if (budget.insufficientMemory) return 0;
+  return Math.min(
+    clamp(
+      Math.floor(budget.effectiveBudgetMb * JOURNAL_GROWTH_POOL_FRACTION),
+      MIN_JOURNAL_GROWTH_POOL_MB,
+      MAX_JOURNAL_GROWTH_POOL_MB,
+    ),
+    budget.childPoolMb,
   );
+}
+
+/**
+ * The serve layer's growth-pool decision in MB: 0 disables adaptive
+ * journal growth. Growth is off when the operator pinned either journal
+ * cap (explicit config wins) or `journalGrowthPoolMb` reports no pool.
+ */
+export function serveJournalGrowthPoolMb(input: {
+  budget: DaemonMemoryBudget;
+  maxJournalEvents?: number;
+  maxJournalBytes?: number;
+}): number {
+  if (input.maxJournalEvents !== undefined) return 0;
+  if (input.maxJournalBytes !== undefined) return 0;
+  return journalGrowthPoolMb(input.budget);
 }
 
 export function resolveDaemonMemoryBudget(

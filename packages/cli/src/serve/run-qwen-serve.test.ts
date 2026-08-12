@@ -96,6 +96,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
+    journalGrowth: null,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -535,9 +536,13 @@ const mockTotalMemBytes = vi.hoisted(() => ({
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
+  // Mock both the named and the default export: consumers do
+  // `import os from 'node:os'`, which a bare spread would leave unmocked.
+  const totalmem = () => mockTotalMemBytes.value ?? actual.totalmem();
   return {
     ...actual,
-    totalmem: () => mockTotalMemBytes.value ?? actual.totalmem(),
+    totalmem,
+    default: { ...actual, totalmem },
   };
 });
 
@@ -2814,6 +2819,113 @@ describe('runQwenServe memory budget', () => {
         1024;
       for (const [options] of createBridge.mock.calls) {
         expect(options.journalGrowthPoolBytes).toBe(expectedPoolBytes);
+      }
+    } finally {
+      createBridge.mockRestore();
+      await handle.close();
+    }
+  });
+  it('disables adaptive journal growth on a host too small for the budget', async () => {
+    // A budget capped below the minimum by host memory leaves no usable
+    // pool: no bridge may receive one, so growth stays off entirely.
+    mockTotalMemBytes.value = 1_023 * 1024 * 1024;
+    const constrainedSpy = vi
+      .spyOn(
+        process as { constrainedMemory: () => number },
+        'constrainedMemory',
+      )
+      .mockReturnValue(0);
+    const dir = makeTmpDir();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(
+        () =>
+          makeRuntimeBridge() as ReturnType<
+            typeof acpBridge.createAcpSessionBridge
+          >,
+      );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 1024,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(createBridge).toHaveBeenCalled();
+      for (const [options] of createBridge.mock.calls) {
+        expect(options).not.toHaveProperty('journalGrowthPoolBytes');
+        expect(options).not.toHaveProperty('journalGrowthSessionLimits');
+        expect(options).not.toHaveProperty(
+          'registerJournalGrowthSessionLimits',
+        );
+      }
+    } finally {
+      createBridge.mockRestore();
+      constrainedSpy.mockRestore();
+      mockTotalMemBytes.value = undefined;
+      await handle.close();
+    }
+  });
+
+  it('wires every bridge to one shared daemon-wide growth-pool view', async () => {
+    const root = makeTmpDir();
+    const primary = path.join(root, 'primary');
+    const secondary = path.join(root, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(
+        () =>
+          makeRuntimeBridge() as ReturnType<
+            typeof acpBridge.createAcpSessionBridge
+          >,
+      );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(createBridge.mock.calls.length).toBeGreaterThanOrEqual(2);
+      for (const [options] of createBridge.mock.calls) {
+        expect(typeof options.journalGrowthSessionLimits).toBe('function');
+        expect(typeof options.registerJournalGrowthSessionLimits).toBe(
+          'function',
+        );
+      }
+      // Caps registered through one bridge's registrar must be visible
+      // through EVERY bridge's view — one aggregate, not a pool per
+      // bridge — and the unregister hook must remove them again.
+      const views = createBridge.mock.calls.map(
+        ([options]) => options.journalGrowthSessionLimits,
+      );
+      const unregisters = createBridge.mock.calls.map(([options], index) =>
+        options.registerJournalGrowthSessionLimits?.(() => [1000 + index]),
+      );
+      for (const view of views) {
+        expect(view?.()).toEqual([1000, 1001]);
+      }
+      for (const unregister of unregisters) {
+        unregister?.();
+      }
+      for (const view of views) {
+        expect(view?.()).toEqual([]);
       }
     } finally {
       createBridge.mockRestore();
