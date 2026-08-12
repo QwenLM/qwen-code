@@ -32,7 +32,10 @@ import {
   findProviderByCredentials,
   resolveMetadataKey,
   tildeifyPath,
+  shortenPath,
 } from '@qwen-code/qwen-code-core';
+import { shortAsciiLogo } from '../components/AsciiArt.js';
+import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
 import { execSync } from 'node:child_process';
@@ -243,7 +246,7 @@ function approvalModeLabel(mode: string): string {
 // Faithful port of the original ink Header (components/Header.tsx): a
 // single-border info panel with 4 lines — title(+version), blank spacer,
 // auth|model(+hint), directory. Same data sources as the original.
-function buildBanner(config: Config | undefined, _width: number) {
+function buildBanner(config: Config | undefined, width: number) {
   let versionLabel = '';
   try {
     const cliPkg = nodePath.join(
@@ -283,19 +286,60 @@ function buildBanner(config: Config | undefined, _width: number) {
   }
   const authModelText = authLabel ? `${authLabel} | ${model}` : model;
   const hint = ' (/model to change)';
-  const path = tildeifyPath(targetDir);
-  return (
+  const authLine = authModelText + hint;
+
+  // Responsive layout mirroring Header.tsx: two-column (ASCII logo + info
+  // panel) when wide, single-column info panel when narrow.
+  const containerMarginX = 2;
+  const logoGap = 2;
+  const infoPanelChromeWidth = 2 + 1 * 2; // border(2) + paddingX(1*2)
+  const minInfoPanelWidth = 40 + infoPanelChromeWidth;
+  const available = Math.max(0, width - containerMarginX * 2);
+  const logoWidth = getAsciiArtWidth(shortAsciiLogo);
+  const showLogo = available >= logoWidth + logoGap + minInfoPanelWidth;
+  const maxInfoPanelWidth = 60;
+  const infoPanelWidth = showLogo
+    ? Math.min(available - logoWidth - logoGap, maxInfoPanelWidth)
+    : available;
+  const maxPathLength = Math.max(0, infoPanelWidth - infoPanelChromeWidth);
+  const displayPath = shortenPath(
+    tildeifyPath(targetDir),
+    Math.max(3, maxPathLength),
+  );
+
+  const infoPanel = (
     <box
       flexDirection="column"
       borderStyle="single"
+      paddingX={1}
+      width={infoPanelWidth}
+      flexGrow={showLogo ? 0 : 1}
+    >
+      <text fg={C.accent}>{`>_ Qwen Code (${versionLabel})`}</text>
+      <text> </text>
+      <text fg={C.dim}>{authLine}</text>
+      <text fg={C.dim}>{displayPath}</text>
+    </box>
+  );
+
+  if (!showLogo) {
+    return (
+      <box marginLeft={1} marginRight={1} flexShrink={0}>
+        {infoPanel}
+      </box>
+    );
+  }
+  return (
+    <box
+      flexDirection="row"
+      alignItems="center"
       marginLeft={1}
       marginRight={1}
       flexShrink={0}
     >
-      <text fg={C.accent}>{`>_ Qwen Code (${versionLabel})`}</text>
-      <text> </text>
-      <text fg={C.dim}>{authModelText + hint}</text>
-      <text fg={C.dim}>{path}</text>
+      <text fg={C.accent}>{shortAsciiLogo}</text>
+      <box width={logoGap} />
+      {infoPanel}
     </box>
   );
 }
