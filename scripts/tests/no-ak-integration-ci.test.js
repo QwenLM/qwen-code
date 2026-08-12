@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -19,6 +27,85 @@ const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps runner temp-backed Unix socket paths short on Linux',
+    () => {
+      const workflow = readFileSync(
+        path.join(ROOT, '.github/workflows/ci.yml'),
+        'utf8',
+      );
+      const testStep = getWorkflowStep(
+        getWorkflowJob(workflow, 'test'),
+        'Run tests and generate reports',
+      );
+      const start = testStep.indexOf('export TMPDIR=');
+      const end = testStep.indexOf('\n          ( while true', start);
+      const routeTemp = testStep.slice(start, end);
+      const root = mkdtempSync(path.join(tmpdir(), 'ci-temp-routing-'));
+      const longRunnerTemp = path.join(root, 'x'.repeat(180));
+
+      try {
+        mkdirSync(longRunnerTemp);
+        const [routedTemp, resolvedTemp] = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${routeTemp}\nprintf '%s\\n%s\\n' "$TMPDIR" "$(cd "$TMPDIR" && pwd -P)"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_OS: 'Linux',
+              RUNNER_TEMP: longRunnerTemp,
+            },
+          },
+        )
+          .trim()
+          .split('\n');
+
+        expect(resolvedTemp).toBe(realpathSync(longRunnerTemp));
+        expect(
+          Buffer.byteLength(
+            path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
+          ),
+        ).toBeLessThan(108);
+        expect(
+          workflow.match(/mktemp -d \/var\/tmp\/qwen-ci-XXXXXX/g),
+        ).toHaveLength(3);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('preserves test failures in every wrapped OS job', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+      const testStep = getWorkflowStep(
+        getWorkflowJob(workflow, jobName),
+        'Run tests and generate reports',
+      );
+      let previous = -1;
+      for (const command of [
+        'set +e',
+        'npm run test:ci',
+        'RC=$?',
+        'set -e',
+        'kill "$SAMPLER_PID" 2>/dev/null || true',
+        'exit "$RC"',
+      ]) {
+        const index = testStep.indexOf(command);
+        expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
+        previous = index;
+      }
+    }
+  });
+
   it('defines a focused no-AK integration script', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
