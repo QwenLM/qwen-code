@@ -6056,7 +6056,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
-    await crashRecoveries.get(req.sessionId);
+    const crashRecovery = crashRecoveries.get(req.sessionId);
+    if (crashRecovery) await crashRecovery;
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
     }
