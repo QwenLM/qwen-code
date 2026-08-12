@@ -304,9 +304,9 @@ export async function fetchGitDiff(
     // listing: the latter can hold thousands of ignored paths the detail gate
     // never limits, and every extra ls-tree chunk is one more serial
     // round-trip that can fail the whole branch diff closed.
-    const candidates = classifiablePaths.filter((filePath) =>
-      phantomCandidatePaths.has(filePath),
-    );
+    const candidates = classifiablePaths
+      .map(stripTrailingDirSlash)
+      .filter((filePath) => phantomCandidatePaths.has(filePath));
     trackedAtBase = await classifyPathsTrackedAtBase(
       gitRoot,
       comparison.untrackedBaseRef,
@@ -315,7 +315,7 @@ export async function fetchGitDiff(
     if (trackedAtBase === null) return null;
     const tracked = trackedAtBase;
     filteredUntrackedPaths = rawUntrackedPaths.filter(
-      (filePath) => !tracked.has(filePath),
+      (filePath) => !tracked.has(stripTrailingDirSlash(filePath)),
     );
     collisionPaths = candidates.filter((filePath) => tracked.has(filePath));
   }
@@ -861,10 +861,12 @@ async function synthesizeUntrackedHunk(
   };
 }
 
-/** `ls-tree -z` token format: `<mode> <type> <sha>\t<path>`. Only blob
- *  entries are trackable file content — a directory entry at the same path
- *  must NOT classify a worktree file as baseline-tracked. Records the entry
- *  mode per path so collision re-accounting can detect pure mode changes. */
+/** `ls-tree -z` token format: `<mode> <type> <sha>\t<path>`. Records blob
+ *  AND gitlink (commit) entries — both are baseline-tracked paths a phantom
+ *  deletion can hide behind — but not tree entries: a directory at the same
+ *  path must NOT classify a worktree file as baseline-tracked. Records the
+ *  entry mode per path so collision re-accounting can detect pure mode
+ *  changes. */
 function collectBlobEntries(
   lsTreeOut: string,
   into: Map<string, string>,
@@ -875,17 +877,29 @@ function collectBlobEntries(
     if (tab < 0) continue;
     const header = token.slice(0, tab);
     const space = header.indexOf(' ');
-    if (space < 0 || header.slice(space + 1).split(' ')[0] !== 'blob') continue;
+    if (space < 0) continue;
+    const type = header.slice(space + 1).split(' ')[0];
+    if (type !== 'blob' && type !== 'commit') continue;
     into.set(token.slice(tab + 1), header.slice(0, space));
   }
 }
 
+/** `ls-files --others` collapses an untracked embedded repository into a
+ *  trailing-slash directory entry (`sub/`) while diff/ls-tree name the same
+ *  logical path without the slash (`sub`); normalize before matching so a
+ *  baseline-tracked gitlink classifies as a collision instead of surfacing
+ *  as both a phantom deletion and an untracked directory row. */
+function stripTrailingDirSlash(filePath: string): string {
+  return filePath.endsWith('/') ? filePath.slice(0, -1) : filePath;
+}
+
 /**
- * Which of `paths` exist as blobs in `baseRef`'s tree — via batched per-path
- * `ls-tree` queries instead of a whole-tree `ls-tree -r` listing, which on a
- * large baseline can overflow `runGit`'s maxBuffer or the git timeout before
- * the diff even starts. Pathspecs carry the `:(literal)` magic so glob
- * characters in filenames match exactly. Returns `null` when git fails.
+ * Which of `paths` exist as blob or gitlink entries in `baseRef`'s tree —
+ * via batched per-path `ls-tree` queries instead of a whole-tree `ls-tree -r`
+ * listing, which on a large baseline can overflow `runGit`'s maxBuffer or the
+ * git timeout before the diff even starts. Pathspecs carry the `:(literal)`
+ * magic so glob characters in filenames match exactly. Returns `null` when
+ * git fails.
  */
 async function classifyPathsTrackedAtBase(
   gitRoot: string,

@@ -840,6 +840,18 @@ export function GitDiffContent({
             }}
           />
         )}
+        {options !== null && sourceError === mode && !error && (
+          <span className={styles.sourceError}>
+            {t('gitDiff.error')}
+            <button
+              type="button"
+              className={styles.retryButton}
+              onClick={retrySource}
+            >
+              {t('gitDiff.retry')}
+            </button>
+          </span>
+        )}
       </div>
       {body}
     </div>

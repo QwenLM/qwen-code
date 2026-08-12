@@ -338,6 +338,8 @@ interface CheckoutOriginal {
   ref: string;
   /** Commit HEAD pointed at before the step ('' when attached). */
   commit: string;
+  /** HEAD was unborn before the step (no commit resolved). */
+  unborn: boolean;
   /** HEAD's reflog length before the step (see headReflogCount). */
   reflogCount: number;
 }
@@ -503,13 +505,18 @@ async function checkoutLanded(
     runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => ''),
     resolveLandingCommit(cwd, landing, env),
   ]);
-  // Equality with the pre-step branch proves nothing — it already held
-  // before the step ran. On an unborn HEAD a fatally refused checkout still
-  // leaves symbolic-ref reporting the same branch, so absorbing the equality
-  // would report a switch that never happened as a success; absorb only a
-  // real move.
-  if (landing.branch && nowBranchRaw.trim() === landing.branch)
-    return original.ref !== landing.branch;
+  // Equality with the pre-step branch proves nothing for a born HEAD — it
+  // already held before the step ran, so absorbing the equality would report
+  // a refused switch as a success. An unborn HEAD is the exception: the
+  // equality gains meaning only when the step borned HEAD (a commit now
+  // resolves) — a fatally refused checkout leaves it unborn, so the
+  // unborn→born move is the proof the switch happened.
+  if (landing.branch && nowBranchRaw.trim() === landing.branch) {
+    return (
+      original.ref !== landing.branch ||
+      (original.unborn && nowCommitRaw.trim() !== '')
+    );
+  }
   // Commit equality only proves HEAD sits on the target commit, not that the
   // requested switch happened. That is sufficient for detached landings
   // (tag/SHA targets expect no branch); while HEAD is still attached to a
@@ -566,11 +573,16 @@ async function performCheckout(
   // Snapshot HEAD before switching: `runCheckoutStep` needs it both to
   // verify a hook-failed landing and to roll back a genuinely failed one.
   const originalRef = await readHeadBranchName(cwd, env);
+  // Probed unconditionally: the unborn flag needs it even when attached (see
+  // checkoutLanded) — on an unborn HEAD branch equality alone cannot tell a
+  // refused checkout from a landed one.
+  const originalCommit = (
+    await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')
+  ).trim();
   const original: CheckoutOriginal = {
     ref: originalRef,
-    commit: originalRef
-      ? ''
-      : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim(),
+    commit: originalRef ? '' : originalCommit,
+    unborn: originalCommit === '',
     reflogCount: await headReflogCount(cwd, env),
   };
   // A remote-tracking ref (remote/branch) needs more than a bare

@@ -657,6 +657,88 @@ describe('GitDiffDialog', () => {
     expect(document.body.textContent).not.toContain('Failed to load changes');
   });
 
+  it('surfaces a retry when a revision-triggered source refetch fails but the retained diff succeeds', async () => {
+    // R10-3: a revision bump nulls the cached branch list; when its refetch
+    // fails while the retained ref's diff refetch succeeds, `error` stays
+    // false and the picker unmounts (branchItems is empty while the cache is
+    // null). The latched source error must still surface with a Retry
+    // affordance, or the user is left in branch mode with no picker and no
+    // way to recover short of reopening the dialog.
+    workspaceGitDiff.mockResolvedValue(diffPayload());
+    workspaceGitBranches.mockResolvedValue({
+      head: 'main',
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'feature', isHead: false },
+      ],
+      remote: [],
+      tags: [],
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={0} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const source = document.body.querySelector(
+      '#git-diff-source',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      source.value = 'branch';
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(1);
+
+    // The blip: the revision bump's branch refetch fails while the retained
+    // ref's diff refetch succeeds.
+    workspaceGitBranches.mockRejectedValueOnce(new Error('daemon busy'));
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" revision={1} />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
+    // The retained diff still renders…
+    expect(document.body.textContent).toContain('src/a.ts');
+    // …and the source failure surfaces with a Retry button anyway.
+    expect(document.body.textContent).toContain('Failed to load changes');
+    const retry = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('Retry'),
+    );
+    expect(retry).toBeTruthy();
+
+    workspaceGitBranches.mockResolvedValueOnce({
+      head: 'main',
+      local: [
+        { name: 'main', isHead: true },
+        { name: 'feature', isHead: false },
+      ],
+      remote: [],
+      tags: [],
+    });
+    await act(async () => {
+      retry!.click();
+    });
+    await flush();
+
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).not.toContain('Failed to load changes');
+    expect(
+      document.body.querySelector('button[aria-label="Select branch"]'),
+    ).toBeTruthy();
+  });
+
   it('distinguishes an empty commit list from an unavailable comparison', async () => {
     workspaceGitDiff.mockResolvedValue(diffPayload());
     workspaceGitLog.mockResolvedValue({

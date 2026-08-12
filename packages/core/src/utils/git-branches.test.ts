@@ -1088,6 +1088,36 @@ describe('gitCheckout hook-masked failures and colliding landings (R8)', () => {
     expect(git(dir, 'symbolic-ref', 'HEAD').trim()).toBe('refs/heads/main');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'absorbs a hook failure that bornes an unborn HEAD onto the same branch name',
+    async () => {
+      // A `--track` checkout of origin/master on a fresh repo genuinely
+      // creates refs/heads/master and attaches HEAD — an unborn→born move.
+      // The born name equals the unborn HEAD's branch name, so branch
+      // equality alone cannot tell the landed switch from a fatal refusal;
+      // only HEAD now resolving a commit proves it. Without absorption the
+      // rollback re-runs the failing hook and gitCheckout throws even though
+      // HEAD sits exactly where requested.
+      const donor = makeRepo();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
+      tmpRoots.push(dir);
+      git(dir, 'init', '-q', '-b', 'master');
+      git(dir, 'remote', 'add', 'origin', donor);
+      git(dir, 'fetch', '-q', 'origin');
+      const donorSha = headSha(donor);
+      fs.writeFileSync(
+        path.join(dir, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\nexit 1\n',
+      );
+      fs.chmodSync(path.join(dir, '.git', 'hooks', 'post-checkout'), 0o755);
+
+      const result = await gitCheckout(dir, 'origin/master');
+
+      expect(result).toEqual({ branch: 'master', detached: false });
+      expect(headSha(dir)).toBe(donorSha);
+    },
+  );
+
   it('rejects a refs/heads/ checkout whose branch no longer exists', async () => {
     // Without the existence check the bare fall-through DWIMs onto the
     // same-named tag and silently detaches HEAD.

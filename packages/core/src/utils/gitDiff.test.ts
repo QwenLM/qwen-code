@@ -945,6 +945,78 @@ describe('fetchGitDiff', () => {
     expect(hunks?.hunks.flatMap((h) => h.lines)).toEqual([]);
   });
 
+  it('re-accounts a baseline-tracked gitlink collision as a single row', async () => {
+    // The baseline tracks an embedded repository (gitlink) at `sub`; the
+    // current index untracked it (`git rm --cached`) while the directory
+    // stays on disk. `ls-files --others` collapses the leftover nested repo
+    // to a trailing-slash `sub/` entry that never string-matches the phantom
+    // candidate `sub`, so without normalization the path double-counts: a
+    // phantom deletion row plus an untracked binary row. The collision must
+    // be re-accounted into one opaque row.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await fs.mkdir(path.join(repo, 'sub'));
+    const sub = path.join(repo, 'sub');
+    await git(sub, 'init', '-q');
+    await git(sub, 'config', 'user.email', 'test@example.com');
+    await git(sub, 'config', 'user.name', 'Test');
+    await git(sub, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(sub, 'file.txt'), 'nested\n');
+    await git(sub, 'add', '.');
+    await git(sub, 'commit', '-q', '-m', 'nested');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base with gitlink');
+    await git(repo, 'branch', 'baseline');
+    await git(repo, 'rm', '-q', '--cached', 'sub');
+    await git(repo, 'commit', '-q', '-m', 'untrack gitlink');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+
+    expect(result?.stats).toEqual({
+      filesCount: 1,
+      linesAdded: 0,
+      linesRemoved: 0,
+    });
+    const row = result?.perFileStats.get('sub');
+    expect(row).toMatchObject({ isBinary: true });
+    expect(row?.isDeleted).toBeUndefined();
+    expect(row?.isUntracked).toBeUndefined();
+    expect(result?.perFileStats.has('sub/')).toBe(false);
+  });
+
+  it('keeps an embedded repo the baseline does not track as one untracked row', async () => {
+    // Control for the gitlink collision test: when the baseline never
+    // tracked the nested repo there is no phantom deletion to re-account,
+    // and the trailing-slash normalization must not absorb the untracked
+    // directory entry either.
+    await fs.writeFile(path.join(repo, 'seed.txt'), 'seed\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'branch', 'baseline');
+    const sub = path.join(repo, 'sub');
+    await fs.mkdir(sub);
+    await git(sub, 'init', '-q');
+    await git(sub, 'config', 'user.email', 'test@example.com');
+    await git(sub, 'config', 'user.name', 'Test');
+    await git(sub, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(sub, 'file.txt'), 'nested\n');
+    await git(sub, 'add', '.');
+    await git(sub, 'commit', '-q', '-m', 'nested');
+
+    const result = await fetchGitDiff(repo, {
+      mode: 'branch',
+      ref: 'baseline',
+    });
+
+    expect(result?.stats.filesCount).toBe(1);
+    expect(result?.perFileStats.get('sub/')).toMatchObject({
+      isBinary: true,
+      isUntracked: true,
+    });
+  });
+
   it('drops a collision whose only difference is converted line endings', async () => {
     // With line-ending conversion active, git stores LF and smudges CRLF:
     // a git-unchanged collision file differs only by trailing CRs, and the
