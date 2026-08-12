@@ -5400,6 +5400,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
+        const eventEpoch = entry.events.epoch;
         const seenCursors = new Set<string>();
         let emptyPageCount = 0;
         let cursor: string | undefined;
@@ -5437,12 +5438,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId
         ) {
           return {
             compactedReplay: page.events,
             liveJournal: [],
             lastEventId,
+            eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),
             ...(page.replayError !== undefined
               ? { replayError: page.replayError }
