@@ -1313,6 +1313,70 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('ensureLeadingAssistantThinking relocates a first thinking run that starts AFTER a tool_use block', () => {
+      // Every other fixture here puts the first thinking run ahead of the
+      // first tool_use, so the contract for a run starting after one is
+      // pinned in neither direction. The shape is reachable through this
+      // pass's own documented source: a truncated turn ending in a
+      // functionCall whose recovery continuation opens with
+      // thought + functionCall. Current behavior relocates it -- the scan is
+      // a bare findIndex(isThinking) with no tool_use-position condition.
+      // Pinning that stops a plausible future "skip when runStart is after
+      // the first tool_use" refinement from silently shipping the
+      // text-leading tool_use shape #3786 rejects.
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'text A' },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [
+                { text: 'thinking E2', thought: true, thoughtSignature: 's2' },
+                { functionCall: { id: 't2', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: 't2',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { ensureLeadingAssistantThinking: true },
+      );
+
+      const blocks = messages.filter((m) => m.role === 'assistant')[0]
+        ?.content as Array<{ type: string }>;
+      expect(blocks.map((b) => b.type)).toEqual([
+        'thinking',
+        'text',
+        'tool_use',
+        'tool_use',
+      ]);
+    });
+
     it('ensureLeadingAssistantThinking leaves an assistant message with no tool_use in chronological order', () => {
       // The wire only enforces leading thinking on tool_use turns
       // (this option's documented scope, and the boundary
