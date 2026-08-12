@@ -69,7 +69,6 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     profile: 'channels.editor.field.dws.profile',
     disableAtMessages: 'channels.editor.field.dws.disableAtMessages',
     imUserIds: 'channels.editor.field.dws.imUserIds',
-    imGroupIds: 'channels.editor.field.dws.imGroupIds',
     documentIds: 'channels.editor.field.dws.documentIds',
     wikiSpaceIds: 'channels.editor.field.dws.wikiSpaceIds',
     wikiDiscoveryInterval: 'channels.editor.field.dws.wikiDiscoveryInterval',

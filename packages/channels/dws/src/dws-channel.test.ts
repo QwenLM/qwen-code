@@ -276,7 +276,7 @@ async function readyPolicyChannel(
 }
 
 describe('DwsChannel', () => {
-  it('authenticates and starts each configured DWS message source', async () => {
+  it('starts supported DWS message sources and ignores legacy groups', async () => {
     const client = new FakeDwsClient();
 
     await readyChannel(
@@ -288,7 +288,6 @@ describe('DwsChannel', () => {
     expect(client.streams.map((item) => item.source)).toEqual([
       { kind: 'at' },
       { kind: 'direct', userId: 'user-2' },
-      { kind: 'group', conversationId: 'cid-2' },
     ]);
   });
 
@@ -558,53 +557,9 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('requires the configured prefix for watched group messages', async () => {
+  it('deduplicates a successful message across restarts', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ disableAtMessages: true, imGroupIds: ['cid-1'] }),
-    );
-
-    await client.emit(
-      0,
-      message('user_im_message_receive_group', 'ambient', 'normal chat'),
-    );
-    await client.emit(
-      0,
-      message(
-        'user_im_message_receive_group',
-        'triggered',
-        '/qwen summarize this',
-      ),
-    );
-
-    expect(channel.inbound.map((item) => item.text)).toEqual([
-      'summarize this',
-    ]);
-  });
-
-  it('still dispatches an @ event after the same ambient group event', async () => {
-    const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ imGroupIds: ['cid-1'] }),
-    );
-    const duplicate = message(
-      'user_im_message_receive_group',
-      'message-1',
-      'please help',
-    );
-
-    await client.emit(1, duplicate);
-    await client.emit(0, { ...duplicate, type: 'user_im_message_receive_at' });
-
-    expect(channel.inbound.map((item) => item.text)).toEqual(['please help']);
-  });
-
-  it('deduplicates a successful message across event streams and restarts', async () => {
-    const client = new FakeDwsClient();
-    const config = makeConfig({ imGroupIds: ['cid-1'] });
-    const first = await readyChannel(client, config, 'persistent-dws');
+    const first = await readyChannel(client, makeConfig(), 'persistent-dws');
     const duplicate = message(
       'user_im_message_receive_at',
       'message-1',
@@ -612,11 +567,6 @@ describe('DwsChannel', () => {
     );
 
     await client.emit(0, duplicate);
-    await client.emit(1, {
-      ...duplicate,
-      type: 'user_im_message_receive_group',
-      content: '/qwen please help',
-    });
     first.disconnect();
 
     const secondClient = new FakeDwsClient();
@@ -650,10 +600,7 @@ describe('DwsChannel', () => {
 
   it('lets concurrent duplicates retry once after the first dispatch fails', async () => {
     const client = new FakeDwsClient();
-    const channel = await readyChannel(
-      client,
-      makeConfig({ imGroupIds: ['cid-1'] }),
-    );
+    const channel = await readyChannel(client);
     const duplicate = message(
       'user_im_message_receive_at',
       'message-1',
@@ -675,13 +622,8 @@ describe('DwsChannel', () => {
 
     const first = client.emit(0, duplicate);
     await vi.waitFor(() => expect(attempts).toBe(1));
-    const retry = {
-      ...duplicate,
-      type: 'user_im_message_receive_group',
-      content: '/qwen please retry',
-    } as const;
-    const second = client.emit(1, retry);
-    const third = client.emit(1, retry);
+    const second = client.emit(0, duplicate);
+    const third = client.emit(0, duplicate);
     releaseFirst();
 
     await expect(first).rejects.toThrow('agent unavailable');

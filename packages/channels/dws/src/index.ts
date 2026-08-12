@@ -69,13 +69,6 @@ export const plugin: ChannelPlugin = {
         description: 'DingTalk user IDs whose direct messages start tasks',
       },
       {
-        key: 'imGroupIds',
-        label: 'Message groups',
-        kind: 'string-list',
-        description:
-          'Open conversation IDs whose prefixed messages start tasks',
-      },
-      {
         key: 'documentIds',
         label: 'Documents',
         kind: 'string-list',
@@ -97,10 +90,9 @@ export const plugin: ChannelPlugin = {
       },
       {
         key: 'trigger',
-        label: 'Poll-source trigger',
+        label: 'Document-comment trigger',
         kind: 'string',
-        description:
-          'Fallback prefix for document comments and configured group messages. Defaults to /qwen',
+        description: 'Fallback prefix for document comments. Defaults to /qwen',
       },
       {
         key: 'pollInterval',
@@ -151,23 +143,13 @@ export const plugin: ChannelPlugin = {
       ) {
         return 'DWS disableAtMessages must be a boolean.';
       }
-      for (const field of [
-        'imUserIds',
-        'imGroupIds',
-        'documentIds',
-        'wikiSpaceIds',
-      ]) {
+      for (const field of ['imUserIds', 'documentIds', 'wikiSpaceIds']) {
         if (!validStringList(config[field])) {
           return `DWS ${field} must contain non-empty strings.`;
         }
       }
       const hasAtSource = config['disableAtMessages'] !== true;
-      const hasListSource = [
-        'imUserIds',
-        'imGroupIds',
-        'documentIds',
-        'wikiSpaceIds',
-      ].some(
+      const hasListSource = ['imUserIds', 'documentIds', 'wikiSpaceIds'].some(
         (field) => Array.isArray(config[field]) && config[field].length > 0,
       );
       if (!hasAtSource && !hasListSource) {

@@ -18,7 +18,6 @@ describe('DWS channel plugin', () => {
       'profile',
       'disableAtMessages',
       'imUserIds',
-      'imGroupIds',
       'documentIds',
       'wikiSpaceIds',
       'wikiDiscoveryInterval',
@@ -66,6 +65,18 @@ describe('DWS channel plugin', () => {
         disableAtMessages: true,
         wikiSpaceIds: ['wiki-1'],
       }),
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({
+        disableAtMessages: true,
+        imGroupIds: ['legacy-group'],
+      }),
+    ).toContain('at least one');
+  });
+
+  it('ignores the removed imGroupIds setting', () => {
+    expect(
+      plugin.management?.validateConfig?.({ imGroupIds: 'legacy-group' }),
     ).toBeUndefined();
   });
 

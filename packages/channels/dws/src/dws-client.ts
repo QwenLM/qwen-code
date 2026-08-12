@@ -34,20 +34,14 @@ export interface DwsDocumentComment {
   replies: DwsDocumentComment[];
 }
 
-export type DwsImSource =
-  | { kind: 'at' }
-  | { kind: 'direct'; userId: string }
-  | { kind: 'group'; conversationId: string };
+export type DwsImSource = { kind: 'at' } | { kind: 'direct'; userId: string };
 
 export type DwsImTarget =
   | { kind: 'group'; conversationId: string }
   | { kind: 'direct'; openDingTalkId: string };
 
 export interface DwsImMessage {
-  type:
-    | 'user_im_message_receive_at'
-    | 'user_im_message_receive_o2o'
-    | 'user_im_message_receive_group';
+  type: 'user_im_message_receive_at' | 'user_im_message_receive_o2o';
   eventId: string;
   messageId: string;
   conversationId: string;
@@ -375,8 +369,7 @@ export function parseDwsImEvent(line: string): DwsImMessage {
   const type = firstString(event, ['type', 'event_type', 'eventType']);
   if (
     type !== 'user_im_message_receive_at' &&
-    type !== 'user_im_message_receive_o2o' &&
-    type !== 'user_im_message_receive_group'
+    type !== 'user_im_message_receive_o2o'
   ) {
     throw new Error(`Unsupported DWS event type: ${type ?? 'unknown'}.`);
   }
@@ -427,8 +420,6 @@ function eventKey(source: DwsImSource): string {
       return 'user_im_message_receive_at';
     case 'direct':
       return 'user_im_message_receive_o2o';
-    case 'group':
-      return 'user_im_message_receive_group';
     default:
       throw new Error('Unsupported DWS IM source.');
   }
@@ -493,9 +484,6 @@ export class DwsClient implements DwsClientLike {
       'compact',
     ];
     if (source.kind === 'direct') args.push('--user', source.userId);
-    if (source.kind === 'group') {
-      args.push('--group', source.conversationId);
-    }
     return this.eventStarter(
       this.executable,
       args,

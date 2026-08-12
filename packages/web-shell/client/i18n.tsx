@@ -2605,9 +2605,6 @@ const EN: Messages = {
     'Direct-message users (comma-separated)',
   'channels.editor.field.dws.imUserIds.description':
     'DingTalk user IDs whose direct messages should start tasks',
-  'channels.editor.field.dws.imGroupIds': 'Message groups (comma-separated)',
-  'channels.editor.field.dws.imGroupIds.description':
-    'Open conversation IDs whose prefixed messages should start tasks',
   'channels.editor.field.dws.documentIds': 'Documents (comma-separated)',
   'channels.editor.field.dws.documentIds.description':
     'DingTalk document IDs or URLs to watch',
@@ -2618,9 +2615,9 @@ const EN: Messages = {
     'Knowledge-base discovery interval (ms)',
   'channels.editor.field.dws.wikiDiscoveryInterval.description':
     'How often knowledge-base document lists are refreshed. Defaults to 300000 milliseconds',
-  'channels.editor.field.dws.trigger': 'Poll-source trigger',
+  'channels.editor.field.dws.trigger': 'Document-comment trigger',
   'channels.editor.field.dws.trigger.description':
-    'Prefix for document comments and configured group messages. Defaults to /qwen',
+    'Fallback prefix for document comments. Defaults to /qwen',
   'channels.editor.field.dws.pollInterval': 'Poll interval (ms)',
   'channels.editor.field.dws.pollInterval.description':
     'Defaults to 60000 milliseconds',
@@ -5320,9 +5317,6 @@ const ZH: Messages = {
   'channels.editor.field.dws.imUserIds': '单聊用户（逗号分隔）',
   'channels.editor.field.dws.imUserIds.description':
     '这些钉钉用户 ID 发来的单聊消息会启动任务',
-  'channels.editor.field.dws.imGroupIds': '消息群（逗号分隔）',
-  'channels.editor.field.dws.imGroupIds.description':
-    '这些群会话中带触发词的消息会启动任务',
   'channels.editor.field.dws.documentIds': '文档（逗号分隔）',
   'channels.editor.field.dws.documentIds.description':
     '需要监听的钉钉文档 ID 或 URL',
@@ -5332,9 +5326,9 @@ const ZH: Messages = {
   'channels.editor.field.dws.wikiDiscoveryInterval': '知识库发现间隔（毫秒）',
   'channels.editor.field.dws.wikiDiscoveryInterval.description':
     '刷新知识库文档列表的间隔，默认 300000 毫秒',
-  'channels.editor.field.dws.trigger': '轮询来源触发词',
+  'channels.editor.field.dws.trigger': '文档评论触发词',
   'channels.editor.field.dws.trigger.description':
-    '文档评论和指定群消息以此前缀开头时启动任务，默认为 /qwen',
+    '文档评论未提及当前账号时使用的备用前缀，默认为 /qwen',
   'channels.editor.field.dws.pollInterval': '轮询间隔（毫秒）',
   'channels.editor.field.dws.pollInterval.description': '默认 60000 毫秒',
   'channels.editor.field.dws.groupPolicy': '群组策略',

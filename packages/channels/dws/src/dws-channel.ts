@@ -42,7 +42,6 @@ interface DwsConfig extends ChannelConfig {
   profile?: unknown;
   disableAtMessages?: unknown;
   imUserIds?: unknown;
-  imGroupIds?: unknown;
   documentIds?: unknown;
   wikiSpaceIds?: unknown;
   wikiDiscoveryInterval?: unknown;
@@ -219,8 +218,7 @@ function isNoReply(text: string): boolean {
 
 function sourceLabel(source: DwsImSource): string {
   if (source.kind === 'at') return '@ messages';
-  if (source.kind === 'direct') return 'direct messages';
-  return 'group messages';
+  return 'direct messages';
 }
 
 function isPersistedTarget(value: unknown): value is PersistedImTarget {
@@ -317,7 +315,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       DEFAULT_WIKI_DISCOVERY_INTERVAL_MS,
     );
     const imUserIds = configuredList(config.imUserIds, 'imUserIds');
-    const imGroupIds = configuredList(config.imGroupIds, 'imGroupIds');
     const disableAtMessages = configuredBoolean(
       config.disableAtMessages,
       'disableAtMessages',
@@ -335,9 +332,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const imSources: DwsImSource[] = [
       ...(!disableAtMessages ? ([{ kind: 'at' }] as const) : []),
       ...imUserIds.map((userId): DwsImSource => ({ kind: 'direct', userId })),
-      ...imGroupIds.map(
-        (conversationId): DwsImSource => ({ kind: 'group', conversationId }),
-      ),
     ];
     if (
       imSources.length === 0 &&
@@ -800,7 +794,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       source.kind === 'direct'
         ? { kind: 'direct', openDingTalkId: message.senderId }
         : { kind: 'group', conversationId: message.conversationId };
-    const targetChanged = this.rememberImTarget(message.conversationId, target);
+    this.rememberImTarget(message.conversationId, target);
 
     if (this.ownUserIds.has(message.senderId)) {
       this.markProcessedMessage(key);
@@ -808,17 +802,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
 
-    const text =
-      source.kind === 'group'
-        ? stripTrigger(message.content, this.trigger)
-        : message.content.trim();
+    const text = message.content.trim();
     if (!text) {
-      if (source.kind !== 'group') {
-        this.markProcessedMessage(key);
-        this.saveCursor();
-      } else if (targetChanged) {
-        this.saveCursor();
-      }
+      this.markProcessedMessage(key);
+      this.saveCursor();
       return;
     }
 
@@ -832,7 +819,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       messageId: message.messageId,
       text,
       isGroup,
-      isMentioned: source.kind === 'at' || source.kind === 'group',
+      isMentioned: source.kind === 'at',
       isReplyToBot: false,
       metadata: [
         `DWS event type: ${message.type}`,

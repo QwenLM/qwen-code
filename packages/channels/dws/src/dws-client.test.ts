@@ -77,7 +77,7 @@ describe('DwsClient', () => {
     });
   });
 
-  it('subscribes to a selected group and normalizes compact events', async () => {
+  it('subscribes to @ messages and normalizes compact events', async () => {
     let onLine!: (line: string) => void | Promise<void>;
     const eventStarter = vi.fn<DwsEventProcessStarter>(
       async (_executable, _args, lineHandler) => {
@@ -92,18 +92,14 @@ describe('DwsClient', () => {
     );
     const onMessage = vi.fn();
 
-    await client.subscribeToIm(
-      { kind: 'group', conversationId: 'cid-1' },
-      onMessage,
-      vi.fn(),
-    );
+    await client.subscribeToIm({ kind: 'at' }, onMessage, vi.fn());
     await onLine(
       json({
-        type: 'user_im_message_receive_group',
+        type: 'user_im_message_receive_at',
         event_id: 'event-1',
         message_id: 'message-1',
         conversation_id: 'cid-1',
-        content: '{"content":"/qwen check this"}',
+        content: '{"content":"check this"}',
         sender_open_dingtalk_id: 'open-alice',
         sender: 'Alice',
       }),
@@ -116,21 +112,19 @@ describe('DwsClient', () => {
         'corp:user',
         'event',
         'consume',
-        'user_im_message_receive_group',
+        'user_im_message_receive_at',
         '--format',
         'compact',
-        '--group',
-        'cid-1',
       ],
       expect.any(Function),
       expect.any(Function),
     );
     expect(onMessage).toHaveBeenCalledWith({
-      type: 'user_im_message_receive_group',
+      type: 'user_im_message_receive_at',
       eventId: 'event-1',
       messageId: 'message-1',
       conversationId: 'cid-1',
-      content: '/qwen check this',
+      content: 'check this',
       senderId: 'open-alice',
       senderName: 'Alice',
     });
@@ -162,13 +156,13 @@ describe('DwsClient', () => {
       parseDwsImEvent(
         json({
           data: json({
-            type: 'user_im_message_receive_group',
+            type: 'user_im_message_receive_at',
             event_id: 'event-1',
             payload: {
               body: {
                 openMessageId: 'message-1',
                 openConversationId: 'cid-1',
-                content: '{"content":"/qwen check this"}',
+                content: '{"content":"check this"}',
                 senderOpenDingTalkId: 'open-alice',
                 sender: 'Alice',
               },
@@ -177,14 +171,28 @@ describe('DwsClient', () => {
         }),
       ),
     ).toEqual({
-      type: 'user_im_message_receive_group',
+      type: 'user_im_message_receive_at',
       eventId: 'event-1',
       messageId: 'message-1',
       conversationId: 'cid-1',
-      content: '/qwen check this',
+      content: 'check this',
       senderId: 'open-alice',
       senderName: 'Alice',
     });
+  });
+
+  it('rejects legacy ambient group events', () => {
+    expect(() =>
+      parseDwsImEvent(
+        json({
+          type: 'user_im_message_receive_group',
+          message_id: 'message-1',
+          conversation_id: 'cid-1',
+          content: '/qwen check this',
+          sender_open_dingtalk_id: 'open-alice',
+        }),
+      ),
+    ).toThrow('Unsupported DWS event type');
   });
 
   it('uses DWS idempotency keys for message sends and replies', async () => {
