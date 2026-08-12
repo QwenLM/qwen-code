@@ -328,8 +328,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonLogHealth>().not.toBeNever();
     expectTypeOf<DaemonLogIssue>().not.toBeNever();
     expectTypeOf<
-      Pick<DaemonStatusReport['limits'], 'compactedReplayMaxBytes'>
-    >().toMatchTypeOf<
+      DaemonStatusReport['limits']['compactedReplayMaxBytes']
+    >().toEqualTypeOf<number>();
+    expectTypeOf<
       Pick<
         DaemonStatusReport['limits'],
         | 'acpPreAttachMaxFramesPerStream'
@@ -338,21 +339,34 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
         | 'acpPreAttachMaxPayloadBytesPerConnection'
         | 'acpPreAttachMaxPayloadBytesGlobal'
       >
-    >();
+    >().toEqualTypeOf<{
+      acpPreAttachMaxFramesPerStream?: number | null;
+      acpPreAttachMaxFramesPerConnection?: number | null;
+      acpPreAttachMaxFramesGlobal?: number | null;
+      acpPreAttachMaxPayloadBytesPerConnection?: number | null;
+      acpPreAttachMaxPayloadBytesGlobal?: number | null;
+    }>();
     expectTypeOf<
       DaemonStatusReport['limits']['acpPreAttachMaxPayloadBytesGlobal']
     >().toEqualTypeOf<number | null | undefined>();
     expectTypeOf<
-      Pick<DaemonStatusReport['runtime']['transport']['acp'], 'enabled'>
-    >().toMatchTypeOf<
       Pick<DaemonStatusReport['runtime']['transport']['acp'], 'preAttach'>
-    >();
+    >().toEqualTypeOf<{
+      preAttach?: {
+        bufferedConnectionFrames: number;
+        bufferedSessionFrames: number;
+        pendingDeliveryFrames: number;
+        usedFrames: number;
+        usedBytes: number;
+        highWaterFrames: number;
+        highWaterBytes: number;
+        guardFailures: number;
+      };
+    }>();
     expectTypeOf<undefined>().toMatchTypeOf<
       DaemonStatusReport['runtime']['transport']['acp']['preAttach']
     >();
-    expectTypeOf<{
-      connectionIdPrefix: string;
-    }>().toMatchTypeOf<
+    expectTypeOf<
       Pick<
         NonNullable<DaemonStatusReport['full']>['acpConnections'][number],
         | 'bufferedConnectionFrames'
@@ -361,7 +375,13 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
         | 'preAttachOwnedFrames'
         | 'preAttachOwnedBytes'
       >
-    >();
+    >().toEqualTypeOf<{
+      bufferedConnectionFrames?: number;
+      bufferedSessionFrames?: number;
+      pendingDeliveryFrames?: number;
+      preAttachOwnedFrames?: number;
+      preAttachOwnedBytes?: number;
+    }>();
     expectTypeOf<
       NonNullable<
         DaemonStatusReport['full']
