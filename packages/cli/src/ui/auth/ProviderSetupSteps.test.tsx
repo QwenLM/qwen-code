@@ -7,7 +7,7 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, customProvider } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -71,6 +71,54 @@ describe('ProviderSetupSteps', () => {
       paste: false,
       ...overrides,
     });
+  };
+
+  const createProtocolFlow = (): ProviderSetupFlow => {
+    const noop = vi.fn();
+    return {
+      state: {
+        provider: customProvider,
+        step: 'protocol',
+        stepIndex: 0,
+        totalSteps: 1,
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: '',
+        baseUrlPlaceholder: '',
+        baseUrlOptionIndex: 0,
+        baseUrlError: null,
+        apiKey: '',
+        apiKeyError: null,
+        modelIds: '',
+        modelIdsError: null,
+        thinkingEnabled: false,
+        modalityEnabled: false,
+        modalityImage: true,
+        modalityVideo: true,
+        modalityAudio: true,
+        modalityPdf: false,
+        contextWindowSize: '',
+        focusedConfigIndex: 0,
+        previewJson: '',
+      },
+      start: noop,
+      reset: noop,
+      goBack: noop,
+      selectProtocol: noop,
+      selectBaseUrl: noop,
+      highlightBaseUrl: noop,
+      submitBaseUrl: noop,
+      changeBaseUrl: noop,
+      changeApiKey: noop,
+      submitApiKey: noop,
+      changeModelIds: noop,
+      submitModelIds: noop,
+      moveAdvancedFocusUp: noop,
+      moveAdvancedFocusDown: noop,
+      toggleFocusedAdvancedOption: noop,
+      changeContextWindowSize: noop,
+      submitAdvancedConfig: noop,
+      submit: noop,
+    } as unknown as ProviderSetupFlow;
   };
 
   const createAdvancedConfigFlow = (): ProviderSetupFlow => {
@@ -258,6 +306,17 @@ describe('ProviderSetupSteps', () => {
       submit: noop,
     } as unknown as ProviderSetupFlow;
   };
+
+  it('renders OpenAI Responses for the custom provider protocol step', () => {
+    const flow = createProtocolFlow();
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    expect(lastFrame()).toContain('OpenAI Responses');
+    unmount();
+  });
 
   it('maps Ctrl+P/N to advanced-config focus navigation', () => {
     const flow = createAdvancedConfigFlow();
