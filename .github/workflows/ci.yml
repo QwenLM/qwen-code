@@ -511,16 +511,13 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the
           # failing run captures the spike, and dump full state on failure.
-          # Route test temp files through a short alias to the runner's
-          # disk-backed, per-registration temp area. The alias keeps Unix
-          # socket paths below Linux's 108-byte cap while avoiding shared
-          # /tmp storage across the several registrations on one host.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
-            TMP_ALIAS="$(mktemp -d /var/tmp/qwen-ci-XXXXXX)"
-            trap 'rm -rf "$TMP_ALIAS"' EXIT
-            ln -s "$TMPDIR" "$TMP_ALIAS/disk"
-            export TMPDIR="$TMP_ALIAS/disk"
+            TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX)"
+            export TMPDIR
+            trap 'rm -rf "$TMPDIR"' EXIT
           fi
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
@@ -832,16 +829,13 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the
           # failing run captures the spike, and dump full state on failure.
-          # Route test temp files through a short alias to the runner's
-          # disk-backed, per-registration temp area. The alias keeps Unix
-          # socket paths below Linux's 108-byte cap while avoiding shared
-          # /tmp storage across the several registrations on one host.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
-            TMP_ALIAS="$(mktemp -d /var/tmp/qwen-ci-XXXXXX)"
-            trap 'rm -rf "$TMP_ALIAS"' EXIT
-            ln -s "$TMPDIR" "$TMP_ALIAS/disk"
-            export TMPDIR="$TMP_ALIAS/disk"
+            TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX)"
+            export TMPDIR
+            trap 'rm -rf "$TMPDIR"' EXIT
           fi
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
@@ -961,16 +955,13 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample the routed temp filesystem every 10s so the
           # failing run captures the spike, and dump full state on failure.
-          # Route test temp files through a short alias to the runner's
-          # disk-backed, per-registration temp area. The alias keeps Unix
-          # socket paths below Linux's 108-byte cap while avoiding shared
-          # /tmp storage across the several registrations on one host.
+          # Keep Linux temp paths real and short on disk-backed /var/tmp.
+          # Symlink aliases break tests that intentionally compare real paths.
           export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           if [ "${RUNNER_OS:-}" = "Linux" ]; then
-            TMP_ALIAS="$(mktemp -d /var/tmp/qwen-ci-XXXXXX)"
-            trap 'rm -rf "$TMP_ALIAS"' EXIT
-            ln -s "$TMPDIR" "$TMP_ALIAS/disk"
-            export TMPDIR="$TMP_ALIAS/disk"
+            TMPDIR="$(mktemp -d /var/tmp/qwen-ci-XXXXXX)"
+            export TMPDIR
+            trap 'rm -rf "$TMPDIR"' EXIT
           fi
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!

@@ -5,13 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -27,8 +21,8 @@ const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
-  it.skipIf(process.platform === 'win32')(
-    'keeps runner temp-backed Unix socket paths short on Linux',
+  it.runIf(process.platform === 'linux')(
+    'keeps Linux Unix socket paths short and identity-stable',
     () => {
       const workflow = readFileSync(
         path.join(ROOT, '.github/workflows/ci.yml'),
@@ -64,7 +58,8 @@ describe('no-AK integration CI wiring', () => {
           .trim()
           .split('\n');
 
-        expect(resolvedTemp).toBe(realpathSync(longRunnerTemp));
+        expect(resolvedTemp).toBe(routedTemp);
+        expect(routedTemp).toMatch(/^\/var\/tmp\/qwen-ci-/);
         expect(
           Buffer.byteLength(
             path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
