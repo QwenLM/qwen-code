@@ -60,6 +60,7 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
+  customization = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -67,7 +68,9 @@ function renderToolLine(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <ToolLine tool={tool} {...props} />
+        <WebShellCustomizationProvider value={customization}>
+          <ToolLine tool={tool} {...props} />
+        </WebShellCustomizationProvider>
       </I18nProvider>,
     );
   });
@@ -97,9 +100,9 @@ function renderToolGroup(
 
 const t = (key: string, values?: Record<string, string | number>): string => {
   if (key === 'toolGroup.running') {
-    return `Running ${values?.name ?? 'tool'}${
-      Number(values?.count ?? 0) > 1 ? ` · ${values?.count ?? 0} tools` : ''
-    }`;
+    return Number(values?.count ?? 0) > 1
+      ? `Running ${values?.count ?? 0} tools: ${values?.name ?? 'tool'}`
+      : `Running ${values?.name ?? 'tool'}`;
   }
   if (key === 'toolGroup.summary') {
     return `Ran ${values?.count ?? 0} tool${values?.count === 1 ? '' : 's'}`;
@@ -149,7 +152,7 @@ describe('tool group summary logic', () => {
 
     expect(hasActiveAgents(tools)).toBe(true);
     expect(getActiveTool(tools).callId).toBe('active');
-    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile');
   });
 
   it('uses a static summary when only background agents remain active', () => {
@@ -182,7 +185,7 @@ describe('tool group summary logic', () => {
       }),
     ];
 
-    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile');
   });
 
   it('describes every active foreground tool until all tools finish', () => {
@@ -205,7 +208,7 @@ describe('tool group summary logic', () => {
     const summary = formatToolGroupSummary(tools, t);
     expect(summary).toContain('ReadFile package.json');
     expect(summary).toContain('ToolGroup');
-    expect(summary).toContain('3 tools');
+    expect(summary).toContain('Running 2 tools:');
   });
 
   it('keeps workspace-relative paths in multi-tool summaries', () => {
@@ -225,7 +228,7 @@ describe('tool group summary logic', () => {
     ];
 
     expect(formatToolGroupSummary(tools, t, '/workspace')).toBe(
-      'Running ReadFile src/index.ts · ReadFile test/index.ts · 2 tools',
+      'Running 2 tools: ReadFile src/index.ts · ReadFile test/index.ts',
     );
   });
 
@@ -253,7 +256,7 @@ describe('tool group summary logic', () => {
 
     const summary = formatToolGroupSummary(tools, t);
     expect(summary).toBe(
-      "Running ReadFile package.json · Grep 'ToolGroup' in path './' · 3 tools",
+      "Running 2 tools: ReadFile package.json · Grep 'ToolGroup' in path './'",
     );
   });
 
@@ -666,6 +669,37 @@ describe('tool row rendering', () => {
     }
   });
 
+  it('shows live elapsed time after expanding a single-tool group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(6_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          toolName: 'ReadFile',
+          status: 'in_progress',
+          startTime: 1_000,
+        }),
+      ]);
+      const summary = container.querySelector('button');
+      expect(summary?.textContent).not.toContain('5s');
+
+      act(() => summary?.click());
+      const content = container.querySelector(
+        '[class*="chatSummaryContentClip"]',
+      );
+      expect(content?.className).not.toContain('chatSummaryContentCollapsed');
+      expect(content?.textContent).toContain('5s');
+
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(content?.textContent).toContain('6s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not show elapsed time after a tool completes', () => {
     const container = renderToolLine(
       makeTool({
@@ -677,6 +711,21 @@ describe('tool row rendering', () => {
     );
 
     expect(container.textContent).not.toContain('5s');
+  });
+
+  it('keeps completed elapsed data available to custom header renderers', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        status: 'completed',
+        startTime: 1_000,
+        endTime: 6_000,
+      }),
+      {},
+      { renderToolHeaderExtra: (info) => <span>{info.elapsed}</span> },
+    );
+
+    expect(container.textContent).toContain('5s');
   });
 
   it('shows a tool-kind icon on every expanded group row', () => {

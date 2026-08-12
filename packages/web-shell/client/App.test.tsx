@@ -4645,6 +4645,29 @@ describe('App compact mode', () => {
       false,
     );
   });
+
+  it('restores compact mode from the workspace setting', async () => {
+    testState.settings = [
+      {
+        key: 'ui.compactMode',
+        type: 'boolean',
+        label: 'Compact mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        values: { effective: true, workspace: true },
+      },
+    ];
+    renderApp();
+
+    await toggleCompactMode();
+
+    expect(settingsSetValue).toHaveBeenCalledWith(
+      'workspace',
+      'ui.compactMode',
+      false,
+    );
+  });
 });
 
 describe('App plan todos', () => {

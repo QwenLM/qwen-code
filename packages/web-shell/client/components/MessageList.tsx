@@ -2506,7 +2506,6 @@ export const MessageList = memo(
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
-    const { collapseCompletedTurns } = useWebShellCustomization();
     const mergedMessages = useMemo(
       () =>
         compactMode
@@ -2747,6 +2746,7 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
+    const { collapseCompletedTurns } = useWebShellCustomization();
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>

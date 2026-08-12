@@ -567,7 +567,7 @@ function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
   return (
     <DefaultToolHeaderExtra
       description={info.description}
-      elapsed={info.elapsed}
+      elapsed={isActiveToolStatus(info.tool.status) ? info.elapsed : ''}
     />
   );
 }
@@ -612,7 +612,7 @@ export function formatToolGroupSummary(
     );
     return t('toolGroup.running', {
       name: activeSummaries.join(' · '),
-      count: tools.length,
+      count: foregroundActiveTools.length,
     });
   }
 
@@ -1243,9 +1243,7 @@ export const ToolLine = memo(function ToolLine({
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
-      : isRunningTool
-        ? formatElapsed(tool.startTime, now)
-        : '';
+      : formatElapsed(tool.startTime, isRunningTool ? now : tool.endTime);
 
   const name = tool.toolName.toLowerCase();
   const opensMonitorDetails =
@@ -1304,6 +1302,11 @@ export const ToolLine = memo(function ToolLine({
 
   return (
     <div className={styles.line}>
+      {hideHeader && isRunningTool && elapsed && (
+        <div className={styles.lineMain}>
+          <span className={styles.lineElapsed}>{elapsed}</span>
+        </div>
+      )}
       {!hideHeader && (
         <div
           className={`${styles.lineMain} ${interactive ? styles.lineExpandable : ''}`}
@@ -1492,7 +1495,7 @@ export const ToolGroup = memo(function ToolGroup({
     singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
-  const summaryIconTool = activeTool ?? tools[0];
+  const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
