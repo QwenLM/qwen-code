@@ -214,6 +214,7 @@ export function useMessagesFromBlocks(
     | {
         key: string;
         request: Promise<ReconciliationRound>;
+        processed: boolean;
       }
     | undefined
   >(undefined);
@@ -264,7 +265,7 @@ export function useMessagesFromBlocks(
     }
     const requestKey = `${sessionId}:${pendingBackgroundAgentKey}:${backgroundAgentNotificationKey}`;
     const retryScopeKey = `${sessionId}:${pendingBackgroundAgentKey}`;
-    const existingRequest = reconciliationRequestRef.current;
+    const cachedRound = reconciliationRequestRef.current;
     const callIds = pendingBackgroundAgentKey.split('|');
     for (const callId of [...missingAgentMissesRef.current.keys()]) {
       if (!callIds.includes(callId)) {
@@ -272,63 +273,70 @@ export function useMessagesFromBlocks(
       }
     }
     const roundErrors: Array<{ callId: string; error: unknown }> = [];
-    const request =
-      existingRequest?.key === requestKey
-        ? existingRequest.request
-        : Promise.allSettled(
-            callIds.map(async (callId) => {
-              try {
-                const resolution =
-                  await workspace.client.resolveSubagentSession(
-                    sessionId,
-                    callId,
-                  );
-                missingAgentMissesRef.current.delete(callId);
-                return [callId, resolution] as const;
-              } catch (error) {
-                if (isSubagentSessionNotFound(error, callId)) {
-                  const misses =
-                    (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
-                  missingAgentMissesRef.current.set(callId, misses);
-                  if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
-                    return [callId, { status: 'failed' }] as const;
-                  }
-                } else if (
-                  isSessionLevelNotFound(error) ||
-                  (error instanceof DaemonHttpError &&
-                    error.status >= 400 &&
-                    error.status < 500 &&
-                    error.status !== 404 &&
-                    error.status !== 429)
-                ) {
-                  // Permanent client errors never recover on retry; make the
-                  // card terminal so it can stop gating the UI. A 429 is the
-                  // daemon's rate-limit signal and unrecognized 404 shapes
-                  // stay transient, so neither may fail the agent.
+    // A settled round that was already processed must not be reused: a
+    // re-run (for example a client identity swap) would attach a second
+    // handler and count the same round against the retry budget twice.
+    const roundIsReusable =
+      !!cachedRound && cachedRound.key === requestKey && !cachedRound.processed;
+    const request = roundIsReusable
+      ? cachedRound.request
+      : Promise.allSettled(
+          callIds.map(async (callId) => {
+            try {
+              const resolution = await workspace.client.resolveSubagentSession(
+                sessionId,
+                callId,
+              );
+              missingAgentMissesRef.current.delete(callId);
+              return [callId, resolution] as const;
+            } catch (error) {
+              if (isSubagentSessionNotFound(error, callId)) {
+                const misses =
+                  (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
+                missingAgentMissesRef.current.set(callId, misses);
+                if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
                   return [callId, { status: 'failed' }] as const;
                 }
-                roundErrors.push({ callId, error });
-                throw error;
-              }
-            }),
-          ).then((results) => {
-            const resolutions = new Map<string, BackgroundAgentResolution>();
-            results.forEach((result) => {
-              if (
-                result.status === 'fulfilled' &&
-                isTerminalBackgroundAgentStatus(result.value[1].status)
+              } else if (
+                isSessionLevelNotFound(error) ||
+                (error instanceof DaemonHttpError &&
+                  error.status >= 400 &&
+                  error.status < 500 &&
+                  error.status !== 404 &&
+                  error.status !== 429)
               ) {
-                resolutions.set(result.value[0], result.value[1]);
+                // Permanent client errors never recover on retry; make the
+                // card terminal so it can stop gating the UI. A 429 is the
+                // daemon's rate-limit signal and unrecognized 404 shapes
+                // stay transient, so neither may fail the agent.
+                return [callId, { status: 'failed' }] as const;
               }
-            });
-            return { resolutions, errors: roundErrors };
+              roundErrors.push({ callId, error });
+              throw error;
+            }
+          }),
+        ).then((results) => {
+          const resolutions = new Map<string, BackgroundAgentResolution>();
+          results.forEach((result) => {
+            if (
+              result.status === 'fulfilled' &&
+              isTerminalBackgroundAgentStatus(result.value[1].status)
+            ) {
+              resolutions.set(result.value[0], result.value[1]);
+            }
           });
-    reconciliationRequestRef.current = { key: requestKey, request };
+          return { resolutions, errors: roundErrors };
+        });
+    const round = roundIsReusable
+      ? cachedRound
+      : { key: requestKey, request, processed: false };
+    reconciliationRequestRef.current = round;
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     request
       .then(({ resolutions, errors }) => {
         if (!active) return;
+        round.processed = true;
         const unresolved = resolutions.size < callIds.length;
         let scheduleRetry = false;
         let retryDelayMs = BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS;

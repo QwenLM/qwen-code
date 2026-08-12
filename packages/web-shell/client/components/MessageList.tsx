@@ -2662,17 +2662,6 @@ export const MessageList = memo(
         ),
       [displayItems, gateBackgroundAgentStatus, latestTurnStartIndex],
     );
-    const [
-      unmatchedCompletionGraceExpired,
-      setUnmatchedCompletionGraceExpired,
-    ] = useState(false);
-    useEffect(() => {
-      setUnmatchedCompletionGraceExpired(false);
-    }, [
-      backgroundSummaryGraceActive,
-      latestAgentNotificationId,
-      latestTurnStartIndex,
-    ]);
     const latestTurnHoldsUnmatchedAgentCompletion = useMemo(
       () =>
         backgroundSummaryGraceActive &&
@@ -2691,6 +2680,21 @@ export const MessageList = memo(
         latestTurnStartIndex,
       ],
     );
+    const [
+      unmatchedCompletionGraceExpired,
+      setUnmatchedCompletionGraceExpired,
+    ] = useState(false);
+    // Key the reset on the hold itself: an earlier benign hold in the same
+    // turn can consume the latch, and a later genuine lost-completion
+    // episode must still receive its full grace window.
+    useEffect(() => {
+      setUnmatchedCompletionGraceExpired(false);
+    }, [
+      backgroundSummaryGraceActive,
+      latestAgentNotificationId,
+      latestTurnHoldsUnmatchedAgentCompletion,
+      latestTurnStartIndex,
+    ]);
     useEffect(() => {
       if (!latestTurnHoldsUnmatchedAgentCompletion) return;
       const timer = setTimeout(

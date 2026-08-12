@@ -895,9 +895,82 @@ describe('background agent task reconciliation', () => {
       expect(container.textContent).toBe('failed,pending');
     });
 
+    // A's failure shrinks the pending set, opening a fresh retry scope: the
+    // healthy sibling keeps polling and still reconciles terminal.
+    await vi.waitFor(() =>
+      expect(hookState.resolveSubagentSession).toHaveBeenLastCalledWith(
+        'session-1',
+        'agent-b',
+      ),
+    );
+    hookState.resolveSubagentSession.mockImplementation(
+      (_sessionId: string, callId: string) =>
+        callId === 'agent-b'
+          ? Promise.resolve(backgroundAgentResolution('completed'))
+          : Promise.reject(
+              new DaemonHttpError(
+                500,
+                { code: 'internal_error' },
+                'server error',
+              ),
+            ),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await vi.waitFor(() => {
+      expect(container.textContent).toBe('failed,completed');
+    });
+
     await act(async () => unmount());
     warnSpy.mockRestore();
     vi.useRealTimers();
+  });
+
+  it('keeps the full retry budget when the client identity changes between rounds', async () => {
+    vi.useFakeTimers();
+    hookState.blocks = [backgroundAgentBlock('agent-call')];
+    hookState.resolveSubagentSession.mockReset();
+    hookState.resolveSubagentSession.mockRejectedValue(
+      new DaemonHttpError(500, { code: 'internal_error' }, 'server error'),
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const originalClient = hookState.client;
+    const { container, render, unmount } = mountStatusConsumer();
+
+    try {
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1),
+      );
+      expect(container.textContent).toBe('pending');
+
+      // The embedding host swaps the client identity while staying
+      // connected. The settled round was already processed, so the hook must
+      // issue a fresh query instead of attaching a second handler to the
+      // cached promise and counting the same round twice.
+      hookState.client = {
+        resolveSubagentSession: hookState.resolveSubagentSession,
+      };
+      await act(async () => render());
+      await vi.waitFor(() =>
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),
+      );
+      expect(container.textContent).toBe('pending');
+
+      // The double-count must not shorten the documented budget: failure
+      // still takes eight erroring rounds in total.
+      for (const delay of [6_000, 12_000, 24_000, 48_000, 60_000, 60_000]) {
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      await vi.waitFor(() => {
+        expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(8);
+        expect(container.textContent).toBe('failed');
+      });
+    } finally {
+      await act(async () => unmount());
+      hookState.client = originalClient;
+      warnSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('re-arms the missing-agent grace after a successful response', async () => {
