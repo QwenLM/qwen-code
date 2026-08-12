@@ -750,12 +750,14 @@ describe('useProviderUpdates', () => {
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
   });
 
-  it('migrates the model only for the active provider in a mixed batch', async () => {
-    // The model-selection gate must run per provider inside executeUpdate.
-    // If it were hoisted into the batch loop, the inactive Token Plan entry
-    // would keep its modelSelection and rewrite model.name a second time
-    // after the active Coding Plan entry migrated the selection — the exact
-    // #8863 symptom.
+  it('leaves the selection alone even for the active provider in a mixed batch', async () => {
+    // A batch mixing the ACTIVE provider (whose plan no longer offers the
+    // current model) with an inactive one: since #8889 a template update
+    // never applies the plan's model selection, so neither entry may touch
+    // model.name — while both updates still run to completion. This pins
+    // the batch-loop side of that invariant; the single-provider side is
+    // pinned by 'leaves the model selection alone when the previous model
+    // is gone' above.
     const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
       string,
       unknown
@@ -772,8 +774,7 @@ describe('useProviderUpdates', () => {
       [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
     };
     // Default mock credentials point at Coding Plan, so only the first entry
-    // is the active provider. The current model exists in neither template,
-    // so the active entry must migrate the selection to its fallback model.
+    // is the active provider. The current model exists in neither template.
     mockConfig.getModel.mockReturnValue('removed-model');
     mockConfig.refreshAuth.mockResolvedValue(undefined);
 
@@ -797,22 +798,17 @@ describe('useProviderUpdates', () => {
       expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
     });
 
-    const modelNameWrites = mockSettings.setValue.mock.calls.filter(
-      (call: unknown[]) => call[1] === 'model.name',
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      expect.anything(),
     );
-    expect(modelNameWrites).toEqual([
-      [expect.anything(), 'model.name', chinaTemplate[0]!.id],
-    ]);
-    const modelBaseUrlWrites = mockSettings.setValue.mock.calls.filter(
-      (call: unknown[]) => call[1] === 'model.baseUrl',
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'model.baseUrl',
+      expect.anything(),
     );
-    expect(modelBaseUrlWrites).toHaveLength(1);
-    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledTimes(1);
-    expect(mockModelsConfig.syncAfterAuthRefresh).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      chinaTemplate[0]!.id,
-      undefined,
-    );
+    expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
   });
 
   it('persists a cooldown (not a full update) when user chooses "later"', async () => {
