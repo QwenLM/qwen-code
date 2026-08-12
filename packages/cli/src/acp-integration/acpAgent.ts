@@ -12388,7 +12388,8 @@ class QwenAgent implements Agent {
   ): ModelReasoningConfiguration | undefined {
     if (
       config.getActiveRuntimeModelSnapshot?.() ||
-      config.getReasoningEffortOverride?.()
+      config.getReasoningEffortOverride?.() ||
+      config.getContentGeneratorConfig().thinkingMandatory === true
     ) {
       return undefined;
     }
