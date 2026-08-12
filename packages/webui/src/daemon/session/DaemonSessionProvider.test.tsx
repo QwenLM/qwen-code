@@ -12403,6 +12403,7 @@ describe('DaemonSessionProvider', () => {
       }
       await secondAttempt.promise;
       if (opts.signal?.aborted) return;
+      yield* [];
     });
     const laterHeartbeat = createDeferred<void>();
     const heartbeat = vi
