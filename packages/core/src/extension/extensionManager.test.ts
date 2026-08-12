@@ -2083,6 +2083,7 @@ describe('extension tests', () => {
       const extensions = manager
         .getLoadedExtensions()
         .filter((extension) => extension.name.endsWith('default-extension'));
+      expect(extensions).toHaveLength(2);
       const initial = await manager.getExtensionStoreSnapshot();
       const refreshTools = vi
         .spyOn(manager, 'refreshTools')
@@ -2100,6 +2101,7 @@ describe('extension tests', () => {
           'disabled',
         );
       }
+      expect(extensions.every((extension) => !extension.isActive)).toBe(true);
     });
 
     it('clears multiple workspace activations with one generation and refresh', async () => {
@@ -2118,6 +2120,13 @@ describe('extension tests', () => {
       const extensions = manager
         .getLoadedExtensions()
         .filter((extension) => extension.name.endsWith('workspace-extension'));
+      expect(extensions).toHaveLength(2);
+      await manager.setExtensionWorkspaceActivations(
+        extensions.map((extension) => extension.id),
+        tempWorkspaceDir,
+        'disabled',
+      );
+      expect(extensions.every((extension) => !extension.isActive)).toBe(true);
       const initial = await manager.getExtensionStoreSnapshot();
       const refreshTools = vi
         .spyOn(manager, 'refreshTools')
@@ -2139,7 +2148,11 @@ describe('extension tests', () => {
             tempWorkspaceDir,
           ),
         ).toMatchObject({ workspace: 'inherit', effective: 'enabled' });
+        expect(snapshot.extensions[extension.id]?.workspaceOverrides).toEqual(
+          {},
+        );
       }
+      expect(extensions.every((extension) => extension.isActive)).toBe(true);
     });
 
     it('applies V2 default and workspace activation to loaded extensions', async () => {

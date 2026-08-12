@@ -215,6 +215,27 @@ describe('ExtensionStore', () => {
     expect(snapshot.extensions[installed.id]?.workspaceOverrides).toEqual({});
   });
 
+  it('does not commit a batch when an identity name mismatches', async () => {
+    const store = makeStore();
+    const installed = { id: 'bb'.repeat(32), name: 'installed' };
+    const initial = await store.ensureInitialized([installed]);
+
+    await expect(
+      store.setDefaultActivations(
+        [{ id: installed.id, name: 'different' }],
+        'disabled',
+      ),
+    ).rejects.toThrow(
+      `Extension id ${installed.id} belongs to "installed", not "different".`,
+    );
+
+    const snapshot = await store.readSnapshot();
+    expect(snapshot.generation).toBe(initial.generation);
+    expect(snapshot.extensions[installed.id]?.defaultActivation).toBe(
+      'enabled',
+    );
+  });
+
   it('rejects a batch mutation before the store is initialized', async () => {
     const store = makeStore();
 

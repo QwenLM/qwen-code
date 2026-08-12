@@ -337,6 +337,24 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<
       Awaited<ReturnType<WorkspaceDaemonClient['setExtensionActivations']>>
     >().toEqualTypeOf<ExtensionMutationResponse>();
+    expectTypeOf<
+      Parameters<DaemonClient['setExtensionDefaultActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionIds: readonly string[],
+        state: 'enabled' | 'disabled',
+        clientId?: string,
+      ]
+    >();
+    expectTypeOf<
+      Parameters<WorkspaceDaemonClient['setExtensionActivations']>
+    >().toEqualTypeOf<
+      [
+        extensionIds: readonly string[],
+        state: ExtensionWorkspaceBatchActivationState,
+        clientId?: string,
+      ]
+    >();
     expectTypeOf<ExtensionWorkspaceBatchActivationState>().toEqualTypeOf<
       'enabled' | 'disabled' | 'inherit'
     >();
@@ -356,6 +374,25 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       code: 'extension_not_found';
       error: string;
     }>();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<
+          Awaited<ReturnType<DaemonClient['extensionOperation']>>['result']
+        >['results']
+      >
+    >().toEqualTypeOf<
+      Array<
+        | ExtensionDefaultActivationBatchItem
+        | ExtensionWorkspaceActivationBatchItem
+      >
+    >();
+    expectTypeOf<
+      NonNullable<
+        NonNullable<
+          Awaited<ReturnType<DaemonClient['extensionOperation']>>['result']
+        >['errors']
+      >
+    >().toEqualTypeOf<ExtensionBatchActivationError[]>();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();
