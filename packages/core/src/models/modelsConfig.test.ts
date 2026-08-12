@@ -138,6 +138,48 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getGenerationConfig().baseUrl).toBe(cliBaseUrl);
   });
 
+  it('keeps catalog modalities for an env-sourced session endpoint after auth sync', () => {
+    const envBaseUrl = 'https://openrouter.ai/api/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'vendor/image-model' }],
+      },
+      generationConfig: {
+        model: 'vendor/image-model',
+        baseUrl: envBaseUrl,
+      },
+      generationConfigSources: {
+        model: { kind: 'env', envKey: 'OPENAI_MODEL' },
+        baseUrl: { kind: 'env', envKey: 'OPENAI_BASE_URL' },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          api: envBaseUrl,
+          models: {
+            'vendor/image-model': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+    });
+
+    modelsConfig.syncAfterAuthRefresh(
+      AuthType.USE_OPENAI,
+      'vendor/image-model',
+    );
+
+    expect(modelsConfig.getGenerationConfig()).toMatchObject({
+      baseUrl: envBaseUrl,
+      modalities: { image: true },
+    });
+  });
+
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

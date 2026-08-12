@@ -83,7 +83,7 @@ describe('token plan provider', () => {
       'kimi-k2.5',
     ]);
     expect(version).toBe(
-      'b1a5f8464e9a28951fffe458ed32b12b01599f282dc3b323dc7b40b6012a370b',
+      '8182c14aa82d412276bb35b237d6e5a85b4985531ceafabf7b0b7153d90562ce',
     );
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
