@@ -165,7 +165,7 @@ After verification, run reverse-audit rounds over the plan's `fileGroups`, carry
 
 ## Step 7: Report and summary
 
-**Resolve anchors at write time.** Assemble the report draft, then:
+**Resolve anchors at write time.** Assemble the report draft — every finding in the template's block shape (`### [<sev>] <title>` with its `- Location:` and `- Anchor:` fields), which is exactly what the gate below parses — then:
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" audit check-anchors --plan <artifacts-dir>/audit-plan-<ts>.json \
@@ -198,19 +198,26 @@ estimate: <floor>–<top> tokens (priced core) · actual: <n> (priced core <n>, 
 
 ## Critical
 
-<clusters: title, locations, failure scenario, evidence tier, "found independently by N agents", confidence mark>
+One block per finding — the write-time anchor gate parses exactly this shape and refuses a draft whose findings it cannot bind:
+
+### [Critical] <title>
+
+- Location: <a.ts:10> (pair findings cite both ends on the one line: <a.ts:10, b.ts:40>)
+- Anchor:
+  <the quoted snippet, verbatim from the cited file(s)>
+- Failure scenario: <failure scenario · evidence tier · "found independently by N agents" · confidence mark>
 
 ## Suggestion
 
-<same shape>
+<same block shape, `### [Suggestion] <title>`>
 
 ## Needs human review (confirmed-low)
 
-<same shape>
+<same block shape>
 
 ## Unverified
 
-<low-tier findings; any run whose verification did not complete>
+<same block shape — low-tier findings; any run whose verification did not complete>
 
 ## Appendix: rejected findings
 

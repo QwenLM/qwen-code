@@ -874,6 +874,73 @@ describe('git-backed checks', () => {
     expect(walkAuditTree(repo).files).toContain('vendor/lib/vendored.ts');
   });
 
+  it('walks a name-excluded directory when git tracks files inside it', () => {
+    // The exclusion is a name heuristic; tracked content is the repo's own
+    // verdict that it misfired (packages/desktop/scripts/build in this
+    // repo is exactly such a directory).
+    const repo = join(dir, 'repo-tracked');
+    mkdirSync(join(repo, 'scripts', 'build'), { recursive: true });
+    writeFileSync(
+      join(repo, 'scripts', 'build', 'common.ts'),
+      'export const c = 1;\n',
+    );
+    writeFileSync(join(repo, 'scripts', 'main.ts'), 'export const m = 1;\n');
+    git(['init', '-q'], repo);
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    const { files, excludedDirs } = walkAuditTree(join(repo, 'scripts'));
+    expect(files).toContain('build/common.ts');
+    expect(excludedDirs).not.toContain('build');
+    // Auditing the tracked build directory directly walks it too, instead
+    // of refusing `empty-subjects` over a directory full of source.
+    const rootWalk = walkAuditTree(join(repo, 'scripts', 'build'));
+    expect(rootWalk.files).toContain('common.ts');
+    expect(rootWalk.excludedDirs).toEqual([]);
+  });
+
+  it('still excludes a name-excluded directory git does not track', () => {
+    const repo = join(dir, 'repo-untracked');
+    mkdirSync(join(repo, 'build'), { recursive: true });
+    writeFileSync(join(repo, 'build', 'app.js'), 'console.log(1);\n');
+    writeFileSync(join(repo, 'main.ts'), 'export const m = 1;\n');
+    git(['init', '-q'], repo);
+    git(['add', 'main.ts'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    const { files, excludedDirs } = walkAuditTree(repo);
+    expect(files).not.toContain('build/app.js');
+    expect(excludedDirs).toContain('build');
+  });
+
+  it('does not flip vendor mode from a vendor-named ancestor outside the repo', () => {
+    // The checkout sits under a vendor component; the audited path is not
+    // under the repo's own vendor/, so build outputs keep their exclusion.
+    const outer = join(dir, 'vendor', 'acme-app');
+    mkdirSync(join(outer, 'dist'), { recursive: true });
+    writeFileSync(join(outer, 'dist', 'bundle.js'), 'console.log(1);\n');
+    writeFileSync(join(outer, 'main.ts'), 'export const m = 1;\n');
+    git(['init', '-q'], outer);
+    writeFileSync(join(outer, '.gitignore'), 'dist/\n');
+    git(['add', '.'], outer);
+    git(['commit', '-m', 'init', '-q'], outer);
+    const { files, excludedDirs } = walkAuditTree(outer);
+    expect(files).toContain('main.ts');
+    expect(files).not.toContain('dist/bundle.js');
+    expect(excludedDirs).toContain('dist');
+  });
+
+  it('keeps the vendor rules for an in-repo vendor ancestor', () => {
+    const repo = join(dir, 'repo-vendor');
+    mkdirSync(join(repo, 'vendor', 'pkg', 'dist'), { recursive: true });
+    writeFileSync(
+      join(repo, 'vendor', 'pkg', 'dist', 'index.js'),
+      'module.exports = {};\n',
+    );
+    git(['init', '-q'], repo);
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    expect(walkAuditTree(repo).files).toContain('vendor/pkg/dist/index.js');
+  });
+
   it('refuses a toplevel audit with a gitlink underneath', () => {
     const repo = initRepo();
     git(['add', '.'], repo);

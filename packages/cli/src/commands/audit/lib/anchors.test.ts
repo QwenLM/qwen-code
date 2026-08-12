@@ -329,16 +329,53 @@ const y = x;
     expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
   });
 
-  it('splits pair locations and resolves each end', () => {
+  it('resolves a pair whose anchor binds exactly once at each end', () => {
+    writeFileSync(join(dir, 'dup2.ts'), 'const x = 1;\n');
+    const pairPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
     const pair = [
       '### [Critical] pair',
+      '- Location: dup.ts:1, dup2.ts:1',
+      '- Anchor: const x = 1;',
+    ].join('\n');
+    const findings = parseReportFindings(pair);
+    expect(findings[0].locations).toEqual(['dup.ts', 'dup2.ts']);
+    // The canonical pair: the snippet appears once in EACH cited file. The
+    // total is two matches, yet every location binds uniquely, so the
+    // finding resolves — a cross-location sum would grade it ambiguous.
+    const result = resolveAnchors(findings, pairPlan)[0];
+    expect(result.verdict).toBe('resolved');
+    expect(result.matchCount).toBe(2);
+  });
+
+  it('grades a pair ambiguous when its anchor binds at only one end', () => {
+    const pair = [
+      '### [Critical] half-bound pair',
       '- Location: dup.ts:1, unique.ts:1',
       '- Anchor: const x = 1;',
     ].join('\n');
     const findings = parseReportFindings(pair);
     expect(findings[0].locations).toEqual(['dup.ts', 'unique.ts']);
-    // The anchor exists in only one of the two cited files: one match.
-    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+    // The snippet exists only in dup.ts: the unique.ts citation does not
+    // bind, so the pair claim is not verified as reported.
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('ambiguous');
+  });
+
+  it('keeps "and"-containing filenames whole when splitting locations', () => {
+    writeFileSync(
+      join(dir, 'drag-and-drop.tsx'),
+      'export const uniqueToken = 42;\n',
+    );
+    const andPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const block = [
+      '### [Critical] hyphenated filename',
+      '- Location: drag-and-drop.tsx:1 and unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(block);
+    // An unanchored \band\b split cut inside the filename and both
+    // fragments resolved out-of-scope; 'and' splits only between words.
+    expect(findings[0].locations).toEqual(['drag-and-drop.tsx', 'unique.ts']);
+    expect(resolveAnchors(findings, andPlan)[0].verdict).toBe('resolved');
   });
 
   it('strips single-line inline-code wrapping from anchors', () => {

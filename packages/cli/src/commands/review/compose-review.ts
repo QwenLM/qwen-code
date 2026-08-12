@@ -30,7 +30,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
-import { compressSummary } from './findings.js';
+import { compressSummary } from '../../utils/findings.js';
 import {
   BUDGET_STOP_PHRASE,
   ROUND_CAP_PHRASE,
@@ -1871,7 +1871,7 @@ export function repositoryContextGate(planPath: string): string[] {
   const dimensions = context?.unverifiedDimensions ?? [];
   // The same cap discipline testPlanGate applies: unbounded entries joined
   // into one disclosure drown the verdict they ride on — and at the schema
-  // bounds (128 x 512 chars) the paragraph outruns the review body's own
+  // bounds (256 x 512 chars) the paragraph outruns the review body's own
   // budget before any other content gets a word in.
   const MAX_DIMENSIONS = 5;
   const disclosed = dimensions

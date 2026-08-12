@@ -23,22 +23,31 @@ const GIT_TIMEOUT_MS = 5_000;
 /**
  * Returns true when `path` is git-ignored under the worktree at `worktree`.
  * Uses `git check-ignore` (exit 0 = ignored, 1 = not). Any other outcome
- * (git missing, not a worktree, fatal error) is treated as not-ignored so a
- * guard never passes on a false signal.
+ * (git missing, not a worktree, fatal error, kill on the deadline) is
+ * treated as not-ignored so a guard never passes on a false signal.
  *
  * Probe a representative FILE, not the directory: a directory-form
  * re-include negation only applies to paths git knows are directories, so
  * probing the directory can spuriously report ignored. The path need not
  * exist — check-ignore evaluates the ignore rules against the pathname.
+ *
+ * `timeoutMs` bounds the spawn. The 5 s default suits a guard probing its
+ * own repository; a caller probing a worktree it does not control passes
+ * the generous deadline its other git calls run under — a kill reads as
+ * "not ignored", which would accuse a correct Test Plan.
  */
-export function isGitIgnored(worktree: string, path: string): boolean {
+export function isGitIgnored(
+  worktree: string,
+  path: string,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): boolean {
   // A leading ':' in the first component would be parsed as pathspec magic
   // and probe the wrong pathname ('./' disambiguates it as a literal).
   const probe = path.startsWith(':') ? `./${path}` : path;
   try {
     execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
       stdio: 'ignore',
-      timeout: GIT_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
     return true;
   } catch {

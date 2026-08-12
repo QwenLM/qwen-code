@@ -51,6 +51,7 @@ import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
 import { isGitIgnored } from '@qwen-code/qwen-code-core';
+import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import {
   hasUnmodeledWorkspaceGlob,
@@ -474,12 +475,18 @@ function normalizeClaimPath(text: string): string {
  * extraction change, not a live hole. A non-zero exit means either "not
  * ignored" or "no git here"; both fall through to the ordinary ruling, which is
  * why this returns a plain boolean.
+ *
+ * The probe runs under GIT_TIMEOUT_MS, the same generous deadline every other
+ * git invocation in these commands uses — it runs against a worktree the
+ * review does not control, and a kill on a short deadline reads as "not
+ * ignored", which turns a gitignored build output into a false `contradicted`
+ * ruling in the presubmit report.
  */
 function isGitIgnoredCached(worktree: string, path: string): boolean {
   const key = `${worktree}\0${path}`;
   const memo = ignoreCache.get(key);
   if (memo !== undefined) return memo;
-  const ignored = isGitIgnored(worktree, path);
+  const ignored = isGitIgnored(worktree, path, GIT_TIMEOUT_MS);
   ignoreCache.set(key, ignored);
   return ignored;
 }

@@ -543,6 +543,11 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
+/** Bound on the subcommand output flush before `process.exit`: long enough
+ *  for a live consumer to drain the pipe, short enough that a consumer that
+ *  only reads after exit cannot wedge the process. */
+const SUBCOMMAND_FLUSH_TIMEOUT_MS = 2_000;
+
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
 
@@ -1135,12 +1140,30 @@ export async function parseArguments(): Promise<CliArgs> {
     // The handlers above wrote through async pipe writes; a synchronous
     // exit here truncates large payloads (the audit plan/verdict JSON) at
     // the 64 KiB pipe buffer. The empty-write callback runs only after
-    // every queued write has flushed.
-    await new Promise<void>((resolve) => {
-      process.stdout.write('', () => {
-        process.stderr.write('', () => resolve());
+    // every queued write has flushed. Two guards keep the flush from
+    // breaking the exit contract it serves: the EPIPE handlers, because
+    // yielding to the event loop lets a downstream-closed pipe (`| head`)
+    // surface its queued writes as an uncaught 'error' where the old
+    // synchronous exit surfaced nothing; and the deadline, because a
+    // parent that reads the child's stdout only after the child exits
+    // would otherwise wait on this await forever.
+    const swallowEpipe = (stream: NodeJS.WriteStream): void => {
+      stream.on('error', (err: Error) => {
+        if ((err as NodeJS.ErrnoException).code !== 'EPIPE') throw err;
       });
-    });
+    };
+    swallowEpipe(process.stdout);
+    swallowEpipe(process.stderr);
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        process.stdout.write('', () => {
+          process.stderr.write('', () => resolve());
+        });
+      }),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, SUBCOMMAND_FLUSH_TIMEOUT_MS).unref();
+      }),
+    ]);
     process.exit(process.exitCode ?? 0);
   }
 

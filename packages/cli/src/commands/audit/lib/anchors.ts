@@ -100,8 +100,10 @@ function normalizeLocation(raw: string): string {
 /** The brief template instructs pairs to cite both locations on the one
  *  line ('a.ts:1, b.ts:2'); split on the comma/and spellings. */
 function parseLocations(value: string): string[] {
+  // 'and' requires surrounding whitespace: it also delimits filenames
+  // ('drag-and-drop.tsx'), and an unanchored \band\b splits inside them.
   return value
-    .split(/,|\band\b/)
+    .split(/,|\s+and\s+/)
     .map(normalizeLocation)
     .filter((l) => l !== '');
 }
@@ -308,6 +310,7 @@ export function resolveAnchors(
     }
     const needle = finding.anchor.replace(/\r\n/g, '\n');
     let matchCount = 0;
+    let onePerLocation = true;
     for (const location of finding.locations) {
       const isCaller = callerSet.has(location);
       if (!isCaller && !allowed.has(location)) {
@@ -324,16 +327,23 @@ export function resolveAnchors(
       // vendored .bat/.cmd) must resolve against the same anchor, so
       // normalize both sides to LF before matching.
       haystack = haystack.replace(/\r\n/g, '\n');
+      // Count PER CITED LOCATION: a pair finding's snippet appears in every
+      // cited file by definition, so a sum across locations grades exactly
+      // the pair class ambiguous whenever it binds at all. The finding
+      // resolves only when each cited file contributes exactly one hit.
+      let locationMatches = 0;
       let idx = haystack.indexOf(needle);
       while (idx !== -1) {
-        matchCount++;
+        locationMatches++;
         idx = haystack.indexOf(needle, idx + 1);
       }
+      matchCount += locationMatches;
+      if (locationMatches !== 1) onePerLocation = false;
     }
     const verdict: AnchorVerdict =
       matchCount === 0
         ? 'unresolved'
-        : matchCount === 1
+        : onePerLocation
           ? 'resolved'
           : 'ambiguous';
     return { finding, verdict, matchCount };

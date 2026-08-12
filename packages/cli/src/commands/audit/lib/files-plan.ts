@@ -129,7 +129,8 @@ const SECRET_FILE_RE =
 
 /** Excluded from enumeration by directory name anywhere under the audited
  *  path, including under vendor/ and the path root: dependency installs,
- *  tooling output, and the tool's own artifact class. Never audit subjects. */
+ *  tooling output, and the tool's own artifact class — unless git tracks
+ *  files inside the directory (see dirHasTrackedFiles). */
 const ALWAYS_EXCLUDED_DIRS = new Set([
   'node_modules',
   '.git',
@@ -154,6 +155,16 @@ const ALWAYS_EXCLUDED_DIRS = new Set([
  *  (vendor/bundle) and JS-bundler output (top-level bundle/) are both
  *  third-party lines, never audit subjects. */
 const BUILD_OUTPUT_DIRS = new Set(['dist', 'build', 'bundle']);
+
+/** The name exclusion is a heuristic, and git's own tracking is the repo's
+ *  verdict that it misfired: a name-excluded directory holding tracked files
+ *  is source (this repo's packages/desktop/scripts/build is exactly one), so
+ *  it is walked instead of silently dropped. Outside a worktree — or for an
+ *  untracked directory — the heuristic stands. */
+function dirHasTrackedFiles(dirAbs: string): boolean {
+  const listing = runGit(dirAbs, ['ls-files', '--', dirAbs], GIT_TIMEOUT_MS);
+  return listing !== null && listing.trim().length > 0;
+}
 
 function isExcludedDirName(name: string, underVendor: boolean): boolean {
   if (ALWAYS_EXCLUDED_DIRS.has(name)) return true;
@@ -237,13 +248,34 @@ export function walkAuditTree(rootAbs: string): WalkResult {
   const files: string[] = [];
   const excludedDirs: string[] = [];
   const structuralUncoverable: WalkResult['structuralUncoverable'] = [];
-  // The vendor context derives from the whole path, not just the root's own
-  // name: starting the walk at vendor/bundle or vendor/pkg/dist must apply
-  // the same rules a walk that DESCENDS into vendor/ would apply there, or
-  // the verdicts depend on the start point (gems walked at one start,
-  // dist/build kept at another).
-  const rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
-  if (isExcludedDirName(basename(rootAbs), rootUnderVendor)) {
+  // The vendor context derives from the root's path RELATIVE TO THE
+  // REPOSITORY: an ancestor named `vendor` outside the repo (the checkout's
+  // location on disk) must not flip vendor mode for the whole walk. Starting
+  // the walk at vendor/bundle or vendor/pkg/dist inside the repo still
+  // applies the same rules a walk that DESCENDS into vendor/ would apply
+  // there, or the verdicts depend on the start point (gems walked at one
+  // start, dist/build kept at another). Outside any worktree there is no
+  // repo boundary to respect, so the whole path keeps carrying the context.
+  let rootUnderVendor: boolean;
+  const geometry = gitGeometry(rootAbs);
+  if (geometry.inWorktree && geometry.root !== undefined) {
+    try {
+      // git reports the symlink-resolved toplevel; resolve both sides
+      // before comparing (the walk entry point may arrive un-resolved).
+      const rel = toPosix(
+        relative(realpathSync(geometry.root), realpathSync(rootAbs)),
+      );
+      rootUnderVendor = rel.split('/').includes('vendor');
+    } catch {
+      rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
+    }
+  } else {
+    rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
+  }
+  if (
+    isExcludedDirName(basename(rootAbs), rootUnderVendor) &&
+    !dirHasTrackedFiles(rootAbs)
+  ) {
     return { files, excludedDirs: ['.'], structuralUncoverable };
   }
   const walk = (dirAbs: string, rel: string, underVendor: boolean): void => {
@@ -283,8 +315,12 @@ export function walkAuditTree(rootAbs: string): WalkResult {
       }
       if (stat.isDirectory()) {
         if (isExcludedDirName(entry, underVendor)) {
-          excludedDirs.push(childRel);
-          continue;
+          if (!dirHasTrackedFiles(entryAbs)) {
+            excludedDirs.push(childRel);
+            continue;
+          }
+          // Tracked content overrides the name heuristic: fall through and
+          // walk it.
         }
         walk(entryAbs, childRel, underVendor || entry === 'vendor');
         continue;

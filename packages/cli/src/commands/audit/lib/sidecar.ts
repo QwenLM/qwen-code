@@ -128,16 +128,24 @@ export function captureSidecar(
   // baseline must stay the run-start content.
   const existingPath = join(sidecarDir, 'sidecar.json');
   if (existsSync(existingPath)) {
-    const existing = loadSidecar(sidecarDir);
-    for (const caller of callerPaths) {
-      if (existing.callerNames.includes(caller)) continue;
-      existing.callerNames.push(caller);
-      // An unreadable caller is recorded by name only.
-      const hash = recordCaller(sidecarDir, caller);
-      if (hash !== undefined) existing.callerHashes[caller] = hash;
+    try {
+      const existing = loadSidecar(sidecarDir);
+      for (const caller of callerPaths) {
+        if (existing.callerNames.includes(caller)) continue;
+        existing.callerNames.push(caller);
+        // An unreadable caller is recorded by name only.
+        const hash = recordCaller(sidecarDir, caller);
+        if (hash !== undefined) existing.callerHashes[caller] = hash;
+      }
+      writeFileSync(existingPath, JSON.stringify(existing, null, 2), 'utf8');
+      return existing;
+    } catch {
+      // A capture killed mid-write leaves a truncated sidecar.json; without
+      // this fall-through the remedy loadSidecar names — re-run snapshot,
+      // which Step 4 does to extend the caller set — re-enters this same
+      // branch and throws forever. A fresh capture rewrites the file, which
+      // is all the recovery the corrupted one allows.
     }
-    writeFileSync(existingPath, JSON.stringify(existing, null, 2), 'utf8');
-    return existing;
   }
 
   const probe = probeGit(

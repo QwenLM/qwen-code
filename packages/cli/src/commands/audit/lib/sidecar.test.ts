@@ -191,6 +191,21 @@ describe('caller registration', () => {
     expect(sidecar.callerHashes[caller]).toBeUndefined();
     expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([caller]);
   });
+
+  it('recaptures fresh when the existing sidecar is corrupt', () => {
+    const caller = join(dir, 'caller.ts');
+    writeFileSync(caller, 'call();\n');
+    const p = plan();
+    captureSidecar(p, sidecarDir);
+    // A capture killed mid-write leaves a truncated sidecar.json. The
+    // Step-4 re-run that extends the caller set re-enters the extend branch
+    // and must recover instead of throwing the corrupt-sidecar error again.
+    writeFileSync(join(sidecarDir, 'sidecar.json'), '{"meta": ', 'utf8');
+    const recaptured = captureSidecar(p, sidecarDir, [caller]);
+    expect(recaptured.callerNames).toEqual([caller]);
+    expect(recaptured.hashes['src/a.ts']).toBeDefined();
+    expect(() => driftCheck(p, sidecarDir)).not.toThrow();
+  });
 });
 
 describe('captureSidecar inside a worktree', () => {

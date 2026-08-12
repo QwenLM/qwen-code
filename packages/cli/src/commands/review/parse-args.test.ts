@@ -752,8 +752,8 @@ describe('parse-args warns when the bundle is not built from these sources', () 
   it('names the cause when the roots hold nothing the digest admits', () => {
     // A root that exists but holds only test files measures zero digested
     // files. That is "nothing found", not "something unreadable", and the
-    // docstring promises each unmeasurable case names itself. The other three
-    // roots come out of the fixture too, so the zero is complete, not the
+    // docstring promises each unmeasurable case names itself. Every other
+    // root comes out of the fixture too, so the zero is complete, not the
     // partial-checkout case.
     stamp(FOREIGN_DIGEST);
     const reviewDir = join(
@@ -779,6 +779,10 @@ describe('parse-args warns when the bundle is not built from these sources', () 
         'review-worktree-lease.ts',
       ),
     );
+    fsReal.rmSync(join(repo, 'packages', 'cli', 'src', 'utils'), {
+      recursive: true,
+      force: true,
+    });
     fsReal.rmSync(join(repo, 'packages', 'core'), {
       recursive: true,
       force: true,
