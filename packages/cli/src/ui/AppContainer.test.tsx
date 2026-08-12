@@ -4446,6 +4446,88 @@ describe('AppContainer State Management', () => {
       unmount();
     });
 
+    it('should write the terminal title again when streamingState changes', () => {
+      // Arrange: Set up mock settings with showStatusInTitle enabled
+      const mockSettingsWithTitleEnabled = {
+        ...mockSettings,
+        merged: {
+          ...mockSettings.merged,
+          ui: {
+            ...mockSettings.merged.ui,
+            showStatusInTitle: true,
+            hideWindowTitle: false,
+          },
+        },
+      } as unknown as LoadedSettings;
+
+      // measureElement must return a real measurement; a bare vi.fn()
+      // returns undefined, the controlsHeight layout effect (which also
+      // depends on streamingState) throws on .height, and ink's
+      // ErrorBoundary silently unmounts the tree.
+      (measureElement as Mock).mockReturnValue({ width: 80, height: 2 });
+
+      // Deliver streamingState changes to the SAME mounted instance so the
+      // title useEffect re-runs through its dep array; a fresh mount would
+      // run the effect regardless of deps.
+      let currentStreamingState = StreamingState.Idle;
+      const streamingListeners = new Set<() => void>();
+      mockedUseGeminiStream.mockImplementation(() => {
+        const [, force] = useReducer((x: number) => x + 1, 0);
+        useEffect(() => {
+          streamingListeners.add(force);
+          return () => {
+            streamingListeners.delete(force);
+          };
+        }, []);
+        return {
+          streamingState: currentStreamingState,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        };
+      });
+
+      const getTitleWrites = () =>
+        (process.stdout.write as ReturnType<typeof vi.fn>).mock.calls.filter(
+          (call: string[]) => call[0].includes('\x1b]2;'),
+        );
+
+      // Act: mount in Idle, then flip to Responding in place
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettingsWithTitleEnabled}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Assert: the idle mount wrote the unprefixed title once
+      expect(getTitleWrites()).toHaveLength(1);
+      expect(getTitleWrites()[0][0]).toBe(titleEscape('Qwen - workspace'));
+
+      currentStreamingState = StreamingState.Responding;
+      act(() => {
+        for (const notify of streamingListeners) notify();
+      });
+
+      // Assert: the streamingState change triggered a second, prefixed
+      // write. This pins streamingState in the title useEffect dep array;
+      // without it the prefix would silently stop appearing on state
+      // changes and every other title test would still pass.
+      expect(getTitleWrites()).toHaveLength(2);
+      expect(getTitleWrites()[1][0]).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
+      unmount();
+      (measureElement as Mock).mockReturnValue(undefined);
+    });
+
     it('should keep default terminal title when waiting for confirmation without a session name', () => {
       // Arrange: Set up mock settings with showStatusInTitle enabled
       const mockSettingsWithTitleEnabled = {
