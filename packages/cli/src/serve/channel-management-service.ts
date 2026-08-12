@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
@@ -227,18 +228,31 @@ export function createChannelManagementService(
         workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd),
       );
 
+  // Throw-safe canonical form for guard comparisons: canonicalizeWorkspace
+  // rethrows non-ENOENT fs errors by design, but on this stop path a
+  // degraded path must degrade the guard to "no matching worker" instead of
+  // escaping stop() as an opaque 500 with no `stopped` record (#8975).
+  const canonicalForGuard = (workspaceCwd: string): string => {
+    try {
+      return canonicalizeWorkspace(workspaceCwd);
+    } catch {
+      return path.resolve(workspaceCwd);
+    }
+  };
+
   // A worker without a committed ready report (no `requestedChannels`) is
   // still starting; a mode-`all` worker in that window may connect any
   // configured channel, so per-channel stops cannot be confirmed (#8975).
-  const workspaceWorkerStarting = (): boolean =>
-    opts.manager
+  const workspaceWorkerStarting = (): boolean => {
+    const target = canonicalForGuard(opts.workspaceCwd);
+    return opts.manager
       .state()
       .workers.some(
         (worker) =>
-          canonicalizeWorkspace(worker.workspaceCwd) ===
-            canonicalizeWorkspace(opts.workspaceCwd) &&
+          canonicalForGuard(worker.workspaceCwd) === target &&
           worker.requestedChannels === undefined,
       );
+  };
 
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
@@ -547,9 +561,11 @@ export function createChannelManagementService(
         );
       }
       // An explicit stop must persist, so a later `--channel all` restart
-      // does not bring this channel back (#8975).
+      // does not bring this channel back (#8975). The stop already succeeded
+      // at this point, so a degraded workspace path must not escape as a raw
+      // fs error and skip the persistence — use the throw-safe form.
       new ChannelStateStore(
-        daemonChannelRuntimeStatePath(canonicalizeWorkspace(opts.workspaceCwd)),
+        daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
       ).trySet(name, 'stopped');
       diagnostics.delete(name);
       return resultFor(name, persisted);

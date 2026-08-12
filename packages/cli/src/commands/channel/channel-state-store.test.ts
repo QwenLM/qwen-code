@@ -4,12 +4,27 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Unique per-run home (a fixed shared path interleaves concurrent runs of
+// this file on one host); created lazily because the mock factory is hoisted
+// above any module-body initialization.
+let stateHome: string | undefined;
+const testDirs: string[] = [];
+
+function getStateHome(): string {
+  if (!stateHome) {
+    stateHome = mkdtempSync(join(tmpdir(), 'qwen-state-home-'));
+    testDirs.push(stateHome);
+  }
+  return stateHome;
+}
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -17,7 +32,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     Storage: {
-      getGlobalQwenDir: () => join(tmpdir(), 'qwen-state-home'),
+      getGlobalQwenDir: () => getStateHome(),
     },
   };
 });
@@ -29,18 +44,24 @@ import {
   selectActiveChannels,
 } from './channel-state-store.js';
 
+afterEach(() => {
+  for (const dir of testDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  stateHome = undefined;
+});
+
 describe('channelRuntimeStatePath', () => {
   it('falls back to the legacy global file without a workspace', () => {
     expect(channelRuntimeStatePath()).toBe(
-      join(tmpdir(), 'qwen-state-home', 'channels', 'channel-state.json'),
+      join(getStateHome(), 'channels', 'channel-state.json'),
     );
   });
 
   it('scopes the state file per workspace (#8975)', () => {
     expect(channelRuntimeStatePath('/workspace/a')).toBe(
       join(
-        tmpdir(),
-        'qwen-state-home',
+        getStateHome(),
         'channels',
         'standalone',
         hashDaemonWorkspace('/workspace/a'),
@@ -59,11 +80,14 @@ describe('channelRuntimeStatePath', () => {
 
 describe('adoptLegacyChannelState (#8975)', () => {
   const workspace = '/workspace/legacy';
-  const legacyPath = channelRuntimeStatePath();
-  const workspacePath = channelRuntimeStatePath(workspace);
-  const channelsDir = join(tmpdir(), 'qwen-state-home', 'channels');
+  let legacyPath: string;
+  let workspacePath: string;
+  let channelsDir: string;
 
   beforeEach(() => {
+    legacyPath = channelRuntimeStatePath();
+    workspacePath = channelRuntimeStatePath(workspace);
+    channelsDir = join(getStateHome(), 'channels');
     rmSync(channelsDir, { recursive: true, force: true });
     mkdirSync(channelsDir, { recursive: true });
   });
@@ -110,16 +134,56 @@ describe('adoptLegacyChannelState (#8975)', () => {
     adoptLegacyChannelState(workspace);
     expect(existsSync(workspacePath)).toBe(false);
   });
+
+  it('does not throw and keeps the legacy file when the target is blocked', () => {
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+    });
+    writeFileSync(legacyPath, legacyBody, 'utf-8');
+    // Block the target: make an intermediate path component (the
+    // `standalone` dir) a regular file, so mkdirSync throws ENOTDIR.
+    writeFileSync(dirname(dirname(workspacePath)), '', 'utf-8');
+
+    expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+
+    expect(existsSync(workspacePath)).toBe(false);
+    expect(readFileSync(legacyPath, 'utf-8')).toBe(legacyBody);
+  });
+
+  it('leaves no target behind when the copy fails, so the next start retries', () => {
+    // A legacy "file" that is really a directory makes the read throw
+    // (EISDIR) — standing in for a mid-copy disk failure. The copy runs
+    // through the atomic write (temp + rename), so a failure can never
+    // leave a partial target that the existsSync guard would mistake for a
+    // completed adoption, blocking every later start.
+    mkdirSync(legacyPath, { recursive: true });
+
+    expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+
+    expect(existsSync(workspacePath)).toBe(false);
+    expect(existsSync(legacyPath)).toBe(true);
+
+    // Once the condition clears, adoption proceeds normally.
+    rmSync(legacyPath, { recursive: true, force: true });
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+    });
+    writeFileSync(legacyPath, legacyBody, 'utf-8');
+    adoptLegacyChannelState(workspace);
+    expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
+    expect(existsSync(legacyPath)).toBe(false);
+  });
 });
 
 describe('ChannelStateStore', () => {
   let filePath: string;
 
   beforeEach(() => {
-    filePath = join(
-      mkdtempSync(join(tmpdir(), 'qwen-channel-state-')),
-      'channel-state.json',
-    );
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-channel-state-'));
+    testDirs.push(dir);
+    filePath = join(dir, 'channel-state.json');
   });
 
   it('returns an empty map when the file is missing', () => {
@@ -227,10 +291,9 @@ describe('ChannelStateStore', () => {
   describe('trySet / trySetMany (#8975)', () => {
     /** A path whose parent is a regular file makes mkdirSync (and thus any write) throw. */
     function unwritablePath(): string {
-      const blocker = join(
-        mkdtempSync(join(tmpdir(), 'qwen-channel-state-')),
-        'blocker',
-      );
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-channel-state-'));
+      testDirs.push(dir);
+      const blocker = join(dir, 'blocker');
       writeFileSync(blocker, '', 'utf-8');
       return join(blocker, 'channel-state.json');
     }
@@ -320,13 +383,42 @@ describe('ChannelStateStore', () => {
     it('keeps every entry when nothing is stale', () => {
       const store = new ChannelStateStore(filePath);
       store.set('telegram', 'stopped');
-      const before = readFileSync(filePath, 'utf-8');
+      const beforeInode = statSync(filePath).ino;
 
       const states = store.prune(['telegram', 'feishu']);
 
       expect(states).toEqual({ telegram: 'stopped' });
-      // No stale entries: the file is not rewritten.
-      expect(readFileSync(filePath, 'utf-8')).toBe(before);
+      // No stale entries: the file is not rewritten. Byte equality cannot
+      // observe a rewrite (the serialization is deterministic), so pin the
+      // inode — atomicWriteFileSync replaces the file via temp+rename.
+      expect(statSync(filePath).ino).toBe(beforeInode);
+    });
+
+    it('treats an empty configured set as a no-op, never a wipe-all (#8975)', () => {
+      const store = new ChannelStateStore(filePath);
+      store.setMany(['telegram', 'feishu'], 'stopped');
+      const beforeInode = statSync(filePath).ino;
+
+      const states = store.prune([]);
+
+      // Zero configured channels is ambiguous (a transient settings read can
+      // recover to empty); destroying every recorded stop would resurrect
+      // exactly the channels #8975 must keep stopped.
+      expect(states).toEqual({ telegram: 'stopped', feishu: 'stopped' });
+      expect(new ChannelStateStore(filePath).readAll()).toEqual({
+        telegram: 'stopped',
+        feishu: 'stopped',
+      });
+      expect(statSync(filePath).ino).toBe(beforeInode);
+    });
+  });
+
+  it('round-trips a channel literally named __proto__ (#8975)', () => {
+    const store = new ChannelStateStore(filePath);
+    store.set('__proto__', 'stopped');
+
+    expect(new ChannelStateStore(filePath).readAll()).toEqual({
+      ['__proto__']: 'stopped',
     });
   });
 });

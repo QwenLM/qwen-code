@@ -18,6 +18,7 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
 } from '../channel-worker-startup-ipc.js';
 import { normalizeWorkerDiagnostic } from '../channel-worker-diagnostics.js';
+import { ChannelWorkerControlError } from '../channel-worker-manager.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerSetResult,
@@ -356,6 +357,17 @@ export function registerWorkspaceChannelControlRoutes(
           recordChannelsStopped(result.stoppedChannels);
           res.status(200).json(result);
         } catch (error) {
+          // A failed stop can still have torn down workers (partial
+          // multi-workspace failure, or a lease-release failure after a
+          // successful tear-down). The manager carries the captured set on
+          // the error; persist it here too, or those channels resurrect on
+          // the next `--channel all` start (#8975).
+          if (
+            error instanceof ChannelWorkerControlError &&
+            error.stoppedChannels
+          ) {
+            recordChannelsStopped(error.stoppedChannels);
+          }
           if (
             sendChannelControlError(res, error, deps.getChannelWorkerControl)
           ) {

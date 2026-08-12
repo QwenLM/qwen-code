@@ -446,6 +446,11 @@ async function startSingle(
     bridge.stop();
     process.exit(1);
   }
+  // Adopt legacy stops before the first workspace-scoped write: once the
+  // workspace file exists, adoption's existsSync guard never runs again, so
+  // a named start must not create the file first and orphan the legacy
+  // stops (#8975). Idempotent — a no-op once the workspace file exists.
+  adoptLegacyChannelState(workspaceCwd);
   recordChannelActive(name, workspaceCwd);
   writeServiceInfoOrExit(
     [name],
@@ -623,8 +628,12 @@ async function startAll(
         nextFireTime,
       })
     : undefined;
+  // The pidfile lists the CONNECTED set, not the attempted set: `qwen
+  // channel stop` persists these names as explicitly stopped, and
+  // `qwen channel status` lists them as running — channels whose connect()
+  // failed never ran and must not be recorded either way (#8975).
   writeServiceInfoOrExit(
-    parsed.map((p) => p.name),
+    [...connectedChannels.keys()],
     () => cleanupStartedChannels(channels.values(), bridge, router),
     workspaceCwd,
   );

@@ -75,6 +75,17 @@ export class ChannelWorkerControlError extends Error {
   readonly rollbackError?: string;
   readonly startupFailures?: ChannelStartupAttemptFailure[];
   readonly startupFailuresTruncated?: boolean;
+  /**
+   * Channels a failed stop already tore down, captured before the failure.
+   * A failed stop can lose the group (release failure) or the success
+   * return path, so the captured set rides on the error: callers
+   * persisting `stopped` state (#8975) must record it even when the stop
+   * reports failure, or those channels resurrect on `--channel all`.
+   */
+  readonly stoppedChannels?: Array<{
+    workspaceCwd: string;
+    names: string[];
+  }>;
 
   constructor(
     code: ChannelWorkerControlError['code'],
@@ -84,6 +95,10 @@ export class ChannelWorkerControlError extends Error {
       rollbackError?: string;
       startupFailures?: readonly ChannelStartupAttemptFailure[];
       startupFailuresTruncated?: boolean;
+      stoppedChannels?: ReadonlyArray<{
+        workspaceCwd: string;
+        names: readonly string[];
+      }>;
     } = {},
   ) {
     super(message);
@@ -95,6 +110,10 @@ export class ChannelWorkerControlError extends Error {
       ...failure,
     }));
     this.startupFailuresTruncated = details.startupFailuresTruncated;
+    this.stoppedChannels = details.stoppedChannels?.map((entry) => ({
+      workspaceCwd: entry.workspaceCwd,
+      names: [...entry.names],
+    }));
   }
 }
 
@@ -231,20 +250,23 @@ function errorMessage(error: unknown): string {
 
 /**
  * Collect the channel names a stop tears down, grouped by workspace.
- * `requestedChannels` is authoritative once a worker commits a ready report;
- * until then (mode-`all` workers starting up) fall back to the connected
- * set. The mode-`all` launch placeholder (`['all']`) is filtered so a stop
- * landing in the startup window never persists a phantom `all: stopped`
- * entry (#8975). Runs inside the manager lane, so an in-flight start has
- * already committed and reported ready by the time a queued stop executes.
+ * Only channels that actually connected are captured: the ready report
+ * commits the attempted set in `requestedChannels` and the connected set in
+ * `channels`, and intersecting the two keeps a partial start from recording
+ * a never-connected channel as explicitly stopped (#8975). Before the ready
+ * report commits, `channels` is the mode-`all` launch placeholder (`['all']`),
+ * which the `all` filter drops, so a stop in that window records nothing.
+ * Runs inside the manager lane, so an in-flight start has already committed
+ * and reported ready by the time a queued stop executes.
  */
 function stoppedChannelsByWorkspace(
   workers: readonly ChannelWorkerGroupSnapshot[],
 ): Array<{ workspaceCwd: string; names: string[] }> {
   const byWorkspace = new Map<string, Set<string>>();
   for (const worker of workers) {
+    const connected = new Set(worker.channels);
     const names = (worker.requestedChannels ?? worker.channels).filter(
-      (name) => !isAllChannelSelectionName(name),
+      (name) => !isAllChannelSelectionName(name) && connected.has(name),
     );
     if (names.length === 0) continue;
     const workspaceCwd = canonicalizeWorkspace(worker.workspaceCwd);
@@ -362,6 +384,12 @@ export function createChannelWorkerManager(
   const classifyFailure = (
     error: unknown,
     fallbackCode: 'channel_worker_start_failed' | 'channel_worker_stop_failed',
+    extraDetails: {
+      stoppedChannels?: ReadonlyArray<{
+        workspaceCwd: string;
+        names: readonly string[];
+      }>;
+    } = {},
   ): ChannelWorkerControlError => {
     if (error instanceof ChannelWorkerReconcileError) {
       return new ChannelWorkerControlError(
@@ -373,6 +401,7 @@ export function createChannelWorkerManager(
             ? { rollbackError: error.rollbackError }
             : {}),
           ...startupFailureDetails(error),
+          ...extraDetails,
         },
       );
     }
@@ -381,7 +410,7 @@ export function createChannelWorkerManager(
         ? 'channel_worker_stop_failed'
         : fallbackCode,
       errorMessage(error),
-      startupFailureDetails(error),
+      { ...startupFailureDetails(error), ...extraDetails },
     );
   };
 
@@ -564,7 +593,14 @@ export function createChannelWorkerManager(
       release();
     } catch (error) {
       setTransition('idle');
-      throw classifyFailure(error, 'channel_worker_stop_failed');
+      // Carry the captured tear-down set on the error: a partial multi-
+      // workspace stop already killed some workers, and a release() failure
+      // clears the group before any retry could re-capture the names. The
+      // route persists this set even on the failure path, so the stopped
+      // channels do not resurrect on the next `--channel all` (#8975).
+      throw classifyFailure(error, 'channel_worker_stop_failed', {
+        ...(stoppedChannels.length > 0 ? { stoppedChannels } : {}),
+      });
     }
     commit(undefined, []);
     return {

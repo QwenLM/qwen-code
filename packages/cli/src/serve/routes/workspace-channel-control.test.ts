@@ -43,6 +43,8 @@ vi.mock('../../commands/channel/channel-state-store.js', () => ({
   ChannelStateStore: mockChannelStateStore,
 }));
 
+import { daemonChannelRuntimeStatePath } from '../../commands/channel/runtime.js';
+import { ChannelWorkerControlError } from '../channel-worker-manager.js';
 import type {
   ChannelWorkerControlState,
   ChannelWorkerStopResult,
@@ -151,17 +153,50 @@ describe('DELETE /workspace/channel', () => {
       (instance) => instance.path,
     );
     expect(paths[0]).not.toEqual(paths[1]);
-    // Both recorded under the daemon state-path segment (#8975).
-    expect(paths[0]).toContain(path.join('channels', 'daemon'));
-    expect(paths[1]).toContain(path.join('channels', 'daemon'));
-    expect(paths[0]).toContain('channel-state.json');
-    expect(paths[1]).toContain('channel-state.json');
+    // Pin the EXACT workspace-derived hash per instance: distinct wrong
+    // inputs still hash distinctly, so only the exact path proves the stop
+    // write lands where the daemon worker's restore read looks (#8975).
+    expect(paths[0]).toBe(daemonChannelRuntimeStatePath('/workspace/a'));
+    expect(paths[1]).toBe(daemonChannelRuntimeStatePath('/workspace/b'));
     expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
       ['telegram'],
       'stopped',
     );
     expect(mockChannelStateStoreInstances[1]!.setMany).toHaveBeenCalledWith(
       ['feishu'],
+      'stopped',
+    );
+  });
+
+  it('records the torn-down channels carried by a failed stop (#8975)', async () => {
+    const { app } = setup({
+      stop: vi.fn(async () => {
+        // A partial multi-workspace failure (or a lease-release failure):
+        // the manager already tore some workers down and carries the
+        // captured set on the error.
+        throw new ChannelWorkerControlError(
+          'channel_worker_stop_failed',
+          'workspace /workspace/b failed to stop',
+          {
+            stoppedChannels: [
+              { workspaceCwd: '/workspace/a', names: ['telegram'] },
+            ],
+          },
+        );
+      }),
+    });
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(500);
+    // The stop failed overall, but the torn-down channels are still
+    // persisted from the error, or they resurrect on `--channel all`.
+    expect(mockChannelStateStoreInstances).toHaveLength(1);
+    expect(mockChannelStateStoreInstances[0]!.path).toBe(
+      daemonChannelRuntimeStatePath('/workspace/a'),
+    );
+    expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
+      ['telegram'],
       'stopped',
     );
   });

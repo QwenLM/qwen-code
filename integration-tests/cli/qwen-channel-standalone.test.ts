@@ -58,6 +58,69 @@ function waitForLine(
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function waitForListeningUrl(
+  proc: ChildProcess,
+  timeoutMs = 60000,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const timer = setTimeout(() => {
+      reject(
+        new Error(`Timed out waiting for the listening URL. Output: ${buffer}`),
+      );
+    }, timeoutMs);
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString('utf-8');
+      const match = buffer.match(/listening on (https?:\/\/[^\s)]+)/);
+      if (match) {
+        clearTimeout(timer);
+        resolve(match[1]!);
+      }
+    };
+    proc.stdout?.on('data', onData);
+    proc.stderr?.on('data', onData);
+    proc.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(
+        new Error(
+          `Process exited (${String(code)}) before the listening URL. Output: ${buffer}`,
+        ),
+      );
+    });
+  });
+}
+
+async function pollHttp(
+  url: string,
+  accept: (status: number, body: unknown) => boolean,
+  timeoutMs = 30000,
+): Promise<unknown> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      let body: unknown = text;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // Not JSON; keep the raw text for the accept predicate.
+      }
+      if (accept(res.status, body)) return body;
+      lastError = new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(250);
+  }
+  throw new Error(
+    `Timed out polling ${url}: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`,
+  );
+}
+
 afterEach(() => {
   if (child && child.exitCode === null && child.signalCode === null) {
     child.kill('SIGKILL');
@@ -77,6 +140,7 @@ describe('qwen channel start standalone (#8975)', () => {
     const workspace = path.join(testRoot, 'workspace');
     mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
     mkdirSync(runtimeDir);
+    mkdirSync(qwenHome, { recursive: true });
     // Nothing configured: the effective channel set is empty.
     writeFileSync(
       path.join(qwenHome, 'settings.json'),
@@ -103,7 +167,17 @@ describe('qwen channel start standalone (#8975)', () => {
     });
 
     await waitForLine(child, 'serving with 0 channels');
-    expect(existsSync(pidFile)).toBe(true);
+    // The child emits the ready line BEFORE writing the pidfile, and the
+    // parent's pipe-buffer wakeup gives no ordering guarantee for the child's
+    // subsequent file syscalls — poll across the process boundary instead
+    // of asserting immediately.
+    const pidFileDeadline = Date.now() + 5000;
+    while (!existsSync(pidFile)) {
+      if (Date.now() > pidFileDeadline) {
+        throw new Error(`Timed out waiting for pid file at ${pidFile}`);
+      }
+      await sleep(50);
+    }
 
     // The pre-fix process exited on its own in under a second once the event
     // loop drained; give it ample time to do so and require it still alive.
@@ -124,4 +198,91 @@ describe('qwen channel start standalone (#8975)', () => {
     expect(existsSync(pidFile)).toBe(false);
     child = undefined;
   }, 60000);
+});
+
+describe('qwen serve --channel all with an empty channel config (#8975)', () => {
+  // End-to-end replay of the production shape from the issue: the ADA
+  // sandbox restart where `qwen serve --channel all` boots with zero
+  // configured channels. Serve must stay up, report the worker running and
+  // shut down cleanly — a regression re-adding "at least one channel"
+  // validation to the serve startup path fails here.
+  it('keeps serving, reports the worker running, and shuts down cleanly', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-channel-serve-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const workspace = path.join(testRoot, 'workspace');
+    mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    mkdirSync(runtimeDir);
+    mkdirSync(qwenHome, { recursive: true });
+    // Nothing configured: the effective channel set is empty.
+    writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({}),
+      'utf-8',
+    );
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [workspace]: 'TRUST_FOLDER' }),
+      'utf-8',
+    );
+
+    child = spawn(
+      process.execPath,
+      [CLI_BIN, 'serve', '--channel', 'all', '--port', '0'],
+      {
+        cwd: workspace,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: runtimeDir,
+          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+        },
+      },
+    );
+
+    const baseUrl = await waitForListeningUrl(child);
+
+    await pollHttp(`${baseUrl}/health`, (status) => status === 200);
+
+    interface ControlState {
+      enabled?: boolean;
+      transition?: string;
+      workers?: Array<{ state?: string; channels?: string[] }>;
+    }
+    const control = (await pollHttp(
+      `${baseUrl}/workspace/channel`,
+      (_status, body) => {
+        const state = body as ControlState;
+        return (
+          state.enabled === true &&
+          state.transition === 'idle' &&
+          Array.isArray(state.workers) &&
+          state.workers.length > 0 &&
+          state.workers[0]!.state === 'running'
+        );
+      },
+    )) as ControlState;
+    // Zero configured channels: the committed worker runs with no channels.
+    expect(control.workers?.[0]?.channels).toEqual([]);
+
+    // Liveness: the server process is still up after the checks.
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBeNull();
+
+    const exited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const { code, signal } = await exited;
+    expect(signal).toBeNull();
+    expect(code).toBe(0);
+    child = undefined;
+  }, 120000);
 });

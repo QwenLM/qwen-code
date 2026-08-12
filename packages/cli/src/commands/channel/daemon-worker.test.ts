@@ -64,6 +64,10 @@ const mockChannelStateStore = vi.hoisted(() =>
       }
     },
     trySetMany: (names: string[], state: 'active' | 'stopped') => {
+      // Mirror the real setMany: an empty name list is a no-op and must
+      // not be recorded, or tests diverge from production in both
+      // directions (the all-channels-fail path reaches trySetMany([])).
+      if (names.length === 0) return;
       try {
         mockChannelStateStoreSetMany(names, state);
       } catch {
@@ -1305,6 +1309,10 @@ describe('runChannelDaemonWorker', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       '[Channel] No channels configured; serving with 0 channels.',
     );
+    // Never prune with an empty configured set: settings can transiently
+    // recover to empty, and prune([]) semantics would wipe every recorded
+    // stop and resurrect the channels #8975 must keep stopped.
+    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
     expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
     expect(mockDaemonChannelBridge).not.toHaveBeenCalled();
     expect(mockCreateChannel).not.toHaveBeenCalled();
@@ -1410,6 +1418,22 @@ describe('runChannelDaemonWorker', () => {
       ['telegram'],
       'active',
     );
+    // State file wiring: the helper receives this worker's workspace and
+    // the store is constructed with the path it returns — a split here
+    // reads state from a different file than the stop writes target,
+    // resurrecting explicitly stopped channels (#8975).
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen/channels/daemon/workspace-hash/channel-state.json',
+    );
+    // prune receives the FULL configured set: a post-selection or partial
+    // list would wipe the stopped records of exactly the skipped channels.
+    expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+      'telegram',
+      'feishu',
+    ]);
     await handle.close();
   });
 

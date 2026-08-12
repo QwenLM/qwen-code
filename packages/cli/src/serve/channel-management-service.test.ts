@@ -10,6 +10,25 @@ import * as path from 'node:path';
 import { PairingStore } from '@qwen-code/channel-base';
 import type { CreatePairingRequestResult } from '@qwen-code/channel-base';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { daemonChannelRuntimeStatePath } from '../commands/channel/runtime.js';
+
+// Identity-equivalent stand-in for the real helper: every workspace used in
+// these tests is nonexistent, where the real canonicalizeWorkspace falls
+// back to path.resolve — so the default keeps the other tests' expectations
+// while individual tests can simulate a degraded fs (non-ENOENT rethrow).
+const mockCanonicalizeWorkspace = vi.hoisted(() =>
+  vi.fn((p: string) => path.resolve(p)),
+);
+
+vi.mock('@qwen-code/acp-bridge/workspacePaths', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/acp-bridge/workspacePaths')
+    >();
+  return { ...actual, canonicalizeWorkspace: mockCanonicalizeWorkspace };
+});
+
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 
 const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
 const mockChannelStateStore = vi.hoisted(() =>
@@ -637,11 +656,11 @@ describe('createChannelManagementService', () => {
 
     await service.stop('bot');
 
+    // Pin the EXACT workspace-derived path, not just its segments: a stop
+    // written under a different hash than the daemon worker's restore read
+    // resurrects the stopped channel after the next daemon restart.
     expect(mockChannelStateStore).toHaveBeenCalledWith(
-      expect.stringContaining(path.join('channels', 'daemon')),
-    );
-    expect(mockChannelStateStore).toHaveBeenCalledWith(
-      expect.stringContaining('channel-state.json'),
+      daemonChannelRuntimeStatePath(canonicalizeWorkspace(WORKSPACE)),
     );
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
@@ -694,6 +713,76 @@ describe('createChannelManagementService', () => {
 
     // The stopped record must not be persisted on a stop reported as
     // successful — the relaunching worker could overwrite it.
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
+  it('only blocks on a starting worker of the same workspace (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          workspaceId: 'other',
+          workspaceCwd: '/ws/other',
+          primary: false,
+        },
+      ],
+    });
+
+    await service.stop('bot');
+
+    // The starting-window guard is workspace-scoped: another workspace's
+    // mode-`all` worker must neither block this workspace's stop nor let an
+    // unconfirmable stop persist. Dropping the workspace comparison from
+    // the guard turns this into a 409.
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
+  it('keeps the starting-window guard actionable when the fs is degraded (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+    // canonicalizeWorkspace rethrows non-ENOENT fs errors by design. The
+    // stop path compares through a throw-safe form, so a degraded path must
+    // degrade to the path.resolve comparison — producing the actionable 409
+    // the guard exists for — instead of escaping stop() as a raw EACCES
+    // that the route maps to an opaque 500 with no stopped record.
+    mockCanonicalizeWorkspace.mockImplementation(() => {
+      const error = new Error('EACCES') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+
+    try {
+      await expect(service.stop('bot')).rejects.toMatchObject({
+        code: 'channel_worker_starting',
+      });
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 

@@ -169,6 +169,26 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
+ * Read and parse the PID file WITHOUT the liveness check and WITHOUT
+ * unlinking it. Lets a caller capture a stale (crashed) service's channel
+ * list before `readServiceInfo` discards the file — a stop issued right
+ * after a crash must still record those channels as stopped (#8975).
+ * Returns null if the file is missing or unparseable.
+ */
+export function peekServiceInfo(): ServiceInfo | null {
+  const filePath = pidFilePath();
+  if (!existsSync(filePath)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return null;
+  }
+  return parseServiceInfo(parsed);
+}
+
+/**
  * Read the PID file and return service info if the process is still alive.
  * Returns null if no file, invalid file, or stale (dead process).
  * Automatically cleans up stale PID files.

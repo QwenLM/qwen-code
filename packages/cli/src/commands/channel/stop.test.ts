@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockReadServiceInfo = vi.hoisted(() => vi.fn());
+const mockPeekServiceInfo = vi.hoisted(() => vi.fn());
 const mockSignalService = vi.hoisted(() => vi.fn());
 const mockWaitForExit = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
@@ -42,6 +43,7 @@ vi.mock('@qwen-code/sdk/daemon', () => ({ DaemonClient: mockDaemonClient }));
 
 vi.mock('./pidfile.js', () => ({
   readServiceInfo: mockReadServiceInfo,
+  peekServiceInfo: mockPeekServiceInfo,
   signalService: mockSignalService,
   waitForExit: mockWaitForExit,
   removeServiceInfo: mockRemoveServiceInfo,
@@ -94,6 +96,12 @@ describe('stopCommand', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('managed by qwen serve'),
     );
+    // A serve-owned pidfile carries no workspaceCwd; persisting on this path
+    // would land serve's channel union in the legacy global file, which the
+    // next standalone start in ANY workspace adopts (#8975).
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
   });
 
   it('stops daemon-managed channels remotely without touching the pidfile', async () => {
@@ -205,6 +213,63 @@ describe('stopCommand', () => {
     await invokeStop();
 
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith('/workspace/a');
+    // And the store is constructed with the path the helper returns — a
+    // split here writes the stop to a different file than start reads.
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
+  });
+
+  it('persists the crashed service channels from a stale pidfile (#8975)', async () => {
+    // The process died, so readServiceInfo unlinks the stale pidfile and
+    // returns null; the peek captures the channels first, or the explicit
+    // stop is lost and the next `--channel all` start resurrects them.
+    mockPeekServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram', 'feishu'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockReadServiceInfo.mockReturnValue(null);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith('/workspace/a');
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      'stopped',
+    );
+    expect(mockSignalService).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Recorded the crashed service channels as stopped',
+      ),
+    );
+  });
+
+  it('does not persist for a crashed serve-owned or empty pidfile (#8975)', async () => {
+    mockPeekServiceInfo.mockReturnValue({
+      owner: 'serve',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    mockReadServiceInfo.mockReturnValue(null);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'No channel service is running.',
+    );
+
+    mockPeekServiceInfo.mockReturnValue(null);
+    await invokeStop();
+
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
   });
 
   it('falls back to the legacy global state file for older pidfiles (#8975)', async () => {

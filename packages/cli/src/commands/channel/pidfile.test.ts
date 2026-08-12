@@ -95,6 +95,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 import {
+  peekServiceInfo,
   readServiceInfo,
   writeServiceInfo,
   writeServeServiceInfo,
@@ -172,6 +173,67 @@ describe('writeServiceInfo + readServiceInfo', () => {
       owner: 'channel',
       channels: ['telegram'],
       workspaceCwd: '/workspace/a',
+    });
+  });
+
+  it('parses a hand-written pidfile carrying workspaceCwd (#8975)', () => {
+    // Pins the parse path directly (not just write-then-read): the field
+    // declaration on ServiceInfo is type-only, so without this a refactor
+    // dropping it from the parser would ship green.
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'channel',
+      pid: 1234,
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+  });
+
+  describe('peekServiceInfo (#8975)', () => {
+    it('returns parsed info without the liveness check and without unlinking', () => {
+      const filePath = getPidFilePath();
+      fsStore[filePath] = JSON.stringify({
+        owner: 'channel',
+        pid: 424242,
+        startedAt: new Date().toISOString(),
+        channels: ['telegram'],
+        workspaceCwd: '/workspace/a',
+      });
+      // A dead process: readServiceInfo unlinks and returns null, but the
+      // peek must still capture the channels for the crashed-service stop.
+      const deadPid = (): never => {
+        throw new Error('ESRCH');
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      process.kill = vi.fn(deadPid) as any;
+
+      expect(peekServiceInfo()).toMatchObject({
+        owner: 'channel',
+        pid: 424242,
+        channels: ['telegram'],
+        workspaceCwd: '/workspace/a',
+      });
+      expect(filePath in fsStore).toBe(true);
+
+      expect(readServiceInfo()).toBeNull();
+      expect(filePath in fsStore).toBe(false);
+    });
+
+    it('returns null for a missing or corrupt pidfile', () => {
+      expect(peekServiceInfo()).toBeNull();
+
+      fsStore[getPidFilePath()] = '{not json';
+      expect(peekServiceInfo()).toBeNull();
     });
   });
 

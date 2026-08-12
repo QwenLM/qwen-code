@@ -467,8 +467,12 @@ export async function runChannelDaemonWorker(
     let states: Record<string, ChannelRuntimeState>;
     try {
       // Drop entries for channels removed from settings so they cannot be
-      // skipped forever by a stale `stopped` record.
-      states = stateStore.prune(names);
+      // skipped forever by a stale `stopped` record. Never prune with an
+      // empty configured set (e.g. settings transiently recovered to empty):
+      // that would wipe every recorded stop and resurrect the channels
+      // #8975 must keep stopped.
+      states =
+        names.length > 0 ? stateStore.prune(names) : stateStore.readAll();
     } catch {
       states = stateStore.readAll();
     }

@@ -1632,12 +1632,63 @@ describe('startCommand.handler', () => {
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '[Channel] "feishu" skipped (stopped before restart)',
       );
+      // prune receives every configured name, including the skipped one: a
+      // post-selection list would wipe the skipped channel's stopped record
+      // and resurrect it on the next start (#8975).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+        'telegram',
+        'feishu',
+      ]);
       expect(mockCreateChannel).toHaveBeenCalledTimes(1);
       expect(mockCreateChannel).toHaveBeenCalledWith(
         'telegram',
         mockParsedChannelConfig,
         expect.any(Object),
         expect.any(Object),
+      );
+    });
+
+    it('writes only the connected channels to the pidfile after a partial connect (#8975)', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelConnect
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('feishu connect failed'));
+      const err = new Error('EEXIST') as NodeJS.ErrnoException;
+      err.code = 'EEXIST';
+      mockWriteServiceInfo.mockImplementationOnce(() => {
+        throw err;
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // The pidfile lists the CONNECTED set: `qwen channel stop` persists
+      // these names as explicitly stopped, so a channel whose connect()
+      // failed (never ran) must not be recorded, or every later
+      // `--channel all` start skips it (#8975).
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to connect "feishu"'),
+      );
+      expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+        ['telegram'],
+        'active',
+      );
+      expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+        ['telegram'],
+        process.cwd(),
       );
     });
 
@@ -1665,6 +1716,19 @@ describe('startCommand.handler', () => {
       // to the workspace the service starts from (#8975).
       expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
       expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
+      // ...and the store is constructed with the path the helper returns —
+      // a split here reads/writes a different file than stop.ts addresses.
+      expect(mockChannelStateStore).toHaveBeenCalledWith(
+        '/tmp/qwen-home/channels/channel-state.json',
+      );
+      // prune receives the FULL configured set: a partial list would wipe
+      // the stopped records of exactly the skipped channels (#8975).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledWith(['telegram']);
+      // Adoption must run before the state read, or startAll reads the
+      // still-empty workspace file and overwrites the legacy stops (#8975).
+      expect(
+        mockAdoptLegacyChannelState.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockChannelStateStorePrune.mock.invocationCallOrder[0]!);
       expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
         ['telegram'],
         'active',
@@ -1759,5 +1823,50 @@ describe('startCommand.handler', () => {
     }
 
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    // The named path adopts legacy stops too, and BEFORE the first
+    // workspace-scoped write: once the workspace file exists, adoption's
+    // existsSync guard never runs again (#8975).
+    expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
+    expect(
+      mockAdoptLegacyChannelState.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockChannelStateStoreSet.mock.invocationCallOrder[0]!);
+  });
+
+  it('still finishes a named start when state persistence fails (#8975)', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    const err = new Error('EEXIST') as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    // The connect already succeeded; a persistence failure must not abort
+    // the start before the pidfile write, or the connected channel is left
+    // stranded without a pidfile (#8975).
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+      ['telegram'],
+      process.cwd(),
+    );
   });
 });

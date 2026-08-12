@@ -1,6 +1,5 @@
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -70,10 +69,24 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   if (!existsSync(legacyPath)) return;
   try {
     mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
-    copyFileSync(legacyPath, targetPath);
-    unlinkSync(legacyPath);
+    // Copy via the atomic write (temp + fsync + rename): a failure can
+    // never leave a partial (corrupt) target behind, which the existsSync
+    // guard above would otherwise treat as a completed adoption — skipping
+    // adoption forever and orphaning the recoverable legacy stops.
+    atomicWriteFileSync(targetPath, readFileSync(legacyPath), {
+      encoding: 'utf-8',
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
   } catch {
     // Best-effort migration; a failure only loses the one-time legacy stops.
+    return;
+  }
+  try {
+    unlinkSync(legacyPath);
+  } catch {
+    // The completed target is used from now on; the legacy file is inert.
   }
 }
 
@@ -121,13 +134,13 @@ export class ChannelStateStore {
   }
 
   readAll(): Record<string, ChannelRuntimeState> {
-    if (!existsSync(this.filePath)) return {};
+    if (!existsSync(this.filePath)) return Object.create(null);
     let parsed: unknown;
     try {
       parsed = JSON.parse(readFileSync(this.filePath, 'utf-8'));
     } catch {
       this.warnDiscardedFile();
-      return {};
+      return Object.create(null);
     }
     if (
       typeof parsed !== 'object' ||
@@ -135,7 +148,7 @@ export class ChannelStateStore {
       Array.isArray(parsed)
     ) {
       this.warnDiscardedFile();
-      return {};
+      return Object.create(null);
     }
     const channels = (parsed as Partial<ChannelStateFile>).channels;
     if (
@@ -144,9 +157,12 @@ export class ChannelStateStore {
       Array.isArray(channels)
     ) {
       this.warnDiscardedFile();
-      return {};
+      return Object.create(null);
     }
-    const states: Record<string, ChannelRuntimeState> = {};
+    // Null-prototype map: channel names are user-controlled settings keys,
+    // so a channel literally named `__proto__` must round-trip like any
+    // other instead of routing through the Object.prototype setter.
+    const states: Record<string, ChannelRuntimeState> = Object.create(null);
     for (const [name, state] of Object.entries(channels)) {
       if (name.length > 0 && isChannelRuntimeState(state)) {
         states[name] = state;
@@ -194,12 +210,17 @@ export class ChannelStateStore {
   /**
    * Drop recorded entries for channels that are no longer configured, so a
    * channel removed from settings and re-added later is not skipped forever
-   * by a stale `stopped` entry. Returns the pruned state map.
+   * by a stale `stopped` entry. Returns the pruned state map. An empty
+   * configured set is a no-op, never a wipe-all: zero configured channels is
+   * ambiguous (e.g. a transient settings read recovering to empty) and
+   * destroying every recorded `stopped` entry would resurrect exactly the
+   * channels #8975 must keep stopped.
    */
   prune(
     configuredNames: readonly string[],
   ): Record<string, ChannelRuntimeState> {
     const states = this.readAll();
+    if (configuredNames.length === 0) return states;
     const configured = new Set(configuredNames);
     const stale = Object.keys(states).filter((name) => !configured.has(name));
     if (stale.length === 0) return states;

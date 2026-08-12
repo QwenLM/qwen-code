@@ -944,8 +944,12 @@ describe('createChannelWorkerManager', () => {
       throw new Error('lease owner changed');
     });
 
+    // The tear-down already succeeded before release() threw, and the group
+    // is cleared — no retry can re-capture the names, so the error must
+    // carry them for the route to persist (#8975).
     await expect(test.manager.stopSelection()).rejects.toMatchObject({
       code: 'channel_worker_stop_failed',
+      stoppedChannels: [{ workspaceCwd: PRIMARY, names: ['telegram'] }],
     });
     expect(test.manager.state()).toMatchObject({
       enabled: true,
@@ -961,6 +965,41 @@ describe('createChannelWorkerManager', () => {
     expect(test.releaseLease).toHaveBeenCalledTimes(2);
   });
 
+  it('carries the captured channels on a failed multi-workspace stop (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        workspaceId: 'primary',
+        workspaceCwd: PRIMARY,
+        primary: true,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      }),
+      workerSnapshot({
+        workspaceId: 'secondary',
+        workspaceCwd: SECONDARY,
+        primary: false,
+        channels: ['feishu'],
+        requestedChannels: ['feishu'],
+      }),
+    ]);
+    // A partial failure: one workspace's worker is already torn down when
+    // the other fails to exit, so the rejection must still carry the
+    // captured set for persistence — otherwise the stopped channels
+    // resurrect on the next `--channel all` start.
+    vi.mocked(group.stop).mockRejectedValueOnce(new Error('stop failed'));
+
+    await expect(test.manager.stopSelection()).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+      stoppedChannels: [
+        { workspaceCwd: PRIMARY, names: ['telegram'] },
+        { workspaceCwd: SECONDARY, names: ['feishu'] },
+      ],
+    });
+  });
+
   it('reports the torn-down channels on stop for state persistence (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
@@ -969,7 +1008,10 @@ describe('createChannelWorkerManager', () => {
       names: ['telegram', 'feishu'],
     });
     vi.mocked(group.snapshots).mockReturnValue([
-      workerSnapshot({ requestedChannels: ['telegram', 'feishu'] }),
+      workerSnapshot({
+        channels: ['telegram', 'feishu'],
+        requestedChannels: ['telegram', 'feishu'],
+      }),
     ]);
 
     await expect(test.manager.stopSelection()).resolves.toMatchObject({
@@ -977,6 +1019,31 @@ describe('createChannelWorkerManager', () => {
       stoppedChannels: [
         { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
       ],
+    });
+  });
+
+  it('records only connected channels after a partial start (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    // telegram connected, feishu's connect failed: the ready report commits
+    // the attempted set in requestedChannels and the connected set in
+    // channels. The capture must intersect the two — recording a
+    // never-connected channel as explicitly stopped would keep it skipped
+    // on every later `--channel all` start after the cause is fixed.
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['telegram'],
+        requestedChannels: ['telegram', 'feishu'],
+      }),
+    ]);
+
+    await expect(test.manager.stopSelection()).resolves.toMatchObject({
+      changed: true,
+      stoppedChannels: [{ workspaceCwd: PRIMARY, names: ['telegram'] }],
     });
   });
 
@@ -995,6 +1062,11 @@ describe('createChannelWorkerManager', () => {
         channels: ['all'],
       }),
     ]);
+
+    // The same placeholder must not leak into committed names either: an
+    // owner-scoped enable issued in this window would otherwise build a
+    // names selection containing the phantom `all`.
+    expect(test.manager.committedChannelNames()).toEqual([]);
 
     const result = await test.manager.stopSelection();
 

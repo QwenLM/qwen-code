@@ -5,6 +5,7 @@ import {
   channelRuntimeStatePath,
 } from './channel-state-store.js';
 import {
+  peekServiceInfo,
   readServiceInfo,
   signalService,
   waitForExit,
@@ -72,11 +73,30 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       }
       return;
     }
+    // Capture the pidfile contents BEFORE readServiceInfo: a crashed
+    // service's stale pidfile is unlinked there, but its channels must
+    // still be recorded as stopped or the next `--channel all` start
+    // resurrects them (#8975).
+    const pidfileSnapshot = peekServiceInfo();
     const info = readServiceInfo();
 
     if (!info) {
-      writeStdoutLine('No channel service is running.');
+      if (
+        pidfileSnapshot &&
+        pidfileSnapshot.owner === 'channel' &&
+        pidfileSnapshot.channels.length > 0
+      ) {
+        new ChannelStateStore(
+          channelRuntimeStatePath(pidfileSnapshot.workspaceCwd),
+        ).trySetMany(pidfileSnapshot.channels, 'stopped');
+        writeStdoutLine(
+          'No channel service is running. Recorded the crashed service channels as stopped.',
+        );
+      } else {
+        writeStdoutLine('No channel service is running.');
+      }
       process.exit(0);
+      return;
     }
 
     if (info.owner === 'serve') {
