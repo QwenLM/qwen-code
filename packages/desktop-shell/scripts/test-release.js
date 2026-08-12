@@ -42,12 +42,14 @@ try {
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
+  testDesktopReleaseHardening();
   testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
   testElectronBridgeManifest(path.join(root, 'electron-bridge'));
   testVersionSynchronization(path.join(root, 'version'));
+  testRuntimePreparation(path.join(root, 'runtime'));
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
@@ -197,6 +199,143 @@ function testDesktopReleaseSigningWorkflow() {
       workflow.indexOf("name: 'Build desktop installers'"),
     'vendor binaries must be signed before Tauri builds installers',
   );
+}
+
+function testDesktopReleaseHardening() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  assert.match(
+    workflow,
+    /Desktop prereleases must use a SemVer prerelease suffix/,
+    'prerelease builds must not reuse a stable Desktop version',
+  );
+  assert.match(
+    workflow,
+    /\*-setup\.exe\|\*-setup\.exe\.sig/,
+    'Windows release collection must allow only installer executables',
+  );
+  assert.doesNotMatch(
+    workflow.slice(
+      workflow.indexOf('elif [ "$RUNNER_OS" = \'Windows\' ]'),
+      workflow.indexOf('elif [ "$RUNNER_OS" = \'Linux\' ]'),
+    ),
+    /\*\.exe\)/,
+    'Windows release collection must not include embedded executables',
+  );
+
+  const prepareRuntime = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'prepare-runtime.js'),
+    'utf8',
+  );
+  assert.match(
+    prepareRuntime,
+    /QWEN_DESKTOP_NODE_CACHE_DIR/,
+    'runtime preparation must cache verified Node.js archives',
+  );
+  assert.match(
+    workflow,
+    /desktop-node-\$\{\{ matrix\.rust_target \}\}-\$\{\{ env\.NODE_VERSION \}\}/,
+    'release builds must persist the bundled Node.js archive cache',
+  );
+  assert.ok(
+    prepareRuntime.indexOf('replaceRuntime();') >
+      prepareRuntime.indexOf('writeChecksums();'),
+    'runtime replacement must happen only after assembly and checksums finish',
+  );
+}
+
+function testRuntimePreparation(directory) {
+  const testPackageDir = path.join(directory, 'packages', 'desktop-shell');
+  const testScript = path.join(testPackageDir, 'scripts', 'prepare-runtime.js');
+  const sourceRoot = path.join(directory, 'source');
+  const runtimeDir = path.join(testPackageDir, 'runtime');
+  const cacheRoot = path.join(directory, 'cache');
+  const nodeVersion = process.versions.node;
+  const archiveName = `node-v${nodeVersion}-darwin-arm64.tar.gz`;
+  const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
+  const archivePath = path.join(cacheDir, archiveName);
+  const extractedRoot = path.join(
+    directory,
+    `node-v${nodeVersion}-darwin-arm64`,
+  );
+
+  fs.mkdirSync(path.join(sourceRoot, 'dist', 'web-shell', 'assets'), {
+    recursive: true,
+  });
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({ version: '0.0.0-test' }),
+  );
+  fs.mkdirSync(path.dirname(testScript), { recursive: true });
+  fs.copyFileSync(
+    path.join(packageDir, 'scripts', 'prepare-runtime.js'),
+    testScript,
+  );
+  fs.writeFileSync(path.join(directory, '.nvmrc'), '22\n');
+  fs.writeFileSync(
+    path.join(testPackageDir, 'package.json'),
+    JSON.stringify({ version: '0.0.0-test' }),
+  );
+  fs.writeFileSync(path.join(testPackageDir, 'NOTICE'), 'test notice');
+  fs.writeFileSync(path.join(sourceRoot, 'LICENSE'), 'test license');
+  for (const file of [
+    'cli.js',
+    'cli-entry.js',
+    path.join('web-shell', 'index.html'),
+    path.join('web-shell', 'assets', 'app.js'),
+  ]) {
+    fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
+  }
+  fs.mkdirSync(path.join(extractedRoot, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(extractedRoot, 'bin', 'node'), 'node');
+  fs.writeFileSync(path.join(extractedRoot, 'LICENSE'), 'node license');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  execFileSync('tar', [
+    '-czf',
+    archivePath,
+    '-C',
+    directory,
+    path.basename(extractedRoot),
+  ]);
+  const archiveHash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(archivePath))
+    .digest('hex');
+  fs.writeFileSync(
+    path.join(cacheDir, 'SHASUMS256.txt'),
+    `${archiveHash}  ${archiveName}\n`,
+  );
+
+  const env = {
+    ...process.env,
+    QWEN_CODE_COMMIT: 'test-commit',
+    QWEN_CODE_ROOT: sourceRoot,
+    QWEN_DESKTOP_NODE_CACHE_DIR: cacheRoot,
+    QWEN_DESKTOP_SKIP_BUILD: '1',
+    QWEN_DESKTOP_TARGET: 'darwin-arm64',
+    npm_execpath: process.env.npm_execpath || process.argv[1],
+  };
+  const first = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /Using cached Node\.js runtime/);
+  assert.ok(
+    fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
+  );
+
+  const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
+  fs.writeFileSync(marker, 'preserve me');
+  fs.rmSync(path.join(sourceRoot, 'LICENSE'));
+  const failed = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.notEqual(failed.status, 0);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'preserve me');
 }
 
 function testUpdaterMirrorConfiguration() {

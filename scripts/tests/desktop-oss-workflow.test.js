@@ -33,6 +33,9 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain(
       'Published stable Desktop versions must use X.Y.Z',
     );
+    expect(prepare).toContain(
+      'Desktop prereleases must use a SemVer prerelease suffix',
+    );
 
     const syncOss = getWorkflowJob(releaseWorkflow, 'sync-oss');
     expect(syncOss).toContain(
@@ -102,6 +105,11 @@ describe('Desktop OSS mirror workflow', () => {
       'Check whether release matches GitHub stable feed',
     );
     expect(check).toContain("gh release download 'desktop-latest'");
+    expect(check).toContain("SOURCE: '${{ steps.release.outputs.source }}'");
+    expect(check).toContain('elif [ "$SOURCE" = \'artifact\' ]; then');
+    expect(check).toContain(
+      'GitHub stable feed is $actual after publishing Desktop $expected',
+    );
     expect(check).toContain('echo \'matches=true\' >> "$GITHUB_OUTPUT"');
     expect(check).toContain('echo \'matches=false\' >> "$GITHUB_OUTPUT"');
     expect(check).toContain(
