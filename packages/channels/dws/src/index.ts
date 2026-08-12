@@ -114,7 +114,7 @@ export const plugin: ChannelPlugin = {
         label: 'Sender Policy',
         kind: 'enum',
         required: true,
-        default: 'allowlist',
+        default: 'open',
         description: 'Controls which DingTalk users may start DWS tasks',
         options: [
           { value: 'allowlist', label: 'Allowlist' },

@@ -33,6 +33,13 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
   });
 
+  it('defaults sender access to open', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'senderPolicy')
+        ?.default,
+    ).toBe('open');
+  });
+
   it('requires another source when @ message listening is disabled', () => {
     expect(
       plugin.management?.validateConfig?.({ disableAtMessages: true }),
