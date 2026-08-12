@@ -451,6 +451,17 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
+  const pairingMaxPending = rawConfig['pairingMaxPending'];
+  if (
+    pairingMaxPending !== undefined &&
+    (typeof pairingMaxPending !== 'number' ||
+      !Number.isSafeInteger(pairingMaxPending) ||
+      pairingMaxPending <= 0)
+  ) {
+    throw new Error(
+      `Channel "${name}" field "pairingMaxPending" must be a positive integer.`,
+    );
+  }
 
   return {
     ...resolvedRawConfig,
@@ -462,6 +473,7 @@ export async function parseChannelConfig(
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
+    pairingMaxPending: pairingMaxPending as number | undefined,
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
       plugin?.defaultSessionScope ||

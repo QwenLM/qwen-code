@@ -460,6 +460,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         senderPolicy: 'open',
         groupPolicy: 'pairing',
         allowedUsers: ['user-1'],
+        pairingMaxPending: 25,
         groupHistoryLimit: 25,
         blockStreaming: 'on',
         identity: { id: 'ops', displayName: 'Ops' },
@@ -482,10 +483,28 @@ describe('WorkspaceChannelSettingsStore', () => {
       senderPolicy: 'open',
       groupPolicy: 'pairing',
       allowedUsers: ['user-1'],
+      pairingMaxPending: 25,
       groupHistoryLimit: 25,
       blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
     });
+  });
+
+  it.each([0, -1, 1.5, '50'])('rejects pairingMaxPending=%j', async (value) => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          pairingMaxPending: value,
+        },
+      }),
+    ).rejects.toThrow(
+      'Channel field "pairingMaxPending" must be a positive integer.',
+    );
   });
 
   it('accepts string-list and record descriptor fields', async () => {

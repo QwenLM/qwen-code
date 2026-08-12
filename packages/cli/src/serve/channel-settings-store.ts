@@ -175,6 +175,16 @@ function assertSharedField(key: string, value: unknown): boolean {
     }
     return true;
   }
+  if (key === 'pairingMaxPending') {
+    if (
+      typeof value !== 'number' ||
+      !Number.isSafeInteger(value) ||
+      value <= 0
+    ) {
+      throw invalidConfig(`Channel field "${key}" must be a positive integer.`);
+    }
+    return true;
+  }
   if (key === 'identity') {
     assertStringRecord(
       key,

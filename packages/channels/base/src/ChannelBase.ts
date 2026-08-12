@@ -831,7 +831,7 @@ export abstract class ChannelBase {
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
       config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
-        ? new PairingStore(name, config.cwd)
+        ? new PairingStore(name, config.cwd, config.pairingMaxPending)
         : undefined;
     this.groupGate = new GroupGate(
       config.groupPolicy,

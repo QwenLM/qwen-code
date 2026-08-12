@@ -122,7 +122,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
   });
 
   it('limits each sender to one pending request across subjects', () => {
-    const store = new PairingStore('support-bot', workspaceA);
+    const store = new PairingStore('support-bot', workspaceA, 3);
 
     const first = store.createGroupRequest(
       'group-1',
@@ -145,7 +145,7 @@ describe('PairingStore workspace scoping (#7017)', () => {
       store.createGroupRequest('group-1', 'Release Team', 'alice', 'Alice'),
     ).toEqual(first);
 
-    // Other senders are unaffected until the shared cap (3) is reached.
+    // Other senders are unaffected until the configured shared cap is reached.
     expect(
       store.createGroupRequest('group-2', 'Platform Team', 'bob', 'Bob'),
     ).toEqual({ code: expect.any(String) });
@@ -155,6 +155,21 @@ describe('PairingStore workspace scoping (#7017)', () => {
     expect(store.createRequest('dave', 'Dave')).toEqual({
       rejected: 'cap_reached',
     });
+  });
+
+  it('allows 50 pending requests by default and rejects the next one', () => {
+    const store = new PairingStore('support-bot', workspaceA);
+
+    for (let index = 1; index <= 50; index++) {
+      expect(store.createRequest(`sender-${index}`, `Sender ${index}`)).toEqual(
+        { code: expect.any(String) },
+      );
+    }
+
+    expect(store.createRequest('sender-51', 'Sender 51')).toEqual({
+      rejected: 'cap_reached',
+    });
+    expect(store.listPending()).toHaveLength(50);
   });
 
   it('frees the sender slot once their pending request is approved', () => {

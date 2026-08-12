@@ -7,7 +7,7 @@ import { getGlobalQwenDir, getWorkspaceScopeDirName } from './paths.js';
 const SAFE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 8;
 const EXPIRY_MS = 60 * 60 * 1000; // 1 hour
-const MAX_PENDING = 3;
+const DEFAULT_MAX_PENDING = 50;
 
 export interface PairingRequest {
   senderId: string;
@@ -37,6 +37,7 @@ export class PairingStore {
   private allowlistPath: string;
   private groupAllowlistPath: string;
   private migratedSentinelPath: string;
+  private readonly maxPending: number;
 
   /**
    * @param channelName Channel name the state is keyed by.
@@ -47,8 +48,19 @@ export class PairingStore {
    *   (see #7017 — sharing them is an authorization-boundary violation in
    *   multi-workspace daemon deployments). Omitting it preserves the legacy
    *   global layout (`<qwen-home>/channels/`).
+   * @param maxPending Maximum active requests before new subjects are rejected.
    */
-  constructor(channelName: string, workspaceCwd?: string) {
+  constructor(
+    channelName: string,
+    workspaceCwd?: string,
+    maxPending = DEFAULT_MAX_PENDING,
+  ) {
+    if (!Number.isSafeInteger(maxPending) || maxPending <= 0) {
+      throw new Error(
+        'Pairing max pending requests must be a positive integer.',
+      );
+    }
+    this.maxPending = maxPending;
     const channelsRoot = path.join(getGlobalQwenDir(), 'channels');
     this.dir = workspaceCwd
       ? path.join(channelsRoot, getWorkspaceScopeDirName(workspaceCwd))
@@ -241,7 +253,7 @@ export class PairingStore {
     }
 
     // Cap check
-    if (active.length >= MAX_PENDING) {
+    if (active.length >= this.maxPending) {
       return { rejected: 'cap_reached' };
     }
 

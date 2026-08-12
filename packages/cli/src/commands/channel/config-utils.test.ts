@@ -183,6 +183,24 @@ describe('parseChannelConfig', () => {
     expect(result.memoryScope).toBeUndefined();
   });
 
+  it('accepts a positive integer pending pairing limit', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      pairingMaxPending: 75,
+    });
+
+    expect(result['pairingMaxPending']).toBe(75);
+  });
+
+  it.each([0, -1, 1.5, '50'])('rejects pairingMaxPending=%j', async (value) => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        pairingMaxPending: value,
+      }),
+    ).rejects.toThrow('pairingMaxPending');
+  });
+
   it('resolves env vars in token, clientId, clientSecret', async () => {
     process.env['TEST_TOKEN'] = 'tok123';
     process.env['TEST_CID'] = 'cid456';

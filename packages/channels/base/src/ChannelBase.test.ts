@@ -13847,6 +13847,33 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
+    it('applies the configured pending pairing limit', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-pairing-limit-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          senderPolicy: 'pairing',
+          allowedUsers: [],
+          pairingMaxPending: 1,
+        });
+
+        await ch.handleInbound(envelope({ senderId: 'alice' }));
+        await ch.handleInbound(envelope({ senderId: 'bob' }));
+
+        expect(ch.sent).toHaveLength(2);
+        expect(ch.sent[0]!.text).toContain('pairing code');
+        expect(ch.sent[1]!.text).toContain('Too many pending pairing requests');
+        expect(
+          new PairingStore('test-chan', '/tmp').listPending(),
+        ).toHaveLength(1);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
+    });
+
     it('logs pairing-required preflight rejections', async () => {
       const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
       const writeSpy = vi
@@ -14078,7 +14105,7 @@ describe('ChannelBase', () => {
       const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-group-pairing-'));
       process.env['QWEN_HOME'] = qwenHome;
       try {
-        const store = new PairingStore('test-chan', '/tmp');
+        const store = new PairingStore('test-chan', '/tmp', 3);
         for (let index = 1; index <= 3; index++) {
           store.createGroupRequest(
             `group-${index}`,
@@ -14087,7 +14114,10 @@ describe('ChannelBase', () => {
             `Sender ${index}`,
           );
         }
-        const ch = createChannel({ groupPolicy: 'pairing' });
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          pairingMaxPending: 3,
+        });
 
         await ch.handleInbound(
           envelope({

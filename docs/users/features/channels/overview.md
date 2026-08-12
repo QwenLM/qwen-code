@@ -35,6 +35,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
       "token": "$MY_BOT_TOKEN",
       "senderPolicy": "allowlist",
       "allowedUsers": ["123456789"],
+      "pairingMaxPending": 50,
       "sessionScope": "user",
       "cwd": "/path/to/working/directory",
       "instructions": "Optional system instructions for the agent.",
@@ -61,6 +62,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                                |
 | `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
+| `pairingMaxPending`      | No               | Maximum pending user and group pairing requests for this channel. Defaults to `50` and must be a positive integer                                                                                                       |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                                                                        |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
@@ -200,7 +202,7 @@ Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pai
 
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
-- Maximum 3 pending requests per channel at a time, and at most one per sender — additional requests are declined until one expires or is approved
+- Maximum 50 pending requests per channel at a time by default, and at most one per sender — set `pairingMaxPending` on the channel to use a different positive-integer limit
 - Users listed in `allowedUsers` in `settings.json` skip user pairing; under `groupPolicy: "pairing"`, the group itself must still be approved
 - Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 

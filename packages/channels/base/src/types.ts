@@ -59,6 +59,8 @@ export interface ChannelConfig {
   clientSecret?: string;
   senderPolicy: SenderPolicy;
   allowedUsers: string[];
+  /** Maximum pending pairing requests. Default: 50. */
+  pairingMaxPending?: number;
   sessionScope: SessionScope;
   cwd: string;
   approvalMode?: string;
