@@ -3377,6 +3377,31 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
+  it('keeps the first delta stamp as serverTimestamp and the latest as serverUpdatedAt', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100_000 }),
+      [
+        {
+          type: 'thought.text.delta',
+          text: 'thinking',
+          serverTimestamp: 1_000,
+        },
+        {
+          type: 'thought.text.delta',
+          text: ' more',
+          serverTimestamp: 3_000,
+        },
+      ],
+      { now: 100_000 },
+    );
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'thought',
+      serverTimestamp: 1_000,
+      serverUpdatedAt: 3_000,
+    });
+  });
+
   it('stamps serverUpdatedAt on a thought finalized by a tool update', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 100_000 }),

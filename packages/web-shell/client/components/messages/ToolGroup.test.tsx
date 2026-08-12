@@ -236,6 +236,27 @@ describe('tool group summary logic', () => {
     );
   });
 
+  it('renders workspace-relative paths in multi-tool running summaries', () => {
+    const tools = [
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: '/workspace/project/src/foo.ts' },
+      }),
+      makeTool({ callId: 'done', status: 'completed' }),
+    ];
+
+    const summary = formatToolGroupSummary(
+      tools,
+      t,
+      undefined,
+      '/workspace/project',
+    );
+    expect(summary).toContain('ReadFile src/foo.ts');
+    expect(summary).not.toContain('/workspace/project/src/foo.ts');
+  });
+
   it('localizes active tool names in running summaries', () => {
     const tools = [
       makeTool({

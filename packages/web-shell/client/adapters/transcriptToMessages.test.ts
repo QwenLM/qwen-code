@@ -316,7 +316,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('uses the daemon clock pair for replayed background agent notifications', () => {
+  it('projects the daemon interval onto the client clock for replayed background agent notifications', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-block', 'agent-call', 'completed', 100_000, {
         toolName: 'agent',
@@ -348,8 +348,50 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
-      tools: [{ callId: 'agent-call', startTime: 5_000, endTime: 15_000 }],
+      tools: [{ callId: 'agent-call', startTime: 190_000, endTime: 200_000 }],
     });
+  });
+
+  it('leaves timing untouched for a non-terminal background agent notification', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 100_000, {
+        toolName: 'agent',
+        rawInput: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+        serverTimestamp: 5_000,
+        serverUpdatedAt: 8_000,
+      }),
+      textBlock(
+        'agent-progress',
+        'assistant',
+        'background agent progress',
+        200_000,
+        false,
+        {
+          serverTimestamp: 15_000,
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              kind: 'agent',
+              status: 'running',
+              taskId: 'agent-task',
+              toolUseId: 'agent-call',
+            },
+          },
+        },
+      ),
+    ]);
+
+    // In-flight projection keeps the client-projected start and no end time;
+    // the non-terminal notification must not overwrite either.
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call', startTime: 97_000 }],
+    });
+    if (messages[0]?.role === 'tool_group') {
+      expect(messages[0].tools[0]).not.toHaveProperty('endTime');
+    }
   });
 
   it('falls back to client timing when a notification repeats the start stamp', () => {
@@ -2080,7 +2122,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps merged permission placeholders on the tool server clock', () => {
+  it('keeps merged permission placeholders on the tool block timing', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {
         id: 'perm-1',
@@ -2112,12 +2154,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toMatchObject([
       {
         role: 'tool_group',
-        tools: [{ callId: 'tc-1', startTime: 5_000, endTime: 15_000 }],
+        tools: [{ callId: 'tc-1', startTime: 3_000, endTime: 13_000 }],
       },
     ]);
   });
 
-  it('keeps the tool server clock when the tool block precedes the permission', () => {
+  it('keeps the tool block timing when the tool block precedes the permission', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('tool-1', 'tc-1', 'completed', 3_000, {
         toolName: 'run_shell_command',
@@ -2149,7 +2191,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toMatchObject([
       {
         role: 'tool_group',
-        tools: [{ callId: 'tc-1', startTime: 5_000, endTime: 15_000 }],
+        tools: [{ callId: 'tc-1', startTime: 3_000, endTime: 13_000 }],
       },
     ]);
   });
@@ -3058,8 +3100,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages[0]).toMatchObject({
       role: 'thinking',
-      startTime: 1_000,
-      endTime: 6_000,
+      startTime: 95_000,
+      endTime: 100_000,
     });
   });
 
@@ -3079,8 +3121,8 @@ describe('transcriptBlocksToDaemonMessages', () => {
       {
         role: 'thinking',
         content: 'first second',
-        startTime: 1_000,
-        endTime: 9_000,
+        startTime: 95_000,
+        endTime: 103_000,
       },
     ]);
   });
@@ -3123,7 +3165,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
-      tools: [{ startTime: 1_000, endTime: 6_000 }],
+      tools: [{ startTime: 95_000, endTime: 100_000 }],
     });
   });
 
@@ -3157,7 +3199,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('does not merge adjacent thinking blocks from different clocks', () => {
+  it('merges adjacent thinking blocks across timing provenance', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('client', 'thought', 'first', 100_000, false, {
         updatedAt: 101_000,
@@ -3169,8 +3211,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
 
     expect(messages).toMatchObject([
-      { role: 'thinking', startTime: 100_000, endTime: 101_000 },
-      { role: 'thinking', startTime: 1_000, endTime: 6_000 },
+      {
+        role: 'thinking',
+        content: 'firstsecond',
+        startTime: 100_000,
+        endTime: 106_000,
+      },
     ]);
   });
 

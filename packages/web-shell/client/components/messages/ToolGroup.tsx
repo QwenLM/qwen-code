@@ -591,6 +591,7 @@ export function formatToolGroupSummary(
   tools: ACPToolCall[],
   t: ReturnType<typeof useI18n>['t'],
   duration?: string,
+  workspaceCwd?: string,
 ): string {
   if (hasActiveAgents(tools)) {
     const foregroundActiveTools = tools.filter(
@@ -609,7 +610,7 @@ export function formatToolGroupSummary(
     const activeSummaries = foregroundActiveTools.map((tool) =>
       isAskUserQuestionToolName(tool.toolName)
         ? t('toolGroup.summary.provideInformation')
-        : formatSingleToolSummary(tool, t),
+        : formatSingleToolSummary(tool, t, workspaceCwd),
     );
     return t('toolGroup.running', {
       name: activeSummaries.join(' · '),
@@ -1494,6 +1495,16 @@ export const ToolGroup = memo(function ToolGroup({
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = activeTool ?? tools[0];
   const liveStartedAtRef = useRef(Date.now());
+  const liveAnchorKeyRef = useRef<string | undefined>(undefined);
+  // Fallback anchor for a running group whose active tool carries no start
+  // time (live path only). It is observation time, not tool start time: it is
+  // re-anchored during render when the running tool changes so the first
+  // frame already counts from ~0s instead of jumping back after paint.
+  const liveAnchorKey = animateSummary ? activeTool?.callId : undefined;
+  if (liveAnchorKey !== liveAnchorKeyRef.current) {
+    liveAnchorKeyRef.current = liveAnchorKey;
+    if (liveAnchorKey !== undefined) liveStartedAtRef.current = Date.now();
+  }
   const summaryNow = useSharedNow(animateSummary);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
@@ -1503,11 +1514,6 @@ export const ToolGroup = memo(function ToolGroup({
         summaryNow - (activeTool?.startTime ?? liveStartedAtRef.current),
       )
     : undefined;
-
-  useEffect(() => {
-    if (!animateSummary) return;
-    liveStartedAtRef.current = Date.now();
-  }, [animateSummary, activeTool?.callId]);
 
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
@@ -1575,7 +1581,7 @@ export const ToolGroup = memo(function ToolGroup({
                 workspaceCwd={workspaceCwd}
               />
             ) : (
-              formatToolGroupSummary(tools, t, runningDuration)
+              formatToolGroupSummary(tools, t, runningDuration, workspaceCwd)
             )}
           </span>
           <span

@@ -10,7 +10,7 @@ Update the existing Web Shell compact mode to hide transcript thinking without c
 
 In compact mode, regular tool groups separated only by hidden thinking are merged within the same activity sequence. Outside compact mode, visible thinking preserves the original interleaved transcript order. User, assistant, system, plan, approval, agent, todo, and question UI boundaries remain separate. Running tool summaries are derived from all active foreground tools and reuse the existing tool descriptions. Completed summaries remain unchanged and appear only after no tool is active. Expanded tool rows reuse the existing tool-kind icons.
 
-Transcript blocks retain the first and latest daemon timestamps. Thinking and tool messages use that authoritative pair for completed durations only when it contains a positive elapsed interval. Live durations project the elapsed daemon duration onto the client clock, avoiding mixed-clock subtraction while still surviving transcript replay. Legacy and partial records without a usable daemon pair use the client-time pair.
+Transcript blocks retain the first and latest daemon timestamps. When a block carries an authoritative pair with a positive elapsed interval, thinking and tool messages keep the daemon-measured duration but anchor it onto the client clock, so every start/end timestamp stays in one domain and remains comparable across tools. Live durations use the same projection, avoiding mixed-clock subtraction while still surviving transcript replay. Legacy and partial records without a usable daemon pair use the client-time pair. Consecutive thinking blocks merge regardless of which timing source produced them, accumulating each block's own duration.
 
 ## Compatibility
 

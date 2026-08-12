@@ -76,9 +76,14 @@ function getTranscriptTiming(
   const serverEnd = block.serverUpdatedAt;
   const hasServerPair = hasServerTimingPair(block);
   if (complete) {
-    return hasServerPair
-      ? { startTime: serverStart!, endTime: serverEnd! }
-      : { startTime: block.createdAt, endTime: block.updatedAt };
+    if (!hasServerPair) {
+      return { startTime: block.createdAt, endTime: block.updatedAt };
+    }
+    // Keep the daemon-measured interval but anchor it in the client clock so
+    // timestamps from different tools stay comparable (collectToolSpans sorts
+    // them; live durations subtract them from Date.now()).
+    const elapsed = Math.max(0, serverEnd! - serverStart!);
+    return { startTime: block.updatedAt - elapsed, endTime: block.updatedAt };
   }
   const elapsed = hasServerPair
     ? Math.max(0, serverEnd! - serverStart!)
@@ -118,12 +123,6 @@ function applyBackgroundAgentTaskUpdate(
   block: DaemonToolTranscriptBlock,
 ): void {
   if (!update) return;
-  const hasServerPair =
-    block.serverTimestamp !== undefined &&
-    update.serverEndTime !== undefined &&
-    update.serverEndTime > block.serverTimestamp;
-  tool.startTime = hasServerPair ? block.serverTimestamp : block.createdAt;
-  tool.endTime = hasServerPair ? update.serverEndTime : update.clientEndTime;
   switch (update.status) {
     case 'completed':
       tool.status = 'completed';
@@ -139,7 +138,21 @@ function applyBackgroundAgentTaskUpdate(
         status: 'cancelled',
       };
       break;
+    default:
+      // A non-terminal notification must not overwrite timing: that is the
+      // only way an in-flight tool could acquire an absolute daemon-clock
+      // start time.
+      return;
   }
+  const hasServerPair =
+    block.serverTimestamp !== undefined &&
+    update.serverEndTime !== undefined &&
+    update.serverEndTime > block.serverTimestamp;
+  const elapsed = hasServerPair
+    ? update.serverEndTime! - block.serverTimestamp!
+    : Math.max(0, update.clientEndTime - block.createdAt);
+  tool.startTime = update.clientEndTime - elapsed;
+  tool.endTime = update.clientEndTime;
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -363,7 +376,6 @@ export function transcriptBlocksToDaemonMessages(
   const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
-  let currentThinkingUsesServerPair = false;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
   // the next top-level assistant/thought block must start a fresh assistant
   // message instead of being appended to text that appeared before the tool.
@@ -545,8 +557,6 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
-        const usesServerPair =
-          !textBlock.streaming && hasServerTimingPair(textBlock);
         const parentSubAgent = textBlock.parentToolCallId
           ? toolsByCallId.get(textBlock.parentToolCallId)
           : undefined;
@@ -558,18 +568,24 @@ export function transcriptBlocksToDaemonMessages(
           currentThinkingIdx !== null
             ? messages[currentThinkingIdx]
             : undefined;
-        if (
-          target &&
-          target.role === 'thinking' &&
-          !needsNewContentMessage &&
-          currentThinkingUsesServerPair === usesServerPair
-        ) {
+        if (target && target.role === 'thinking' && !needsNewContentMessage) {
           const timing = getTranscriptTiming(textBlock, !textBlock.streaming);
+          // Accumulate each block's own duration instead of subtracting the
+          // merged endpoints, so blocks with different timing provenance
+          // (daemon pair vs client pair) keep an exact total.
+          const blockElapsed =
+            timing.endTime !== undefined
+              ? timing.endTime - timing.startTime
+              : undefined;
+          const prevEnd = target.endTime ?? target.startTime;
           messages[currentThinkingIdx!] = {
             ...target,
             content: target.content + textBlock.text,
             isStreaming: textBlock.streaming,
-            endTime: timing.endTime,
+            endTime:
+              blockElapsed !== undefined && prevEnd !== undefined
+                ? prevEnd + blockElapsed
+                : timing.endTime,
           };
           needsNewContentMessage = false;
         } else {
@@ -583,7 +599,6 @@ export function transcriptBlocksToDaemonMessages(
             ...timing,
           });
           currentThinkingIdx = messages.length - 1;
-          currentThinkingUsesServerPair = usesServerPair;
           needsNewContentMessage = false;
         }
         currentAssistantIdx = null;

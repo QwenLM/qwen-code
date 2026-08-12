@@ -500,6 +500,9 @@ function finalizeStreamingTextBlock(
     // finalize/status events can be much newer and would skew message times.
     if (event?.serverTimestamp !== undefined) {
       if (block.serverTimestamp === undefined) {
+        // Degraded-record fallback: the block was never stamped while
+        // streaming, so the terminator's stamp approximates its first
+        // observed time rather than being the true start.
         block.serverTimestamp = event.serverTimestamp;
       } else {
         block.serverUpdatedAt = event.serverTimestamp;

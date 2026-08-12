@@ -248,10 +248,6 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const translationAbortRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
-    if (startTime !== undefined) startTimeRef.current = startTime;
-  }, [startTime]);
-
-  useEffect(() => {
     if (!content || !thinkingActive) return;
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -259,11 +255,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   }, [content, thinkingActive]);
 
   useEffect(() => {
-    if (!content) return;
-    if (endTime !== undefined) {
-      setFinishedAt(endTime);
-      return;
-    }
+    if (!content || endTime !== undefined) return;
     if (thinkingActive) {
       sawActiveRef.current = true;
       setFinishedAt(null);
