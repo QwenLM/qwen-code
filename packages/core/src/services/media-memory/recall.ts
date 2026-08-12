@@ -76,6 +76,16 @@ export interface MediaMemoryRecallEntry {
   /** Fidelity disclosure recorded at collection time — travels with the
    * content so degraded derivatives are never mistaken for originals. */
   disclosure?: string;
+  /**
+   * True when `content` is a PREFIX of what memory holds, cut by
+   * `recall.maxTextChars`. Coverage speaks for what was PROCESSED, so a
+   * transcript entry legitimately reports `complete` — without this flag
+   * the model reads a truncated transcript, sees complete coverage and no
+   * gap, and answers about late audio it never saw. Defaults collide here
+   * by design: maxTextChars (24000 chars) is smaller than the collection
+   * bound (65536 bytes), so any long transcript is cut at READ time.
+   */
+  contentTruncated?: boolean;
   /** Session handle for a derived media artifact, freshly bound through
    * the registry (M §5.2). Absent when the artifact is gone. */
   resourceId?: string;
@@ -405,46 +415,44 @@ export class MediaMemoryRecallService {
   ): Promise<MediaMemoryCandidateSummary[]> {
     const bindings = this.resolveBindings(resourceIds);
     const request: MediaMemoryRecallRequest = { resourceIds, query: '' };
-    try {
-      return await this.store.read(
-        [] as MediaMemoryCandidateSummary[],
-        async (snapshot) => {
-          const { candidates } = await this.collectFromSnapshot(
-            snapshot,
-            request,
-            bindings,
-          );
-          return orderCandidates([...candidates.values()])
-            .slice(0, this.config.sideQuery.maxCandidateEntries)
-            .map((candidate) => ({
-              entryId: candidate.entry.entryId,
-              kind: candidate.entry.kind,
-              ...(candidate.entry.role !== undefined
-                ? { role: candidate.entry.role }
-                : {}),
-              scope: candidate.entry.scope,
-              channels: candidate.entry.channels,
-              coverage: candidate.entry.coverage,
-              ...(candidate.entry.content !== undefined
-                ? {
-                    description: truncateChars(
-                      candidate.entry.content,
-                      CANDIDATE_DESCRIPTION_MAX_CHARS,
-                    ),
-                  }
-                : {}),
-              ...(candidate.entry.provenance.toolName !== undefined
-                ? { producer: candidate.entry.provenance.toolName }
-                : {}),
-            }));
-        },
-      );
-    } catch (err) {
-      debugLogger.debug(
-        `candidate manifest failed: ${err instanceof Error ? err.message : err}`,
-      );
-      return [];
-    }
+    // No catch-all here: an unreadable/absent store already resolves to the
+    // empty manifest inside `read`, so anything reaching this frame is a
+    // defect in the walk. The caller records it as `manifest_failed` and
+    // sends the main request anyway — swallowing it here would only cost us
+    // the stack trace.
+    return await this.store.read(
+      [] as MediaMemoryCandidateSummary[],
+      async (snapshot) => {
+        const { candidates } = await this.collectFromSnapshot(
+          snapshot,
+          request,
+          bindings,
+        );
+        return orderCandidates([...candidates.values()])
+          .slice(0, this.config.sideQuery.maxCandidateEntries)
+          .map((candidate) => ({
+            entryId: candidate.entry.entryId,
+            kind: candidate.entry.kind,
+            ...(candidate.entry.role !== undefined
+              ? { role: candidate.entry.role }
+              : {}),
+            scope: candidate.entry.scope,
+            channels: candidate.entry.channels,
+            coverage: candidate.entry.coverage,
+            ...(candidate.entry.content !== undefined
+              ? {
+                  description: truncateChars(
+                    candidate.entry.content,
+                    CANDIDATE_DESCRIPTION_MAX_CHARS,
+                  ),
+                }
+              : {}),
+            ...(candidate.entry.provenance.toolName !== undefined
+              ? { producer: candidate.entry.provenance.toolName }
+              : {}),
+          }));
+      },
+    );
   }
 
   /**
@@ -460,22 +468,26 @@ export class MediaMemoryRecallService {
     entryIds: string[],
   ): Promise<MediaMemoryRecallResult> {
     const bindings = this.resolveBindings(resourceIds);
-    if (entryIds.length > this.config.sideQuery.maxSelectedEntries) {
+    // A repeated pick is one pick: a selector naming the same entry twice
+    // asked for the same content, and materializing it twice would spend
+    // the budget on a duplicate.
+    const selectedIds = [...new Set(entryIds)];
+    if (selectedIds.length > this.config.sideQuery.maxSelectedEntries) {
       throw new MediaMemoryRecallRejection(
         'invalid_selection',
-        `selector returned ${entryIds.length} entryIds; at most ` +
+        `selector returned ${selectedIds.length} entryIds; at most ` +
           `${this.config.sideQuery.maxSelectedEntries} may be selected`,
       );
     }
     const request: MediaMemoryRecallRequest = { resourceIds, query: '' };
-    const miss: MediaMemoryRecallResult = {
-      status: 'miss',
-      files: [],
-      entries: [],
-      gaps: [],
-    };
-    try {
-      return await this.store.read(miss, async (snapshot) => {
+    return await this.store.read(
+      {
+        status: 'miss',
+        files: [],
+        entries: [],
+        gaps: [],
+      } satisfies MediaMemoryRecallResult,
+      async (snapshot) => {
         const collected = await this.collectFromSnapshot(
           snapshot,
           request,
@@ -490,7 +502,7 @@ export class MediaMemoryRecallService {
             .map((candidate) => [candidate.entry.entryId, candidate]),
         );
         const selected: CandidateEntry[] = [];
-        for (const entryId of entryIds) {
+        for (const entryId of selectedIds) {
           const candidate = manifest.get(entryId);
           if (!candidate) {
             throw new MediaMemoryRecallRejection(
@@ -502,14 +514,8 @@ export class MediaMemoryRecallService {
           selected.push(candidate);
         }
         return this.finishResult(snapshot, selected, collected);
-      });
-    } catch (err) {
-      if (err instanceof MediaMemoryRecallRejection) throw err;
-      debugLogger.debug(
-        `recallSelection failed: ${err instanceof Error ? err.message : err}`,
-      );
-      return miss;
-    }
+      },
+    );
   }
 
   /** Shared request validation (M §9.2): every handle must have been
@@ -524,7 +530,11 @@ export class MediaMemoryRecallService {
         'recall request must name at least one resourceId',
       );
     }
-    return resourceIds.map((resourceId) => {
+    // Deduplicated: gaps are pushed per binding and the advisor runs per
+    // gap, so a handle repeated in one request would otherwise yield
+    // identical duplicate gaps and duplicate suggested actions — telling
+    // the model to run the same follow-up call twice on the same resource.
+    return [...new Set(resourceIds)].map((resourceId) => {
       const binding = this.registry.resolve(resourceId);
       if (!binding) {
         throw new MediaMemoryRecallRejection(
@@ -817,6 +827,13 @@ export class MediaMemoryRecallService {
                       entry.inlineText,
                       this.config.maxTextChars,
                     ),
+                    // Say so when the payload is a prefix: coverage speaks
+                    // for what was processed, so it stays `complete` and
+                    // no gap is raised — the flag is the only signal that
+                    // the model is not holding the whole text.
+                    ...(entry.inlineText.length > this.config.maxTextChars
+                      ? { contentTruncated: true }
+                      : {}),
                   }
                 : {}),
               ...(entry.disclosure !== undefined

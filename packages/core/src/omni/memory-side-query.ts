@@ -223,8 +223,12 @@ export async function runOmniMemorySideQuery(params: {
       },
     });
   } catch (err) {
-    // Timeout, selector failure, or an invalid selection that exhausted
-    // maxAttempts: empty recall, main request proceeds (M §17).
+    // Timeout, generation failure, or a selection our `validate` refused.
+    // Note the asymmetry: `maxAttempts` governs the client's own retry loop
+    // (unparseable output, schema violations), while `validate` runs once
+    // afterwards — so a selection that parses but names an id outside the
+    // manifest throws on the first offense and is not retried. Either way:
+    // empty recall, main request proceeds (M §17).
     const reason = timeoutSignal.aborted
       ? 'selector_timeout'
       : `selector_failed: ${err instanceof Error ? err.message : err}`;
@@ -241,6 +245,12 @@ export async function runOmniMemorySideQuery(params: {
       resourceIds,
       selection.entryIds,
     );
+    // Every pick can drop out in the availability pass (the artifacts were
+    // deleted between the walk and now). Injecting the empty shell would
+    // spend the reminder on a payload that says nothing.
+    if (result.entries.length === 0) {
+      return { result: null, reason: 'materialized_nothing', resourceIds };
+    }
     return { result, resourceIds };
   } catch (err) {
     // Defense in depth: validate() should have caught any bad selection,

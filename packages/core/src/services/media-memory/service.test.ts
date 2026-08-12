@@ -238,6 +238,30 @@ describe('MediaMemoryService.commitPolicySucceeded', () => {
     ).toBeUndefined();
   });
 
+  it('leaves the derived version pointing at the execution that made it', async () => {
+    // A second execution over the same source under a different omni
+    // configuration can land on byte-identical output — same derived File,
+    // same version. Rewriting the version's producer would make it name an
+    // execution whose outputs it is not.
+    const source = (await service.recordFileRecognized(recognizedEvent()))!;
+    const first = (await service.commitPolicySucceeded(
+      succeededInput(source),
+    ))!;
+    const second = (await service.commitPolicySucceeded(
+      succeededInput(source, { omniConfigHash: 'fp-' + '1'.repeat(61) }),
+    ))!;
+
+    expect(second.executionId).not.toBe(first.executionId);
+    const derivedVersionId = first.mediaBindings.get(SHA_OUT)!.fileVersionId;
+    expect(second.mediaBindings.get(SHA_OUT)!.fileVersionId).toBe(
+      derivedVersionId,
+    );
+    const snapshot = await readSnapshot();
+    expect(snapshot.versions[derivedVersionId]!.producedByExecutionId).toBe(
+      first.executionId,
+    );
+  });
+
   it('commits execution + derived version + entry atomically with lineage edges', async () => {
     const source = (await service.recordFileRecognized(recognizedEvent()))!;
     const commit = await service.commitPolicySucceeded(succeededInput(source));

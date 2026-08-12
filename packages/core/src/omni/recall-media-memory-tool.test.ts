@@ -291,6 +291,59 @@ describe('buildMediaMemoryRecallAdvisor', () => {
     ]);
   });
 
+  it('does not re-suggest audio extraction once the track exists', () => {
+    // The payload that RETURNS the extracted audio still reports the
+    // video's speech_text channel as open. Matching that channel made the
+    // advisor suggest extracting the track again in the very same payload;
+    // the model is supposed to chain to transcription instead.
+    const advise = buildMediaMemoryRecallAdvisor(
+      advisorConfig({
+        registered: [
+          ToolNames.OMNI_EXTRACT_AUDIO,
+          ToolNames.OMNI_TRANSCRIBE_AUDIO,
+        ],
+        enabled: [
+          ToolNames.OMNI_EXTRACT_AUDIO,
+          ToolNames.OMNI_TRANSCRIBE_AUDIO,
+        ],
+      }),
+    );
+    expect(
+      advise({
+        resourceId: 'media-4-aa',
+        mediaType: 'video',
+        gap: gap(['speech_text']),
+      }),
+    ).toEqual([]);
+    // A wholly unprocessed video still gets the extraction step.
+    expect(
+      advise({
+        resourceId: 'media-4-aa',
+        mediaType: 'video',
+        gap: gap(['acoustic', 'speech_text']),
+      }).map((a) => a.toolName),
+    ).toEqual([ToolNames.OMNI_EXTRACT_AUDIO]);
+  });
+
+  it('never suggests work that cannot close a sampled-coverage gap', () => {
+    // Keyframes deliberately never claim complete visual coverage, so
+    // suggesting keyframe extraction against `partial_coverage` would
+    // advise the same step forever.
+    const advise = buildMediaMemoryRecallAdvisor(
+      advisorConfig({
+        registered: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
+        enabled: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
+      }),
+    );
+    expect(
+      advise({
+        resourceId: 'media-5-bb',
+        mediaType: 'video',
+        gap: gap(['visual'], 'partial_coverage'),
+      }),
+    ).toEqual([]);
+  });
+
   it('never suggests anything for an unavailable artifact', () => {
     const advise = buildMediaMemoryRecallAdvisor(
       advisorConfig({

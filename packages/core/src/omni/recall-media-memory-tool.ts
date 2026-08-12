@@ -165,12 +165,18 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
               type: 'string',
               enum: [...OMNI_MEMORY_RECALL_KINDS],
             },
+            // An empty list would read as "restrict to nothing" and return a
+            // silent miss; omit the key instead to mean "all kinds".
+            minItems: 1,
+            uniqueItems: true,
             description:
               'Restrict to entry kinds (default: all configured kinds).',
           },
           roles: {
             type: 'array',
             items: { type: 'string', minLength: 1, maxLength: 128 },
+            minItems: 1,
+            uniqueItems: true,
             description:
               'Restrict to artifact roles (e.g. "transcript", "keyframe").',
           },

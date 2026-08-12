@@ -721,6 +721,20 @@ describe('MediaMemoryRecallService — sideQuery manifest and selection (§9.3)'
     );
   });
 
+  it('materializes a repeated pick once', async () => {
+    const source = await recognizeMovie();
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+    const svc = recallService();
+    const manifest = await svc.candidateSummaries([resourceId]);
+    const entryId = manifest[0]!.entryId;
+
+    const result = await svc.recallSelection([resourceId], [entryId, entryId]);
+
+    // One pick, not two copies spending the budget on the same content.
+    expect(result.entries.map((e) => e.entryId)).toEqual([entryId]);
+  });
+
   it('rejects an entryId outside the manifest wholesale', async () => {
     const source = await recognizeMovie();
     await commitTranscript(source);

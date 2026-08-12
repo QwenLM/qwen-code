@@ -619,7 +619,7 @@ describe('evaluateMediaPolicyToolCall', () => {
               fileVersionId: 'v1',
               rootFileId: 'f1',
               fileRef: bindings[id],
-              mediaType: 'video' as const,
+              mediaType: 'image' as const,
             }
           : undefined,
     });
@@ -716,6 +716,41 @@ describe('evaluateMediaPolicyToolCall', () => {
         outcome: 'reject',
         reason: 'invalid_params',
       });
+    });
+
+    it('rejects a handle whose modality the tool does not accept', () => {
+      // The fixed-policy path validates modality at startup; a gated caller
+      // holds only opaque handles, so mixing two up must fail as a
+      // correctable parameter error rather than as a spawned ffmpeg that
+      // burns the tool timeout and returns an opaque stderr tail.
+      const result = evaluateMediaPolicyToolCall({
+        config: {
+          ...configWith({
+            omni_compress_image: { modelAccess: { enabled: true } },
+          }),
+          getOmniMediaResourceRegistry: () =>
+            ({
+              resolve: () => ({
+                resourceId: 'media-1-ab',
+                fileId: 'f1',
+                fileVersionId: 'v1',
+                rootFileId: 'f1',
+                fileRef: '/media/movie.mkv',
+                mediaType: 'video' as const,
+              }),
+            }) as never,
+        },
+        tool: policyTool(),
+        args: { resourceId: 'media-1-ab', outputDir: '/out' },
+        executionOrigin: { kind: 'model' },
+      });
+      expect(result).toMatchObject({
+        outcome: 'reject',
+        reason: 'invalid_params',
+      });
+      expect((result as { message: string }).message).toContain(
+        'names video media',
+      );
     });
 
     it('never resolves handles for fixed_policy calls (args pass untouched)', () => {

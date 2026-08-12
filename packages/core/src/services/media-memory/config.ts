@@ -39,7 +39,9 @@ export interface NormalizedOmniMemoryCollection {
 }
 
 export interface NormalizedOmniMemorySideQuery {
-  /** Selector model; null = the session's active model. */
+  /** Selector model; null = whatever the side-query runner picks by
+   * default (the configured FAST model, falling back to the session
+   * model) — NOT necessarily the session's active model. */
   model: string | null;
   timeoutMs: number;
   maxCandidateEntries: number;

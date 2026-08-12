@@ -3853,7 +3853,7 @@ const SETTINGS_SCHEMA = {
                   'Set this and the guard omits it honestly instead.',
                 showInDialog: false,
                 jsonSchemaOverride: {
-                  type: 'number',
+                  type: 'integer',
                   minimum: 0,
                   default: 0,
                 },
@@ -4072,7 +4072,7 @@ const SETTINGS_SCHEMA = {
                   'entry; the stored artifact keeps the full content.',
                 showInDialog: false,
                 jsonSchemaOverride: {
-                  type: 'number',
+                  type: 'integer',
                   minimum: 1,
                   default: 65536,
                 },
@@ -4113,7 +4113,11 @@ const SETTINGS_SCHEMA = {
                 default: 12,
                 description: 'Maximum entries one recall may return.',
                 showInDialog: false,
-                jsonSchemaOverride: { type: 'number', minimum: 1, default: 12 },
+                jsonSchemaOverride: {
+                  type: 'integer',
+                  minimum: 1,
+                  default: 12,
+                },
               },
               maxTextChars: {
                 type: 'number',
@@ -4126,7 +4130,7 @@ const SETTINGS_SCHEMA = {
                   'result.',
                 showInDialog: false,
                 jsonSchemaOverride: {
-                  type: 'number',
+                  type: 'integer',
                   minimum: 1,
                   default: 24000,
                 },
@@ -4192,7 +4196,7 @@ const SETTINGS_SCHEMA = {
                       'query.',
                     showInDialog: false,
                     jsonSchemaOverride: {
-                      type: 'number',
+                      type: 'integer',
                       minimum: 1,
                       default: 8,
                     },
@@ -4216,7 +4220,8 @@ const SETTINGS_SCHEMA = {
                     default: undefined as string | undefined,
                     description:
                       'Model for the passive selector; unset uses the ' +
-                      "session's active model.",
+                      'side-query default (the configured fast model, ' +
+                      'falling back to the session model).',
                     showInDialog: false,
                     jsonSchemaOverride: {
                       type: ['string', 'null'],
@@ -4234,7 +4239,7 @@ const SETTINGS_SCHEMA = {
                       'with an empty recall.',
                     showInDialog: false,
                     jsonSchemaOverride: {
-                      type: 'number',
+                      type: 'integer',
                       minimum: 1,
                       default: 30000,
                     },
@@ -4249,7 +4254,7 @@ const SETTINGS_SCHEMA = {
                       'Maximum candidate entries shown to the selector.',
                     showInDialog: false,
                     jsonSchemaOverride: {
-                      type: 'number',
+                      type: 'integer',
                       minimum: 1,
                       default: 100,
                     },
@@ -4265,7 +4270,7 @@ const SETTINGS_SCHEMA = {
                       'exceed recall.maxEntries.',
                     showInDialog: false,
                     jsonSchemaOverride: {
-                      type: 'number',
+                      type: 'integer',
                       minimum: 1,
                       default: 12,
                     },
@@ -4277,11 +4282,15 @@ const SETTINGS_SCHEMA = {
                     requiresRestart: true,
                     default: 1,
                     description:
-                      'Selector attempts before falling back to an empty ' +
-                      'recall.',
+                      'Attempts allowed for the selector call itself ' +
+                      '(unparseable or schema-invalid output is retried up ' +
+                      'to this many times). A selection that parses but ' +
+                      'names entries outside the manifest is refused ' +
+                      'without a retry; the turn then proceeds with an ' +
+                      'empty recall.',
                     showInDialog: false,
                     jsonSchemaOverride: {
-                      type: 'number',
+                      type: 'integer',
                       minimum: 1,
                       default: 1,
                     },

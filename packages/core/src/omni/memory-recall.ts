@@ -44,7 +44,12 @@ const GAP_STEP: ReadonlyArray<{
   },
   {
     mediaType: 'video',
-    channels: ['acoustic', 'speech_text'],
+    // 'acoustic' ONLY. Extracting the track covers `acoustic`, which
+    // leaves `speech_text` open — so matching on speech_text too made the
+    // advisor re-suggest extraction in the very payload that returns the
+    // extracted audio. A wholly unprocessed video still matches (its gap
+    // contains acoustic) and the model chains to transcription from there.
+    channels: ['acoustic'],
     toolName: ToolNames.OMNI_EXTRACT_AUDIO,
     reason: 'no audio-track evidence collected yet: extract the audio track',
   },
@@ -70,7 +75,13 @@ export function buildMediaMemoryRecallAdvisor(
     resolveMediaPolicyModelAccess(config, toolName).enabled;
 
   return ({ resourceId, mediaType, gap }) => {
+    // Nothing can be gathered from a file that is gone.
     if (gap.reason === 'artifact_unavailable') return [];
+    // `partial_coverage` means sampled evidence already exists, and by
+    // design it stays sampled: keyframes deliberately never report
+    // complete visual coverage. Suggesting the step that produced it would
+    // advise work that CANNOT close the gap, forever.
+    if (gap.reason === 'partial_coverage') return [];
     const actions: MediaMemoryNextPolicyAction[] = [];
     for (const step of GAP_STEP) {
       if (step.mediaType !== mediaType) continue;

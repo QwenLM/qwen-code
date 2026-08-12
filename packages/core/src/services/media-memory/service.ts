@@ -652,8 +652,15 @@ function commitExecution(
         now,
       );
       derivedVersionId = commit.fileVersionId;
-      snapshot.versions[commit.fileVersionId].producedByExecutionId =
-        executionId;
+      // Only the execution that FIRST materialized this content owns the
+      // provenance pointer. A later execution landing on the same version
+      // (identical bytes from a differently-configured run) would otherwise
+      // rewrite history, and the version would name an execution whose
+      // outputs it is not.
+      if (commit.created) {
+        snapshot.versions[commit.fileVersionId].producedByExecutionId =
+          executionId;
+      }
       mediaBindings.set(output.sha256, {
         fileId: commit.fileId,
         fileVersionId: commit.fileVersionId,

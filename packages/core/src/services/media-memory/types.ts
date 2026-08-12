@@ -69,8 +69,6 @@ export type MediaChannel =
 export interface MediaCoverage {
   mode: 'complete' | 'continuous' | 'sampled' | 'partial' | 'summary';
   scope: MediaScope;
-  sampleCount?: number;
-  sampleRate?: number;
 }
 
 // ─── File / version records (M §5.2) ────────────────────────────────────
@@ -113,7 +111,6 @@ export interface MediaVersionSource {
 export interface MediaVersionRecognition {
   ingestionConfigHash: string;
   detectorVersion: string;
-  probeBackend?: string;
   probeStatus: 'complete' | 'partial' | 'unavailable';
 }
 
@@ -195,7 +192,9 @@ export type KnownMediaMemoryRole =
 /** Reference to a stored artifact backing a derived_media entry. */
 export interface MediaArtifactRef {
   storage: 'managed' | 'workspace';
-  /** Content-addressed object key (sha256 + extension) when managed. */
+  /** Content-addressed object key when managed, as `sha256/<hex>` — the
+   * form the object store resolves and the only field an entry's bytes can
+   * be re-found by after the producing run is gone. */
   managedId?: string;
   workspacePath?: string;
   mimeType: string;

@@ -3342,6 +3342,12 @@
                   "default": 0,
                   "description": "Estimated-token ceiling for a single omni media input, checked at the delivery boundary using the versioned raw-resource estimator. 0 disables the token guard — the estimation formula is pending confirmation with the model provider; set a positive threshold to enforce fail-closed rejection."
                 },
+                "maxDurationSeconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "Duration ceiling in seconds for a single omni media input, checked at the delivery boundary. 0 disables it. Byte and token limits cannot express a provider duration cap: a long film downscaled under the byte ceiling still gets rejected by the API, after paying for the transcode. Set this and the guard omits it honestly instead."
+                },
                 "policies": {
                   "description": "Guard policies keyed by policy id, run only when the final delivery set exceeds transport limits. Merged with system defaults by id. The merged set must cover image, video, and audio and must not be empty; every policy output must use source: omit.",
                   "type": "object",
@@ -3431,7 +3437,7 @@
               "type": "object",
               "properties": {
                 "maxInlineTextBytes": {
-                  "type": "number",
+                  "type": "integer",
                   "minimum": 1,
                   "default": 65536,
                   "description": "Upper bound for inline text persisted on a memory entry (transcripts, OCR). Longer text is truncated on the entry; the stored artifact keeps the full content."
@@ -3452,13 +3458,13 @@
                   "description": "Mutually exclusive recall exposure: \"active\" registers the recall tool for the model; \"sideQuery\" runs a passive selector before the main request instead."
                 },
                 "maxEntries": {
-                  "type": "number",
+                  "type": "integer",
                   "minimum": 1,
                   "default": 12,
                   "description": "Maximum entries one recall may return."
                 },
                 "maxTextChars": {
-                  "type": "number",
+                  "type": "integer",
                   "minimum": 1,
                   "default": 24000,
                   "description": "Total character budget across all text in one recall result."
@@ -3487,7 +3493,7 @@
                   "type": "object",
                   "properties": {
                     "maxFilesPerCall": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1,
                       "default": 8,
                       "description": "Maximum distinct files one recall tool call may query."
@@ -3504,31 +3510,31 @@
                         "null"
                       ],
                       "default": null,
-                      "description": "Model for the passive selector; unset uses the session's active model."
+                      "description": "Model for the passive selector; unset uses the side-query default (the configured fast model, falling back to the session model)."
                     },
                     "timeoutMs": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1,
                       "default": 30000,
                       "description": "Side-query timeout; on timeout the turn proceeds with an empty recall."
                     },
                     "maxCandidateEntries": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1,
                       "default": 100,
                       "description": "Maximum candidate entries shown to the selector."
                     },
                     "maxSelectedEntries": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1,
                       "default": 12,
                       "description": "Maximum entries the selector may pick. Must not exceed recall.maxEntries."
                     },
                     "maxAttempts": {
-                      "type": "number",
+                      "type": "integer",
                       "minimum": 1,
                       "default": 1,
-                      "description": "Selector attempts before falling back to an empty recall."
+                      "description": "Attempts allowed for the selector call itself (unparseable or schema-invalid output is retried up to this many times). A selection that parses but names entries outside the manifest is refused without a retry; the turn then proceeds with an empty recall."
                     }
                   }
                 }

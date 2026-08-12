@@ -273,6 +273,24 @@ export function evaluateMediaPolicyToolCall(params: {
           `handle from a 【媒体资源】 annotation or a recall result.`,
       };
     }
+    // The handle's modality must be one this tool declares consuming. The
+    // fixed-policy path validates this at startup; a gated caller holds
+    // only opaque handles, so mixing two up is easy — and without this the
+    // mistake becomes a spawned ffmpeg that burns the tool timeout and
+    // returns an opaque stderr tail, instead of an instant parameter error
+    // the caller can correct.
+    const accepted = tool.mediaPolicyDescriptor.inputMediaTypes;
+    if (accepted !== undefined && !accepted.includes(binding.mediaType)) {
+      return {
+        outcome: 'reject',
+        reason: 'invalid_params',
+        message:
+          `Invalid parameters for tool "${tool.name}": resourceId ` +
+          `"${args['resourceId']}" names ${binding.mediaType} media, but ` +
+          `this tool accepts ${accepted.join(', ')}. Pass a handle whose ` +
+          `media type matches.`,
+      };
+    }
     const { resourceId: _resourceId, ...rest } = args;
     args = { ...rest, inputPath: binding.fileRef };
   }
