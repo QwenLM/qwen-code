@@ -71,6 +71,21 @@ describe('isAutoConnectChromeDevToolsServer', () => {
     ).toBe(false);
   });
 
+  it('ignores servers pinned to a --browserUrl', () => {
+    expect(
+      isAutoConnectChromeDevToolsServer('chrome-devtools', {
+        command: 'npx',
+        args: ['--autoConnect', '--browserUrl', 'http://127.0.0.1:9222'],
+      }),
+    ).toBe(false);
+    expect(
+      isAutoConnectChromeDevToolsServer('chrome-devtools', {
+        command: 'npx',
+        args: ['--autoConnect', '--browserUrl=http://127.0.0.1:9222'],
+      }),
+    ).toBe(false);
+  });
+
   it('ignores unrelated stdio servers', () => {
     expect(
       isAutoConnectChromeDevToolsServer('filesystem', {

@@ -766,4 +766,69 @@ describe('CDP bridge', () => {
       ),
     );
   });
+
+  it('keeps old links attached when switched-tab attach fails', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+    (chrome.tabs.query as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { id: 9 },
+    ]);
+    chromeHarness.attach.mockImplementationOnce(
+      (
+        _target: chrome.debugger.Debuggee,
+        _version: string,
+        callback: () => void,
+      ) => {
+        (chrome.runtime as { lastError: unknown }).lastError = {
+          message: 'new tab denied',
+        };
+        callback();
+        (chrome.runtime as { lastError: unknown }).lastError = undefined;
+      },
+    );
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_attached',
+        id: 2,
+        error: { message: 'new tab denied' },
+        linkId: 'cdp-link-2',
+      }),
+    );
+    expect(send).not.toHaveBeenCalledWith({
+      type: 'cdp_detach',
+      reason: 'target_switched',
+      linkId: 'cdp-link-1',
+    });
+
+    bridge.handleCdpFrame(
+      frame({
+        type: 'cdp_command',
+        id: 3,
+        method: 'Runtime.evaluate',
+        linkId: 'cdp-link-1',
+      }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({
+        type: 'cdp_result',
+        id: 3,
+        result: { value: 'ok' },
+        linkId: 'cdp-link-1',
+      }),
+    );
+  });
 });

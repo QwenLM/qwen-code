@@ -192,8 +192,12 @@ function onDebuggerDetach(
 }
 
 function notifyAttachedLinksOfDetach(reason: string): void {
+  notifyLinksOfDetach(attachedLinks, reason);
+}
+
+function notifyLinksOfDetach(links: Set<string>, reason: string): void {
   if (!activeSend) return;
-  for (const linkId of attachedLinks) {
+  for (const linkId of links) {
     activeSend({
       type: 'cdp_detach',
       reason,
@@ -300,22 +304,8 @@ async function runAttachFlow(
       return await tabInfoOf(tabId);
     }
 
-    // Switching to a different tab (or first attach): the previous tab's
-    // links lose their debugger, so tell the daemon (it closes their
-    // puppeteer sockets) before we move on. Chrome's own onDetach for a
-    // self-detach is racy with the re-attach below, so notify those links
-    // explicitly instead of relying on it.
-    if (attachedTabId !== null) {
-      notifyAttachedLinksOfDetach('target_switched');
-      const prev = attachedTabId;
-      teardownAttachment();
-      await new Promise<void>((resolve) => {
-        chrome.debugger.detach({ tabId: prev }, () => {
-          void chrome.runtime.lastError; // best-effort; tab may already be gone
-          resolve();
-        });
-      });
-    }
+    const prevTabId = attachedTabId;
+    const prevLinks = attachedLinks;
 
     await new Promise<void>((resolve, reject) => {
       chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION, () => {
@@ -335,17 +325,21 @@ async function runAttachFlow(
       });
     });
 
-    // Idempotent re-attach: a prior attachment may still hold live listeners
-    // + keepalive. Drop them before re-registering so a second attach can't
-    // double-register onDebuggerEvent/onDetach — otherwise every CDP event
-    // would fire twice and corrupt the puppeteer stream.
-    teardownAttachment();
-
     attachedTabId = tabId;
     attachedLinks = new Set([linkId]);
-    chrome.debugger.onEvent.addListener(onDebuggerEvent);
-    chrome.debugger.onDetach.addListener(onDebuggerDetach);
-    startAttachKeepalive();
+    if (prevTabId !== null && prevTabId !== tabId) {
+      notifyLinksOfDetach(prevLinks, 'target_switched');
+      await new Promise<void>((resolve) => {
+        chrome.debugger.detach({ tabId: prevTabId }, () => {
+          void chrome.runtime.lastError; // best-effort; tab may already be gone
+          resolve();
+        });
+      });
+    } else {
+      chrome.debugger.onEvent.addListener(onDebuggerEvent);
+      chrome.debugger.onDetach.addListener(onDebuggerDetach);
+      startAttachKeepalive();
+    }
 
     return await tabInfoOf(tabId);
   } finally {

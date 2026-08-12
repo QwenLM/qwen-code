@@ -71,8 +71,8 @@ function isStdioLike(cfg: MCPServerConfig): cfg is MCPServerConfig & {
  * Whether a configured MCP server is a chrome-devtools adapter that would
  * re-dial Chrome's consent-gated remote-debugging endpoint per process:
  * a stdio server named `chrome-devtools` or running a `chrome-devtools-mcp`
- * binary, launched with `--autoConnect`. An explicit `--wsEndpoint` already
- * targets a stable bridge and is left alone.
+ * binary, launched with `--autoConnect`. Explicit connection targets already
+ * point at a stable browser/bridge and are left alone.
  */
 export function isAutoConnectChromeDevToolsServer(
   name: string,
@@ -94,7 +94,10 @@ export function isAutoConnectChromeDevToolsServer(
   const hasExplicitEndpoint = args.some(
     (a) =>
       typeof a === 'string' &&
-      (a === '--wsEndpoint' || a.startsWith('--wsEndpoint=')),
+      (a === '--wsEndpoint' ||
+        a.startsWith('--wsEndpoint=') ||
+        a === '--browserUrl' ||
+        a.startsWith('--browserUrl=')),
   );
   return args.includes('--autoConnect') && !hasExplicitEndpoint;
 }
