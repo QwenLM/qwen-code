@@ -38,6 +38,7 @@
 // come from the environment the CLI itself exported.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { ToolNames } from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
 
 /** One subagent, as the harness recorded it. */
@@ -77,6 +78,15 @@ export interface AgentRecord {
    * the harness wrote down, not a hope.
    */
   successfulCallArgs: string[];
+  /**
+   * The arguments of the successful `read_file` calls, serialized — a subset of
+   * `successfulCallArgs` for the checks where NAMING a path is not OPENING it.
+   * A `search_file_content` or a `list_directory` over the record dir carries
+   * the same stringified path in its args without reading a line; the
+   * findings-file floor asks whether the list was read, and only a read is a
+   * read.
+   */
+  successfulReadFileArgs: string[];
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
   /** When the transcript was last written. */
@@ -213,11 +223,13 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   // attributed by a stack.
   interface Pending {
     namedTheDiff: boolean;
+    readFile: boolean;
     range: [number, number] | null;
     args: string;
   }
   const diffReads: Array<[number, number]> = [];
   const successfulCallArgs: string[] = [];
+  const successfulReadFileArgs: string[] = [];
   const byId = new Map<string, Pending>();
   const anonymous: Pending[] = [];
 
@@ -261,6 +273,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
         : false;
       const pending: Pending = {
         namedTheDiff,
+        readFile: fc.name === ToolNames.READ_FILE,
         range: namedTheDiff ? rangeOf(args) : null,
         args: JSON.stringify(args),
       };
@@ -286,6 +299,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       if (!isErrorPart(part as FunctionResponsePart)) {
         successfulToolCalls++;
         successfulCallArgs.push(pending.args);
+        if (pending.readFile) successfulReadFileArgs.push(pending.args);
         if (pending.namedTheDiff) {
           diffToolCalls++;
           if (pending.range) diffReads.push(pending.range);
@@ -316,6 +330,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     diffToolCalls,
     diffReads,
     successfulCallArgs,
+    successfulReadFileArgs,
     finalText,
     mtimeMs,
   };

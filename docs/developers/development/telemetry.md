@@ -562,6 +562,12 @@ The following events are logged:
 - `qwen-code.config`: Emitted once at startup with CLI configuration.
   - **Attributes**: `model`, `sandbox_enabled`, `core_tools_enabled`, `approval_mode`, `file_filtering_respect_git_ignore`, `debug_mode`, `truncate_tool_output_threshold`, `truncate_tool_output_lines`, `hooks` (comma-separated, omitted if disabled), `ide_enabled`, `interactive_shell_enabled`, `mcp_servers`, `mcp_servers_count`, `mcp_tools`, `mcp_tools_count`, `output_format`, `skills`, `subagents`
 
+- `session.start`: A session begins. Emitted after telemetry initialization at startup and again on every session switch; lifecycle semantics are described in the Spans section.
+  - **Attributes**: `session.id` (string), `session.previous_id` (string, present only when this start continues a persisted conversation under a new session id)
+
+- `session.end`: A session ends. Emitted before a session switch replaces the current session, and at telemetry shutdown.
+  - **Attributes**: `session.id` (string)
+
 - `qwen-code.user_prompt`: User submits a prompt.
   - **Attributes**: `prompt_length` (int), `prompt_id` (string), `prompt` (string, excluded if `log_prompts_enabled` is false), `auth_type` (string)
 
@@ -857,6 +863,20 @@ The daemon process (long-running HTTP server mode) exposes its own metrics.
 ### Spans
 
 Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each interaction is a trace root with its own `traceId`; cross-prompt correlation uses the `session.id` attribute.
+
+Session lifecycle is also exported through the OpenTelemetry General Session
+semantic conventions. When the OTel logs pipeline is enabled, Qwen Code emits
+`session.start` and `session.end` log events with the required `session.id`
+attribute (cataloged under Core Session Events above). A resumed persisted
+conversation includes `session.previous_id` on its `session.start` event only
+when the resumed session id differs from the current one; cold-start
+resumptions (`--resume`, `--continue`, `--fork-session`) do not carry it.
+`/clear` and other replacement flows intentionally do not claim continuation
+because they discard the previous conversation.
+
+The existing Qwen-specific `qwen-code.config`/`cli_config` and RUM
+`session_start` records remain available for compatibility. GenAI request
+spans continue to use `gen_ai.conversation.id` for the same owning session ID.
 
 - `qwen-code.interaction`: Root span for each user prompt turn.
   - **Attributes**: `session.id`, optional ARMS extension `gen_ai.user.id`, `qwen-code.prompt_id`, `qwen-code.message_type`, `qwen-code.model`, `qwen-code.approval_mode`, `interaction.sequence`, `interaction.duration_ms`, `qwen-code.turn_status` ("ok"/"error"/"cancelled")

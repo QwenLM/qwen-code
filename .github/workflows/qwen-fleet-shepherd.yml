@@ -215,17 +215,42 @@ jobs:
               # Identify OUR run by id for next tick's in-flight attribution.
               # Safe correlation window: nothing else in this tick has
               # dispatched yet (conflict dispatches happen later in the
-              # walk), so the newest dispatch created since T0 is ours. If it
-              # never appears, run=none is recorded and the failure mode is a
-              # duplicate scan, not starvation.
+              # walk), so a dispatch created since T0 is ours — provided it
+              # is the ONLY one. The fork-review bridge also dispatches
+              # autonomously at arbitrary times, and GitHub may expose a
+              # foreign dispatch before our own run appears in the list.
+              # So: ANY poll seeing two or more candidates records run=none
+              # (the window is ambiguous — never attribute a guess), and a
+              # single candidate is accepted only as the sole candidate
+              # across two consecutive polls — the FIRST singleton might be
+              # the foreign one, and our run arriving at the next poll flips
+              # the window to ambiguous instead of being attributed on top
+              # of it. Either fallback is the documented one: a duplicate
+              # scan, never starvation.
               if [[ "${DRY_RUN}" != "true" ]]; then
                 for _ in 1 2 3 4 5; do
                   sleep 2
-                  LIVENESS_RUN_OUT="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+                  CANDIDATES="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
                     --event workflow_dispatch --limit 5 --json databaseId,createdAt 2> /dev/null \
-                    | jq -r --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ] | first | .databaseId // "" | tostring' 2> /dev/null || true)"
-                  if [[ -n "${LIVENESS_RUN_OUT}" && "${LIVENESS_RUN_OUT}" != "null" ]]; then break; fi
+                    | jq -c --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ]' 2> /dev/null || true)"
+                  COUNT="$(jq 'length' <<< "${CANDIDATES}" 2> /dev/null || echo 0)"
+                  if [[ "${COUNT}" =~ ^[0-9]+$ ]] && [[ "${COUNT}" -gt 1 ]]; then
+                    echo "🫀 ${COUNT} dispatches since ${DISPATCH_T0} — attribution ambiguous (fork bridge?), recording run=none"
+                    ATTRIBUTED=''
+                    break
+                  fi
+                  SEEN_ID=''
+                  if [[ "${COUNT}" == "1" ]]; then
+                    SEEN_ID="$(jq -r '.[0].databaseId // "" | tostring' <<< "${CANDIDATES}")"
+                  fi
+                  if [[ -n "${SEEN_ID}" && "${SEEN_ID}" == "${PREV_SEEN:-}" ]]; then
+                    ATTRIBUTED="${SEEN_ID}"
+                  else
+                    ATTRIBUTED=''
+                  fi
+                  PREV_SEEN="${SEEN_ID}"
                 done
+                LIVENESS_RUN_OUT="${ATTRIBUTED:-}"
               fi
             fi
           fi
