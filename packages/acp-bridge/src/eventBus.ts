@@ -405,7 +405,7 @@ export class EventBus {
   /**
    * The engine's current live-journal byte cap — may have grown past the
    * configured baseline under adaptive growth. Read by the bridge's
-   * growth policy to account daemon-wide granted headroom.
+   * growth policy to account granted headroom across its live sessions.
    */
   journalLimitBytes(): number | undefined {
     return this.compactionEngine?.journalLimits?.().maxBytes;

@@ -1354,7 +1354,10 @@ describe('TurnBoundaryCompactionEngine', () => {
         onJournalGrowth: (current) => {
           seen.push({ ...current });
           return seen.length < 3
-            ? { maxEvents: current.maxEvents * 2, maxBytes: current.maxBytes * 2 }
+            ? {
+                maxEvents: current.maxEvents * 2,
+                maxBytes: current.maxBytes * 2,
+              }
             : undefined;
         },
       });
@@ -1386,7 +1389,9 @@ describe('TurnBoundaryCompactionEngine', () => {
         retainedEvents: 2,
         maxEvents: 2,
       });
-      expect(snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id)).toEqual([3, 4]);
+      expect(
+        snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
+      ).toEqual([3, 4]);
     });
 
     it('degrades to eviction when the advisor throws', () => {
@@ -1402,29 +1407,125 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       const snap = engine.snapshot();
       expect(markerOf(snap)).toBeDefined();
-      expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(2);
+      expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
+        2,
+      );
     });
 
     it('treats a non-growing or malformed grant as a refusal', () => {
+      // The clock advances between breaches so the refusal throttle does
+      // not swallow the second ask — both fixtures must actually be
+      // consumed. Infinity (not NaN) is the malformed value: it passes the
+      // `>` size comparisons, so only the safe-integer guard can refuse it.
+      let clockMs = 1_000_000;
       const grants: Array<{ maxEvents: number; maxBytes: number } | undefined> =
         [
           // bytes not larger than current
           { maxEvents: 10, maxBytes: 8 * 1024 * 1024 },
           // not a safe integer
-          { maxEvents: 10, maxBytes: Number.NaN },
+          { maxEvents: 10, maxBytes: Number.POSITIVE_INFINITY },
         ];
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
-        now: () => 1_000_000,
+        now: () => clockMs,
         onJournalGrowth: () => grants.shift(),
       });
-      for (let i = 1; i <= 4; i++) {
-        engine.ingest(makeUserMessage(i, `message-${i}`));
-      }
+      engine.ingest(makeUserMessage(1, 'message-1'));
+      engine.ingest(makeUserMessage(2, 'message-2'));
+      engine.ingest(makeUserMessage(3, 'message-3'));
+      clockMs += 10_000;
+      engine.ingest(makeUserMessage(4, 'message-4'));
 
       const snap = engine.snapshot();
       expect(markerOf(snap)).toBeDefined();
-      expect(engine.journalLimits().maxEvents).toBe(2);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 2,
+        maxBytes: 8 * 1024 * 1024,
+      });
+      expect(grants).toHaveLength(0);
+    });
+
+    it('refuses a grant that grows bytes but shrinks the entry cap', () => {
+      // A misbehaving advisor must never lower a cap mid-turn; only the
+      // `maxEvents >= current` acceptance clause guards that.
+      const advisor = vi.fn(() => ({
+        maxEvents: 1,
+        maxBytes: 16 * 1024 * 1024,
+      }));
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: advisor,
+      });
+      for (let i = 1; i <= 3; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      expect(advisor).toHaveBeenCalledTimes(1);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 2,
+        maxBytes: 8 * 1024 * 1024,
+      });
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeDefined();
+      expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
+        2,
+      );
+    });
+
+    it('grows the caps on a byte-cap breach while under the entry cap', () => {
+      // The canonical trigger: a few very large events cross the byte cap
+      // while the entry count stays low. Explicit byte lengths keep the
+      // breach independent of envelope serialization size.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 300,
+        onJournalGrowth: (current) => ({
+          maxEvents: current.maxEvents * 2,
+          maxBytes: current.maxBytes * 2,
+        }),
+      });
+      engine.ingest(makeUserMessage(1, 'first large event'), 200);
+      engine.ingest(makeUserMessage(2, 'second large event'), 200);
+
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeUndefined();
+      expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
+        2,
+      );
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 20_000,
+        maxBytes: 600,
+      });
+    });
+
+    it('stamps the truncation marker with the grown caps after growth then eviction', () => {
+      // The marker contract: maxBytes / maxEvents reflect the caps in
+      // force, which may already have grown when the pool later refuses.
+      let granted = false;
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: (current) => {
+          if (granted) return undefined;
+          granted = true;
+          return {
+            maxEvents: current.maxEvents * 2,
+            maxBytes: current.maxBytes * 2,
+          };
+        },
+      });
+      for (let i = 1; i <= 6; i++) {
+        engine.ingest(makeUserMessage(i, `message-${i}`));
+      }
+
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 4,
+        maxBytes: 16 * 1024 * 1024,
+      });
+      const snap = engine.snapshot();
+      expect(markerOf(snap)?.data).toMatchObject({
+        scope: 'live_journal',
+        maxEvents: 4,
+        maxBytes: 16 * 1024 * 1024,
+      });
     });
 
     it('throttles re-asks after a refusal until the interval elapses', () => {

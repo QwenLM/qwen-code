@@ -2541,10 +2541,11 @@ async function runQwenServeImpl(
     writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
   // Adaptive live-journal growth: sessions whose in-flight turn outgrows the
-  // journal caps can grow into a daemon-wide pool derived from the memory
-  // budget, instead of silently truncating the live replay window (the
-  // canonical case: one turn fanning out many concurrent subagents). An
-  // operator-pinned journal flag disables growth — explicit config wins.
+  // journal caps can grow into a per-bridge pool (derived once from the
+  // daemon memory budget and handed to each bridge), instead of silently
+  // truncating the live replay window (the canonical case: one turn fanning
+  // out many concurrent subagents). An operator-pinned journal flag disables
+  // growth — explicit config wins.
   const journalGrowthPoolBytes =
     opts.maxJournalEvents === undefined &&
     opts.maxJournalBytes === undefined &&

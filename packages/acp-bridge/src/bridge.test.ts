@@ -4543,6 +4543,157 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  describe('adaptive live-journal growth pool', () => {
+    it('grows a breaching session from the pool instead of truncating', async () => {
+      const gate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await gate.promise;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 64 * 1024 * 1024,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'grow' }],
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'prompt-grow' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      for (const text of ['chunk-a', 'chunk-b', 'chunk-c']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      const snap = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snap.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toBeUndefined();
+      for (const text of ['chunk-a', 'chunk-b', 'chunk-c']) {
+        expect(JSON.stringify(snap.liveJournal)).toContain(text);
+      }
+
+      gate.resolve();
+      await prompt;
+      await bridge.shutdown();
+    });
+
+    it('refuses growth for a second session once the first consumes the pool', async () => {
+      // Cross-session accounting is the pool's reason to exist: growth
+      // granted to one session must shrink the headroom every other live
+      // session sees. A pool equal to the baseline byte cap is fully
+      // consumed by the first session's first doubling.
+      const gates = new Map<
+        string,
+        { promise: Promise<void>; resolve: (value: void) => void }
+      >();
+      const handle = makeChannel({
+        promptImpl: async (req) => {
+          const gate = gates.get(req.sessionId);
+          if (gate) await gate.promise;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        // 'thread' scope: each spawn creates its own session (the default
+        // 'single' scope would attach the second spawn to the first).
+        sessionScope: 'thread',
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 8 * 1024 * 1024,
+      });
+
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      gates.set(first.sessionId, deferred<void>());
+      const firstPrompt = bridge.sendPrompt(
+        first.sessionId,
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { clientId: first.clientId, promptId: 'prompt-first' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      for (const text of ['a-1', 'a-2', 'a-3']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: first.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      gates.set(second.sessionId, deferred<void>());
+      const secondPrompt = bridge.sendPrompt(
+        second.sessionId,
+        {
+          sessionId: second.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { clientId: second.clientId, promptId: 'prompt-second' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+      for (const text of ['b-1', 'b-2', 'b-3']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: second.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      const firstSnap = await bridge.loadSession({
+        sessionId: first.sessionId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        firstSnap.liveJournal?.find(
+          (event) => event.type === 'history_truncated',
+        ),
+      ).toBeUndefined();
+
+      const secondSnap = await bridge.loadSession({
+        sessionId: second.sessionId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        secondSnap.liveJournal?.find(
+          (event) => event.type === 'history_truncated',
+        ),
+      ).toMatchObject({ data: { scope: 'live_journal' } });
+
+      gates.get(first.sessionId)?.resolve();
+      gates.get(second.sessionId)?.resolve();
+      await firstPrompt;
+      await secondPrompt;
+      await bridge.shutdown();
+    });
+  });
+
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {
     // Live-session regression: recordId is only stamped during replay of
     // the persisted transcript, never on the live stream. A seeded replay

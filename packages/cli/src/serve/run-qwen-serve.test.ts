@@ -2653,9 +2653,7 @@ describe('runQwenServe memory budget', () => {
       // here (not hardcoded) because `effective` caps at the host's
       // available memory.
       const expectedPoolBytes =
-        journalGrowthPoolMb(
-          resolveDaemonMemoryBudget({ budgetMb: 4096 }),
-        ) *
+        journalGrowthPoolMb(resolveDaemonMemoryBudget({ budgetMb: 4096 })) *
         1024 *
         1024;
       for (const [options] of createBridge.mock.calls) {
@@ -2696,6 +2694,88 @@ describe('runQwenServe memory budget', () => {
       for (const [options] of createBridge.mock.calls) {
         expect(options.maxJournalBytes).toBe(16 * 1024 * 1024);
         expect(options).not.toHaveProperty('journalGrowthPoolBytes');
+      }
+    } finally {
+      createBridge.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('disables adaptive journal growth when only the entry cap is pinned', async () => {
+    // Symmetric to the byte-cap pin: the gate must disable growth on
+    // EITHER pinned journal flag, as the docs promise.
+    const dir = makeTmpDir();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(
+        () =>
+          makeRuntimeBridge() as ReturnType<
+            typeof acpBridge.createAcpSessionBridge
+          >,
+      );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: dir,
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+        maxJournalEvents: 5000,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      expect(createBridge).toHaveBeenCalled();
+      for (const [options] of createBridge.mock.calls) {
+        expect(options.maxJournalEvents).toBe(5000);
+        expect(options).not.toHaveProperty('journalGrowthPoolBytes');
+      }
+    } finally {
+      createBridge.mockRestore();
+      await handle.close();
+    }
+  });
+
+  it('derives the adaptive journal growth pool into secondary-workspace bridges too', async () => {
+    const root = makeTmpDir();
+    const primary = path.join(root, 'primary');
+    const secondary = path.join(root, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(
+        () =>
+          makeRuntimeBridge() as ReturnType<
+            typeof acpBridge.createAcpSessionBridge
+          >,
+      );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+        memoryBudgetMb: 4096,
+      },
+      { resolveOnListen: true },
+    );
+    try {
+      await handle.runtimeReady;
+      // One bridge per workspace; every one of them must carry the pool,
+      // not just the primary.
+      expect(createBridge.mock.calls.length).toBeGreaterThanOrEqual(2);
+      const expectedPoolBytes =
+        journalGrowthPoolMb(resolveDaemonMemoryBudget({ budgetMb: 4096 })) *
+        1024 *
+        1024;
+      for (const [options] of createBridge.mock.calls) {
+        expect(options.journalGrowthPoolBytes).toBe(expectedPoolBytes);
       }
     } finally {
       createBridge.mockRestore();

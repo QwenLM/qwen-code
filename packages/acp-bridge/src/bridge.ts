@@ -4351,22 +4351,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         },
         // Adaptive growth: the engine asks before evicting past its caps.
-        // The policy accounts growth daemon-wide from every live session's
-        // CURRENT journal cap (stateless — no ledger to reconcile when a
-        // session is reaped), so granted headroom dies with its session.
+        // The policy accounts growth across this bridge's live sessions
+        // from every session's CURRENT journal cap (stateless — no ledger
+        // to reconcile when a session is reaped), so granted headroom dies
+        // with its session.
         ...(journalGrowthPolicy
           ? {
               onJournalGrowth: (current: {
                 maxEvents: number;
                 maxBytes: number;
               }) => {
+                const allSessionLimitBytes = [...byId.values()].map(
+                  (entry) =>
+                    entry.events.journalLimitBytes() ?? maxJournalBytes,
+                );
+                // During a restore the session's bus exists but its entry
+                // is not registered in byId yet; account its current caps
+                // explicitly so the pool is not over-granted.
+                if (!byId.has(sessionId)) {
+                  allSessionLimitBytes.push(current.maxBytes);
+                }
                 const grant = journalGrowthPolicy.grant({
                   currentMaxEvents: current.maxEvents,
                   currentMaxBytes: current.maxBytes,
-                  allSessionLimitBytes: [...byId.values()].map(
-                    (entry) =>
-                      entry.events.journalLimitBytes() ?? maxJournalBytes,
-                  ),
+                  allSessionLimitBytes,
                 });
                 if (grant) {
                   teeServeDebugLine(

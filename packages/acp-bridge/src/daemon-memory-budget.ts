@@ -27,10 +27,12 @@ export const MIN_ROOT_RESERVE_MB = 256;
 export const MAX_ROOT_RESERVE_MB = 1_024;
 
 /**
- * Adaptive live-journal growth: the daemon-wide pool (carved from the
- * effective budget) that per-session journal caps may grow into beyond
- * their baseline when an in-flight turn outgrows them. A ceiling, not a
- * preallocation — nothing is reserved until a session actually grows.
+ * Adaptive live-journal growth: the pool (carved from the effective
+ * budget) that per-session journal caps may grow into beyond their
+ * baseline when an in-flight turn outgrows them. Derived once here and
+ * handed to each bridge, which accounts its own live sessions against it.
+ * A ceiling, not a preallocation — nothing is reserved until a session
+ * actually grows.
  */
 export const JOURNAL_GROWTH_POOL_FRACTION = 0.05;
 export const MIN_JOURNAL_GROWTH_POOL_MB = 32;
@@ -201,7 +203,7 @@ export function recommendedChildShareMb(
 }
 
 /**
- * Daemon-wide pool, in MB, that adaptive live-journal growth may draw on.
+ * Per-bridge pool, in MB, that adaptive live-journal growth may draw on.
  * Divides the same capacity denominator as the child policy; the journal
  * lives in the daemon heap rather than in a child, but the budget is the
  * single figure this module offers and 5% of it keeps the pool a rounding

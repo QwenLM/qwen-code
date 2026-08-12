@@ -5,7 +5,7 @@
  */
 
 /**
- * Daemon-wide accounting for adaptive live-journal growth.
+ * Per-bridge accounting for adaptive live-journal growth.
  *
  * Each session's compaction engine starts at the configured journal caps
  * (defaults: 10 000 entries / 8 MiB). When an in-flight turn outgrows them
@@ -13,9 +13,9 @@
  * subagents, whose streamed events all land on the parent session's bus —
  * the engine asks its growth advisor before evicting. This module is that
  * advisor's accounting core: it grants doublings of a session's caps while
- * the sum of growth granted across all live sessions stays within a
- * daemon-wide pool derived from the daemon memory budget, and never past a
- * per-session hard cap.
+ * the sum of growth granted across the bridge's live sessions stays within
+ * the pool handed to that bridge (derived once from the daemon memory
+ * budget), and never past a per-session hard cap.
  *
  * The accounting is stateless on purpose: the caller reports every live
  * session's CURRENT journal byte cap on each request, so there is no grant
@@ -29,8 +29,9 @@ export interface JournalGrowthPolicyOptions {
   /** The per-session journal byte cap every session starts at. */
   baselineBytes: number;
   /**
-   * Daemon-wide pool, in bytes, available for growth BEYOND the per-session
-   * baselines. Derived from the daemon memory budget by `runQwenServe`.
+   * Pool, in bytes, available for growth BEYOND the per-session baselines.
+   * Derived once from the daemon memory budget by `runQwenServe` and handed
+   * to each bridge, which accounts only its own live sessions against it.
    */
   poolBytes: number;
   /** Per-session hard cap the granted byte cap never exceeds. */
@@ -60,7 +61,7 @@ export function createJournalGrowthPolicy(
   opts: JournalGrowthPolicyOptions,
 ): JournalGrowthPolicy {
   // Entries scale proportionally with bytes so a byte cap grown N× carries
-  // N× the entry cap too (defaults: 10 000 entries / 8 MiB → 327 680
+  // N× the entry cap too (defaults: 10 000 entries / 8 MiB → 320 000
   // entries at the 256 MiB hard cap).
   const hardCapEvents = Math.max(
     opts.baselineEvents,

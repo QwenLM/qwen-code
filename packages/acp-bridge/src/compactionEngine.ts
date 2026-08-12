@@ -471,9 +471,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       this.journalTotalEvents += 1;
     }
 
+    // Mirror the eviction condition exactly: at a single entry the byte
+    // loop below keeps the last entry, so a grant there would charge the
+    // shared pool while buying zero eviction.
     if (
       this.liveJournal.length > this.maxJournalEvents ||
-      this.journalTotalBytes > this.maxJournalBytes
+      (this.journalTotalBytes > this.maxJournalBytes &&
+        this.liveJournal.length > 1)
     ) {
       this.maybeGrowJournalLimits();
     }
