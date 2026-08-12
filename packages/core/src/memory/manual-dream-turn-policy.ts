@@ -5,12 +5,12 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import {
-  SYSTEM_REMINDER_CLOSE,
-  SYSTEM_REMINDER_OPEN,
-} from '../utils/environmentContext.js';
 
-export const MANUAL_DREAM_TOOL_GUARD_MARKER = `${SYSTEM_REMINDER_OPEN}\nqwen-code turn policy: manual-dream-v1\n${SYSTEM_REMINDER_CLOSE}`;
+// This is persisted provenance, not an environment reminder. Keeping it out
+// of <system-reminder> avoids suppressing real environment reminders when an
+// interrupted Dream turn is recovered.
+export const MANUAL_DREAM_TOOL_GUARD_MARKER =
+  '<qwen-code-turn-policy>manual-dream-v1</qwen-code-turn-policy>';
 
 export function hasManualDreamToolGuardMarker(parts: readonly Part[]): boolean {
   return parts.some(

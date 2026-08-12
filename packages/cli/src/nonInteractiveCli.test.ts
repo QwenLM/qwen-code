@@ -238,6 +238,7 @@ describe('runNonInteractive', () => {
     abortAll: ReturnType<typeof vi.fn>;
   };
   let mockCoreExecuteToolCall: Mock;
+  let mockLoopDetectionReset: Mock;
   let mockShutdownTelemetry: Mock;
   let processStdoutSpy: MockInstance;
   let processStderrSpy: MockInstance;
@@ -250,6 +251,7 @@ describe('runNonInteractive', () => {
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
+    getLoopDetectionService: Mock;
   };
   let mockGetDebugResponses: Mock;
   let goalRuntime: GoalRuntime;
@@ -307,11 +309,15 @@ describe('runNonInteractive', () => {
       abortAll: vi.fn(),
     };
 
+    mockLoopDetectionReset = vi.fn();
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
+      getLoopDetectionService: vi.fn(() => ({
+        reset: mockLoopDetectionReset,
+      })),
       stripOrphanedUserEntriesFromHistory: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
         initialize: vi.fn(),
@@ -1591,19 +1597,42 @@ describe('runNonInteractive', () => {
           toolInvocationGuard: expect.any(Function),
         }),
       );
+      const recoveredGuard =
+        mockCoreExecuteToolCall.mock.calls[0]?.[3]?.toolInvocationGuard;
+      expect(recoveredGuard).toEqual(expect.any(Function));
+      await expect(
+        recoveredGuard({
+          callId: 'recovered-deny',
+          toolName: ToolNames.AGENT,
+          args: { prompt: 'edit arbitrary files' },
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        recoveredGuard({
+          callId: 'recovered-allow',
+          toolName: ToolNames.READ_FILE,
+          args: { file_path: '/tmp/read-only-context.md' },
+          signal: new AbortController().signal,
+        }),
+      ).resolves.toEqual({ allowed: true });
     });
 
-    it('adds plan mode reminders to an interrupted prompt replay', async () => {
+    it('adds plan mode reminders when a recovered Dream has only its policy marker', async () => {
       setupMetricsMock();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
       mockGeminiClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
-        getHistory: vi
-          .fn()
-          .mockReturnValue([
-            { role: 'user', parts: [{ text: 'do the thing' }] },
-          ]),
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [
+              { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+              { text: 'do the thing' },
+            ],
+          },
+        ]),
       }));
       mockGeminiClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
@@ -1625,6 +1654,7 @@ describe('runNonInteractive', () => {
       );
       expect(request).toEqual([
         { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
         { text: 'do the thing' },
       ]);
     });
@@ -4452,6 +4482,9 @@ describe('runNonInteractive', () => {
 
   it('defers teammate input until the guarded tool-result chain ends', async () => {
     setupMetricsMock();
+    // The isolated teammate send is an implementation-only extra turn; the
+    // equivalent logical exchange still fits within this four-turn cap.
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(4);
     const toolInvocationGuard = vi
       .fn()
       .mockResolvedValue({ allowed: true as const });
@@ -4585,10 +4618,15 @@ describe('runNonInteractive', () => {
       expect.stringContaining('/teammate/'),
       { type: SendMessageType.Teammate },
     );
+    expect(mockLoopDetectionReset).toHaveBeenCalledTimes(1);
+    expect(mockLoopDetectionReset).toHaveBeenCalledWith(
+      'prompt-guarded-teammate',
+    );
   });
 
-  it('clears a slash-command guard before a queued Goal segment', async () => {
+  it('keeps queued teammate input out of a Goal segment and clears the prior guard', async () => {
     setupMetricsMock();
+    vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(1);
     await prepareGoalState('active');
     const toolInvocationGuard = vi
       .fn()
@@ -4612,6 +4650,7 @@ describe('runNonInteractive', () => {
       return () => {};
     });
     const goal = goalRuntime.getSnapshot().goal!;
+    const initialPermit = goalRuntime.permitForTurn('prompt-guarded-goal-turn');
     const nextPermit: GoalTurnPermit = {
       goalId: goal.goalId,
       revision: goal.revision,
@@ -4628,6 +4667,28 @@ describe('runNonInteractive', () => {
       }
     });
 
+    let leaderMessageCallback: ((formatted: string) => void) | null = null;
+    const teamManager = {
+      setLeaderMessageCallback: vi.fn(
+        (callback: ((formatted: string) => void) | null) => {
+          leaderMessageCallback = callback;
+        },
+      ),
+      getEventEmitter: () => new EventEmitter(),
+      hasActiveTeammates: () => false,
+      drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(mockConfig.getTeamManager).mockReturnValue(teamManager as never);
+
+    const guardedToolRequest: ToolCallRequestInfo = {
+      callId: 'guarded-tool-before-goal-turn',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt-guarded-goal-turn',
+      ...(initialPermit ? { goalContext: initialPermit } : {}),
+    };
+
     const goalToolRequest: ToolCallRequestInfo = {
       callId: 'goal-tool-after-guarded-turn',
       name: 'testTool',
@@ -4636,18 +4697,35 @@ describe('runNonInteractive', () => {
       prompt_id: 'prompt-guarded-goal-turn',
       goalContext: nextPermit,
     };
-    mockCoreExecuteToolCall.mockResolvedValue({
-      callId: goalToolRequest.callId,
-      responseParts: [{ text: 'goal tool result' }],
-      terminateTurn: true,
-    });
+    mockCoreExecuteToolCall
+      .mockImplementationOnce(async () => {
+        leaderMessageCallback?.('Teammate input waiting behind Goal');
+        return {
+          callId: guardedToolRequest.callId,
+          responseParts: [{ text: 'guarded turn result' }],
+          terminateTurn: true,
+        };
+      })
+      .mockResolvedValueOnce({
+        callId: goalToolRequest.callId,
+        responseParts: [{ text: 'goal tool result' }],
+        terminateTurn: true,
+      });
     mockGeminiClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents(finishedEvents))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: guardedToolRequest,
+          },
+        ]),
+      )
       .mockReturnValueOnce(
         createStreamFromEvents([
           { type: GeminiEventType.ToolCallRequest, value: goalToolRequest },
         ]),
-      );
+      )
+      .mockReturnValueOnce(createStreamFromEvents(finishedEvents));
 
     await runNonInteractive(
       mockConfig,
@@ -4656,13 +4734,43 @@ describe('runNonInteractive', () => {
       'prompt-guarded-goal-turn',
     );
 
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      1,
+      mockConfig,
+      guardedToolRequest,
+      expect.any(AbortSignal),
+      expect.objectContaining({ toolInvocationGuard }),
+    );
+    expect(mockCoreExecuteToolCall).toHaveBeenNthCalledWith(
+      2,
       mockConfig,
       goalToolRequest,
       expect.any(AbortSignal),
       expect.not.objectContaining({
         toolInvocationGuard: expect.anything(),
       }),
+    );
+    const goalSend = mockGeminiClient.sendMessageStream.mock.calls[1];
+    expect(goalSend?.[0]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining('continue the active goal'),
+        }),
+      ]),
+    );
+    expect(goalSend?.[0]).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining('Teammate input waiting behind Goal'),
+        }),
+      ]),
+    );
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      3,
+      [{ text: 'Teammate input waiting behind Goal' }],
+      expect.any(AbortSignal),
+      expect.stringContaining('/teammate/'),
+      { type: SendMessageType.Teammate },
     );
   });
 
@@ -6687,6 +6795,73 @@ describe('runNonInteractive', () => {
         ? block.tool_use_id
         : undefined;
     };
+
+    it('lets a guarded /dream turn satisfy the structured output contract', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const dreamGuard = (
+        await import('@qwen-code/qwen-code-core')
+      ).createManualDreamToolInvocationGuard('/test/project');
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'dream',
+          description: 'guarded memory consolidation',
+          kind: CommandKind.BUILT_IN,
+          supportedModes: ['non_interactive'],
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'Dream prompt' }],
+            toolInvocationGuard: dreamGuard,
+          }),
+        },
+      ]);
+      const structuredRequest: ToolCallRequestInfo = {
+        callId: 'dream-structured-output',
+        name: ToolNames.STRUCTURED_OUTPUT,
+        args: { summary: 'dream complete' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-dream-structured',
+      };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, signal, options) => {
+          const decision = await options?.toolInvocationGuard?.({
+            callId: request.callId,
+            toolName: request.name,
+            args: request.args,
+            signal,
+          });
+          expect(decision).toEqual({ allowed: true });
+          return {
+            callId: request.callId,
+            responseParts: [{ text: 'accepted' }],
+          };
+        },
+      );
+      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.ToolCallRequest, value: structuredRequest },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/dream',
+        'prompt-dream-structured',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        structuredRequest,
+        expect.any(AbortSignal),
+        expect.objectContaining({ toolInvocationGuard: dreamGuard }),
+      );
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
 
     it('stops executing remaining tool calls from the same turn once structured_output succeeds', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({

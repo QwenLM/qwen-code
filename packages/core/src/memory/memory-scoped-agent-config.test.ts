@@ -540,6 +540,9 @@ describe('createMemoryScopedAgentConfig', () => {
       allowed: false,
       reason: 'ManagedAutoMemory(agent: unavailable in this scoped turn)',
     });
+    await expect(
+      evaluate(ToolNames.STRUCTURED_OUTPUT, { summary: 'dream complete' }),
+    ).resolves.toEqual({ allowed: true });
   });
 
   it('applies repository-local Git safety checks in the requested directory', async () => {

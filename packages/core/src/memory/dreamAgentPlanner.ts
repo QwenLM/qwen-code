@@ -36,6 +36,14 @@ const DREAM_TOOL_NAMES = [
   ToolNames.EDIT,
 ] as const;
 
+// structured_output is a terminal response contract rather than a filesystem
+// capability. Permit it for visible /dream turns that use --json-schema, but
+// do not expose it to the forked Dream worker when no schema was requested.
+const MANUAL_DREAM_TOOL_NAMES = [
+  ...DREAM_TOOL_NAMES,
+  ToolNames.STRUCTURED_OUTPUT,
+] as const;
+
 const DREAM_AGENT_SYSTEM_PROMPT = `You are performing a managed memory dream — a reflective pass over durable memory files.
 
 Synthesize what you've learned recently into durable, well-organized memories so that future sessions can orient quickly.
@@ -121,7 +129,7 @@ export function createManualDreamToolInvocationGuard(projectRoot: string) {
     allowShell: true,
     includeUserMemory: false,
     protectPinnedMemory: true,
-    allowedTools: DREAM_TOOL_NAMES,
+    allowedTools: MANUAL_DREAM_TOOL_NAMES,
   });
 }
 

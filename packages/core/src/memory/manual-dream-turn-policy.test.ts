@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
+import { isSystemReminderContent } from '../utils/environmentContext.js';
 import {
   isManualDreamToolGuardTurn,
   MANUAL_DREAM_TOOL_GUARD_MARKER,
@@ -20,6 +21,15 @@ describe('manual dream turn policy provenance', () => {
       { text: 'consolidate memory' },
     ],
   };
+
+  it('does not masquerade as a system reminder', () => {
+    expect(
+      isSystemReminderContent({
+        role: 'user',
+        parts: [{ text: MANUAL_DREAM_TOOL_GUARD_MARKER }],
+      }),
+    ).toBe(false);
+  });
 
   it('finds the owning marker through a tool-result chain', () => {
     expect(

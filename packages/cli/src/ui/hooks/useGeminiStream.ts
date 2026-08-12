@@ -3532,6 +3532,10 @@ export const useGeminiStream = (
         }
 
         if (submitType === SendMessageType.Retry) {
+          // Retry owns a fresh logical prompt id. Advance the session counter
+          // so the next automated turn cannot reuse the retry's generated id
+          // and accidentally inherit its stamped slash-command guard.
+          startNewPrompt();
           logUserRetry(config, new UserRetryEvent(prompt_id));
         }
 

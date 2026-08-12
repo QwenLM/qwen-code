@@ -9875,6 +9875,53 @@ Other open files:
         expect(continuationRequest).toContain(MANUAL_DREAM_TOOL_GUARD_MARKER);
       });
 
+      it('does not add manual-dream provenance to an ordinary blocking Stop continuation', async () => {
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            { role: 'user', parts: [{ text: 'ordinary prompt' }] },
+            { role: 'model', parts: [{ text: 'not done' }] },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'ordinary prompt' }],
+            new AbortController().signal,
+            'prompt-ordinary-stop-hook',
+          ),
+        );
+
+        const continuationRequest = mockTurnRunFn.mock.calls[1]?.[1] as Array<
+          Part | string
+        >;
+        expect(continuationRequest).not.toContain(
+          MANUAL_DREAM_TOOL_GUARD_MARKER,
+        );
+      });
+
       it('persists the manual-dream policy on a same-turn Steer continuation', async () => {
         client['chat'] = {
           addHistory: vi.fn(),

@@ -187,12 +187,13 @@ vi.mock('./useLogger.js', () => ({
 }));
 
 const mockStartNewPrompt = vi.fn();
+const mockGetPromptCount = vi.fn(() => 5);
 const mockAddUsage = vi.fn();
 vi.mock('../contexts/SessionContext.js', () => ({
   useSessionStats: vi.fn(() => ({
     startNewPrompt: mockStartNewPrompt,
     addUsage: mockAddUsage,
-    getPromptCount: vi.fn(() => 5),
+    getPromptCount: mockGetPromptCount,
     stats: {
       sessionId: 'test-session-id',
     },
@@ -224,6 +225,8 @@ describe('useGeminiStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    mockStartNewPrompt.mockImplementation(() => undefined);
+    mockGetPromptCount.mockReturnValue(5);
     mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
     mockRefreshMemoryInstruction.mockResolvedValue(undefined);
     mockGetActiveGoal.mockReturnValue(undefined);
@@ -8903,6 +8906,79 @@ describe('useGeminiStream', () => {
         expect.any(AbortSignal),
         undefined,
         toolInvocationGuard,
+      );
+    });
+
+    it('does not reuse a guarded retry prompt id for an automated turn', async () => {
+      let promptCount = 5;
+      mockGetPromptCount.mockImplementation(() => promptCount);
+      mockStartNewPrompt.mockImplementation(() => {
+        promptCount += 1;
+      });
+
+      const toolInvocationGuard = vi
+        .fn()
+        .mockResolvedValue({ allowed: true as const });
+      mockHandleSlashCommand.mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: 'dream prompt',
+        toolInvocationGuard,
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Error,
+              value: { error: { message: 'dream failed' } },
+            };
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Error,
+              value: { error: { message: 'retry failed' } },
+            };
+          })(),
+        );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/dream');
+      });
+      await act(async () => {
+        await result.current.submitQuery('dream prompt', SendMessageType.Retry);
+      });
+
+      const notificationRequest: ToolCallRequestInfo = {
+        callId: 'automated-after-retry',
+        name: 'write_file',
+        args: { file_path: '/memory/pinned.md' },
+        isClientInitiated: false,
+        prompt_id: 'test-session-id########7',
+      };
+      mockScheduleToolCalls.mockClear();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: notificationRequest,
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'background notification',
+          SendMessageType.Notification,
+        );
+      });
+
+      expect(mockStartNewPrompt).toHaveBeenCalledTimes(2);
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [notificationRequest],
+        expect.any(AbortSignal),
+        undefined,
       );
     });
 

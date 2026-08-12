@@ -841,6 +841,11 @@ export async function runNonInteractive(
     // accumulate here and are drained into the LLM
     // conversation between turns.
     const pendingTeammateMessages: string[] = [];
+    let teammateLoopResetPending = false;
+    const enqueueTeammateMessage = (message: string) => {
+      pendingTeammateMessages.push(message);
+      teammateLoopResetPending = true;
+    };
     // Track the manager we're currently bound to so we can
     // detach the leader callback and approval listener before
     // a new manager is installed (or in `finally`). Without
@@ -875,7 +880,7 @@ export async function runNonInteractive(
       boundManager = manager;
       if (manager) {
         manager.setLeaderMessageCallback((formatted) => {
-          pendingTeammateMessages.push(formatted);
+          enqueueTeammateMessage(formatted);
         });
 
         // Route teammate tool approvals through the session's
@@ -932,9 +937,7 @@ export async function runNonInteractive(
             // Also surface to the leader's LLM, otherwise it just
             // sees the teammate fail without any signal that an
             // approval was needed and the host couldn't prompt.
-            pendingTeammateMessages.push(
-              `<team_notice>\n${reason}\n</team_notice>`,
-            );
+            enqueueTeammateMessage(`<team_notice>\n${reason}\n</team_notice>`);
             event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
               debugLogger.warn('Teammate approval Cancel failed:', err);
             });
@@ -1458,6 +1461,7 @@ export async function runNonInteractive(
       let isFirstTurn = true;
       let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
+      let deferredTeammateTurnPending = false;
       let modelOverride: string | undefined =
         inlineModelOverride ?? fullTurnModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
@@ -2139,6 +2143,19 @@ export async function runNonInteractive(
 
       let currentPromptId = prompt_id;
       while (true) {
+        // Fresh teammate input is a loop-detection boundary even when it must
+        // wait for the owning tool/Goal chain to finish before it can be sent
+        // as a distinct policy turn. Reset once when each queued batch is
+        // first observed rather than on every deferred loop iteration.
+        if (
+          teammateLoopResetPending &&
+          (hasUnsentToolResponse || activeGoalTurn)
+        ) {
+          geminiClient.getLoopDetectionService().reset(currentPromptId);
+          teammateLoopResetPending = false;
+          deferredTeammateTurnPending = true;
+        }
+
         // Drain pending teammate messages only at a logical turn boundary.
         // A teammate message is fresh external input, so merging it into an
         // unsent tool response would make one persisted user entry belong to
@@ -2146,6 +2163,7 @@ export async function runNonInteractive(
         // chain finalizes; the shouldFinalize path below clears any owning
         // slash-command guard before looping back here.
         let isTeammateTurn = false;
+        let isDeferredTeammateTurn = false;
         if (
           !isFirstTurn &&
           pendingTeammateMessages.length > 0 &&
@@ -2153,6 +2171,9 @@ export async function runNonInteractive(
           !activeGoalTurn
         ) {
           const batch = pendingTeammateMessages.splice(0);
+          teammateLoopResetPending = false;
+          isDeferredTeammateTurn = deferredTeammateTurnPending;
+          deferredTeammateTurnPending = false;
           const teammatePart = { text: batch.join('\n\n') };
           currentMessages = [{ role: 'user', parts: [teammatePart] }];
           isTeammateTurn = true;
@@ -2164,7 +2185,12 @@ export async function runNonInteractive(
 
         turnCount++;
         const goalTurn = activeGoalTurn;
-        await enforceSessionTurnLimit(goalTurn?.origin === 'runtime');
+        // A deferred teammate drain is the extra model call introduced to keep
+        // fresh external input out of the prior policy turn. Do not charge
+        // that isolation-only call against the user's configured turn cap.
+        await enforceSessionTurnLimit(
+          goalTurn?.origin === 'runtime' || isDeferredTeammateTurn,
+        );
 
         let sendType: SendMessageType;
         if (goalTurn) {
@@ -2393,7 +2419,7 @@ export async function runNonInteractive(
             if (teamManager.allRemainingStalled()) {
               teamManager.abortStalledTeammates();
               const status = teamManager.buildTeamStatusSummary();
-              pendingTeammateMessages.push(status);
+              enqueueTeammateMessage(status);
               continue;
             }
 
@@ -2412,7 +2438,7 @@ export async function runNonInteractive(
               if (teamManager.allRemainingStalled()) {
                 teamManager.abortStalledTeammates();
                 const status = teamManager.buildTeamStatusSummary();
-                pendingTeammateMessages.push(status);
+                enqueueTeammateMessage(status);
                 break;
               }
               const waitResult = await teamManager.waitForTeammateActivity(

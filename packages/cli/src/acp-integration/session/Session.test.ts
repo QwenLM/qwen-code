@@ -2322,6 +2322,98 @@ describe('Session', () => {
       );
     });
 
+    it('allows safe work after restoring the /dream guard', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+        },
+      ]);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read complete',
+        returnDisplay: 'read complete',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.READ_FILE,
+        kind: core.Kind.Read,
+        displayName: 'read_file',
+        description: 'read_file',
+        build: vi.fn().mockImplementation((params) => ({
+          params,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        })),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'continued-dream-read',
+                    name: core.ToolNames.READ_FILE,
+                    args: { file_path: '/repo/README.md' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    it('adds a newly applicable plan reminder to a recovered Dream', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
+            { text: 'dream prompt' },
+          ],
+        },
+      ]);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      let sentParts: Part[] = [];
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(async (_model, req) => {
+          sentParts = req.message ?? [];
+          return createEmptyStream();
+        });
+
+      await session.prompt({
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+
+      expect(sentParts).toContainEqual({
+        text: expect.stringContaining('Plan mode is active'),
+      });
+      expect(sentParts).toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
+    });
+
     it('classifies a turn with dangling tool calls as interrupted_turn', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue([
         { role: 'user', parts: [{ text: 'read it' }] },
