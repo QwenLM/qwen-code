@@ -3728,6 +3728,24 @@ describe('GeminiChat', async () => {
       // no signature yet. See dropDanglingUnsignedTrailingThought's doc.
       // If this test ever goes red, the trade-off was revisited on purpose
       // -- update the doc alongside it.
+      //
+      // Asserted against BOTH surfaces on purpose. The "and from the JSONL
+      // record" half of the claim above holds only because `recordArgs.message`
+      // is built from the already-dropped `consolidatedHistoryParts`; that
+      // agreement is ordering-dependent, so a future reorder that moves the
+      // drop after the record call would leave a history-only assertion green
+      // while the JSONL kept the wedge shape for `--resume` to rehydrate.
+      const recordAssistantTurn = vi.fn();
+      const chatWithRecording = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordAssistantTurn,
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
       const stream = (async function* () {
         yield {
           candidates: [
@@ -3749,17 +3767,22 @@ describe('GeminiChat', async () => {
         stream,
       );
 
-      const res = await chat.sendMessageStream(
+      const res = await chatWithRecording.sendMessageStream(
         'm1',
         { message: 'truncated-all-unsigned' },
         'p-truncated-all-unsigned',
       );
       for await (const _ of res);
 
-      expect(chat.getHistory()[1].parts).toEqual([
+      const expectedParts = [
         { text: 'first thought', thought: true },
         { functionCall: { id: 'call1', name: 'tool', args: {} } },
-      ]);
+      ];
+      expect(chatWithRecording.getHistory()[1].parts).toEqual(expectedParts);
+      expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+      expect(recordAssistantTurn.mock.calls[0]?.[0].message).toEqual(
+        expectedParts,
+      );
     });
 
     it('documents the accepted limitation: two adjacent text-less signed thought parts concatenate their signatures', async () => {
@@ -13784,6 +13807,7 @@ describe('GeminiChat', async () => {
         text?: string;
         functionCall?: unknown;
         thought?: boolean;
+        thoughtSignature?: string;
       }>,
       finishReason?: string,
     ): GenerateContentResponse {
@@ -14824,6 +14848,62 @@ describe('GeminiChat', async () => {
       expect((lastEntry.parts ?? []).some((part) => part.functionCall)).toBe(
         true,
       );
+    });
+
+    it('keeps a SIGNED trailing reasoning episode on the truncated turn when coalescing recovery pairs', async () => {
+      // Complement to the drop test above, and the direction that site was
+      // missing: the XML-recovery call site pins both directions, but this
+      // one pinned only the pop. An over-pop localized here passed the whole
+      // suite. The drop is scoped to UNSIGNED trailing episodes -- a signed
+      // one is complete and replayable, so a signing provider whose episode
+      // completed just before MAX_TOKENS truncation must keep it when the
+      // continuation introduces a functionCall.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'complete episode',
+                thought: true,
+                thoughtSignature: 'sig-kept',
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                text: 'continuing',
+                functionCall: { id: 'c1', name: 'tool', args: {} },
+              },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        { message: 'do a task' },
+        'prompt-recovery-signed-episode',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const parts =
+        chat.getHistory()[chat.getHistory().length - 1]!.parts ?? [];
+      const signed = parts.find((p) => p.thought && p.thoughtSignature);
+      expect(signed?.thoughtSignature).toBe('sig-kept');
+      expect(signed?.text).toBe('complete episode');
+      expect(parts.some((p) => p.functionCall)).toBe(true);
     });
 
     it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
@@ -16500,6 +16580,13 @@ describe('GeminiChat', async () => {
       expect(thoughtPart?.text).toBe('planning my read');
       expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(parts.some((p) => p.text?.includes('<invoke'))).toBe(false);
+      // Order is the replay-load-bearing half: a signature-validating
+      // provider rejects a turn whose reasoning episode trails the tool call
+      // it preceded. Presence assertions alone survive a mutation that
+      // splices functionCallParts ahead of the episode.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
     });
 
     it('drops a dangling unsigned trailing reasoning episode when XML tool call recovery attaches a functionCall', async () => {
@@ -16561,6 +16648,10 @@ describe('GeminiChat', async () => {
       // recovered tool call.
       expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(false);
       expect(parts.some((p) => p.text === 'cut off mid-thought')).toBe(false);
+      // The surviving signed episode must still precede the recovered call.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
     });
 
     it('drops a dangling unsigned episode that PRECEDES the consumed XML text, when remainingText is re-inserted after it', async () => {
@@ -16613,6 +16704,10 @@ describe('GeminiChat', async () => {
       // No unsigned thinking may share an active tool-use turn.
       expect(parts.some((p) => p.thought && !p.thoughtSignature)).toBe(false);
       expect(parts.some((p) => p.text === 'planning my read')).toBe(false);
+      // remainingText is non-empty here, and the drop fires on this path --
+      // the visible prose the user already saw streamed must survive both the
+      // pop and the re-insertion, or `--resume` loses it permanently.
+      expect(parts.some((p) => p.text === 'Sure.')).toBe(true);
     });
 
     it('keeps a SIGNED trailing reasoning episode when XML tool call recovery fires', async () => {
@@ -16662,6 +16757,13 @@ describe('GeminiChat', async () => {
       const trailing = parts.find((p) => p.thought);
       expect(trailing?.thoughtSignature).toBe('sig-trailing');
       expect(trailing?.text).toBe('a complete afterthought');
+      // Even though this episode arrived AFTER the XML text on the wire, the
+      // consumed text part is spliced out and the recovered calls are
+      // appended last, so every surviving episode ends up preceding them --
+      // the shape a signature-validating provider requires on replay.
+      expect(parts.findIndex((p) => p.thought)).toBeLessThan(
+        parts.findIndex((p) => p.functionCall),
+      );
     });
 
     it('retains a short text prefix in history when recovering XML tool calls', async () => {

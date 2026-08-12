@@ -2913,7 +2913,13 @@ describe('AnthropicContentGenerator', () => {
           baseUrl: 'https://api.anthropic.com',
           timeout: 10_000,
           maxRetries: 2,
-          samplingParams: { max_tokens: 500 },
+          // Must stay above budget_tokens below: Anthropic requires
+          // budget_tokens < max_tokens (documented in buildThinkingConfig)
+          // and buildSamplingParameters does not clamp between the two, so a
+          // smaller value here would make this canonical manual-mode fixture
+          // model a request the real API rejects -- passing only because the
+          // client is mocked.
+          samplingParams: { max_tokens: 64_000 },
           schemaCompliance: 'auto',
           // Explicit budget_tokens is the escape hatch that keeps
           // claude-opus-4-6 (a 4.6+ model that otherwise defaults to
