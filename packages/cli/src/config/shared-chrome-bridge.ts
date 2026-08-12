@@ -58,7 +58,7 @@ interface StdioLikeServerConfig {
 
 function isStdioLike(cfg: MCPServerConfig): cfg is MCPServerConfig & {
   command: string;
-  args?: string[];
+  args?: unknown[];
 } {
   return (
     typeof (cfg as StdioLikeServerConfig).command === 'string' &&
@@ -86,11 +86,15 @@ export function isAutoConnectChromeDevToolsServer(
     /(^|[\\/])chrome-devtools-mcp(\.(cmd|exe|js))?$/.test(command) ||
     args.some(
       (arg) =>
-        arg === 'chrome-devtools-mcp' || arg.startsWith('chrome-devtools-mcp@'),
+        typeof arg === 'string' &&
+        (arg === 'chrome-devtools-mcp' ||
+          arg.startsWith('chrome-devtools-mcp@')),
     );
   if (!matchesAdapter) return false;
   const hasExplicitEndpoint = args.some(
-    (a) => a === '--wsEndpoint' || a.startsWith('--wsEndpoint='),
+    (a) =>
+      typeof a === 'string' &&
+      (a === '--wsEndpoint' || a.startsWith('--wsEndpoint=')),
   );
   return args.includes('--autoConnect') && !hasExplicitEndpoint;
 }
@@ -101,12 +105,12 @@ export function isAutoConnectChromeDevToolsServer(
  * keep everything else (browser hints, isolation flags, …) as configured.
  */
 export function rewriteToWsEndpoint(
-  args: readonly string[],
+  args: readonly unknown[],
   wsEndpoint: string,
 ): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
+    const arg = String(args[i]!);
     if (arg === '--autoConnect') continue;
     if (arg === '--wsEndpoint' || arg.startsWith('--wsEndpoint=')) {
       if (arg === '--wsEndpoint') i++; // also skip its value
@@ -208,7 +212,7 @@ export async function maybeRouteChromeDevToolsViaDaemonBridge(
       const rewritten: MCPServerConfig = {
         ...cfg,
         args: rewriteToWsEndpoint(
-          (cfg as { args?: string[] }).args ?? [],
+          (cfg as { args?: unknown[] }).args ?? [],
           wsEndpoint,
         ),
       };

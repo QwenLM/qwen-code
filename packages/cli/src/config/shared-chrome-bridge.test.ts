@@ -250,9 +250,13 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
   });
 
   it('applies the rewrite when the probe reports a usable bridge', async () => {
+    const numericArgServer = {
+      command: 'node',
+      args: ['server.js', '--port', 9222],
+    } as unknown as MCPServerConfig;
     const { config, setMcpServers } = configStub({
       'chrome-devtools': AUTO_CONNECT_SERVER,
-      filesystem: { command: 'npx', args: ['-y', 'some-fs-server'] },
+      filesystem: numericArgServer,
     });
 
     await maybeRouteChromeDevToolsViaDaemonBridge(
@@ -277,10 +281,7 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
       ],
     });
     // Unrelated servers pass through untouched.
-    expect(next['filesystem']).toEqual({
-      command: 'npx',
-      args: ['-y', 'some-fs-server'],
-    });
+    expect(next['filesystem']).toBe(numericArgServer);
   });
 
   it('leaves approval-gated server configs literal', async () => {
