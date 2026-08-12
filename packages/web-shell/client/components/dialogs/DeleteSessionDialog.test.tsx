@@ -34,18 +34,24 @@ let sessions = [
 
 const deleteSessionMock = vi.fn();
 const deleteSessionsMock = vi.fn();
+let scopedSessionsOptions: unknown;
 const initialSessions = sessions.slice();
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
-  useWorkspace: () => ({ client: {} }),
-  useSessions: () => ({
-    sessions,
-    loading: false,
-    error: undefined,
-    deleteSession: deleteSessionMock,
-    deleteSessions: deleteSessionsMock,
-  }),
+}));
+
+vi.mock('../../hooks/useScopedSessions', () => ({
+  useScopedSessions: (_workspaceCwd: unknown, options: unknown) => {
+    scopedSessionsOptions = options;
+    return {
+      sessions,
+      loading: false,
+      error: undefined,
+      deleteSession: deleteSessionMock,
+      deleteSessions: deleteSessionsMock,
+    };
+  },
 }));
 
 const { DeleteSessionDialog } = await import('./DeleteSessionDialog');
@@ -142,6 +148,11 @@ afterEach(() => {
 describe('DeleteSessionDialog selection', () => {
   it('keeps the keyboard cursor separate from the checked set; Enter only toggles', () => {
     mount();
+
+    expect(scopedSessionsOptions).toEqual({
+      autoLoad: true,
+      maxAgeMs: 1_000,
+    });
 
     // Opens with no highlight and nothing checked; delete stays disabled.
     expect(rows().some(isCursor)).toBe(false);

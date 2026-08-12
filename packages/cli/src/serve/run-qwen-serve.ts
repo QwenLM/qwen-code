@@ -1171,6 +1171,7 @@ async function loadServeRuntimeModules() {
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
+    daemonAcpNdJsonLimits: spawnChannelModule.DAEMON_ACP_NDJSON_LIMITS,
     ProcessRegistry: processRegistryModule.ProcessRegistry,
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
@@ -3747,6 +3748,7 @@ async function runQwenServeImpl(
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
       childHeapPolicy,
+      pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -4453,6 +4455,7 @@ async function runQwenServeImpl(
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4994,6 +4997,7 @@ async function runQwenServeImpl(
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {

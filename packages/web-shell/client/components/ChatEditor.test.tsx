@@ -269,6 +269,7 @@ function renderChatEditor(props: {
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
   onAttachmentsChange?: (hasAttachments: boolean) => void;
+  onImagePreview?: (src: string, alt?: string) => void;
   tokenCount?: number;
   contextWindow?: number;
   onShowContextUsage?: () => void;
@@ -668,6 +669,18 @@ describe('ChatEditor attachment reporting', () => {
       'disabled',
       true,
     );
+  });
+
+  it('opens the image preview when a pasted image is clicked', () => {
+    const onImagePreview = vi.fn();
+    const container = renderChatEditor({
+      pastedImages: [{ data: 'abc', media_type: 'image/png' }],
+      onImagePreview,
+    });
+    const img = container.querySelector('img');
+    expect(img).not.toBeNull();
+    act(() => img!.click());
+    expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
 });
 

@@ -1610,6 +1610,7 @@ describe('runQwenServe telemetry validation', () => {
   });
 
   it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hot-remove-')),
     );
@@ -1682,6 +1683,14 @@ describe('runQwenServe telemetry validation', () => {
         body: JSON.stringify({ cwd: secondary, persist: true }),
       });
       expect(added.status).toBe(201);
+      expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['pipeLimits']).toEqual({
+          maxFrameBytes: 64 * 1024 * 1024,
+          maxQueuedMessages: 256,
+          maxQueuedBytes: 64 * 1024 * 1024,
+        });
+      }
       expect(createBridge.mock.calls[0]?.[0].onChannelDelivery).toBeTypeOf(
         'function',
       );
@@ -1925,6 +1934,7 @@ describe('runQwenServe telemetry validation', () => {
   });
 
   it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -2001,6 +2011,14 @@ describe('runQwenServe telemetry validation', () => {
     try {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['pipeLimits']).toEqual({
+          maxFrameBytes: 64 * 1024 * 1024,
+          maxQueuedMessages: 256,
+          maxQueuedBytes: 64 * 1024 * 1024,
+        });
+      }
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,

@@ -23,6 +23,8 @@ interface Deferred<T> {
 }
 
 const sdkMock = vi.hoisted(() => ({
+  ownerVersion: 0,
+  ownerGuard: { capture: vi.fn() },
   actions: {
     loadArtifacts: vi.fn(),
   },
@@ -39,6 +41,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useActions: () => sdkMock.actions,
   useConnection: () => sdkMock.connection,
   usePromptStatus: () => sdkMock.promptStatus,
+  useDaemonSessionOwnerGuard: () => sdkMock.ownerGuard,
   useWorkspaceEventSignals: () => ({
     artifactsVersion: sdkMock.artifactsVersion,
   }),
@@ -101,6 +104,11 @@ beforeEach(() => {
   };
   sdkMock.promptStatus = 'idle';
   sdkMock.artifactsVersion = 0;
+  sdkMock.ownerVersion = 0;
+  sdkMock.ownerGuard.capture.mockImplementation(() => {
+    const version = sdkMock.ownerVersion;
+    return { isCurrent: () => sdkMock.ownerVersion === version };
+  });
   sdkMock.actions.loadArtifacts.mockReset();
 });
 
@@ -137,6 +145,7 @@ describe('useSessionArtifacts', () => {
       sessionId: 'session-b',
       capabilities: { features: ['session_artifacts'] },
     };
+    sdkMock.ownerVersion += 1;
     await rerenderHookHost();
 
     expect(latestState?.loading).toBe(true);
@@ -178,6 +187,32 @@ describe('useSessionArtifacts', () => {
     });
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'refreshed-artifact',
+    ]);
+  });
+
+  it('loads a same-id replacement without waiting for the old owner', async () => {
+    const oldLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockReturnValueOnce(oldLoad.promise)
+      .mockResolvedValueOnce({ artifacts: [artifact('replacement')] });
+
+    await renderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledOnce();
+
+    sdkMock.ownerVersion += 1;
+    await rerenderHookHost();
+
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'replacement',
+    ]);
+
+    await act(async () => {
+      oldLoad.resolve({ artifacts: [artifact('stale')] });
+      await oldLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'replacement',
     ]);
   });
 });
