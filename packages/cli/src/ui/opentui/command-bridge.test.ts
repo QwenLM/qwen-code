@@ -109,11 +109,9 @@ describe('resolveDialogRequest', () => {
       { dialog: 'hooks' },
       { dialog: 'rewind' },
       { dialog: 'diff' },
-      { dialog: 'stats' },
       { dialog: 'arena', mode: 'start' },
       { dialog: 'subagent_create' },
       { dialog: 'subagent_list' },
-      { dialog: 'skills_manage' },
     ];
     expect(unsupported.length).toBeGreaterThan(0);
     for (const request of unsupported) {
