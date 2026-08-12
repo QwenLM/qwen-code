@@ -761,6 +761,45 @@ describe('validateModelConfig - Vertex AI Application Default Credentials', () =
     expect(result.errors[0].message).toContain('GOOGLE_CLOUD_PROJECT');
   });
 
+  it('builds the client in Vertex mode from the auth type alone', async () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+    // Deliberately unset: the mode must not depend on the side effect that
+    // only the CLI pre-flight check writes.
+    vi.stubEnv('GOOGLE_GENAI_USE_VERTEXAI', '');
+    vi.mocked(GoogleGenAI).mockClear();
+    vi.mocked(GoogleGenAI).mockImplementation(
+      () =>
+        ({
+          models: {
+            countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+          },
+        }) as unknown as GoogleGenAI,
+    );
+
+    const generator = await createContentGenerator(
+      { model: 'gemini-2.5-pro', authType: AuthType.USE_VERTEX_AI },
+      {
+        getUsageStatisticsEnabled: () => false,
+        getContentGeneratorConfig: () => ({}),
+        getCliVersion: () => '1.0.0',
+        getTelemetryEnabled: () => false,
+        getSessionId: () => 'test-session',
+      } as unknown as Config,
+    );
+    await generator.countTokens({ model: 'gemini-2.5-pro', contents: 'hello' });
+
+    expect(GoogleGenAI).toHaveBeenCalledWith(
+      expect.objectContaining({ vertexai: true, apiKey: undefined }),
+    );
+  });
+
+  it('keeps the strict error pointing at the keyless alternative', () => {
+    const result = validateModelConfig(vertexConfig, true);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].message).toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
   it('does not extend the keyless path to the Gemini API auth type', () => {
     vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
 
@@ -770,5 +809,31 @@ describe('validateModelConfig - Vertex AI Application Default Credentials', () =
     } as ContentGeneratorConfig);
 
     expect(result.valid).toBe(false);
+    // The keyless hint is Vertex-specific: recommending a project to a Gemini
+    // API user is the misleading-placeholder advice it exists to prevent.
+    expect(result.errors[0].message).not.toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('keeps failing on the declared key variable when the entry has an envKey', () => {
+    vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'my-project');
+
+    const withEnvKey = {
+      ...vertexConfig,
+      apiKeyEnvKey: 'MY_VERTEX_KEY',
+    } as ContentGeneratorConfig;
+
+    expect(validateModelConfig(withEnvKey).valid).toBe(false);
+    expect(validateModelConfig(withEnvKey).errors[0].message).toContain(
+      'MY_VERTEX_KEY',
+    );
+    // Such an entry never takes the ADC path, so the keyless hint must not
+    // appear: it would be advice that cannot work.
+    expect(validateModelConfig(withEnvKey).errors[0].message).not.toContain(
+      'GOOGLE_CLOUD_PROJECT',
+    );
+    expect(validateModelConfig(withEnvKey, true).valid).toBe(false);
+    expect(
+      validateModelConfig(withEnvKey, true).errors[0].message,
+    ).not.toContain('GOOGLE_CLOUD_PROJECT');
   });
 });

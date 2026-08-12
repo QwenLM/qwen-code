@@ -28,6 +28,8 @@ export {
   type OnModelChangeCallback,
 } from './modelsConfig.js';
 
+export { VERTEX_ADC_HINT } from './modelConfigErrors.js';
+
 export {
   AUTH_ENV_MAPPINGS,
   CREDENTIAL_FIELDS,

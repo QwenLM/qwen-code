@@ -290,18 +290,37 @@ export interface ModelConfigValidationResult {
   errors: Error[];
 }
 
+export const VERTEX_PROJECT_ENV_VAR = 'GOOGLE_CLOUD_PROJECT';
+
+/**
+ * Single definition of "a Vertex project is configured", shared by every gate
+ * that decides whether Application Default Credentials are usable. Callers that
+ * read from somewhere other than the process environment pass their own lookup
+ * so all gates agree on whitespace handling.
+ */
+export function hasVertexProjectConfigured(
+  lookup: (key: string) => string | undefined = (key) => process.env[key],
+): boolean {
+  return !!lookup(VERTEX_PROJECT_ENV_VAR)?.trim();
+}
+
 /**
  * Vertex AI accepts Application Default Credentials in place of an API key:
  * with a project configured and no key passed, the @google/genai client
  * resolves ADC itself. Passing any key value instead switches the client to
  * Vertex Express mode and disables ADC, so the key must stay absent.
+ *
+ * An entry that declares its own key variable is excluded: falling back to ADC
+ * there would authenticate as a different principal than the one configured,
+ * silently, whenever that variable failed to be injected.
  */
 function usesVertexApplicationDefaultCredentials(
   config: ContentGeneratorConfig,
 ): boolean {
   return (
     config.authType === AuthType.USE_VERTEX_AI &&
-    !!process.env['GOOGLE_CLOUD_PROJECT']?.trim()
+    !config.apiKeyEnvKey &&
+    hasVertexProjectConfigured()
   );
 }
 
@@ -339,6 +358,7 @@ export function validateModelConfig(
           model: config.model,
           baseUrl: config.baseUrl,
           envKey,
+          explicitEnvKey: config.apiKeyEnvKey,
         }),
       );
     }

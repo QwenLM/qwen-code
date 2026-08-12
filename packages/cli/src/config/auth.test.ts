@@ -284,6 +284,36 @@ describe('validateAuthMethod', () => {
   });
 
   it('should return an error for USE_VERTEX_AI with neither an API key nor a project', () => {
+    const result = validateAuthMethod(AuthType.USE_VERTEX_AI);
+
+    expect(result).toContain('GOOGLE_API_KEY');
+    // The first error a Vertex user hits must name the keyless alternative,
+    // otherwise the advice is "set a key", which forces Express mode.
+    expect(result).toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('should keep requiring the declared envKey for USE_VERTEX_AI even when a project is set', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        env: { GOOGLE_CLOUD_PROJECT: 'my-project' },
+        model: { name: 'vertex-model' },
+        modelProviders: {
+          'vertex-ai': [{ id: 'vertex-model', envKey: 'MY_VERTEX_KEY' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const result = validateAuthMethod(AuthType.USE_VERTEX_AI);
+
+    expect(result).toContain('MY_VERTEX_KEY');
+    // The entry never takes the ADC path, so pointing at a project would be
+    // advice that cannot work.
+    expect(result).not.toContain('GOOGLE_CLOUD_PROJECT');
+  });
+
+  it('should not treat a whitespace-only project as configured', () => {
+    process.env['GOOGLE_CLOUD_PROJECT'] = '   ';
+
     expect(validateAuthMethod(AuthType.USE_VERTEX_AI)).toContain(
       'GOOGLE_API_KEY',
     );

@@ -8,6 +8,7 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
@@ -912,10 +913,7 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
   openai: ['OPENAI_API_KEY'],
   anthropic: ['ANTHROPIC_API_KEY'],
   gemini: ['GEMINI_API_KEY'],
-  // GOOGLE_CLOUD_PROJECT is not an API key, but it is what selects Vertex's
-  // Application Default Credentials path, so its presence means auth is
-  // configured. This cell only tests presence; no value is read from it.
-  'vertex-ai': ['GOOGLE_API_KEY', 'GOOGLE_CLOUD_PROJECT'],
+  'vertex-ai': ['GOOGLE_API_KEY'],
 };
 
 /**
@@ -6755,6 +6753,25 @@ class QwenAgent implements Agent {
         if (resolvedApiKey) {
           hasToken = true;
         }
+      }
+      // Keyless Vertex: a configured project selects the ADC path, but it is
+      // routing configuration, not evidence that a usable credential exists.
+      // Report indeterminate rather than a confirmed token and let the session
+      // boot settle it.
+      if (
+        !hasToken &&
+        authType === AuthType.USE_VERTEX_AI &&
+        hasVertexProjectConfigured()
+      ) {
+        return this.acpCell('auth', {
+          status: 'unknown',
+          hint: 'Vertex AI is configured for Application Default Credentials; whether they resolve is only known at session start.',
+          detail: {
+            source: String(authType),
+            hasToken: 'unknown' as const,
+            envVarCandidates: apiKeyVars,
+          },
+        });
       }
       // No env-var registration → either OAuth-style auth (qwen-oauth) or
       // a custom provider whose key is sourced from settings rather than
