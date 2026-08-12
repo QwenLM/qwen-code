@@ -1,8 +1,8 @@
 # Selective session restore implementation plan
 
-- Status: Proposed; as of 2026-08-11, #8691, #8833, and #8882 are merged;
-  exact-shape restore coalescing is implemented in Draft PR #8933, and selective
-  implementation starts from fresh `main` after #8933 lands
+- Status: Proposed; as of 2026-08-12, #8691, #8833, #8882, and exact-shape
+  restore coalescing in #8933 are merged; selective implementation starts from
+  fresh `main` containing #8933 merge commit `962dc8e`
 - Design: `docs/design/2026-08-08-selective-session-restore.md`
 - Tracks: #8678
 
@@ -14,11 +14,10 @@ checkpoint. #8824 was superseded by this split series. #8883's legacy watchdog
 retry fix and the later PR3c/PR3d resync/repair and branch-adoption slices are not
 prerequisites for this bounded-hydration implementation.
 
-Do not start the selective implementation from an unmerged prerequisite head.
-After #8933 lands, create a separate Draft branch from fresh `main`, confirm its
-diff contains #8882 and #8933, and rerun their transactional and request-shape
-regressions before adding projection code. Do not add selective commits to
-#8743, #8882, or #8933.
+Create a separate Draft branch from fresh `main`, confirm its history contains
+#8882 and #8933, and rerun their transactional and request-shape regressions
+before adding projection code. Do not add selective commits to #8743, #8882, or
+#8933.
 
 Implement selective restore as one end-to-end daemon fix. Reviewable commits may
 follow the phases below, but do not merge an intermediate PR that only removes a
@@ -372,7 +371,7 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
   receive post-resume updates, including available-command refresh. None may
   collect historical replay frames. Generic load and branch clients retain
   their explicit replay behavior.
-- After #8933 merges, create the implementation from fresh `main` containing the
+- With #8933 merged, create the implementation from fresh `main` containing the
   final #8882 and #8933 code, review the selective-only diff, and run their
   integration coverage with selective-restore 409, 413, timeout/504,
   cancellation, and staging failures on the modern `client_identity` path.
@@ -411,8 +410,9 @@ production-line core `refactor`, the repository's maintainer-only gate applies.
 - [x] #8933 implements exact-shape WebUI and bridge coalescing, effective-page
       snapshotting, ingress validation, and focused real-daemon regression
       coverage without adding selective runtime code.
-- [ ] #8933 has landed; the selective implementation branch is then created from
-      fresh `main` containing both #8882 and #8933.
+- [x] #8933 has landed as merge commit `962dc8e`; fresh `main` contains both
+      #8882 and #8933.
+- [ ] The selective implementation branch is created from that fresh `main`.
 - [ ] Projection acquisition, runtime-consumer migration, and old-loader removal
       ship as one end-to-end implementation; no intermediate production PR leaves
       an unused projection or removes the post-lease authoritative read without

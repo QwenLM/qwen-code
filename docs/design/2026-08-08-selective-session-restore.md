@@ -2,10 +2,10 @@
 
 - Status: Draft for review
 - Tracks: #8678
-- Prerequisite status on 2026-08-11: #8691, attachment-identity hardening in
-  #8833, and transactional cross-session switching in #8882 are merged;
-  exact-shape restore coalescing is implemented in Draft PR #8933 and must land
-  before selective implementation starts
+- Prerequisite status on 2026-08-12: #8691, attachment-identity hardening in
+  #8833, transactional cross-session switching in #8882, and exact-shape
+  restore coalescing in #8933 are merged; selective implementation may start
+  from fresh `main` containing merge commit `962dc8e`
 
 ## Scope and ordering
 
@@ -21,10 +21,10 @@ The final #8882 implementation keeps the current UI session attached until a
 fully staged target wins its identity, environment, lifecycle, and deadline
 checks and commits. Review after merge found one remaining correctness boundary:
 the WebUI coordinator and ACP bridge could still coalesce non-equivalent replay
-requests. Draft PR #8933 implements exact-shape coalescing, page snapshotting,
+requests. Merged PR #8933 implements exact-shape coalescing, page snapshotting,
 bridge ingress validation, and the associated unit and real-daemon regression
-coverage. Selective implementation begins from fresh `main` only after #8933
-lands; it must not duplicate that coordinator or bridge fix. The boundaries are
+coverage. Selective implementation begins from fresh `main` containing #8933
+and must not duplicate that coordinator or bridge fix. The boundaries are
 distinct: #8691 fences timeouts and late results; #8833 fences stale attachment
 work; #8882 owns transactional target commit; #8933 owns restore request-shape
 correctness; selective restore removes the leased mode's duplicate full read and
@@ -559,7 +559,7 @@ Map protocol modes explicitly:
 | legacy streamed load                      | `all`                  |
 | `resumeSession`                           | `none`                 |
 
-Prerequisite PR #8933 implements bridge restore-shape normalization before
+Merged PR #8933 implements bridge restore-shape normalization before
 `inFlightRestores`. Omission remains `{ kind: 'all' }`; an explicit validated
 page size is `{ kind: 'recent', limit }`; resume is `{ kind: 'none' }`. The
 coalescing key also includes action, response/stream replay mode, and
@@ -1481,14 +1481,12 @@ plus an explicit smaller-page retry when the aligned selection can be reduced.
 
 ## Rollout and follow-ups
 
-The design document may land before its remaining implementation prerequisite.
-#8691, #8833, and #8882 are merged; #8933 contains the completed request-shape
-fix and must merge next. Start selective development from fresh `main` after
-#8933 lands, followed by the durable checkpoint. #8883 and the later PR3c/PR3d
-ownership slices are not prerequisites for this bounded hydration path. Keep
-selective restore as one end-to-end implementation PR, using reviewable commits
-for the phases below; do not land an unused projection API or a partial
-early-paging step.
+#8691, #8833, #8882, and #8933 are merged. Start selective development from
+fresh `main` containing the completed request-shape fix, followed by the durable
+checkpoint. #8883 and the later PR3c/PR3d ownership slices are not prerequisites
+for this bounded hydration path. Keep selective restore as one end-to-end
+implementation PR, using reviewable commits for the phases below; do not land an
+unused projection API or a partial early-paging step.
 `historyPageSize` cannot bound pre-materialization I/O without the consumer
 projection, and the writer-lease path's post-acquisition read remains
 authoritative.
