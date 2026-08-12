@@ -926,6 +926,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const pumpTransitionRef = useRef<() => void>(() => undefined);
   const lifecycleRef = useRef(0);
   const sourceBoundOperationCountRef = useRef(0);
+  const sessionConfigGenerationRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   const cancelTransitionRef = useRef<(reason: string) => void>(() => undefined);
   const controlledTransitionOriginRef = useRef(false);
   const transcriptHistoryRef = useRef<TranscriptHistoryState>({
@@ -2249,6 +2252,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.skills !== undefined &&
               connectionRef.current.supportedCommands !== undefined &&
               connectionRef.current.context !== undefined);
+          const configGeneration =
+            sessionConfigGenerationRef.current.get(activeSession) ?? 0;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
@@ -2332,6 +2337,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               return current;
             }
+            const configSnapshotCurrent =
+              configGeneration % 2 === 0 &&
+              (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
+                configGeneration;
             return {
               ...current,
               status: 'connected',
@@ -2353,10 +2362,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
               models: sessionModels.length > 0 ? sessionModels : current.models,
-              currentModel: sessionCurrentModel ?? current.currentModel,
+              currentModel: configSnapshotCurrent
+                ? (sessionCurrentModel ?? current.currentModel)
+                : current.currentModel,
               currentMode: currentMode ?? current.currentMode,
               reasoning:
-                context !== undefined
+                configSnapshotCurrent && context !== undefined
                   ? mapSessionContextReasoning(
                       context,
                       current.reasoning?.effort,
@@ -2365,10 +2376,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               displayName:
                 getSessionDisplayName(activeSession.state) ??
                 current.displayName,
-              contextWindow: sessionContextWindow ?? current.contextWindow,
+              contextWindow: configSnapshotCurrent
+                ? (sessionContextWindow ?? current.contextWindow)
+                : current.contextWindow,
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
-              context: context ?? current.context,
+              context: configSnapshotCurrent
+                ? (context ?? current.context)
+                : current.context,
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -4430,6 +4445,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           sourceBoundOperationCountRef.current > 0,
         setSourceBoundOperationInFlight: (inFlight) =>
           (sourceBoundOperationCountRef.current += inFlight ? 1 : -1),
+        sessionConfigGeneration: sessionConfigGenerationRef.current,
         getTransitionOrigin: () => {
           const controlled = controlledTransitionOriginRef.current;
           controlledTransitionOriginRef.current = false;

@@ -139,6 +139,7 @@ export interface CreateDaemonSessionActionsArgs {
   isDifferentLogicalTransitionPending?: () => boolean;
   isSourceBoundOperationInFlight?: () => boolean;
   setSourceBoundOperationInFlight?: (inFlight: boolean) => void;
+  sessionConfigGeneration?: WeakMap<DaemonSessionClient, number>;
   getTransitionOrigin?: () => 'action' | 'controlled';
 }
 export function getConnectionAfterSessionClear(
@@ -210,6 +211,7 @@ export function createDaemonSessionActions({
   isDifferentLogicalTransitionPending = () => false,
   isSourceBoundOperationInFlight = () => false,
   setSourceBoundOperationInFlight = () => undefined,
+  sessionConfigGeneration = new WeakMap(),
   getTransitionOrigin = () => 'action',
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
@@ -233,13 +235,28 @@ export function createDaemonSessionActions({
     }
   }
 
-  function trackSourceBoundOperation<T>(operation: Promise<T>): Promise<T> {
+  function trackSessionConfigMutation<T>(
+    session: DaemonSessionClient,
+    operation: Promise<T>,
+  ): Promise<T> {
+    sessionConfigGeneration.set(
+      session,
+      (sessionConfigGeneration.get(session) ?? 0) + 1,
+    );
     setSourceBoundOperationInFlight(true);
     void operation.then(
-      () => setSourceBoundOperationInFlight(false),
-      () => setSourceBoundOperationInFlight(false),
+      () => finishSessionConfigMutation(session),
+      () => finishSessionConfigMutation(session),
     );
     return operation;
+  }
+
+  function finishSessionConfigMutation(session: DaemonSessionClient): void {
+    sessionConfigGeneration.set(
+      session,
+      (sessionConfigGeneration.get(session) ?? 0) + 1,
+    );
+    setSourceBoundOperationInFlight(false);
   }
 
   const isCurrentLogicalSession = (session: DaemonSessionClient) => {
@@ -754,7 +771,8 @@ export function createDaemonSessionActions({
       );
       try {
         const modelRequest = session.setModel(modelId);
-        const contextRequest = trackSourceBoundOperation(
+        const contextRequest = trackSessionConfigMutation(
+          session,
           modelRequest.then(() => session.context()),
         );
         const result = await withActionTimeout(
@@ -826,7 +844,8 @@ export function createDaemonSessionActions({
       );
       try {
         const result = await withActionTimeout(
-          trackSourceBoundOperation(
+          trackSessionConfigMutation(
+            session,
             session.setConfigOption('reasoning_effort', value),
           ),
           'Set reasoning effort timed out',
@@ -1273,13 +1292,21 @@ export function createDaemonSessionActions({
         'Load context failed',
         'load_context',
       );
+      const configGeneration = sessionConfigGeneration.get(session) ?? 0;
       try {
         const context = await withActionTimeout(
           session.context(),
           'Load context timed out',
         );
-        if (sessionRef.current === session) {
-          setConnection((current) => ({
+        setConnection((current) => {
+          if (
+            sessionRef.current !== session ||
+            configGeneration % 2 !== 0 ||
+            (sessionConfigGeneration.get(session) ?? 0) !== configGeneration
+          ) {
+            return current;
+          }
+          return {
             ...current,
             context,
             currentMode:
@@ -1290,8 +1317,8 @@ export function createDaemonSessionActions({
               context,
               current.reasoning?.effort,
             ),
-          }));
-        }
+          };
+        });
         return context;
       } catch (error) {
         throw dispatchActionError(

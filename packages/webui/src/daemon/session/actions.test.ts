@@ -1509,6 +1509,40 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('does not apply context captured before a reasoning update', async () => {
+    const session = createMockSession('session-a');
+    const staleContext = createDeferred<ReturnType<typeof contextStatus>>();
+    const currentConfigOptions = reasoningConfigOptions('medium');
+    session.context.mockReturnValueOnce(staleContext.promise);
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: currentConfigOptions,
+    });
+    const sessionConfigGeneration = new WeakMap<DaemonSessionClient, number>();
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        currentModel: 'qwen3.8-max',
+        context: reasoningContext(session.sessionId, 'xhigh'),
+        reasoning: { enabled: true, effort: 'xhigh', efforts: [] },
+      },
+      session,
+      sessionConfigGeneration,
+    });
+
+    const staleRead = actions.getContext();
+    await actions.setReasoningEffort('medium');
+    staleContext.resolve(reasoningContext(session.sessionId, 'xhigh'));
+    await expect(staleRead).resolves.toEqual(
+      reasoningContext(session.sessionId, 'xhigh'),
+    );
+
+    expect(getConnection()).toMatchObject({
+      reasoning: { enabled: true, effort: 'medium' },
+      context: { state: { configOptions: currentConfigOptions } },
+    });
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -1634,6 +1668,7 @@ function createActionsHarness(
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
     setSourceBoundOperationInFlight?: ReturnType<typeof vi.fn>;
+    sessionConfigGeneration?: WeakMap<DaemonSessionClient, number>;
     isSourceBoundOperationInFlight?: () => boolean;
     isCrossSessionTransitionPending?: () => boolean;
     isDifferentLogicalTransitionPending?: () => boolean;
@@ -1696,6 +1731,7 @@ function createActionsHarness(
     isSourceBoundOperationInFlight: opts.isSourceBoundOperationInFlight,
     getTransitionOrigin: opts.getTransitionOrigin,
     setSourceBoundOperationInFlight: opts.setSourceBoundOperationInFlight,
+    sessionConfigGeneration: opts.sessionConfigGeneration,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
@@ -1798,4 +1834,21 @@ function contextStatus(sessionId: string) {
     workspaceCwd: '/workspace',
     state: {},
   };
+}
+
+function reasoningContext(sessionId: string, effort: string) {
+  return {
+    ...contextStatus(sessionId),
+    state: { configOptions: reasoningConfigOptions(effort) },
+  };
+}
+
+function reasoningConfigOptions(effort: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue: effort,
+      options: ['none', 'low', 'medium', 'xhigh'].map((value) => ({ value })),
+    },
+  ];
 }
