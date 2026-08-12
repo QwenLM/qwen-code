@@ -442,6 +442,17 @@ describe('observedTestCounts', () => {
             '[maven-test-report] core (7 report(s)): tests=7, failures=0, errors=0, skipped=0',
         },
         {
+          // The exitCode===null disjunct pinned ALONE: a spawn-level death
+          // (OOM kill, maxBuffer overflow) carries timedOut:false, and the
+          // interrupt fixtures above bundle the two disjuncts together.
+          command: 'mvn test',
+          exitCode: null,
+          seconds: 3,
+          timedOut: false,
+          output:
+            '[maven-test-report] core (9 report(s)): tests=9, failures=0, errors=0, skipped=0',
+        },
+        {
           command: 'mvn -fn test',
           exitCode: 0,
           seconds: 3,
@@ -495,6 +506,14 @@ describe('observedTestCounts', () => {
           exitCode: null,
           seconds: 300,
           timedOut: true,
+          output: 'Tests  499 passed (499)',
+        },
+        // The null-exit disjunct alone, like its Maven twin above.
+        {
+          command: 'npm test',
+          exitCode: null,
+          seconds: 3,
+          timedOut: false,
           output: 'Tests  499 passed (499)',
         },
       ],
@@ -2043,7 +2062,164 @@ describe('runTestPlan', () => {
       const r = run('## Test Plan\n\nRan `npm test`', [], bt);
       const claim = r.claims.find((c) => c.text === 'npm test');
       expect(claim?.verdict).toBe('contradicted');
-      expect(claim?.observed).toBe('exit null');
+      expect(claim?.observed).toBe('it ended without an exit code');
+    });
+
+    it('does not leak an attached quoted flag value into the positionals', () => {
+      // The attached `<flag>='…'` form carries its quoted value in-token
+      // for EVERY value flag — the old consumption covered only `-pl=`/
+      // `--projects=`, so `-l='a test -B'` leaked the `test` fragment and
+      // settled a claim that runs no lifecycle work.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const leaked = run("## Test Plan\n\nRan `mvn -l='a test -B'`", [], bt);
+      expect(verdictOf(leaked.claims, "mvn -l='a test -B'")).toBe('unchecked');
+
+      // The mirror false negative: the same value beside a real phase used
+      // to never settle while its space-form twin did.
+      const settled = run(
+        "## Test Plan\n\nRan `mvn test -l='build log.txt'`",
+        [],
+        bt,
+      );
+      expect(verdictOf(settled.claims, "mvn test -l='build log.txt'")).toBe(
+        'reproduces',
+      );
+    });
+
+    it('does not leak a quoted value whose first word is empty', () => {
+      // A quoted value starting with a space breaks into a BARE opening
+      // quote token; the rejoin/consume loops checked the closing quote
+      // before advancing, so the span was never rejoined and `test` leaked
+      // into the positionals.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const leaked = run("## Test Plan\n\nRan `mvn -l ' x test -B'`", [], bt);
+      expect(verdictOf(leaked.claims, "mvn -l ' x test -B'")).toBe('unchecked');
+
+      const settled = run(
+        "## Test Plan\n\nRan `mvn test -l ' x verify -e'`",
+        [],
+        bt,
+      );
+      expect(verdictOf(settled.claims, "mvn test -l ' x verify -e'")).toBe(
+        'reproduces',
+      );
+    });
+
+    it('does not settle claims on the password-encryption options', () => {
+      // `-emp`/`-ep` and their long spellings consume their argument and
+      // perform ZERO lifecycle work; reading the argument as a positional
+      // phase settled claims that built and tested nothing. All four
+      // spellings — including the commons-cli single-dash long one — carry
+      // the same treatment.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      for (const claim of [
+        'mvn -emp test',
+        'mvn -ep test',
+        'mvn --encrypt-master-password test',
+        'mvn -encrypt-master-password test',
+      ]) {
+        const r = run(`## Test Plan\n\nRan \`${claim}\``, [], bt);
+        expect(verdictOf(r.claims, claim)).toBe('unchecked');
+      }
+    });
+
+    it('does not settle a claim carrying mid-position unknown work', () => {
+      // Maven dies on 'Unknown lifecycle phase' for a bare positional that
+      // names no work (`mvn foo test` runs nothing); settling the trailing
+      // phase anyway read `reproduces` over a command that errored out.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `mvn foo test`', [], bt);
+      expect(verdictOf(r.claims, 'mvn foo test')).toBe('unchecked');
+    });
+
+    it('extracts ././-prefixed runner spellings as commands', () => {
+      // A leading `./` before upward hops (or another `./`) used to fall
+      // out of the runner grammar, so the claim was never extracted.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `././mvnw test`', [], bt);
+      expect(verdictOf(r.claims, '././mvnw test')).toBe('reproduces');
+    });
+
+    it('extracts case- and .exe-variant runner spellings as commands', () => {
+      // scoop/Chocolatey installs create an `mvn.exe` shim, and Windows
+      // authors type `MVNW`/`mvnw.CMD` on a case-insensitive filesystem —
+      // a span the runner check rejects is a claim never extracted.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null, exe: 'mvn' })],
+      } as unknown as BuildTestReport;
+      const exe = run('## Test Plan\n\nRan `mvn.exe test`', [], bt);
+      expect(verdictOf(exe.claims, 'mvn.exe test')).toBe('reproduces');
+      const upper = run('## Test Plan\n\nRan `MVNW test`', [], bt);
+      expect(verdictOf(upper.claims, 'MVNW test')).toBe('reproduces');
+    });
+
+    it('does not attribute a src/-named module failure to a root claim', () => {
+      // The root-project arm keyed on the `<worktree>/src/` substring: a
+      // module literally named `src` sits beneath it, and attributing its
+      // compile failure to a claim naming the root module defeats the
+      // `-am` carve-out in the accusing direction. Attribution walks to
+      // the owning pom.xml instead; a failure inside a CLAIMED module
+      // still contradicts.
+      writeFileSync(join(dir, 'pom.xml'), '<project/>');
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src', 'pom.xml'), '<project/>');
+      mkdirSync(join(dir, 'app'), { recursive: true });
+      writeFileSync(join(dir, 'app', 'pom.xml'), '<project/>');
+      const wt = dir.replace(/\\/g, '/');
+
+      const outside = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['.', 'app'],
+            exitCode: 1,
+            output: `[ERROR] ${wt}/src/src/main/java/Foo.java:[10,5] boom`,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const uncheckedRun = run(
+        '## Test Plan\n\nRan `./mvnw -pl .,app test`',
+        [],
+        outside,
+      );
+      expect(verdictOf(uncheckedRun.claims, './mvnw -pl .,app test')).toBe(
+        'unchecked',
+      );
+
+      const inside = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['.', 'app'],
+            exitCode: 1,
+            output: `[ERROR] ${wt}/app/src/main/java/Bar.java:[10,5] boom`,
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const contradictedRun = run(
+        '## Test Plan\n\nRan `./mvnw -pl .,app test`',
+        [],
+        inside,
+      );
+      expect(verdictOf(contradictedRun.claims, './mvnw -pl .,app test')).toBe(
+        'contradicted',
+      );
     });
 
     it('compares quoted -pl selectors as their module sets', () => {
@@ -2436,7 +2612,7 @@ describe('runTestPlan', () => {
       const r = run('## Test Plan\n\nRan `npm test`', [], bt);
       const claim = r.claims.find((c) => c.text === 'npm test');
       expect(claim?.verdict).toBe('contradicted');
-      expect(claim?.observed).toBe('exit null');
+      expect(claim?.observed).toBe('it ended without an exit code');
     });
 
     it('does not reproduce a claim on a run whose exit 0 swallowed failures', () => {

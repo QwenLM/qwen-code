@@ -46,6 +46,7 @@ import {
   ANSI_SGR_RE,
   isDependencyFailureLine,
   isDiskFailureLine,
+  isFailingSurefireSummaryLine,
   isGoalFailureLine,
   isSourceFailureLine,
   isSurefireSummaryLine,
@@ -125,6 +126,14 @@ export interface CommandResult {
    * nothing, and `test-plan` must not rule a claim reproduced against it.
    */
   neverRan?: boolean;
+  /**
+   * The output trim's rescue cap dropped failure-evidence lines from the
+   * omitted middle (dependency/source/goal/disk failures, module errors,
+   * failing Surefire summaries): the classifiers read an output whose
+   * verdict-relevant lines may be gone — the same epistemic state as
+   * `evidenceCapped`, which the Maven adapter folds it into.
+   */
+  rescueOverflow?: boolean;
   /**
    * Present on a Maven LIFECYCLE command (not the dependency warm-up): what
    * it scopes, as the adapter knew it when it built the command line.
@@ -223,10 +232,32 @@ const RUNNER_SUMMARY_RE = /^\s*(?:Tests?|Test Files):?\s+\d/;
  *  same bytes: a real runner interleaves them BETWEEN tokens
  *  (`Tests\x1b[2m  \x1b[22m3 failed`), where no anchored pattern can step
  *  over them. The rescued line itself keeps its original bytes. */
-export function trimOutput(s: string): string {
-  if (s.length <= KEEP_HEAD + KEEP_TAIL) return s;
-  const middle = s.slice(KEEP_HEAD, s.length - KEEP_TAIL);
-  // Rescue module-resolution errors from the omitted middle. The widening loop
+export function trimOutput(s: string): {
+  /** The trimmed output the report carries. */
+  text: string;
+  /**
+   * The rescue cap dropped failure-evidence lines from the omitted middle:
+   * classification reads an output whose verdict-relevant lines may be
+   * gone — the Maven adapter folds this into `evidenceCapped`.
+   */
+  evidenceDropped: boolean;
+} {
+  if (s.length <= KEEP_HEAD + KEEP_TAIL)
+    return { text: s, evidenceDropped: false };
+  // Align both cuts to line boundaries: every rescue and classification
+  // predicate is line-anchored, so a verdict-critical line straddling a
+  // mid-line cut would fragment into two pieces that match nothing —
+  // neither rescued nor classified.
+  const headNewline = s.lastIndexOf('\n', KEEP_HEAD);
+  const headEnd = headNewline === -1 ? KEEP_HEAD : headNewline + 1;
+  const tailNewline = s.indexOf('\n', s.length - KEEP_TAIL);
+  const tailStart = tailNewline === -1 ? s.length - KEEP_TAIL : tailNewline + 1;
+  // Head and tail already cover the whole string line-wise — one long line
+  // spans the middle, and splitting it would break the very line the
+  // alignment exists to protect.
+  if (headEnd >= tailStart) return { text: s, evidenceDropped: false };
+  const middle = s.slice(headEnd, tailStart);
+  // Rescue verdict-relevant lines from the omitted middle. The widening loop
   // reads this trimmed output to decide what to add to the build set — a `Cannot
   // find module` line lost to trimming (a long TypeScript log can push one past the
   // head and before the tail) would end the widening early and surface a real
@@ -234,43 +265,79 @@ export function trimOutput(s: string): string {
   // CAPPED: the rescue exists to save a handful of summary/module-error lines,
   // and an uncapped predicate made the whole trim a no-op on 40k lines of
   // `Test <n>: …` prose (measured in review — 1.6 MB in, 1.6 MB out). Past the
-  // cap the trim's bounded-output contract wins and the rest stays omitted.
+  // cap the trim's bounded-output contract wins and the rest stays omitted —
+  // but evidence lines take the slots FIRST: benign matches (green Surefire
+  // summaries, skip markers, runner summaries) must not exhaust the cap in
+  // positional order and drop the failure lines a verdict reads. Dropped
+  // evidence lines fail closed through `evidenceDropped`.
   const RESCUE_MAX = 40;
-  const matching = middle.split('\n').filter(
-    (l) =>
-      MODULE_ERROR_RE.test(l) ||
-      RUNNER_SUMMARY_RE.test(l.replace(ANSI_SGR_RE, '')) ||
-      // Maven infra classification runs on this trimmed output; a
-      // dependency-failure line lost to the trim would file a network
-      // outage against the PR, a source-failure line lost there would
-      // launder a compile error into infrastructure, a goal-failure line
-      // lost there would read a fail-never plugin failure green, and a
-      // disk-failure line lost there would file an ENOSPC death against
-      // the PR (or, under fail-never, read the run green) — the exact
-      // errors this command prevents.
-      isDependencyFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-      isSourceFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-      isGoalFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-      isDiskFailureLine(l.replace(ANSI_SGR_RE, '')) ||
-      // The adapter's testsSuppressed guard reads the skip marker from
-      // this trimmed output; a large reactor's trailing Reactor Summary
-      // pushes every `Tests are skipped.` line into the omitted middle,
-      // and losing it certifies a run that tested zero.
-      isTestsSkippedLine(l.replace(ANSI_SGR_RE, '')) ||
-      // The adapter's exit-0 stdout cross-check reads Surefire's framed
-      // `Tests run:` summaries from this trimmed output — the ONE defense
-      // for relocated-`<reportsDirectory>` runs. A large reactor's
-      // trailing Reactor Summary pushes them into the omitted middle
-      // exactly like the skip marker above, and losing them certifies a
-      // failing run green.
-      isSurefireSummaryLine(l.replace(ANSI_SGR_RE, '')),
+  const matched: Array<{ line: string; index: number; evidence: boolean }> = [];
+  middle.split('\n').forEach((line, index) => {
+    // The widening loop reads module errors from the ORIGINAL bytes.
+    if (MODULE_ERROR_RE.test(line)) {
+      matched.push({ line, index, evidence: true });
+      return;
+    }
+    // Strip SGR ONCE per line: the classifiers below all read the same
+    // stripped copy.
+    const stripped = line.replace(ANSI_SGR_RE, '');
+    // Maven infra classification runs on this trimmed output; a
+    // dependency-failure line lost to the trim would file a network
+    // outage against the PR, a source-failure line lost there would
+    // launder a compile error into infrastructure, a goal-failure line
+    // lost there would read a fail-never plugin failure green, and a
+    // disk-failure line lost there would file an ENOSPC death against
+    // the PR (or, under fail-never, read the run green) — the exact
+    // errors this command prevents. A FAILING Surefire stdout summary is
+    // the same class: the exit-0 cross-check's one defense for
+    // relocated-`<reportsDirectory>` runs.
+    if (
+      isDependencyFailureLine(stripped) ||
+      isSourceFailureLine(stripped) ||
+      isGoalFailureLine(stripped) ||
+      isDiskFailureLine(stripped) ||
+      isFailingSurefireSummaryLine(stripped)
+    ) {
+      matched.push({ line, index, evidence: true });
+      return;
+    }
+    // The adapter's testsSuppressed guard reads the skip marker from this
+    // trimmed output; a large reactor's trailing Reactor Summary pushes
+    // every `Tests are skipped.` line into the omitted middle, and losing
+    // it certifies a run that tested zero. Green Surefire summaries and
+    // runner summaries carry counts, never verdicts.
+    if (
+      isSurefireSummaryLine(stripped) ||
+      isTestsSkippedLine(stripped) ||
+      RUNNER_SUMMARY_RE.test(stripped)
+    ) {
+      matched.push({ line, index, evidence: false });
+    }
+  });
+  const evidenceCount = matched.reduce(
+    (sum, item) => sum + (item.evidence ? 1 : 0),
+    0,
   );
-  const rescued = matching.slice(0, RESCUE_MAX);
-  const omitted = s.length - KEEP_HEAD - KEEP_TAIL;
+  const kept =
+    matched.length <= RESCUE_MAX
+      ? matched
+      : [
+          ...matched.filter((item) => item.evidence).slice(0, RESCUE_MAX),
+          ...matched
+            .filter((item) => !item.evidence)
+            .slice(0, RESCUE_MAX - Math.min(evidenceCount, RESCUE_MAX)),
+        ].sort((a, b) => a.index - b.index);
+  const rescued = kept.map((item) => item.line);
+  const evidenceDropped = evidenceCount > RESCUE_MAX;
+  const omitted = middle.length;
+  const dropped = matched.length - kept.length;
   const marker = rescued.length
-    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept${matching.length > RESCUE_MAX ? ` — first ${RESCUE_MAX} matching lines only, ${matching.length - RESCUE_MAX} more omitted` : ''}] ...\n${rescued.join('\n')}\n\n`
+    ? `\n\n... [${omitted} characters omitted; module-resolution errors, dependency failures, source failures, goal failures, disk failures, skipped-test markers, Surefire stdout summaries, and runner summaries kept${dropped > 0 ? ` — first ${RESCUE_MAX} matching lines only, ${dropped} more omitted` : ''}] ...\n${rescued.join('\n')}\n\n`
     : `\n\n... [${omitted} characters omitted] ...\n\n`;
-  return s.slice(0, KEEP_HEAD) + marker + s.slice(-KEEP_TAIL);
+  return {
+    text: s.slice(0, headEnd) + marker + s.slice(tailStart),
+    evidenceDropped,
+  };
 }
 
 /**
@@ -320,12 +387,14 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
   const timedOut = spawnTimedOut(r);
+  const trimmed = trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`);
   return {
     command,
     exitCode: r.status,
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
-    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    output: trimmed.text,
+    ...(trimmed.evidenceDropped ? { rescueOverflow: true } : {}),
     deadlineMs,
   };
 }

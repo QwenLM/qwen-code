@@ -46,7 +46,13 @@
 // `script-lint` gives a deferred checker, for the same reason.
 
 import type { CommandModule } from 'yargs';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
@@ -195,28 +201,31 @@ export function extractTestPlanSection(
   return null;
 }
 
-// `mvn.cmd` is the spelling Windows `cmd.exe` users type for system Maven.
-// The relative wrapper spellings — `./mvnw`, `.\mvnw`, and ANY number of
-// `../` / `..\` hops (`../../mvnw` is a normal nested-module invocation two
-// levels deep) — are command claims exactly like the bare runner; without
-// the deeper hops such claims are silently never extracted and never ruled.
-// They are modeled for the WHOLE runner vocabulary, not `mvnw` alone:
-// `./mvnd test` is a command claim exactly like `./mvnw test`, and `./mvn`
-// exactly like `mvn`. Platform suffixes follow each runner's Windows
-// distribution: `mvn.cmd`/`mvnw.cmd` ship as `.cmd`, `mvnd` additionally
-// as `.exe`, and `mvnDebug` as `mvnDebug.cmd` beside `mvn.cmd`.
+// `mvn.cmd` is the spelling Windows `cmd.exe` users type for system Maven,
+// and scoop/Chocolatey installs create an `mvn.exe` shim — the same suffix
+// already granted `mvnd`/`mvnDebug`. The relative wrapper spellings —
+// `./mvnw`, `.\mvnw`, and ANY mix of `./` and `../` hops (`../../mvnw` is
+// a normal nested-module invocation two levels deep, `././mvnw` and
+// `./../mvnw` are ordinary shell spellings) — are command claims exactly
+// like the bare runner; without the hops such claims are silently never
+// extracted and never ruled. They are modeled for the WHOLE runner
+// vocabulary, not `mvnw` alone: `./mvnd test` is a command claim exactly
+// like `./mvnw test`, and `./mvn` exactly like `mvn`.
 const MAVEN_RUNNER_SOURCE =
-  'mvn(?:\\.cmd)?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?|mvnw(?:\\.cmd)?' +
-  '|(?:\\.\\.[/\\\\])*\\.[/\\\\](?:mvn(?:\\.cmd)?|mvnw(?:\\.cmd)?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?)' +
-  '|(?:\\.\\.[/\\\\])+(?:mvn(?:\\.cmd)?|mvnw(?:\\.cmd)?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?)';
+  'mvn(?:\\.(?:cmd|exe))?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?|mvnw(?:\\.cmd)?' +
+  '|(?:\\.{1,2}[/\\\\])+(?:mvn(?:\\.(?:cmd|exe))?|mvnd(?:\\.(?:cmd|exe))?|mvnDebug(?:\\.(?:cmd|exe))?|mvnw(?:\\.cmd)?)';
 
-/** Runners whose presence makes a backticked span a command, not prose. */
+/** Runners whose presence makes a backticked span a command, not prose.
+ *  Case-insensitive: Windows authors type `MVNW test` and `mvnw.CMD test`
+ *  (the filesystem is case-insensitive there), and a span the runner check
+ *  rejects is a claim silently never extracted and never ruled. */
 const RUNNER_RE = new RegExp(
   '^(?:npm|npx|yarn|pnpm|bun|make|node|go|cargo|python3?|pytest)\\b' +
     `|^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`,
+  'i',
 );
 
-const MAVEN_RUNNER_RE = new RegExp(`^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`);
+const MAVEN_RUNNER_RE = new RegExp(`^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`, 'i');
 
 /** `foo/bar.ts`, `packages/cli/src/x.tsx:42` — a path, not a sentence. */
 const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
@@ -690,6 +699,13 @@ const MAVEN_VALUE_FLAGS = new Set([
   '--toolchains',
   '-gt',
   '--global-toolchains',
+  // The password-encryption options consume their argument and perform
+  // zero lifecycle work — reading that argument as a positional phase
+  // settles claims that built and tested nothing.
+  '-emp',
+  '--encrypt-master-password',
+  '-ep',
+  '--encrypt-password',
 ]);
 
 /**
@@ -721,6 +737,8 @@ const MAVEN_SINGLE_DASH_LONGS = new Set([
   'fail-never',
   'fail-fast',
   'fail-at-end',
+  'encrypt-master-password',
+  'encrypt-password',
 ]);
 
 function normalizeMavenSingleDashLongTokens(tokens: string[]): string[] {
@@ -759,24 +777,20 @@ function mavenPositionalTokens(tokens: string[]): string[] {
     const token = unquoteToken(tokens[i]);
     if (MAVEN_VALUE_FLAGS.has(token)) {
       i += 1;
-      const raw = tokens[i];
-      if (raw === undefined) break;
-      const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
-      if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
-        while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
-      }
+      if (tokens[i] !== undefined) i = skipQuotedTail(tokens, i, tokens[i]);
       continue;
     }
-    // The attached `-pl='foo bar'` form carries the same quoted value
-    // in-token: the split broke it at the space, so consume through the
-    // closing quote here too, or a phase-looking word inside the selector
-    // (`-pl='foo test'`) would be read as a claimed phase.
-    if (token.startsWith('-pl=') || token.startsWith('--projects=')) {
-      const raw = token.slice(token.indexOf('=') + 1);
-      const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
-      if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
-        while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
-      }
+    // The attached `<flag>=<value>` form of EVERY value flag carries the
+    // same quoted value in-token: the split broke it at the space, so
+    // consume through the closing quote here too, or a phase-looking word
+    // inside the value (`-l='a test -B'`) would leak into the positionals.
+    const eq = token.indexOf('=');
+    if (
+      eq > 0 &&
+      token.startsWith('-') &&
+      MAVEN_VALUE_FLAGS.has(token.slice(0, eq))
+    ) {
+      i = skipQuotedTail(tokens, i, token.slice(eq + 1));
       continue;
     }
     positional.push(token);
@@ -798,6 +812,7 @@ function mavenLifecycle(tokens: string[]): string | null {
 
 const BARE_MAVEN_LIFECYCLE_RE = new RegExp(
   `^(?:${MAVEN_RUNNER_SOURCE})\\s+(clean|validate|compile|test-compile|test|package|verify|install)$`,
+  'i',
 );
 
 function bareMavenLifecycle(command: string): string | null {
@@ -830,15 +845,30 @@ function mavenHasAlsoMake(tokens: string[]): boolean {
         raw = token.slice(token.indexOf('=') + 1);
       }
       if (raw === undefined) break;
-      const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
-      if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
-        while (i + 1 < tokens.length && !tokens[i].endsWith(quote)) i += 1;
-      }
+      i = skipQuotedTail(tokens, i, raw);
       continue;
     }
     if (token === '-am' || token === '--also-make') return true;
   }
   return false;
+}
+
+/**
+ * A quoted shell word whose opening quote did not close inside its first
+ * token (the whitespace split broke it): consume through the token carrying
+ * the closing quote, and check AFTER advancing — a bare opening-quote token
+ * (a value whose first word is empty, `-l ' x'` split at the space) ends in
+ * its own quote and otherwise satisfies the exit before consuming anything.
+ */
+function skipQuotedTail(tokens: string[], i: number, first: string): number {
+  const quote =
+    first.startsWith("'") || first.startsWith('"') ? first[0] : null;
+  if (quote === null || (first.length > 1 && first.endsWith(quote))) return i;
+  while (i + 1 < tokens.length) {
+    i += 1;
+    if (tokens[i].endsWith(quote)) break;
+  }
+  return i;
 }
 
 /** Strip one layer of matching surrounding quotes from a claim token. */
@@ -878,16 +908,16 @@ function mavenPlModules(tokens: string[]): string[] | null {
     // A module dir can carry a space (it passes the POM entry gate), so
     // shellSelector wraps the selector in quotes, and the split above broke
     // it into its first word — collapsing two different module sets that
-    // share one. Rejoin through the closing quote before splitting on `,`.
+    // share one. Rejoin through the closing quote before splitting on `,` —
+    // checking AFTER the advance, or a bare opening-quote token satisfies
+    // the exit before anything is consumed.
     const quote = raw.startsWith("'") || raw.startsWith('"') ? raw[0] : null;
     if (quote !== null && !(raw.length > 1 && raw.endsWith(quote))) {
       const parts = [raw];
-      while (
-        i + 1 < tokens.length &&
-        !parts[parts.length - 1].endsWith(quote)
-      ) {
+      while (i + 1 < tokens.length) {
         i += 1;
         parts.push(tokens[i]);
+        if (tokens[i].endsWith(quote)) break;
       }
       raw = parts.join(' ');
     }
@@ -956,14 +986,29 @@ function rejoinQuotedTokens(tokens: string[]): string[] {
       out.push(token);
       continue;
     }
+    // Check AFTER the advance: a bare opening-quote token (a quoted value
+    // whose first word is empty) ends in its own quote and otherwise
+    // satisfies the exit immediately, leaking the interior fragments.
     const parts = [token];
-    while (i + 1 < tokens.length && !parts[parts.length - 1].endsWith(quote)) {
+    while (i + 1 < tokens.length) {
       i += 1;
       parts.push(tokens[i]);
+      if (tokens[i].endsWith(quote)) break;
     }
     out.push(parts.join(' '));
   }
   return out;
+}
+
+/**
+ * The file a compiler-error line names: every shape `isSourceFailureLine`
+ * recognizes carries a JVM source path followed by a line/column.
+ */
+const SOURCE_FAILURE_PATH_RE =
+  /(?:^|\s)((?:[A-Za-z]:)?\/[^\s:]+\.(?:java|kts?|scala|groovy))(?=:(?:\[|\s?\(|\s?\d))/;
+
+function sourceFailurePath(line: string): string | null {
+  return SOURCE_FAILURE_PATH_RE.exec(line.replace(/\\/g, '/'))?.[1] ?? null;
 }
 
 function sameModuleSet(a: string[] | null, b: string[] | null): boolean {
@@ -1084,6 +1129,15 @@ function ruleCommand(
     // produce. The single-dash long spelling is normalized above.
     token === '-fn' ||
     token === '--fail-never' ||
+    // The password-encryption options perform zero lifecycle work: a claim
+    // carrying one cannot settle on a run that executed phases, and the
+    // attached/commons-cli separator-less spellings carry the same scope.
+    token.startsWith('-emp') ||
+    token.startsWith('-ep') ||
+    token === '--encrypt-master-password' ||
+    token.startsWith('--encrypt-master-password=') ||
+    token === '--encrypt-password' ||
+    token.startsWith('--encrypt-password=') ||
     // commons-cli also accepts separator-less ATTACHED short forms
     // (`-fother/pom.xml`, `-rf:core`, `-ssettings.xml`, `-plcore`); the
     // exact-token and `=`-attached matches alone let them bypass the
@@ -1111,12 +1165,27 @@ function ruleCommand(
   // (`mvn deploy test`, a leading plugin goal): it never ran here, and
   // settling the trailing phase without disclosing the reduction would
   // overstate the evidence.
-  const claimPhases = mavenPositionalTokens(claimTokenList).filter(
+  const positionalTokens = mavenPositionalTokens(claimTokenList);
+  const claimPhases = positionalTokens.filter(
     (token) =>
       MAVEN_PHASE_RE.test(token) ||
       MAVEN_UNRUN_WORK_RE.test(token) ||
       (!token.startsWith('-') && token.includes(':')),
   );
+  // Maven dies on 'Unknown lifecycle phase' for any OTHER bare positional
+  // (`mvn foo test` runs no work): the settlement invariant the comment
+  // above states for trailing and unrun work applies to mid-position junk
+  // too, or the claim settles `reproduces` over a command that errored out.
+  // Position 0 is the runner itself, which names no lifecycle work.
+  const unknownWork = positionalTokens
+    .slice(1)
+    .some(
+      (token) =>
+        !token.startsWith('-') &&
+        !MAVEN_PHASE_RE.test(token) &&
+        !MAVEN_UNRUN_WORK_RE.test(token) &&
+        !token.includes(':'),
+    );
   const claimScopesItself = claimTokens.some(
     (token) =>
       token === '-pl' ||
@@ -1131,7 +1200,7 @@ function ruleCommand(
   // phase alone would read undisclosed — unlike `mvn clean test`, which
   // discloses its phase reduction. Trailing flag tokens (`-B`, attached
   // `-D…`) name no work of their own.
-  const claimFinalWork = mavenPositionalTokens(claimTokenList)
+  const claimFinalWork = positionalTokens
     .filter((token) => !token.startsWith('-'))
     .at(-1);
   const claimPlModules = mavenPlModules(claimTokenList);
@@ -1156,11 +1225,13 @@ function ruleCommand(
     claimedLifecycle !== null &&
     claimFinalWork === claimedLifecycle &&
     !claimScopesItself &&
+    !unknownWork &&
     c.maven?.lifecycle === claimedLifecycle;
   const settledBySameScope = (c: CommandResult): boolean =>
     claimOnlyPlScoped &&
     claimedLifecycle !== null &&
     claimFinalWork === claimedLifecycle &&
+    !unknownWork &&
     c.maven?.lifecycle === claimedLifecycle &&
     sameModuleSet(c.maven?.modules ?? null, claimPlModules);
   // A run this review itself classified as infrastructure (a timeout, a
@@ -1212,17 +1283,47 @@ function ruleCommand(
     // Compile/goal failures inside a claimed module write no Surefire
     // reports, so the test-phase markers below cannot attribute them; but a
     // compiler error line names the file it failed on, worktree-absolute
-    // (`[ERROR] /wt/core/src/…/Foo.java:[10,5] …`). One beneath a claimed
-    // module dir is a failure the claim's own command would share.
+    // (`[ERROR] /wt/core/src/…/Foo.java:[10,5] …`). Attribute the file to
+    // the module that OWNS it — its nearest pom.xml-bearing ancestor — not
+    // to whichever claimed dir the path happens to sit beneath: a module
+    // literally named `src` (or a `<module>src/core</module>` layout) sits
+    // beneath `<worktree>/src/` but is not the root project, and `-am` can
+    // pull in modules the claim never names. A failure the claim's own
+    // command would share is one inside a module it DOES name.
     const worktreePosix = worktree.split(sep).join('/');
+    // The owning module of a worktree-relative file: its nearest pom.xml-
+    // bearing ancestor. Null when the tree carries no pom.xml at all —
+    // ownership is unknowable there, and attribution falls back to the
+    // module-prefix reading.
+    const owningModuleOf = (rel: string): string | null => {
+      const segments = rel.split('/');
+      for (let depth = segments.length - 1; depth >= 0; depth -= 1) {
+        const dir = segments.slice(0, depth).join('/');
+        try {
+          if (statSync(join(worktree, dir, 'pom.xml')).isFile()) {
+            return dir === '' ? '.' : dir;
+          }
+        } catch {
+          // no pom.xml at this depth
+        }
+      }
+      return null;
+    };
     if (
       lines.some((line) => {
         if (!isSourceFailureLine(line)) return false;
-        const linePosix = line.replace(/\\/g, '/');
+        const path = sourceFailurePath(line);
+        if (path === null || !path.startsWith(`${worktreePosix}/`)) {
+          return false;
+        }
+        const rel = path.slice(worktreePosix.length + 1);
+        const owner = owningModuleOf(rel);
         return claimPlModules.some((module) =>
-          module === '.'
-            ? linePosix.includes(`${worktreePosix}/src/`)
-            : linePosix.includes(`${worktreePosix}/${module}/`),
+          owner !== null
+            ? owner === module
+            : module === '.'
+              ? rel.startsWith('src/')
+              : rel.startsWith(`${module}/`),
         );
       })
     ) {
@@ -1413,7 +1514,10 @@ function ruleCommand(
           kind: 'command',
           text,
           verdict: 'contradicted',
-          observed: `exit ${ran.exitCode}`,
+          observed:
+            ran.exitCode === null
+              ? 'it ended without an exit code'
+              : `exit ${ran.exitCode}`,
           note: form.reduced
             ? `${howItRan}, and that failed`
             : 'this review ran it and it failed',

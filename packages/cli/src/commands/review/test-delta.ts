@@ -236,7 +236,7 @@ function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
     // is JSON.stringify'd to --out, and the verdict fields sit AFTER it — an
     // untrimmed megabyte pushes exactly what the command produces past any
     // reader's truncation.
-    output: trimOutput(raw),
+    output: trimOutput(raw).text,
   };
 }
 

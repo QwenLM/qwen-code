@@ -568,6 +568,38 @@ describe('runBaseTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('suppresses the nested-pom probe for literal workspace members too', () => {
+    // Every twin-parity branch has a dedicated test except the LITERAL
+    // member (`workspaces: ["packages/app"]`, no `*`): a future edit
+    // breaking it would make blobIsNpmProject refuse a literal-workspaces
+    // merge base, and beside a standalone nested Maven module the probe
+    // would permanently disable A/B attribution for that repo shape while
+    // every other base-tree test stayed green.
+    mkdirSync(join(repo, 'packages', 'app'), { recursive: true });
+    writeFileSync(
+      join(repo, 'packages', 'app', 'package.json'),
+      JSON.stringify({ name: '@x/app', scripts: { build: 'tsc' } }),
+    );
+    mkdirSync(join(repo, 'java'), { recursive: true });
+    writeFileSync(join(repo, 'java', 'pom.xml'), '<project/>');
+    writeFileSync(
+      join(repo, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/app'] }),
+    );
+    git(repo, 'add', 'packages', 'java', 'package.json');
+    git(repo, 'commit', '-qam', 'literal workspace member + nested maven');
+    const sha = git(repo, 'rev-parse', 'HEAD');
+
+    const builds: string[] = [];
+    const r = run({ plan: { mergeBaseSha: sha } }, (w) => {
+      builds.push(w);
+      return okBuild;
+    });
+
+    expect(builds).toHaveLength(1);
+    expect(r.available).toBe(true);
+  });
+
   it('does NOT count an unreadable member manifest as an npm package', () => {
     // applies() requires at least one readable package: a manifest that
     // does not parse lands in `skipped` on disk, so counting it on blob

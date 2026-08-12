@@ -964,15 +964,14 @@ describe('runBuildTest', () => {
     const summary = 'Tests  3 failed | 1132 passed (1135)';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${summary}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(summary);
     expect(trimmed).toContain('runner summaries kept');
     // The colored form a real pipe delivers is rescued too.
     const colored = `Tests\x1b[2m  \x1b[22m\x1b[31m3 failed\x1b[39m | 1132 passed`;
     expect(
-      trimOutput(
-        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
-      ),
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
     ).toContain(colored);
   });
 
@@ -984,7 +983,7 @@ describe('runBuildTest', () => {
       '[ERROR] Could not resolve dependencies for project example:core:jar:1';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('dependency failures');
     // The colored form a `-Dstyle.color=always` reactor delivers — the SGR
@@ -993,9 +992,8 @@ describe('runBuildTest', () => {
     const colored =
       '\x1b[1;31m[ERROR]\x1b[m Could not resolve dependencies for project example:core:jar:1';
     expect(
-      trimOutput(
-        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
-      ),
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
     ).toContain(colored);
   });
 
@@ -1005,16 +1003,15 @@ describe('runBuildTest', () => {
     const line = '[ERROR] COMPILATION ERROR :';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('source failures');
     // The colored form too — losing the SGR strip here would drop the marker
     // that keeps a compile failure from laundering into infrastructure.
     const colored = '\x1b[1;31m[ERROR]\x1b[m COMPILATION ERROR :';
     expect(
-      trimOutput(
-        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
-      ),
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
     ).toContain(colored);
   });
 
@@ -1025,7 +1022,7 @@ describe('runBuildTest', () => {
       '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check (validate) on project core: You have 1 Checkstyle violation.';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('goal failures');
   });
@@ -1038,7 +1035,7 @@ describe('runBuildTest', () => {
       '[ERROR] Failed to write target/x.txt: No space left on device';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('disk failures');
   });
@@ -1051,16 +1048,15 @@ describe('runBuildTest', () => {
     const line = '[INFO] Tests are skipped.';
     const trimmed = trimOutput(
       'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
-    );
+    ).text;
     expect(trimmed).toContain(line);
     expect(trimmed).toContain('skipped-test markers');
     // The colored form too — the rescue strips SGR before the predicate and
     // keeps the original bytes.
     const colored = '\x1b[1;34m[INFO]\x1b[m Tests are skipped.';
     expect(
-      trimOutput(
-        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
-      ),
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
     ).toContain(colored);
   });
 
@@ -1073,7 +1069,7 @@ describe('runBuildTest', () => {
       const line = `${framing} Tests run: 5, Failures: 2, Errors: 0, Skipped: 0`;
       const trimmed = trimOutput(
         'head\n' + 'x'.repeat(3000) + `\n${line}\n` + 'y'.repeat(9000),
-      );
+      ).text;
       expect(trimmed).toContain(line);
     }
     expect(
@@ -1082,15 +1078,14 @@ describe('runBuildTest', () => {
           'x'.repeat(3000) +
           '\n[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0\n' +
           'y'.repeat(9000),
-      ),
+      ).text,
     ).toContain('Surefire stdout summaries');
     // The colored form too — the rescue strips SGR before the predicate.
     const colored =
       '\x1b[1;31m[ERROR]\x1b[m Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
     expect(
-      trimOutput(
-        'h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000),
-      ),
+      trimOutput('h\n' + 'x'.repeat(3000) + `\n${colored}\n` + 'y'.repeat(9000))
+        .text,
     ).toContain(colored);
   });
 
@@ -1104,7 +1099,7 @@ describe('runBuildTest', () => {
       ) +
       '\n' +
       'y'.repeat(9000);
-    const trimmed = trimOutput(hostile);
+    const trimmed = trimOutput(hostile).text;
     expect(trimmed.length).toBeLessThan(hostile.length / 4);
   });
 
@@ -1118,9 +1113,68 @@ describe('runBuildTest', () => {
       Array.from({ length: 50 }, (_, i) => `Tests: ${i} failed`).join('\n') +
       '\n' +
       't'.repeat(6500);
-    const trimmed = trimOutput(input);
+    const trimmed = trimOutput(input).text;
     expect(trimmed).toContain(
       'runner summaries kept — first 40 matching lines only, 10 more omitted',
+    );
+  });
+
+  it('aligns both cuts to line boundaries so seam-straddling lines survive', () => {
+    // The cuts used to sit at fixed CHARACTER offsets while every rescue
+    // and classification predicate is line-anchored: a verdict-critical
+    // line straddling either cut fragmented into two pieces that matched
+    // nothing — neither rescued nor disclosed. No hostile input needed.
+    const headLine =
+      '[ERROR] Failed to execute goal org.example:plugin:1:check (check) on project core: boom';
+    // `headLine` starts at offset 1999, straddling the old 2000-char head
+    // cut; the newline before it re-roots the head.
+    const headSeam =
+      'head\n' + 'x'.repeat(1993) + '\n' + headLine + '\n' + 'y'.repeat(9000);
+    expect(trimOutput(headSeam).text).toContain(headLine);
+    expect(trimOutput(headSeam).evidenceDropped).toBe(false);
+
+    const tailLine = '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
+    // `tailLine` straddles the old len-6000 tail cut.
+    const tailSeam =
+      'head\n' + 'x'.repeat(3000) + '\n' + tailLine + '\n' + 'y'.repeat(5970);
+    expect(trimOutput(tailSeam).text).toContain(tailLine);
+  });
+
+  it('keeps failure-evidence lines when benign matches outgrow the rescue cap', () => {
+    // One shared cap in positional order let benign matches (green Surefire
+    // summaries) exhaust the slots and drop a failing module's summary —
+    // the adapter then read the trimmed output green over a failing run.
+    // Evidence takes the slots first.
+    const evidence = '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0';
+    const benign = Array.from(
+      { length: 50 },
+      () => '[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0',
+    ).join('\n');
+    const input =
+      'head\n' +
+      'x'.repeat(3000) +
+      `\n${benign}\n${evidence}\n` +
+      'y'.repeat(9000);
+    const trimmed = trimOutput(input);
+    expect(trimmed.text).toContain(evidence);
+    expect(trimmed.evidenceDropped).toBe(false);
+  });
+
+  it('fails closed when evidence lines themselves outgrow the rescue cap', () => {
+    // When the cap drops EVIDENCE lines the trimmed output no longer holds
+    // the verdict's inputs — the flag the Maven adapter folds into
+    // evidenceCapped must say so; benign-only overflow stays disclosed text.
+    const evidence = Array.from(
+      { length: 45 },
+      (_, i) =>
+        `[ERROR] Failed to execute goal org.example:plugin:1:check (check) on project m${i}: boom`,
+    ).join('\n');
+    const input =
+      'head\n' + 'x'.repeat(3000) + `\n${evidence}\n` + 'y'.repeat(9000);
+    const trimmed = trimOutput(input);
+    expect(trimmed.evidenceDropped).toBe(true);
+    expect(trimmed.text).toContain(
+      'first 40 matching lines only, 5 more omitted',
     );
   });
 
