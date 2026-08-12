@@ -668,6 +668,7 @@ export function ModelDialog({
   // the dialog; latch so the close feedback and onClose fire only once.
   const closeLatchRef = useRef(false);
   const selectionInFlightRef = useRef(false);
+  const selectionCommittedRef = useRef(false);
   const reportAuxiliaryModelSelection = useCallback(
     (feedbackItem: HistoryItemWithoutId & Record<string, unknown>) => {
       uiState?.historyManager.addItem(feedbackItem, Date.now());
@@ -682,7 +683,7 @@ export function ModelDialog({
   const closeWithoutSelection = useCallback(() => {
     if (closeLatchRef.current || selectionInFlightRef.current) return;
     closeLatchRef.current = true;
-    if (!isAuxiliaryModelMode) {
+    if (!isAuxiliaryModelMode && !selectionCommittedRef.current) {
       const feedbackItem = {
         type: 'info' as const,
         text: t('Kept model as {{model}}', {
@@ -744,7 +745,7 @@ export function ModelDialog({
 
   const handleSelect = useCallback(
     async (selected: string) => {
-      if (selectionInFlightRef.current) return;
+      if (selectionInFlightRef.current || selectionCommittedRef.current) return;
       setErrorMessage(null);
       const selectedEntry = availableModelEntries.find(
         ({ authType: t2, model, isRuntime, snapshotId }) => {
@@ -993,6 +994,7 @@ export function ModelDialog({
               : {}),
             baseUrl: selectedBaseUrl,
           });
+          selectionCommittedRef.current = true;
         } finally {
           selectionInFlightRef.current = false;
         }
@@ -1021,25 +1023,33 @@ export function ModelDialog({
         return;
       }
 
-      handleModelSwitchSuccess({
-        config,
-        settings,
-        uiState,
-        after,
-        effectiveAuthType,
-        effectiveModelId,
-        // Persist the selected provider's baseUrl so the right provider is
-        // restored next launch when several share the same id. Pair it with the
-        // same resolved config that effectiveModelId comes from (`after`) so the
-        // persisted (model.name, model.baseUrl) stays consistent even if
-        // switchModel transforms the id; fall back to the picker entry's
-        // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
-        effectiveBaseUrl: isRuntime
-          ? undefined
-          : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
-        isRuntime,
-        persistScope,
-      });
+      try {
+        handleModelSwitchSuccess({
+          config,
+          settings,
+          uiState,
+          after,
+          effectiveAuthType,
+          effectiveModelId,
+          // Persist the selected provider's baseUrl so the right provider is
+          // restored next launch when several share the same id. Pair it with the
+          // same resolved config that effectiveModelId comes from (`after`) so the
+          // persisted (model.name, model.baseUrl) stays consistent even if
+          // switchModel transforms the id; fall back to the picker entry's
+          // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+          effectiveBaseUrl: isRuntime
+            ? undefined
+            : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
+          isRuntime,
+          persistScope,
+        });
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        setErrorMessage(
+          `${t('Model switched, but the selection could not be saved.')}\n\n${errorMessage}`,
+        );
+        return;
+      }
       closeLatchRef.current = true;
       onClose();
     },

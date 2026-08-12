@@ -1725,6 +1725,64 @@ describe('<ModelDialog />', () => {
     expect(recordSlashCommand).toHaveBeenCalledTimes(1);
   });
 
+  it('does not retry or report an unchanged model after persistence fails', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const setValue = vi.fn(() => {
+      const error = new Error('settings are read-only');
+      Object.assign(error, { code: 'EACCES' });
+      throw error;
+    });
+    const { props, getByText, mockHistoryManager, recordSlashCommand } =
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'old-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'gpt-4',
+              label: 'GPT-4',
+              description: 'GPT-4 model',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4',
+          })),
+        } as unknown as Partial<Config>,
+        { setValue },
+      );
+
+    const onSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await act(async () => {
+      await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    });
+
+    expect(
+      getByText((text) =>
+        text.includes('Model switched, but the selection could not be saved.'),
+      ),
+    ).toBeDefined();
+
+    await onSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+    mockedUseKeypress.mock.calls[0][0]({
+      name: 'escape',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence: '',
+    });
+
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(setValue).toHaveBeenCalledTimes(1);
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => DEFAULT_QWEN_MODEL);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');
