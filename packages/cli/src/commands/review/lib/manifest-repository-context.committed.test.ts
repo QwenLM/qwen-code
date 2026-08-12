@@ -5,7 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -23,6 +23,7 @@ const repoRoot = resolve(
 );
 
 const MANIFEST_RELATIVE_PATH = '.qwen/review-context.json';
+const BUNDLED_SKILLS_ROOT = 'packages/core/src/skills/bundled';
 
 const expectedManifest = {
   version: 1,
@@ -133,11 +134,44 @@ function provideForRepo(changedPaths: string[]) {
   });
 }
 
+function provideForPattern(pattern: string, changedPath: string) {
+  const manifest = {
+    version: 1,
+    label: 'Pattern probe',
+    rules: [{ paths: [pattern], domains: ['pattern-probe'] }],
+  };
+  return manifestRepositoryContextProvider.provide({
+    worktree: repoRoot,
+    changedPaths: [changedPath],
+    readIdentityFile: (relativePath) =>
+      relativePath === MANIFEST_RELATIVE_PATH ? JSON.stringify(manifest) : null,
+  });
+}
+
 function probeFor(pattern: string): string {
-  const wildcard = pattern.search(/[?*]/);
-  if (wildcard === -1) return pattern;
-  const slash = pattern.lastIndexOf('/', wildcard);
-  return `${pattern.slice(0, slash)}/probe.txt`;
+  return pattern
+    .split('/')
+    .map((segment) =>
+      segment === '**'
+        ? '__qwen_review_probe__'
+        : segment.replaceAll('*', 'probe').replaceAll('?', 'q'),
+    )
+    .join('/');
+}
+
+function listFilesRecursively(relativeDirectory: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(join(repoRoot, relativeDirectory), {
+    withFileTypes: true,
+  })) {
+    const relativePath = `${relativeDirectory}/${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...listFilesRecursively(relativePath));
+    } else if (entry.isFile()) {
+      files.push(relativePath);
+    }
+  }
+  return files.sort();
 }
 
 function inGitWorktree(): boolean {
@@ -169,10 +203,15 @@ describe('committed review context manifest', () => {
   });
 
   it('matches every paths pattern through the real provider', () => {
-    for (const rule of expectedManifest.rules) {
-      for (const pattern of rule.paths) {
-        expect(provideForRepo([probeFor(pattern)])).not.toBeNull();
-      }
+    const patterns = [
+      ...expectedManifest.rules.flatMap((rule) => rule.paths),
+      'packages/core/src/synthetic/*.json',
+    ];
+    for (const pattern of patterns) {
+      const probe = probeFor(pattern);
+      expect(provideForPattern(pattern, probe)?.domains).toEqual([
+        'pattern-probe',
+      ]);
     }
   });
 
@@ -203,35 +242,56 @@ describe('committed review context manifest', () => {
 
     expect(context).not.toBeNull();
     expect(context?.domains).toContain('core-skills');
-    expect(context?.relatedPaths).toContain(
-      'packages/core/src/skills/bundled/dataviz/SKILL.md',
-    );
-    expect(context?.relatedPaths).not.toContain(
+
+    const nestedSentinels = [
       'packages/core/src/skills/bundled/dataviz/references/palette.md',
-    );
-    expect(context?.relatedPaths).not.toContain(
       'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
-    );
-    expect(context?.relatedPaths).not.toContain(
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js',
       'packages/core/src/skills/bundled/loop/autonomous-loop.ts',
+      'packages/core/src/skills/bundled/loop/autonomous-loop.test.ts',
+      'packages/core/src/skills/bundled/review/DESIGN.md',
+    ];
+    for (const sentinel of nestedSentinels) {
+      expect(existsSync(join(repoRoot, sentinel))).toBe(true);
+    }
+
+    const bundledFiles = listFilesRecursively(BUNDLED_SKILLS_ROOT);
+    const entrypoints = bundledFiles.filter((path) =>
+      /^packages\/core\/src\/skills\/bundled\/[^/]+\/SKILL\.md$/.test(path),
     );
+    const nestedFiles = bundledFiles.filter(
+      (path) => !entrypoints.includes(path),
+    );
+    expect(entrypoints.length).toBeGreaterThan(0);
+    expect(nestedFiles).toEqual(expect.arrayContaining(nestedSentinels));
+    for (const entrypoint of entrypoints) {
+      expect(context?.relatedPaths).toContain(entrypoint);
+    }
+    for (const nestedFile of nestedFiles) {
+      expect(context?.relatedPaths).not.toContain(nestedFile);
+    }
   });
 
   it('stays under the resolved-file bound when every rule co-matches', () => {
-    const probes = expectedManifest.rules.map((rule) => {
-      const wildcardPattern = rule.paths.find((pattern) =>
+    const probes = expectedManifest.rules.flatMap((rule) => {
+      const wildcardPatterns = rule.paths.filter((pattern) =>
         /[?*]/.test(pattern),
       );
       expect(
-        wildcardPattern,
+        wildcardPatterns.length,
         'every rule needs a synthetic wildcard probe for the union test',
-      ).toBeDefined();
-      const probe = probeFor(wildcardPattern as string);
-      expect(
-        existsSync(join(repoRoot, probe)),
-        'union probes must not be real changed files excluded from relatedPaths',
-      ).toBe(false);
-      return probe;
+      ).toBeGreaterThan(0);
+      return wildcardPatterns.map((pattern) => {
+        const probe = probeFor(pattern);
+        expect(
+          existsSync(join(repoRoot, probe)),
+          'union probes must not be real changed files excluded from relatedPaths',
+        ).toBe(false);
+        expect(provideForPattern(pattern, probe)?.domains).toEqual([
+          'pattern-probe',
+        ]);
+        return probe;
+      });
     });
     const context = provideForRepo(probes);
     expect(context).not.toBeNull();
