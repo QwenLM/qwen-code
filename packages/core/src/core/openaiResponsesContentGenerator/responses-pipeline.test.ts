@@ -106,8 +106,14 @@ function gatedByteStream(): {
   };
 }
 
-function makeCliConfig(proxy?: string): Config {
-  return { getProxy: () => proxy } as unknown as Config;
+function makeCliConfig(proxy?: string, sessionId = ''): Config {
+  // Config.getSessionId() is typed `string` and never returns undefined, so
+  // the mock must not either -- the reachable "no usable session" state is
+  // the empty string.
+  return {
+    getProxy: () => proxy,
+    getSessionId: () => sessionId,
+  } as unknown as Config;
 }
 
 function makeGeneratorConfig(
@@ -203,7 +209,37 @@ describe('ResponsesPipeline', () => {
     ]);
   });
 
-  it('passes userPromptId through as prompt_cache_key when within the length limit', async () => {
+  it('keys prompt_cache_key on the session so it stays stable across turns', async () => {
+    // userPromptId is `${sessionId}########${counter}` and changes on every
+    // send, so keying on it directly gives each turn its own cache namespace
+    // and no request can hit the prefix cache the previous one wrote. Nothing
+    // errors when that happens -- the loss is pure cost and latency, which is
+    // exactly why it needs a test rather than being noticed in use. Matches
+    // the Chat wire's `qwen-code:${sessionId}` key (prefix-caching.ts).
+    const keys: Array<string | undefined> = [];
+    for (const turn of ['sess-abc########1', 'sess-abc########2']) {
+      fetchMock.mockClear();
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(undefined, 'sess-abc'),
+      );
+      for await (const _ of pipeline.executeStream(textRequest('hi'), turn)) {
+        // drain
+      }
+      keys.push(
+        (JSON.parse(fetchMock.mock.calls[0]![1].body) as ResponsesApiRequest)
+          .prompt_cache_key,
+      );
+    }
+
+    expect(keys[0]).toBe('qwen-code:sess-abc');
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('falls back to userPromptId as prompt_cache_key when the session id is empty', async () => {
     mockResponse(
       sseEvent('response.completed', { response: { status: 'completed' } }),
     );

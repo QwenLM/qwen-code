@@ -247,6 +247,32 @@ export class ResponsesPipeline {
     return mergeStreamResponses(chunks);
   }
 
+  /**
+   * Key the OpenAI prefix cache on the SESSION, not the turn.
+   *
+   * `userPromptId` is `${sessionId}########${counter}` -- it changes on every
+   * send, so using it directly gives each turn its own cache namespace and no
+   * request in a session can ever hit the prefix cache written by the one
+   * before it. Nothing fails when that happens; the cost is silent, which is
+   * why it survived until review.
+   *
+   * Matches the Chat wire's `applyOfficialOpenAIPromptCaching`
+   * (openaiContentGenerator/prefix-caching.ts), which keys on
+   * `qwen-code:${sessionId}` -- that landed on main in #8418 after this
+   * branch forked, so the two wires would otherwise disagree on merge.
+   *
+   * `Config.getSessionId()` is typed `string`, so the guard below is for the
+   * empty-string case only -- falling back to `userPromptId` there keeps a
+   * per-request key rather than collapsing every session onto a bare
+   * `qwen-code:` prefix.
+   */
+  private buildPromptCacheKey(userPromptId: string): string {
+    const sessionId = this.cliConfig.getSessionId();
+    return sanitizePromptCacheKey(
+      sessionId ? `qwen-code:${sessionId}` : userPromptId,
+    );
+  }
+
   private buildRequest(
     request: GenerateContentParameters,
     userPromptId: string,
@@ -268,7 +294,7 @@ export class ResponsesPipeline {
       instructions,
       tools,
       stream: true,
-      prompt_cache_key: sanitizePromptCacheKey(userPromptId),
+      prompt_cache_key: this.buildPromptCacheKey(userPromptId),
       // We never reference previous_response_id, so server-side storage of
       // the response buys nothing. The spec pairs reasoning.encrypted_content
       // with store:false as the intended stateless-replay recipe -- set it
