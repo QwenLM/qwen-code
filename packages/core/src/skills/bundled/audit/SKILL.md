@@ -58,7 +58,7 @@ Read the plan JSON. It fixes **what will be audited**: the walked subjects, the 
   --out .qwen/tmp/audit-plan-<ts>.json --apply-exclude-remedy
 ```
 
-Re-read the plan: the remedy is verified by re-probe. A directory still exposed after the exclude entry (a full `.qwen/*` + `!**` re-include matches the report file itself) or with status `tracked` (force-added history) refuses the in-repo landing: the sidecar and the report go to the `guard.fallbackRoot` printed in the plan (outside the repo, 0700), and the args/plan/findings/callers files in `.qwen/tmp/` move there with them — every subsequent command references the relocated paths, so nothing that quotes the module stays in a directory the guard proved committable. The terminal summary echoes that path. Outside any git worktree the guard passes vacuously. **Relocated-path convention:** under a fallback landing, every `.qwen/tmp/` path the command blocks below carry — the args, plan, findings, and callers files — is the relocated equivalent under `<fallbackRoot>` (Step 1 moved them); substitute those paths before copying any block.
+Re-read the plan: the remedy is verified by re-probe. A directory still exposed after the exclude entry (a full `.qwen/*` + `!**` re-include matches the report file itself) or with status `tracked` (force-added history) refuses the in-repo landing: the sidecar and the report go to the `guard.fallbackRoot` printed in the plan (outside the repo, 0700), and the args/plan/findings/callers files in `.qwen/tmp/` move there with them — every subsequent command references the relocated paths, so nothing that quotes the module stays in a directory the guard proved committable. The terminal summary echoes that path. Outside any git worktree the guard passes vacuously. **Relocated-path convention:** the command blocks below write the args, plan, findings, and callers paths as `<artifacts-dir>/…`; resolve `<artifacts-dir>` before copying any block — `.qwen/tmp` normally, `<fallbackRoot>` when Step 1 relocated the files. Steps 0–1 keep the literal `.qwen/tmp/` paths: they run before the guard verdict.
 
 **Residue.** A `residue` entry is a file matching the reserved scratch prefix — possible residue from a killed prior run, which the plan cannot prove. Keep-as-subject is the default. Offer deletion only when the mtime is consistent with a recorded prior audit run on this path, and only behind an explicit user confirmation at Step 2. Record the outcome either way in the report header's walks record.
 
@@ -79,7 +79,7 @@ If the user opted into the baseline suite, run it now (a pre-existing failure is
 
 ```bash
 "${QWEN_CODE_CLI:-qwen}" audit snapshot \
-  --plan .qwen/tmp/audit-plan-<ts>.json \
+  --plan <artifacts-dir>/audit-plan-<ts>.json \
   --out .qwen/audits/audit-<ts>.sidecar
 ```
 
@@ -92,27 +92,27 @@ If the user opted into the baseline suite, run it now (a pre-existing failure is
 Print the reader brief and launch ONE `general-purpose` agent with it:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" audit agent-prompt --plan .qwen/tmp/audit-plan-<ts>.json --role low-reader
+"${QWEN_CODE_CLI:-qwen}" audit agent-prompt --plan <artifacts-dir>/audit-plan-<ts>.json --role low-reader
 ```
 
-Launch with the printed prompt **verbatim**, plus the output path: `Write your findings to .qwen/tmp/audit-findings-low-<ts>.md`. The reader is a sub-agent, never your own session — containment keeps untrusted module content out of the context holding the user's tool access. Apply the whiff check to its return (below). Its findings ship **unverified**, capped at 10 — skip Steps 5-6 and the reverse audit; go to Step 7.
+Launch with the printed prompt **verbatim**, plus the output path: `Write your findings to <artifacts-dir>/audit-findings-low-<ts>.md`. The reader is a sub-agent, never your own session — containment keeps untrusted module content out of the context holding the user's tool access. Apply the whiff check to its return (below). Its findings ship **unverified**, capped at 10 — skip Steps 5-6 and the reverse audit; go to Step 7.
 
 ### medium / high — fan-out
 
 Read `roster` from the plan. Launch one agent per role, in waves sized to keep the machine responsive; within each wave, issue all Agent tool calls in one response so they run concurrently. Set `subagent_type: "general-purpose"` and `run_in_background: false`. For each role:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" audit agent-prompt --plan .qwen/tmp/audit-plan-<ts>.json --role <role> \
+"${QWEN_CODE_CLI:-qwen}" audit agent-prompt --plan <artifacts-dir>/audit-plan-<ts>.json --role <role> \
   --probes <opted-in|declined>
 ```
 
-Pass the Step-2 probe opt-in as `--probes`: `opted-in` carries the probe discipline, `declined` strips every execution instruction from the brief. Launch with the printed prompt **verbatim**, plus the output path: `Write your findings to .qwen/tmp/audit-findings-<role>-<ts>.md`.
+Pass the Step-2 probe opt-in as `--probes`: `opted-in` carries the probe discipline, `declined` strips every execution instruction from the brief. Launch with the printed prompt **verbatim**, plus the output path: `Write your findings to <artifacts-dir>/audit-findings-<role>-<ts>.md`.
 
-**1c's caller registration.** 1c deep-reads callers outside the audited path and registers each. When 1c returns, collect its registered caller absolute paths into `.qwen/tmp/audit-callers-<ts>.json` and extend the sidecar:
+**1c's caller registration.** 1c deep-reads callers outside the audited path and registers each. When 1c returns, collect its registered caller absolute paths into `<artifacts-dir>/audit-callers-<ts>.json` and extend the sidecar:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" audit snapshot --plan .qwen/tmp/audit-plan-<ts>.json \
-  --out <the Step 3 sidecar path> --callers .qwen/tmp/audit-callers-<ts>.json
+"${QWEN_CODE_CLI:-qwen}" audit snapshot --plan <artifacts-dir>/audit-plan-<ts>.json \
+  --out <the Step 3 sidecar path> --callers <artifacts-dir>/audit-callers-<ts>.json
 ```
 
 (The Step 3 sidecar path is `.qwen/audits/audit-<ts>.sidecar` — or `<fallbackRoot>/audit-<ts>.sidecar` under a fallback landing.)
@@ -135,10 +135,10 @@ Cluster all returned findings by **root cause**, not by location — the same de
 **Drift checkpoint first** — before verification, before each high-tier round, and at write time:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" audit drift-check --plan .qwen/tmp/audit-plan-<ts>.json \
+"${QWEN_CODE_CLI:-qwen}" audit drift-check --plan <artifacts-dir>/audit-plan-<ts>.json \
   --sidecar <the Step 3 sidecar path>
 "${QWEN_CODE_CLI:-qwen}" audit guard-check --report-slug <plan artifacts.reportSlug> \
-  --plan .qwen/tmp/audit-plan-<ts>.json
+  --plan <artifacts-dir>/audit-plan-<ts>.json
 ```
 
 (The Step 3 sidecar path is `.qwen/audits/audit-<ts>.sidecar` — or `<fallbackRoot>/audit-<ts>.sidecar` under a fallback landing.)
@@ -168,9 +168,9 @@ After verification, run reverse-audit rounds over the plan's `fileGroups`, carry
 **Resolve anchors at write time.** Assemble the report draft, then:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" audit check-anchors --plan .qwen/tmp/audit-plan-<ts>.json \
+"${QWEN_CODE_CLI:-qwen}" audit check-anchors --plan <artifacts-dir>/audit-plan-<ts>.json \
   --report <draft-path>
-# add: --callers .qwen/tmp/audit-callers-<ts>.json — only when 1c registered callers (medium/high with a 1c return; never at low)
+# add: --callers <artifacts-dir>/audit-callers-<ts>.json — only when 1c registered callers (medium/high with a 1c return; never at low)
 ```
 
 Every finding's anchor snippet must resolve uniquely against the audited files or the registered callers. `unresolved`/`ambiguous` → downgrade the finding (or refuse it) and record the refusal in the header; `out-of-scope` → refuse. An exit code of 4 means at least one finding needs this handling — never ship an anchor that binds arbitrarily.
@@ -217,7 +217,7 @@ estimate: <floor>–<top> tokens (priced core) · actual: <n> (priced core <n>, 
 <finding, rejecting reason>
 ```
 
-Delete the intermediates (the findings files, the draft, and the `.qwen/tmp/` args/plan/callers files) when the run ends; the report and its sidecar are the only durable artifacts. Then the terminal summary — short: counts by severity and theme, the top clusters, the report path (and the fallback path when relocated), and suggested follow-ups (fix a cluster, file issues, re-audit after) **listed, not performed**. There is no verdict.
+Delete the intermediates (the findings files, the draft, and the args/plan/callers files under `<artifacts-dir>`) when the run ends; the report and its sidecar are the only durable artifacts. Then the terminal summary — short: counts by severity and theme, the top clusters, the report path (and the fallback path when relocated), and suggested follow-ups (fix a cluster, file issues, re-audit after) **listed, not performed**. There is no verdict.
 
 ## Language
 
