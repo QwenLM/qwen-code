@@ -20,7 +20,10 @@ import {
   isShellCommandReadOnlyAST,
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  hasShellSubstitution,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -189,6 +192,12 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    const rawMonitorDecision: PermissionDecision =
+      ctx.toolName === 'monitor' &&
+      ctx.command !== undefined &&
+      hasShellSubstitution(ctx.command)
+        ? 'ask'
+        : 'default';
     ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 
@@ -251,13 +260,20 @@ export class PermissionManager {
     // opinion" and must never override an explicit allow from a Bash
     // rule. (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the
     // guard is load-bearing.)
+    let finalDecision = bashDecision;
     if (
       virtualDecision !== 'default' &&
-      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[bashDecision]
+      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[finalDecision]
     ) {
-      return virtualDecision;
+      finalDecision = virtualDecision;
     }
-    return bashDecision;
+    if (
+      rawMonitorDecision !== 'default' &&
+      DECISION_PRIORITY[rawMonitorDecision] > DECISION_PRIORITY[finalDecision]
+    ) {
+      finalDecision = rawMonitorDecision;
+    }
+    return finalDecision;
   }
 
   /**
