@@ -10,6 +10,14 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export interface ServeWorkspaceRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
+  runtimeLive: boolean;
+  runtimeEpoch: number;
+}
+
 /**
  * Closed enumeration of structured error categories surfaced on diagnostic
  * status cells. Cells produced by `/workspace/preflight`, `/workspace/env`,

@@ -66,6 +66,7 @@ export type {
   BridgeSessionLifecycle,
   BridgeSessionLifecycleEvent,
   BridgeOptions,
+  BridgeRuntimeEpochSource,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
@@ -98,6 +99,7 @@ export type {
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeWorkspaceRuntimeLifecycleSnapshot,
   BridgeShutdownOptions,
   AcpSessionBridge,
   HttpAcpBridge,

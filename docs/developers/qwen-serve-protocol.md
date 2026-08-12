@@ -207,7 +207,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
- 'workspace_display_name',
+ 'workspace_display_name', 'workspace_runtime_removal', 'workspace_runtime',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
  'workspace_qualified_memory', 'extension_management_v2',
  'workspace_persisted_transcript',
@@ -252,6 +252,28 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
 
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
+
+`workspace_runtime` advertises `GET /workspace/runtime/status`,
+`POST /workspace/runtime/ensure`, and their
+`/workspaces/:workspace/runtime/...` equivalents. `ensure` accepts no
+capability selection: it starts or reuses the selected trusted workspace's ACP
+runtime and returns its lifecycle state and monotonic runtime epoch. The
+foundation response does not claim feature-specific catalog readiness. A
+successful `ensure` renews a workspace-level ten-minute warm window, so every
+call extends the reuse deadline and follow-up status and catalog reads can
+observe the initialized child. The HTTP observer waits up to 60 seconds; a
+`503 runtime_still_starting` does not cancel the bounded physical startup, and
+clients may poll status or call ensure again. A physical startup failure returns
+`503 runtime_initialization_failed`. The capability is advertised only when all
+active runtime bridges provide the authoritative lifecycle snapshot; a selected
+legacy injected bridge returns `501 workspace_runtime_not_supported` instead of
+a guessed state or epoch.
+
+`ensure` uses the ordinary daemon mutation admission, matching Session
+creation: a loopback daemon without a configured token accepts it, while
+configured-token, `--require-auth`, and non-loopback deployments still enforce
+bearer authentication. It does not use the stricter “token must be configured
+even on loopback” gate reserved for sensitive configuration mutations.
 
 `workspace_qualified_voice` advertises Voice routes selected by a trusted workspace runtime: `GET` and `POST /workspaces/:workspace/voice`, `POST /workspaces/:workspace/voice/transcribe`, and `WS /workspaces/:workspace/voice/stream`. It is advertised only when multi-workspace runtimes and the shared ACP/Voice WebSocket listener are both enabled. The selector follows the same id-or-encoded-absolute-cwd rules as other plural routes. For REST, an unknown selector returns `400 { code: "workspace_mismatch" }` and an untrusted selector returns `403 { code: "untrusted_workspace" }`; WebSocket upgrade rejection exposes the corresponding HTTP 400/403 status without a structured JSON envelope. Neither transport falls back to primary. Legacy `/workspace/voice`, `/workspace/voice/transcribe`, and `/voice/stream` remain primary-only. Clients use `workspace_qualified_voice` for all qualified Voice modalities and let the selected runtime report configuration-specific errors. The legacy `workspace_voice`, `workspace_voice_transcription`, and `voice_transcribe` tags describe only the primary-bound routes and must not hide a qualified secondary configuration.
 
@@ -471,6 +493,7 @@ operator diagnostic snapshot documented below.
 | `persistent_workspace_registration` | a workspace registration store is wired into the daemon. Production `runQwenServe` supplies the user-level store automatically; direct `createServeApp` embeds must inject one explicitly and own startup restoration of their workspace registry.                                                                                                                                                                                                                                                              |
 | `scratch_workspace_registration`    | managed scratch workspace creation is available — a runtime factory, a validated managed scratch root, and runtime disposal are wired, and every managed runtime respects the scratch root boundary.                                                                                                                                                                                                                                                                                                            |
 | `workspace_runtime_removal`         | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `workspace_runtime`                 | every active workspace bridge provides an authoritative runtime lifecycle snapshot; mixed or legacy injected bridges omit the tag.                                                                                                                                                                                                                                                                                                                                                                              |
 | `workspace_qualified_acp`           | ACP HTTP and multi-workspace runtimes are active, so the plural ACP endpoint can select a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `workspace_qualified_voice`         | multi-workspace runtimes and the shared ACP/Voice WebSocket listener are active, so every workspace-qualified Voice modality is reachable for a secondary runtime.                                                                                                                                                                                                                                                                                                                                              |
 | `workspace_qualified_memory`        | ACP HTTP and multi-workspace runtimes are active, so workspace-qualified managed-memory routes can select a per-workspace task lane for remember, forget, and dream operations.                                                                                                                                                                                                                                                                                                                                 |

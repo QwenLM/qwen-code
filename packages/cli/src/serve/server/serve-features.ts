@@ -57,6 +57,7 @@ interface CreateServeFeaturesDeps {
   realtimeVoiceEnabled: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceRuntimeAvailable: () => boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -91,6 +92,7 @@ export function createServeFeatures(
     realtimeVoiceEnabled,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    workspaceRuntimeAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
   const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
@@ -143,6 +145,7 @@ export function createServeFeatures(
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
+        workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),
