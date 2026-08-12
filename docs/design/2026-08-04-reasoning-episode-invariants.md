@@ -15,7 +15,7 @@ status: 'draft'
 > re-verified line-by-line by the consolidator against
 > [`fix/geminichat-thought-consolidation`](https://github.com/QwenLM/qwen-code/tree/fix/geminichat-thought-consolidation)
 > @ [`f907a0f5c`](https://github.com/QwenLM/qwen-code/commit/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e)
-> (PR #8260's tip commit). All four reviewers independently discovered that
+> (PR #8260's tip commit at audit time; the branch has since moved). All four reviewers independently discovered that
 > the ambient checkout at review time (`dogfood/reasoning-fidelity`) predates
 > PR #8260 and does not contain the fix chain at all — every citation below
 > is against `f907a0f5c`, linked as a permanent GitHub blob URL so it resolves
@@ -25,7 +25,7 @@ status: 'draft'
 
 qwen-code's shared internal chat history representation, `Content[]`/`Part[]`
 (from `@google/genai`), is used across every content generator: Gemini,
-Anthropic, OpenAI Chat, OpenAI Responses, DeepSeek. Reasoning/thinking output
+Anthropic (`USE_ANTHROPIC`, incl. DeepSeek's Anthropic-compatible backend), Gemini (`USE_GEMINI`/`USE_VERTEX_AI`), OpenAI-compatible (`USE_OPENAI`), and Qwen/DashScope (`QWEN_OAUTH`). Reasoning/thinking output
 rides on exactly two fields on a `Part`: `thought: boolean` and
 `thoughtSignature?: string`. Providers disagree sharply on how strict the
 replay contract for these fields is:
@@ -34,16 +34,13 @@ replay contract for these fields is:
   part of an unbroken, still-active tool-use chain reaching the end of
   history must be a byte-exact signed replay, or the request is permanently
   rejected — encoded directly in this codebase as a hard `throw` in
-  [`dropUnsignedThinkingFromAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1148-L1211).
+  [`dropUnsignedThinkingFromAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1148-L1217).
 - **Gemini**: forgiving. No client-side signature enforcement was found
   anywhere in the Gemini content-generator path.
 - **DeepSeek**: no signature validation at all. Unsigned thinking immediately
   before a tool call is normal, valid wire shape —
   [`injectEmptyThinkingOnToolUseTurns`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1238-L1270)
   synthesizes an empty-signature placeholder specifically because DeepSeek
-  "empirically accepts" one.
-- **OpenAI Responses**: `thoughtSignature` carries an opaque encoded payload
-  used to reconstruct a real reasoning item on replay; a missing or
   undecodable signature falls back to a plain assistant message rather than
   guessing.
 
@@ -70,7 +67,7 @@ blast radius is explicit rather than rediscovered one bug at a time.
 "Active tool-use chain" is not a property of one `Content` entry in
 isolation — it is this codebase's own operational definition, implemented as
 a backward walk from the tail of the outgoing message list
-([`converter.ts:1160-1188`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1160-L1188)):
+([`converter.ts:1167-1186`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1167-L1186)):
 consume trailing `user` messages, checking whether any carries a
 `tool_result`; if the message before that run is an `assistant` message with
 `tool_use`, mark it active and continue; the walk terminates the instant it
@@ -80,7 +77,7 @@ inventory below:
 
 1. **Wire-message adjacency, not `Content`-array adjacency, is what creates
    the hazard.** The Anthropic converter's
-   [`mergeConsecutiveAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1405-L1443)
+   [`mergeConsecutiveAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1405-L1448)
    collapses **consecutive** `role: 'model'` `Content` entries (no `user`
    entry between them) into a single wire message, concatenating blocks in
    original order with no thinking-awareness. Its own doc comment
@@ -104,19 +101,19 @@ inventory below:
 
 ## Mutation-site inventory
 
-| #   | Site                                                                                    | Location                                                                                                                                                                                                                                                                                                                                                       | Preserves the invariant?                                                                                                                                       |
-| --- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Live per-stream consolidation                                                           | [`geminiChat.ts:4760`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4760) (call), [`:1045`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L1045-L1054) (def)                                               | **Yes**, as of `f907a0f5c`                                                                                                                                     |
-| 2   | MAX_TOKENS recovery-coalescing                                                          | [`geminiChat.ts:5097-5140`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5140) (`coalesceRecoveryPairs`), guard at [`:5122-5130`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5122-L5130)         | **Yes, in memory only — never reaches the on-disk JSONL** (see §Site 2)                                                                                        |
-| 3   | Session resume / JSONL→`Content[]` reconstruction                                       | [`sessionService.ts:2171-2245`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2171-L2245), reached from [`client.ts:429-441`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/client.ts#L429-L441)                  | **No — BUG.** Full trace in the companion document, [`2026-08-04-resume-jsonl-reasoning-divergence.md`](./2026-08-04-resume-jsonl-reasoning-divergence.md)     |
-| 4   | Orphaned-tool-use repair (resume-adjacent)                                              | [`geminiChat.ts:1528-1720`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L1528-L1720) (`repairOrphanedToolUseTurns`)                                                                                                                                                                 | **Yes, by not touching the field** — but see §Site 3's Hazard B, where this repair actively re-activates a tool-use chain around an untouched dangling thought |
-| 5   | Anthropic converter request-building pipeline                                           | [`converter.ts:262-335`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L262-L335)                                                                                                                                                                            | **Yes, per-request** — this is the last line of defense against every upstream gap, but is **disabled for native Anthropic base URLs** (see below)             |
-| 6   | Chat compaction                                                                         | [`chatCompressionService.ts`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/chatCompressionService.ts), [`postCompactAttachments.ts:772-855`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/postCompactAttachments.ts#L772-L855) | **Partial — a real, previously-undocumented gap.** See below                                                                                                   |
-| 7   | History-editing utilities (`setHistory`, `truncateHistory`, `stripThoughtsFromHistory`) | [`geminiChat.ts:4253-4294`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4253-L4294)                                                                                                                                                                                                | `setHistory`/`truncateHistory` **inherit** whatever they're given; `stripThoughtsFromHistory` is safe by wholesale elimination                                 |
-| 8   | Rewind (two independent implementations, contradictory policies)                        | `AppContainer.tsx` (interactive) vs. [`Session.ts:2243-2244`](https://github.com/QwenLM/qwen-code/blob/874e46d7340e07d556f19a8d990c136c8975297f/packages/cli/src/acp-integration/session/Session.ts#L2243-L2244) (ACP/VSCode)                                                                                                                                  | **Contested — see "A currently-live contradiction" below**                                                                                                     |
-| 9   | Tool scheduler call/result pairing                                                      | `core/coreToolScheduler.ts`, `useGeminiStream.ts`                                                                                                                                                                                                                                                                                                              | **Yes, by not touching the field**                                                                                                                             |
-| 10  | Managed-memory microcompaction                                                          | `services/microcompaction/microcompact.ts`                                                                                                                                                                                                                                                                                                                     | **Yes, by not touching the field** — operates on `functionResponse` payloads only                                                                              |
-| 11  | Fork/subagent history seeding, ACP history replay, background-agent transcript recovery | `agents/runtime/`, `background-agent-resume.ts`, `packages/cli/src/acp-integration/session/history-replay-page.ts`                                                                                                                                                                                                                                             | **Uncertain — flagged, not traced to the same depth**                                                                                                          |
+| #   | Site                                                                                    | Location                                                                                                                                                                                                                                                                                                                                                       | Preserves the invariant?                                                                                                                                                                     |
+| --- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Live per-stream consolidation                                                           | [`geminiChat.ts:4760`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4760) (call), [`:1045`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L1045-L1054) (def)                                               | **Yes**, as of `f907a0f5c`                                                                                                                                                                   |
+| 2   | MAX_TOKENS recovery-coalescing                                                          | [`geminiChat.ts:5097-5139`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5139) (`coalesceRecoveryPairs`), guard at [`:5126-5131`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5126-L5131)         | **Yes, in memory only — never reaches the on-disk JSONL** (see §Site 2)                                                                                                                      |
+| 3   | Session resume / JSONL→`Content[]` reconstruction                                       | [`sessionService.ts:2171-2251`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2171-L2251), reached from [`client.ts:429-441`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/client.ts#L429-L441)                  | **No — BUG.** Full trace in the companion document, [`2026-08-04-resume-jsonl-reasoning-divergence.md`](./2026-08-04-resume-jsonl-reasoning-divergence.md)                                   |
+| 4   | Orphaned-tool-use repair (resume-adjacent)                                              | [`geminiChat.ts:1669-1704`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L1669-L1704) (`repairOrphanedToolUseTurns`)                                                                                                                                                                 | **Yes, by not touching the field** — but see the companion document's 'hazard shape (Race B)', where this repair actively re-activates a tool-use chain around an untouched dangling thought |
+| 5   | Anthropic converter request-building pipeline                                           | [`converter.ts:262-335`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L262-L335)                                                                                                                                                                            | **Yes, per-request** — this is the last line of defense against every upstream gap, but is **disabled for native Anthropic base URLs** (see below)                                           |
+| 6   | Chat compaction                                                                         | [`chatCompressionService.ts`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/chatCompressionService.ts), [`postCompactAttachments.ts:772-854`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/postCompactAttachments.ts#L772-L854) | **Partial — a real, previously-undocumented gap.** See below                                                                                                                                 |
+| 7   | History-editing utilities (`setHistory`, `truncateHistory`, `stripThoughtsFromHistory`) | [`geminiChat.ts:4253-4287`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4253-L4287)                                                                                                                                                                                                | `setHistory`/`truncateHistory` **inherit** whatever they're given; `stripThoughtsFromHistory` is safe by wholesale elimination                                                               |
+| 8   | Rewind (two independent implementations, contradictory policies)                        | `AppContainer.tsx` (interactive) vs. [`Session.ts:2243-2244`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/cli/src/acp-integration/session/Session.ts#L2243-L2244) (ACP/VSCode)                                                                                                                                  | **Contested — see "A currently-live contradiction" below**                                                                                                                                   |
+| 9   | Tool scheduler call/result pairing                                                      | `core/coreToolScheduler.ts`, `useGeminiStream.ts`                                                                                                                                                                                                                                                                                                              | **Yes, by not touching the field**                                                                                                                                                           |
+| 10  | Managed-memory microcompaction                                                          | `services/microcompaction/microcompact.ts`                                                                                                                                                                                                                                                                                                                     | **Yes, by not touching the field** — operates on `functionResponse` payloads only                                                                                                            |
+| 11  | Fork/subagent history seeding, ACP history replay, background-agent transcript recovery | `agents/runtime/`, `background-agent-resume.ts`, `packages/cli/src/acp-integration/session/history-replay-page.ts`                                                                                                                                                                                                                                             | **Uncertain — flagged, not traced to the same depth**                                                                                                                                        |
 
 ### Site 1 — Live per-stream consolidation
 
@@ -159,12 +156,12 @@ the site whose on-disk counterpart is this doc's most significant finding.
 The MAX*TOKENS recovery loop only proceeds when the truncated turn has **no**
 `functionCall` of its own — exactly the precondition under which Site 1's
 `hasToolCall` was `false` and never fired for that specific record. If the
-recovery \_continuation* then calls a tool, [`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5140)
+recovery \_continuation* then calls a tool, [`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5139)
 re-runs the same trailing-only check on the truncated turn's parts
 **immediately before** merging in the continuation:
 
 ```ts
-// f907a0f5c:geminiChat.ts:5122-5136
+// f907a0f5c:geminiChat.ts:5126-5135
 if (precedingModel.parts) {
   dropDanglingUnsignedTrailingThought(
     precedingModel.parts,
@@ -220,12 +217,12 @@ across all four independent reviewers after correction.
 construction** for the field itself — but this repair is exactly what
 reactivates a dangling-thought turn's tool-use chain in the resume scenario's
 "Race B" (crash after `tool_use`, before `functionResponse`) — see the
-companion document's Hazard B.
+companion document's "A second hazard shape (Race B)".
 
 ### Site 5 — Anthropic converter pipeline: the last line of defense, and its blind spot
 
 The converter's guard,
-[`dropUnsignedThinkingFromAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1148-L1211),
+[`dropUnsignedThinkingFromAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1148-L1217),
 is the only provider-side defense against every upstream mutation-site gap in
 this document. It is gated by `dropUnsignedAssistantThinking`, computed at
 [`anthropicContentGenerator.ts:736-741`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/anthropicContentGenerator.ts#L736-L741):
@@ -251,7 +248,7 @@ codebase's diagnostics.
 `ChatCompressionService.compress()` is documented as "Claude-Code-style
 full-history compression": the entire curated history is summarized and the
 post-compact history rebuilt from scratch via
-[`composePostCompactHistory`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/postCompactAttachments.ts#L772-L855) —
+[`composePostCompactHistory`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/postCompactAttachments.ts#L772-L854) —
 summary + model ack + recent restores + (conditionally) the pre-compaction
 history's **trailing** `model`+`functionCall` turn, so a pending
 `functionResponse` still has a matching call. Two branches treat that
@@ -263,7 +260,7 @@ out.push({ role: 'model', parts: ackParts });
 out.push({ role: 'user', parts: postAckParts });
 if (trailingFc) out.push(trailingFc);   // entire Content, incl. any thought parts, preserved
 
-// postCompactAttachments.ts:841-848 — "no attachments" fold branch
+// postCompactAttachments.ts:840-848 — "no attachments" fold branch
 } else if (trailingFc) {
   const fcParts = (trailingFc.parts ?? []).filter((p) => !!p.functionCall);
   out.push({ role: 'model', parts: [...ackParts, ...fcParts] });   // thought parts DROPPED
@@ -301,15 +298,15 @@ invariant being handled two different ways nine days apart, in two different
 code paths, with no cross-reference between them:
 
 - [`2f1b52d3d`](https://github.com/QwenLM/qwen-code/commit/2f1b52d3d32827b78c0341491fd07c7c6ac2c8c0)
-  (2026-04-30, "preserve reasoning*content in rewind, compression, and merge
-  paths") **removed** the strip-thoughts-on-rewind call from the interactive
-  double-ESC `/rewind` handler, with an explicit comment: *"Do NOT strip
-  thought parts — reasoning models (e.g. DeepSeek) require reasoning*content
-  continuity across all turns."*
+  (2026-04-30, "preserve `reasoning_content` in rewind, compression, and
+  merge paths") **removed** the strip-thoughts-on-rewind call from the
+  interactive double-ESC `/rewind` handler, with an explicit comment: _"Do
+  NOT strip thought parts — reasoning models (e.g. DeepSeek) require
+  `reasoning_content` continuity across all turns in the conversation."_
 - Nine days later, [`825502742`](https://github.com/QwenLM/qwen-code/commit/8255027426e0b84a4038de6bb1d2d2dd730dc938)
   (2026-05-09, "add message edit/rewind... UI") added a **second,
   independent** rewind implementation for the ACP/VSCode path
-  ([`Session.ts:2243-2244`](https://github.com/QwenLM/qwen-code/blob/874e46d7340e07d556f19a8d990c136c8975297f/packages/cli/src/acp-integration/session/Session.ts#L2243-L2244),
+  ([`Session.ts:2243-2244`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/cli/src/acp-integration/session/Session.ts#L2243-L2244),
   confirmed still live today) that calls `chat.truncateHistory(...)`
   immediately followed by `chat.stripThoughtsFromHistory()` — silently
   reintroducing the exact behavior the first commit had just removed, with
@@ -335,12 +332,15 @@ the `@google/genai` SDK changelog, not asserted:
   (`continue` in the loop) — the simplest possible policy, viable only
   because there was never a second provider that might need that content
   replayed later.
-- gemini-cli has **zero** non-Gemini provider code today, confirmed by direct
-  search (`grep -ril "anthropic\|deepseek"` → zero hits) and by its
-  `AuthType` enum being exhaustively Google-family
-  (`LOGIN_WITH_GOOGLE`/`USE_VERTEX_AI`/`GATEWAY`/`USE_GEMINI`/`COMPUTE_ADC`).
+- gemini-cli has **zero** non-Gemini provider code today. `grep -ril
+"anthropic\|deepseek"` at `ac42fb0a24` returns exactly two files, and
+  neither is provider code: a third-party license notice
+  (`packages/vscode-ide-companion/NOTICES.txt`) and a chat-session test
+  fixture (`memory-tests/large-chat-session.json`). Its `AuthType` enum is
+  correspondingly Google-family across all six members
+  (`LOGIN_WITH_GOOGLE`/`USE_GEMINI`/`USE_VERTEX_AI`/`LEGACY_CLOUD_SHELL`/`COMPUTE_ADC`/`GATEWAY`).
 - qwen-code's Anthropic provider was founded by `b931d28f3` (2025-12-24) —
-  almost exactly **six months after** the field existed as a Gemini-internal
+  **208 days (nearly seven months) after** the field existed as a Gemini-internal
   accounting detail, and its subsequent history is a documented, multi-round,
   still-visibly-unsettled struggle to decide when reasoning content must
   survive a history mutation (`f7733cfc7` → `93cbad24b` → `d09c19c0c` →
@@ -371,10 +371,14 @@ structural difference worth naming precisely.
 (`TextPart | MediaPart | ToolCallPart | ToolResultPart | ReasoningPart`) —
 the same species of design as `Content[]`/`Part[]`, not a fundamentally
 different architecture. **But no provider-specific replay token is ever a
-field on that shared union.** Every part carries an optional
+field on that shared union.** Every member that needs provider round-trip
+state carries an optional
 [`providerMetadata: Record<providerNamespace, Record<string, unknown>>`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/schema/src/llm.ts#L6-L8)
-bag, and each protocol adapter reads and writes only its own namespaced key
-at the point of wire encoding — never a shared boolean+string pair:
+bag — four of the five at this commit; `MediaPart`
+([`messages.ts:34-40`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/src/schema/messages.ts#L34-L40))
+is the exception and has no such field. Each protocol adapter reads and
+writes only its own namespaced key at the point of wire encoding — never a
+shared boolean+string pair:
 
 - Anthropic's signature:
   [`providerMetadata.anthropic.signature`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/src/protocols/anthropic-messages.ts#L255-L258)
@@ -389,7 +393,7 @@ This is a direct application of the Vercel AI SDK's own
 the same namespacing pattern, even on opencode's legacy AI-SDK-direct
 path — `packages/opencode/src/provider/transform.ts:183`), and the design
 choice is stated explicitly, not just observable from the types
-([`packages/llm/DESIGN.md:806-822`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/DESIGN.md#L806-L822)):
+([`packages/llm/DESIGN.md:806-826`](https://github.com/anomalyco/opencode/blob/aefaf140c19e25494da27739ae979f31b8cfe474/packages/llm/DESIGN.md#L806-L826)):
 
 > "Normalized message/content/event unions remain closed and exhaustive.
 > Unknown or provider-required round-trip data lives in caller-writable
@@ -440,15 +444,15 @@ representation.** Three pieces of evidence, all independently verified:
    reasoning lower unsigned reasoning to ordinary assistant text"_ — the
    same "push the decision to the point where the contract is actually
    known" lesson this document's mutation-site inventory argues for.
-2. **A same-minute patch/revert/delete sequence** on 2026-06-02: a narrow
+2. **A same-minute patch/revert/delete sequence** on 2026-06-03: a narrow
    fix, [`42173bca4b`](https://github.com/anomalyco/opencode/commit/42173bca4ba2f2c5e7faba827e1ade8a2a1b4b0a)
-   (23:33:48, "preserve signed thinking during anthropic reorder"), was
+   (04:33:48 UTC, "preserve signed thinking during anthropic reorder"), was
    reverted 17 seconds later
    ([`a763a14d44`](https://github.com/anomalyco/opencode/commit/a763a14d44d894c54c6199bb171ca711d1e0ca24),
-   23:34:05), followed 31 seconds after that by deleting the entire
+   04:34:05 UTC), followed 31 seconds after that by deleting the entire
    tool-reorder mechanism the patch had been trying to fix around
    ([`5940304098`](https://github.com/anomalyco/opencode/commit/59403040987137a367f259884766efc363725c39),
-   23:34:36) — a real "we tried patching X, then decided the underlying
+   04:34:36 UTC) — a real "we tried patching X, then decided the underlying
    hack shouldn't exist" transition, the same category of decision this
    document declines to make lightly for qwen-code's own mutation sites.
 3. **A field-name migration that silently dropped signatures until
