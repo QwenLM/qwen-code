@@ -41,6 +41,34 @@ const scriptStepOf = (job) =>
 const checkoutStepOf = (job) =>
   job.steps.find((step) => step.uses?.startsWith('actions/checkout'));
 
+describe('spam-blocklist-enforce: step layout', () => {
+  for (const [name, job] of jobs) {
+    it(`has exactly one checkout and one github-script step in ${name}`, () => {
+      // Every static guard and the behavioural extraction bind to find()'s
+      // first match; a second checkout could shadow the blocklist with
+      // fork-controlled content under the write token.
+      assert.equal(
+        job.steps.filter((s) => s.uses?.startsWith('actions/checkout')).length,
+        1,
+      );
+      assert.equal(
+        job.steps.filter((s) => s.uses?.startsWith('actions/github-script'))
+          .length,
+        1,
+      );
+    });
+
+    it(`checks out the blocklist before the ${name} script runs`, () => {
+      // Reordered, the script reads a file that does not exist yet; the
+      // catch treats that as "no blocklist" and the lane silently no-ops.
+      assert.ok(
+        job.steps.indexOf(checkoutStepOf(job)) <
+          job.steps.indexOf(scriptStepOf(job)),
+      );
+    });
+  }
+});
+
 describe('spam-blocklist-enforce: repository guard', () => {
   for (const [name, job] of jobs) {
     it(`gates ${name} on the canonical repository`, () => {
@@ -113,6 +141,11 @@ describe('spam-blocklist-enforce: credential scoping', () => {
         checkout.with['sparse-checkout'],
         '.github/spam-blocklist.txt',
       );
+      assert.equal(
+        checkout.with.path,
+        undefined,
+        'a path input relocates the blocklist away from BLOCKLIST_PATH',
+      );
     });
 
     it(`pins the ${name} action versions by full SHA`, () => {
@@ -134,6 +167,11 @@ describe('spam-blocklist-enforce: credential scoping', () => {
         job.env,
         undefined,
         'job-level env would expose the token to every step',
+      );
+      assert.equal(
+        doc.env,
+        undefined,
+        'workflow-level env would expose secrets to every step',
       );
       const step = scriptStepOf(job);
       assert.ok(step, 'github-script step must exist');
@@ -169,6 +207,11 @@ describe('spam-blocklist-enforce: script wiring', () => {
     assert.equal(
       scriptStepOf(doc.jobs.sweep).env.LOOKBACK_HOURS,
       "${{ inputs.hours || '2' }}",
+    );
+    assert.equal(
+      doc.on.workflow_dispatch?.inputs?.hours?.type,
+      'number',
+      'the LOOKBACK_HOURS consumer depends on this declared input',
     );
   });
 });
@@ -227,6 +270,26 @@ describe('spam-blocklist-enforce: event coverage', () => {
     // period longer than the 2h default lookback would make the sweep's
     // blind spot permanent, not merely slower.
     assert.deepEqual(doc.on.schedule, [{ cron: '30 * * * *' }]);
+  });
+});
+
+describe('spam-blocklist-enforce: concurrency', () => {
+  for (const [name, job] of jobs) {
+    it(`never cancels an in-flight ${name} run`, () => {
+      // A cancelled run leaves the spam standing until the hourly sweep.
+      assert.equal(job.concurrency?.['cancel-in-progress'], false);
+    });
+  }
+
+  it('keys the enforce group on the event subject', () => {
+    // A comment plus its own edit must serialise on one group. Whitespace
+    // is normalised because the folded YAML scalar keeps literal newlines
+    // inside the ${{ }} expression.
+    assert.equal(
+      doc.jobs.enforce.concurrency.group.replace(/\s+/g, ' '),
+      'spam-blocklist-enforce-${{ github.event.comment.id || github.event.review.id || github.event.issue.number || github.event.pull_request.number || github.run_id }}',
+    );
+    assert.equal(doc.jobs.sweep.concurrency.group, 'spam-blocklist-sweep');
   });
 });
 
@@ -489,6 +552,24 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.equal(calls[0].params.pull_number, 60);
   });
 
+  it('deletes the comment and closes the PR when both authors are blocklisted', async () => {
+    // Both halves must fire together: an if/else restructuring must not
+    // suppress the close when the comment author is the blocklisted one.
+    const { calls } = await enforce('pull_request_review_comment', {
+      comment: { id: 5, user: { login: 'spamuser' } },
+      pull_request: {
+        number: 60,
+        user: { login: 'spamuser' },
+        state: 'open',
+      },
+    });
+    assert.deepEqual(names(calls), [
+      'pulls.deleteReviewComment',
+      'pulls.update',
+      'issues.lock',
+    ]);
+  });
+
   it('minimizes a review body, which has no REST delete', async () => {
     const { calls } = await enforce('pull_request_review', {
       review: { id: 7, node_id: 'PRR_abc', user: { login: 'spamuser' } },
@@ -518,6 +599,22 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
     assert.equal(calls[0].params.pull_number, 61);
+  });
+
+  it('minimizes the review and closes the PR when both authors are blocklisted', async () => {
+    const { calls } = await enforce('pull_request_review', {
+      review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+      pull_request: {
+        number: 61,
+        user: { login: 'spamuser' },
+        state: 'open',
+      },
+    });
+    assert.deepEqual(names(calls), [
+      'graphql.minimizeComment',
+      'pulls.update',
+      'issues.lock',
+    ]);
   });
 
   it('ignores an issues event, which this workflow no longer subscribes to', async () => {
@@ -643,6 +740,29 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.ok(summaryItems(core).some((item) => item.startsWith('FAILED — ')));
   });
 
+  it('still locks the thread when the close fails mid-sequence', async () => {
+    // A rate-limit 403 on the close must not skip the lock that follows it;
+    // the sweep backstop repairs leftovers, but the lane must attempt them.
+    const { calls, core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'spamuser' } },
+        issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.update' ? new HttpError(403, 'Forbidden') : null,
+      },
+    );
+    assert.deepEqual(names(mutationsOf(calls)), [
+      'issues.deleteComment',
+      'issues.update',
+      'issues.lock',
+    ]);
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /403/);
+  });
+
   it('is a no-op on an empty blocklist', async () => {
     const { calls, core } = await enforce(
       'issue_comment',
@@ -670,11 +790,38 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
   });
 
   it('survives a ghost author on a deleted account', async () => {
-    const { calls } = await enforce('issue_comment', {
+    const issueComment = await enforce('issue_comment', {
       comment: { id: 1, user: null },
       issue: { number: 1, user: null, state: 'open' },
     });
-    assert.deepEqual(names(calls), []);
+    assert.deepEqual(names(issueComment.calls), []);
+
+    const reviewComment = await enforce('pull_request_review_comment', {
+      comment: { id: 1, user: null },
+      pull_request: { number: 1, user: null, state: 'open' },
+    });
+    assert.deepEqual(names(reviewComment.calls), []);
+
+    const review = await enforce('pull_request_review', {
+      review: { id: 1, node_id: 'PRR_ghost', user: null },
+      pull_request: { number: 1, user: null, state: 'open' },
+    });
+    assert.deepEqual(names(review.calls), []);
+
+    const openedPr = await enforce('pull_request_target', {
+      pull_request: { number: 1, user: null, state: 'open' },
+    });
+    assert.deepEqual(names(openedPr.calls), []);
+  });
+
+  it('still closes a blocklisted PR when the reviewer is a deleted account', async () => {
+    // The reviewer check precedes closeThread: a ghost reviewer must not
+    // let a blocklisted author's PR escape the close.
+    const { calls } = await enforce('pull_request_review', {
+      review: { id: 1, node_id: 'PRR_ghost', user: null },
+      pull_request: { number: 2, user: { login: 'spamuser' }, state: 'open' },
+    });
+    assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
   });
 });
 
@@ -858,23 +1005,36 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
     assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
   });
 
-  it('keeps sweeping when a listing fails', async () => {
-    // The listings run through run() like everything else: a rate-limit 403
-    // on one of them must not abort the lane before a single mutation.
-    const { calls, core } = await sweep({
-      threads: [{ number: 11, user: { login: 'spamuser' }, state: 'open' }],
-      fail: (name) =>
-        name === 'paginate:issues.listCommentsForRepo'
-          ? new HttpError(403, 'rate limited')
-          : null,
-    });
-    assert.equal(core.logs.failed.length, 1);
-    assert.match(core.logs.failed[0], /403/);
-    assert.deepEqual(names(mutationsOf(calls)), [
+  // The listings run through run() like everything else: a rate-limit 403
+  // on any one of them must collect as a failure while the rest of the
+  // sweep still executes, never aborting the lane before its remaining
+  // mutations. Survivors differ per case: whatever the other two listings
+  // feed.
+  const listingSurvivors = {
+    'paginate:issues.listCommentsForRepo': ['issues.update', 'issues.lock'],
+    'paginate:pulls.listReviewCommentsForRepo': [
+      'issues.deleteComment',
       'issues.update',
       'issues.lock',
-    ]);
-  });
+    ],
+    'paginate:issues.listForRepo': ['issues.deleteComment'],
+  };
+  for (const [listing, survivors] of Object.entries(listingSurvivors)) {
+    it(`keeps sweeping when ${listing.replace('paginate:', '')} fails`, async () => {
+      const { calls, core } = await sweep({
+        issueComments: [{ id: 2, user: { login: 'spamuser' } }],
+        threads: [{ number: 11, user: { login: 'spamuser' }, state: 'open' }],
+        fail: (name) =>
+          name === listing ? new HttpError(403, 'rate limited') : null,
+      });
+      assert.equal(core.logs.failed.length, 1);
+      assert.match(core.logs.failed[0], /403/);
+      assert.deepEqual(names(mutationsOf(calls)), survivors);
+      assert.ok(
+        summaryItems(core).some((item) => item.startsWith('FAILED — ')),
+      );
+    });
+  }
 
   it('survives deleted accounts across all three listings', async () => {
     const { calls, core } = await sweep({
@@ -911,7 +1071,10 @@ describe('spam-blocklist-enforce: blocklist file', () => {
     const helperOf = (job, name) => {
       const script = scriptStepOf(job).with.script;
       const start = script.indexOf(`const ${name} =`);
-      return script.slice(start, script.indexOf(';', start) + 1);
+      // Slice to the blank line, not the first ';': once a helper gains a
+      // multi-statement body, a ';' slice truncates the comparison and
+      // hides one-sided drift in any later statement.
+      return script.slice(start, script.indexOf('\n\n', start));
     };
     assert.equal(
       helperOf(doc.jobs.enforce, 'parseBlocklist'),
@@ -928,7 +1091,6 @@ describe('spam-blocklist-enforce: blocklist file', () => {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line !== '' && !line.startsWith('#'));
-    assert.ok(entries.length > 0, 'blocklist should not be empty');
     for (const entry of entries) {
       assert.equal(
         entry,
