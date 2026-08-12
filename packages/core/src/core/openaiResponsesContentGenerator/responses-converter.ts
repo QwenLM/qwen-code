@@ -26,8 +26,41 @@ import type {
   ResponsesApiContentPart,
 } from './types.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { safeJsonParse } from '../../utils/safeJsonParse.js';
+import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const debugLogger = createDebugLogger('RESPONSES_CONVERTER');
+
+/**
+ * Known OpenAI Responses API error codes that carry a well-defined HTTP
+ * status. Mid-stream `error` / `response.failed` frames arrive after a 200 OK,
+ * so unless the thrown error is stamped with a `.status`/`.code` it classifies
+ * as `unknown` and misses every retry / rate-limit / model-fallback gate (see
+ * utils/retryErrorClassification.ts and utils/rateLimit.ts) — the same failure
+ * at connection time carries `.status` (responses-pipeline.ts) and is retried.
+ */
+const RESPONSES_ERROR_CODE_TO_STATUS: Record<string, number> = {
+  server_error: 500,
+  rate_limit_exceeded: 429,
+};
+
+interface ResponsesStreamError extends Error {
+  status?: number;
+  code?: string;
+}
+
+function makeResponsesStreamError(
+  message: string,
+  code?: string,
+): ResponsesStreamError {
+  const err: ResponsesStreamError = new Error(message);
+  if (code) {
+    err.code = code;
+    const status = RESPONSES_ERROR_CODE_TO_STATUS[code];
+    if (status !== undefined) err.status = status;
+  }
+  return err;
+}
 
 /**
  * Opaque payload stashed in `part.thoughtSignature` for a Responses API
@@ -173,6 +206,23 @@ export function convertResponsesEventToGemini(
         try {
           args = JSON.parse(rawArgs) as Record<string, unknown>;
         } catch {
+          // The accumulated delta buffer can be corrupt or truncated (a
+          // non-compliant proxy) while the done item still carries the
+          // complete authoritative `arguments` string — prefer that when it
+          // differs, so a valid final payload isn't shadowed by a broken
+          // buffer. Otherwise repair the string we have with the same
+          // jsonrepair fallback every sibling wire applies (safeJsonParse,
+          // streamingToolCallParser.getCompletedToolCalls, the Chat converter).
+          const authoritative =
+            fc.arguments && fc.arguments !== rawArgs ? fc.arguments : rawArgs;
+          args = safeJsonParse(authoritative, {}) as Record<string, unknown>;
+        }
+        // Tool arguments are always JSON objects; a polluted buffer or proxy
+        // payload can parse/repair to an array/null/primitive, which would
+        // otherwise flow through the cast into functionCall.args and break the
+        // Record-spreading consumers downstream (geminiChat, sessionService).
+        // Collapse anything else to {}, matching the sibling's guard.
+        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
           args = {};
         }
         return makeChunkResponse(model, state, [
@@ -226,12 +276,15 @@ export function convertResponsesEventToGemini(
     case 'response.failed': {
       const raw = event.data as Record<string, unknown>;
       const envelope = (raw['response'] ?? raw) as {
-        error?: { code: string; message: string };
+        error?: { code?: string; message?: string };
       };
       const errMsg = envelope.error
         ? `${envelope.error.code}: ${envelope.error.message}`
         : 'Response failed';
-      throw new Error(`Responses API failed: ${errMsg}`);
+      throw makeResponsesStreamError(
+        `Responses API failed: ${errMsg}`,
+        envelope.error?.code,
+      );
     }
 
     case 'response.incomplete': {
@@ -254,9 +307,10 @@ export function convertResponsesEventToGemini(
     }
 
     case 'error': {
-      const data = event.data as { message?: string };
-      throw new Error(
+      const data = event.data as { message?: string; code?: string };
+      throw makeResponsesStreamError(
         `Responses API error: ${data.message ?? 'Unknown error'}`,
+        data.code,
       );
     }
 
@@ -305,6 +359,15 @@ function makeFinalResponse(
       thoughtsTokenCount: usage.output_tokens_details?.reasoning_tokens ?? 0,
       cachedContentTokenCount: usage.input_tokens_details?.cached_tokens ?? 0,
     };
+    // cachedContentTokenCount is always materialized (`?? 0`), so without
+    // provenance the logging layer's absent-vs-zero fallback
+    // (loggingContentGenerator.usageSpanMetadata) would report a provider
+    // cache measurement on every turn even when none was sent. Mirror the
+    // Chat converter: record whether cached_tokens was actually present.
+    setGenAiUsageProvenance(resp.usageMetadata, {
+      cachedInputTokensReported:
+        typeof usage.input_tokens_details?.cached_tokens === 'number',
+    });
   }
 
   return resp;
@@ -375,6 +438,11 @@ export function convertGeminiContentsToResponsesInput(
     // Flushed before any function_call/function_call_output/reasoning item
     // so relative ordering within the turn is preserved.
     let pendingContentParts: ResponsesApiContentPart[] = [];
+    // Media attached to tool results (functionResponse.parts) is staged here
+    // and flushed as one follow-up user message after all tool outputs in this
+    // turn, so tool-returned images aren't silently dropped. Mirrors the Chat
+    // converter's split-tool-media follow-up.
+    const pendingToolMediaParts: ResponsesApiContentPart[] = [];
     const flushPendingMessage = () => {
       if (pendingContentParts.length === 0) return;
       const content: string | ResponsesApiContentPart[] =
@@ -465,6 +533,47 @@ export function convertGeminiContentsToResponsesInput(
         } else {
           output = JSON.stringify(fr.response ?? {});
         }
+        // A tool can return media (e.g. read_file on an image) in
+        // functionResponse.parts alongside its textual output. The
+        // function_call_output.output field is string-only, so surface the
+        // media the way the sibling Chat converter does
+        // (createToolMessage/splitToolMedia) instead of dropping it: append
+        // any text entries (e.g. compaction-slimmer placeholders) to the
+        // output, and stage image entries for a follow-up user message.
+        for (const frPart of fr.parts ?? []) {
+          if (
+            'text' in frPart &&
+            typeof (frPart as { text?: unknown }).text === 'string' &&
+            (frPart as { text: string }).text.length > 0
+          ) {
+            const text = (frPart as { text: string }).text;
+            output += (output ? '\n' : '') + text;
+          } else if (frPart.inlineData) {
+            const mimeType = frPart.inlineData.mimeType ?? 'image/png';
+            if (mimeType.startsWith('image/')) {
+              pendingToolMediaParts.push({
+                type: 'input_image',
+                image_url: `data:${mimeType};base64,${frPart.inlineData.data}`,
+              });
+            } else {
+              debugLogger.warn(
+                `Dropping unsupported tool-result inline media type: ${mimeType}`,
+              );
+              pendingToolMediaParts.push({
+                type: 'input_text',
+                text: `[Unsupported tool-result media type: ${mimeType}]`,
+              });
+            }
+          } else if (frPart.fileData) {
+            debugLogger.warn(
+              `Dropping unsupported tool-result file reference: ${frPart.fileData.mimeType ?? 'unknown mime type'}`,
+            );
+            pendingToolMediaParts.push({
+              type: 'input_text',
+              text: `[Unsupported tool-result file reference: ${frPart.fileData.mimeType ?? 'unknown mime type'}]`,
+            });
+          }
+        }
         items.push({
           type: 'function_call_output',
           call_id: fr.id || `call_${Date.now()}_${callIdCounter++}`,
@@ -501,6 +610,21 @@ export function convertGeminiContentsToResponsesInput(
       }
     }
     flushPendingMessage();
+    if (pendingToolMediaParts.length > 0) {
+      // Emitted after all function_call_output items in this turn so tool
+      // outputs stay grouped; the model still sees tool-returned images.
+      items.push({
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: '(attached media from previous tool call)',
+          },
+          ...pendingToolMediaParts,
+        ],
+      } as ResponsesApiMessageItem);
+    }
   }
 
   return { instructions, input: items };

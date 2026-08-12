@@ -25,18 +25,76 @@ import {
   buildRuntimeFetchOptions,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_GUARD_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from '../openaiContentGenerator/constants.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
+/**
+ * Thrown when the SSE read loop goes silent past the inactivity timeout.
+ * `code: 'ETIMEDOUT'` makes `classifyRetryError` treat it as a retryable
+ * transport error, identical to a real socket read timeout -- mirroring the
+ * sibling Chat pipeline's StreamInactivityTimeoutError (which cannot be reused
+ * directly here because it is typed to an OpenAI chunk async-iterable, whereas
+ * this wire reads a raw byte ReadableStream).
+ */
+export class StreamInactivityTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly idleMs: number,
+    readonly chunksReceived: number,
+  ) {
+    super(
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks. ` +
+        `Set ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
+    );
+    this.name = 'StreamInactivityTimeoutError';
+  }
+}
+
+// Resolve the streaming inactivity timeout (ms): explicit config field wins,
+// then the env deployment knob, then the default -- mirroring the sibling Chat
+// pipeline's resolveStreamIdleTimeoutMs. `<= 0` disables the watchdog; a value
+// above the JS timer ceiling or a non-integer is rejected (setTimeout silently
+// compresses oversized delays to ~1ms, which would fire near-immediately).
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  const fromConfig = config.streamIdleTimeoutMs;
+  if (typeof fromConfig === 'number') {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_GUARD_TIMEOUT_MS
+    ) {
+      return fromConfig;
+    }
+  }
+  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV]?.trim();
+  if (raw && /^\d+$/.test(raw)) {
+    const parsed = Number(raw);
+    if (parsed <= MAX_STREAM_GUARD_TIMEOUT_MS) {
+      return parsed;
+    }
+  }
+  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+}
+
 export class ResponsesPipeline {
   private readonly config: ContentGeneratorConfig;
   private readonly cliConfig: Config;
+  // Resolved once (config field > env > default) so the env read happens per
+  // pipeline, not per streaming request.
+  private readonly streamIdleTimeoutMs: number;
 
   constructor(config: ContentGeneratorConfig, cliConfig: Config) {
     this.config = config;
     this.cliConfig = cliConfig;
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(config);
   }
 
   async *executeStream(
@@ -44,9 +102,28 @@ export class ResponsesPipeline {
     userPromptId: string,
     signal?: AbortSignal,
   ): AsyncGenerator<GenerateContentResponse> {
+    yield* await this.connectStream(request, userPromptId, signal);
+  }
+
+  /**
+   * Eagerly performs the connect phase (fetch + non-2xx handling + content-type
+   * guard) and returns a lazy generator over the response body. Callers that
+   * wrap the returned promise in retryWithBackoff (index.ts's
+   * generateContentStream) then see connection-time HTTP errors -- a 500/502/504
+   * or a 429 storm -- surface from the awaited promise and get retried, instead
+   * of the errors escaping later during lazy iteration outside the retry
+   * wrapper (a lazy `async *` generator resolves its promise before any network
+   * I/O runs).
+   */
+  async connectStream(
+    request: GenerateContentParameters,
+    userPromptId: string,
+    signal?: AbortSignal,
+  ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const activeRequest = this.buildRequest(request, userPromptId);
     const streamState = new ResponsesStreamState();
-    yield* this.streamRequest(activeRequest, streamState, signal);
+    const reader = await this.connect(activeRequest, signal);
+    return this.iterateBody(reader, streamState, signal);
   }
 
   async execute(
@@ -91,7 +168,7 @@ export class ResponsesPipeline {
       prompt_cache_key: sanitizePromptCacheKey(userPromptId),
       // We never reference previous_response_id, so server-side storage of
       // the response buys nothing. The spec pairs reasoning.encrypted_content
-      // with store:false as the intended stateless-replay recipe — set it
+      // with store:false as the intended stateless-replay recipe -- set it
       // unconditionally for consistency, not just when reasoning is on.
       store: false,
     };
@@ -126,9 +203,16 @@ export class ResponsesPipeline {
       if (this.config.samplingParams.top_p != null) {
         apiRequest.top_p = this.config.samplingParams.top_p;
       }
-      if (this.config.samplingParams.max_tokens != null) {
-        apiRequest.max_output_tokens = this.config.samplingParams.max_tokens;
-      }
+    }
+
+    // The per-send output budget geminiChat window-clamps lives on
+    // request.config.maxOutputTokens (issue #5950 invariant: prompt +
+    // max_tokens <= window); it must win over the static samplingParams cap so
+    // subagent budgets and the MAX_TOKENS escalation re-clamp reach this wire.
+    const maxOut =
+      request.config?.maxOutputTokens ?? this.config.samplingParams?.max_tokens;
+    if (maxOut != null) {
+      apiRequest.max_output_tokens = maxOut;
     }
 
     if (this.config.extra_body) {
@@ -136,7 +220,7 @@ export class ResponsesPipeline {
       for (const [key, value] of Object.entries(this.config.extra_body)) {
         // apiRequest is built from an object literal, so optional fields
         // like `tools`/`instructions` are already present as keys even when
-        // their value is undefined — check the value, not just key presence,
+        // their value is undefined -- check the value, not just key presence,
         // so extra_body can still fill in a field nothing else set.
         if (!(key in requestRecord) || requestRecord[key] === undefined) {
           requestRecord[key] = value;
@@ -165,11 +249,16 @@ export class ResponsesPipeline {
     return Object.keys(reasoning).length > 0 ? reasoning : undefined;
   }
 
-  private async *streamRequest(
+  /**
+   * Connect phase: build and send the request, validate the HTTP response, and
+   * return a reader over the SSE body. Eagerly awaited so connection-time
+   * failures (non-2xx, missing body, non-SSE content-type, transport errors)
+   * reject the promise the caller can wrap in retryWithBackoff.
+   */
+  private async connect(
     apiRequest: ResponsesApiRequest,
-    streamState: ResponsesStreamState,
     signal?: AbortSignal,
-  ): AsyncGenerator<GenerateContentResponse> {
+  ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
     const baseUrl = (this.config.baseUrl || 'https://api.openai.com')
       .replace(/\/v1\/?$/, '')
       .replace(/\/$/, '');
@@ -251,6 +340,58 @@ export class ResponsesPipeline {
       );
     }
 
+    return response.body.getReader();
+  }
+
+  /**
+   * Body-iteration phase: lazily drain the SSE reader, parse frames, and yield
+   * Gemini responses. An idle watchdog around each `reader.read()` fails a
+   * silent mid-stream stall with a retryable ETIMEDOUT (mirroring the Chat
+   * pipeline's inactivity guard) instead of hanging forever; the timer resets
+   * on every chunk, so an actively streaming model is never interrupted, and
+   * `streamIdleTimeoutMs <= 0` disables it.
+   */
+  private async *iterateBody(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    streamState: ResponsesStreamState,
+    signal?: AbortSignal,
+  ): AsyncGenerator<GenerateContentResponse> {
+    const idleMs = this.streamIdleTimeoutMs;
+    let chunksReceived = 0;
+
+    const readChunk = (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+      if (idleMs <= 0) return reader.read();
+      const readPromise = reader.read();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          // A user cancellation wins over the watchdog's retryable ETIMEDOUT.
+          // Reject only -- do NOT cancel the reader here: cancel() resolves the
+          // pending read() as { done: true } synchronously, which would win the
+          // race over this rejection. The generator's finally cancels the
+          // reader (freeing the socket) once this error propagates out.
+          if (signal?.aborted) {
+            const abortErr = new Error('Aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          } else {
+            reject(new StreamInactivityTimeoutError(idleMs, chunksReceived));
+          }
+        }, idleMs);
+        timer.unref?.();
+      });
+      return Promise.race([readPromise, timeout])
+        .catch((err) => {
+          // The orphaned read() rejects once the body is cancelled; swallow it
+          // so it is not an unhandled rejection.
+          void Promise.resolve(readPromise).catch(() => {});
+          throw err;
+        })
+        .finally(() => {
+          if (timer !== undefined) clearTimeout(timer);
+        });
+    };
+
     const convertParsedFrame = (
       eventType: ResponsesSSEEventType,
       data: Record<string, unknown>,
@@ -286,7 +427,6 @@ export class ResponsesPipeline {
       }
     };
 
-    const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let currentEventType: ResponsesSSEEventType | null = null;
@@ -294,8 +434,9 @@ export class ResponsesPipeline {
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readChunk();
         if (done) break;
+        chunksReceived += 1;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');

@@ -26,6 +26,10 @@ import {
 } from '../../utils/runtimeFetchOptions.js';
 import { extractTextFromContents } from '../../utils/extract-text-from-contents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  DEFAULT_MAX_RETRIES,
+  resolveRequestTimeout,
+} from '../openaiContentGenerator/constants.js';
 
 const debugLogger = createDebugLogger('RESPONSES');
 
@@ -68,8 +72,8 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
     this.openaiClient = new OpenAISDK({
       apiKey,
       baseURL,
-      timeout: this.contentGeneratorConfig.timeout,
-      maxRetries: this.contentGeneratorConfig.maxRetries,
+      timeout: resolveRequestTimeout(this.contentGeneratorConfig.timeout),
+      maxRetries: this.contentGeneratorConfig.maxRetries ?? DEFAULT_MAX_RETRIES,
       // Mirror the streaming pipeline (responses-pipeline.ts), which
       // applies customHeaders to every request -- without this, headers
       // configured for the streaming path (e.g. a proxy auth header)
@@ -98,7 +102,7 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const signal = request.config?.abortSignal ?? undefined;
-    return this.pipeline.executeStream(request, userPromptId, signal);
+    return this.pipeline.connectStream(request, userPromptId, signal);
   }
 
   async countTokens(

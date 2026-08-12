@@ -21,6 +21,7 @@ import type {
   ResponsesApiReasoningItem,
   ResponsesSSEEvent,
 } from './types.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('convertResponsesEventToGemini', () => {
   it('emits a plain text chunk for response.output_text.delta', () => {
@@ -47,7 +48,10 @@ describe('convertResponsesEventToGemini', () => {
 
   it('buffers function_call args across deltas and emits on output_item.done', () => {
     const state = new ResponsesStreamState();
-    convertResponsesEventToGemini(
+    // The buffering events (output_item.added and each arguments.delta) must
+    // return null: emitting a functionCall part early would land a spurious
+    // (empty/partial) tool call in history that replays as a duplicate call.
+    const added = convertResponsesEventToGemini(
       {
         event: 'response.output_item.added',
         data: {
@@ -63,7 +67,8 @@ describe('convertResponsesEventToGemini', () => {
       'gpt-5',
       state,
     );
-    convertResponsesEventToGemini(
+    expect(added).toBeNull();
+    const delta1 = convertResponsesEventToGemini(
       {
         event: 'response.function_call_arguments.delta',
         data: { output_index: 0, delta: '{"path":' },
@@ -71,7 +76,8 @@ describe('convertResponsesEventToGemini', () => {
       'gpt-5',
       state,
     );
-    convertResponsesEventToGemini(
+    expect(delta1).toBeNull();
+    const delta2 = convertResponsesEventToGemini(
       {
         event: 'response.function_call_arguments.delta',
         data: { output_index: 0, delta: '"a.ts"}' },
@@ -79,6 +85,7 @@ describe('convertResponsesEventToGemini', () => {
       'gpt-5',
       state,
     );
+    expect(delta2).toBeNull();
     const resp = convertResponsesEventToGemini(
       {
         event: 'response.output_item.done',
@@ -226,6 +233,174 @@ describe('convertResponsesEventToGemini', () => {
     ]);
   });
 
+  it("prefers the done item's authoritative arguments when the delta buffer is corrupt", () => {
+    // A non-compliant proxy delivers output_item.added, a corrupt/partial
+    // arguments delta (non-empty, so `||` keeps it), then output_item.done
+    // with the complete valid arguments. Without the fallback the corrupt
+    // buffer short-circuits and the tool dispatches with empty args.
+    const state = new ResponsesStreamState();
+    convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.added',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 0, delta: '{"path":' },
+      },
+      'gpt-5',
+      state,
+    );
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+            arguments: '{"path":"a.ts"}',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(resp?.candidates?.[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: 'call_1',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+        },
+      },
+    ]);
+  });
+
+  it('repairs malformed-but-repairable tool-call arguments via the jsonrepair fallback (trailing comma)', () => {
+    // The authoritative arguments string itself is malformed but repairable
+    // (trailing comma). Bare JSON.parse throws; safeJsonParse/jsonrepair
+    // recovers it the same way every sibling wire does.
+    const state = new ResponsesStreamState();
+    convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.added',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 0, delta: '{"path": "a.ts",}' },
+      },
+      'gpt-5',
+      state,
+    );
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(resp?.candidates?.[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: 'call_1',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+        },
+      },
+    ]);
+  });
+
+  it('collapses non-object parsed tool-call arguments to {} (array payload)', () => {
+    // A polluted buffer can parse to a valid non-object JSON value (array /
+    // null / primitive). Downstream consumers spread args as a Record, so
+    // anything non-object must collapse to {}.
+    const state = new ResponsesStreamState();
+    convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.added',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'x',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 0, delta: '["a","b"]' },
+      },
+      'gpt-5',
+      state,
+    );
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'x',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(
+      (
+        resp?.candidates?.[0]?.content?.parts?.[0] as {
+          functionCall?: { args?: unknown };
+        }
+      ).functionCall?.args,
+    ).toEqual({});
+  });
+
   describe('reasoning item completion (thoughtSignature round-trip)', () => {
     it('emits a signature-only thought chunk when encrypted_content is present', () => {
       const state = new ResponsesStreamState();
@@ -309,6 +484,59 @@ describe('convertResponsesEventToGemini', () => {
       thoughtsTokenCount: 2,
       cachedContentTokenCount: 1,
     });
+    // A successful completed turn must map to STOP; a wrong reason here would
+    // trigger MAX_TOKENS truncation recovery downstream on every turn.
+    expect(resp?.candidates?.[0]?.finishReason).toBe('STOP');
+  });
+
+  it('records cache provenance as reported when cached_tokens is present', () => {
+    const state = new ResponsesStreamState();
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.completed',
+        data: {
+          response: {
+            id: 'resp_1',
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              total_tokens: 15,
+              input_tokens_details: { cached_tokens: 3 },
+            },
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(
+      getGenAiUsageProvenance(resp?.usageMetadata ?? undefined)
+        ?.cachedInputTokensReported,
+    ).toBe(true);
+  });
+
+  it('records cache provenance as NOT reported when cached_tokens is absent (absent vs zero)', () => {
+    // cachedContentTokenCount is always materialized to 0, so provenance is the
+    // only signal that distinguishes "provider reported 0" from "not reported".
+    const state = new ResponsesStreamState();
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.completed',
+        data: {
+          response: {
+            id: 'resp_1',
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(resp?.usageMetadata?.cachedContentTokenCount).toBe(0);
+    expect(
+      getGenAiUsageProvenance(resp?.usageMetadata ?? undefined)
+        ?.cachedInputTokensReported,
+    ).toBe(false);
   });
 
   it('throws on response.failed', () => {
@@ -334,6 +562,49 @@ describe('convertResponsesEventToGemini', () => {
         state,
       ),
     ).toThrow(/Responses API error: boom/);
+  });
+
+  it('stamps .status/.code on a response.failed with a known error code so retry/fallback gates classify it', () => {
+    // A mid-stream failure arrives after 200 OK; without .status it classifies
+    // as `unknown` and misses every retry / rate-limit / fallback gate.
+    const state = new ResponsesStreamState();
+    let thrown: unknown;
+    try {
+      convertResponsesEventToGemini(
+        {
+          event: 'response.failed',
+          data: {
+            response: {
+              error: { code: 'rate_limit_exceeded', message: 'slow down' },
+            },
+          },
+        },
+        'gpt-5',
+        state,
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as { status?: number }).status).toBe(429);
+    expect((thrown as { code?: string }).code).toBe('rate_limit_exceeded');
+    expect((thrown as Error).message).toContain('rate_limit_exceeded');
+  });
+
+  it('maps a mid-stream error event server_error code to HTTP 500 status', () => {
+    const state = new ResponsesStreamState();
+    let thrown: unknown;
+    try {
+      convertResponsesEventToGemini(
+        { event: 'error', data: { message: 'boom', code: 'server_error' } },
+        'gpt-5',
+        state,
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect((thrown as { status?: number }).status).toBe(500);
+    expect((thrown as { code?: string }).code).toBe('server_error');
   });
 
   describe('response.incomplete', () => {
@@ -731,6 +1002,48 @@ describe('convertGeminiContentsToResponsesInput', () => {
     ]);
   });
 
+  it('surfaces tool-result image media as a follow-up user input_image message instead of dropping it', () => {
+    // A tool that returns an image stores it in functionResponse.parts; the
+    // string-only function_call_output.output can't carry it, so it must be
+    // emitted as a follow-up user message rather than silently dropped.
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                response: { output: 'see image' },
+                parts: [
+                  { inlineData: { mimeType: 'image/png', data: 'YWJj' } },
+                ],
+              },
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: 'see image',
+      } satisfies ResponsesApiFunctionCallOutputItem,
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: '(attached media from previous tool call)',
+          },
+          { type: 'input_image', image_url: 'data:image/png;base64,YWJj' },
+        ],
+      } satisfies ResponsesApiMessageItem,
+    ]);
+  });
+
   it('unwraps a { error } tool response envelope to the bare string', () => {
     const { input } = convertGeminiContentsToResponsesInput(
       request([
@@ -837,6 +1150,43 @@ describe('convertGeminiToolsToResponsesTools', () => {
     ).toBeUndefined();
   });
 
+  it('converts every declaration across multiple Tool entries (not just the first)', () => {
+    const tools = convertGeminiToolsToResponsesTools({
+      model: 'gpt-5',
+      contents: [],
+      config: {
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: 'read_file',
+                parametersJsonSchema: { type: 'object', properties: {} },
+              },
+              {
+                name: 'write_file',
+                parametersJsonSchema: { type: 'object', properties: {} },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(tools?.map((t) => t.name)).toEqual(['read_file', 'write_file']);
+  });
+
+  it('returns undefined (not tools: []) when declarations are present but empty', () => {
+    // Exercises the `result.length > 0 ? result : undefined` ternary: an empty
+    // array would otherwise serialize `tools: []` alongside the unconditional
+    // tool_choice.
+    expect(
+      convertGeminiToolsToResponsesTools({
+        model: 'gpt-5',
+        contents: [],
+        config: { tools: [{ functionDeclarations: [] }] },
+      }),
+    ).toBeUndefined();
+  });
+
   it('normalizes a zero-arg tool schema missing properties (Azure/litellm compatibility)', () => {
     // Every other case here already has `properties`, so
     // normalizeResponsesParameters is a no-op for them -- this is the only
@@ -897,9 +1247,35 @@ describe('normalizeResponsesParameters', () => {
     });
   });
 
+  it('recurses into bare object schemas nested under oneOf and allOf', () => {
+    const schema = {
+      type: 'object',
+      properties: {},
+      oneOf: [{ type: 'object' }],
+      allOf: [{ type: 'object' }],
+    };
+    expect(normalizeResponsesParameters(schema)).toEqual({
+      type: 'object',
+      properties: {},
+      oneOf: [{ type: 'object', properties: {} }],
+      allOf: [{ type: 'object', properties: {} }],
+    });
+  });
+
   it('passes through a well-formed schema unchanged', () => {
     const schema = { type: 'object', properties: { path: { type: 'string' } } };
     expect(normalizeResponsesParameters(schema)).toEqual(schema);
+  });
+
+  it('does not mutate the caller-provided schema object in place', () => {
+    // Tool declarations are shared across requests; an in-place mutation would
+    // corrupt the caller's object. The normalizer must return a fresh tree.
+    const schema = { type: 'object' };
+    const snapshot = structuredClone(schema);
+    const result = normalizeResponsesParameters(schema);
+    expect(schema).toEqual(snapshot);
+    expect(result).not.toBe(schema);
+    expect(result).toEqual({ type: 'object', properties: {} });
   });
 
   it('passes through undefined', () => {
