@@ -177,13 +177,6 @@ export interface BridgeTelemetry {
  */
 export interface BridgeOptions {
   /**
-   * Runtime output root owned by this workspace bridge. Used only for
-   * transcript recovery after the ACP child process has already exited.
-   * Production callers with per-workspace runtimes must pass the same root
-   * supplied to the child through `QWEN_RUNTIME_DIR`.
-   */
-  runtimeBaseDir?: string;
-  /**
    * `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
