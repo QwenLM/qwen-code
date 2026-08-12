@@ -408,8 +408,10 @@ export function createProductionDispatch(
     // to every reader of the subagent transcript dir.
     const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
     // Resolved once and handed to both the runtime and the transcript so
-    // the on-disk records name the same agent that ran.
-    const agentName = await resolveWorkflowAgentName(config, opts);
+    // the on-disk records name the same agent that ran. The resolved
+    // agentType definition rides along so the override path reuses it
+    // instead of re-scanning subagent files per attempt.
+    const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
     let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
@@ -419,7 +421,7 @@ export function createProductionDispatch(
           config,
           workflowAgentId,
           prompt,
-          agentName,
+          agentIdentity.name,
           emitter,
           attempt,
         );
@@ -431,7 +433,7 @@ export function createProductionDispatch(
             attemptSignal,
             emitter,
             workflowAgentId,
-            agentName,
+            agentIdentity,
             onTokens,
           );
         } finally {
@@ -442,42 +444,55 @@ export function createProductionDispatch(
       {
         stallMs,
         signal,
-        // agentName can carry a model-authored agentType spelling — keep
+        // The name can carry a model-authored agentType spelling — keep
         // the stall log / abandoned error single-line the same way the
         // "not found" throw site sanitizes it.
-        label: sanitizeForErrorMessage(agentName),
+        label: sanitizeForErrorMessage(agentIdentity.name),
       },
     );
   };
 }
 
+/** Identity resolved once per dispatch — see resolveWorkflowAgentIdentity. */
+interface WorkflowAgentIdentity {
+  /** The name the runtime agent runs under and the transcript records. */
+  name: string;
+  /** The resolved agentType definition, when `opts.agentType` matched one. */
+  resolvedAgentType?: SubagentConfig;
+}
+
 /**
- * Single derivation of a dispatch's display name: the fast path and the
+ * Single derivation of a dispatch's identity: the fast path and the
  * ephemeral override default run the runtime agent under it, and the
  * transcript records it, so the on-disk identity always matches the agent
- * that ran. An explicit non-empty label wins; an unlabeled override-path
- * agent records its agentType's resolved canonical name — the
- * SubagentManager lookup is case-insensitive, so the spelling the script
- * passed may differ from the agent that actually runs; otherwise the
- * shared default. The truthy checks keep `label: ''` and `agentType: ''`
- * from naming the agent ''.
+ * that ran. A resolvable agentType wins — the override path runs the agent
+ * under the resolved definition's canonical name (the SubagentManager
+ * lookup is case-insensitive, so the spelling the script passed may differ
+ * from the agent that actually runs), and a label cannot rename a resolved
+ * agentType; the label only names dispatches that run without one.
+ * Otherwise the shared default. The truthy checks keep `label: ''` and
+ * `agentType: ''` from naming the agent ''.
+ *
+ * Also hands back the resolved definition so `runOverridePath` reuses it
+ * instead of calling `findSubagentByName` a second time — that lookup is
+ * uncached disk I/O at every non-session level.
  */
-async function resolveWorkflowAgentName(
+async function resolveWorkflowAgentIdentity(
   config: Config,
   opts: WorkflowAgentOpts,
-): Promise<string> {
-  if (typeof opts.label === 'string' && opts.label) {
-    return opts.label;
-  }
+): Promise<WorkflowAgentIdentity> {
   if (opts.agentType) {
     const resolved = await config
       .getSubagentManager()
       .findSubagentByName(opts.agentType);
     if (resolved) {
-      return resolved.name;
+      return { name: resolved.name, resolvedAgentType: resolved };
     }
   }
-  return opts.agentType || 'workflow-agent';
+  if (typeof opts.label === 'string' && opts.label) {
+    return { name: opts.label };
+  }
+  return { name: opts.agentType || 'workflow-agent' };
 }
 
 /**
@@ -503,7 +518,7 @@ function attachDispatchTranscript(
   config: Config,
   agentId: string,
   prompt: string,
-  /** The name the runtime agent runs under — see resolveWorkflowAgentName. */
+  /** The name the runtime agent runs under — see resolveWorkflowAgentIdentity. */
   agentName: string,
   emitter: AgentEventEmitter,
   /** 1-based attempt; retries append to the transcript attempt 1 opened. */
@@ -551,8 +566,8 @@ async function runSingleDispatch(
    * identity — it keys the transcript file and the ALS agent-context frame.
    */
   workflowAgentId: string,
-  /** The name the runtime agent runs under — see resolveWorkflowAgentName. */
-  agentName: string,
+  /** The identity the runtime agent runs under — see resolveWorkflowAgentIdentity. */
+  agentIdentity: WorkflowAgentIdentity,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
@@ -567,7 +582,7 @@ async function runSingleDispatch(
     opts.schema === undefined
   ) {
     const subagent = await AgentHeadless.create(
-      agentName,
+      agentIdentity.name,
       config,
       {
         systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -628,7 +643,7 @@ async function runSingleDispatch(
     opts,
     attemptSignal,
     workflowAgentId,
-    agentName,
+    agentIdentity,
     onTokens,
     emitter,
   );
@@ -702,8 +717,8 @@ async function runOverridePath(
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
   workflowAgentId: string,
-  /** The name the runtime agent runs under — see resolveWorkflowAgentName. */
-  agentName: string,
+  /** The identity the runtime agent runs under — see resolveWorkflowAgentIdentity. */
+  agentIdentity: WorkflowAgentIdentity,
   /**
    * P5: forwarded from createProductionDispatch. The override path
    * builds its own AgentHeadless and runs subagent.execute(); the
@@ -732,7 +747,10 @@ async function runOverridePath(
   let baseConfig: SubagentConfig;
 
   if (opts.agentType !== undefined) {
-    const resolved = await subagentMgr.findSubagentByName(opts.agentType);
+    // Resolved once per dispatch by resolveWorkflowAgentIdentity — the
+    // transcript identity and the runtime config must derive from the same
+    // definition, and re-scanning here would be a second uncached disk read.
+    const resolved = agentIdentity.resolvedAgentType;
     if (!resolved) {
       // Error message verbatim from upstream Claude Code 2.1.168 strings:
       // "agent({agentType}): agent type '{name}' not found". Match for
@@ -756,7 +774,7 @@ async function runOverridePath(
     // createAgentHeadless gives us provider routing via
     // buildRuntimeContentGeneratorView and per-agent ToolRegistry cleanup.
     baseConfig = {
-      name: agentName,
+      name: agentIdentity.name,
       description: 'Default workflow subagent (per-call overrides).',
       systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
       level: 'session',

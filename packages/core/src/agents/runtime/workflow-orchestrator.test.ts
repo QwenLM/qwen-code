@@ -2821,6 +2821,90 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     }
   });
 
+  // With BOTH label and agentType set the transcript must stamp the same
+  // identity the runtime agent runs under — the resolved agentType's
+  // canonical name. A label cannot rename a resolved agentType: a fan-out
+  // that labels each chunk would otherwise attribute every on-disk record
+  // to the label while the agent that ran is the agentType, and consumers
+  // aggregating by agentName could not correlate those dispatches with
+  // AgentTool launches of the same agentType.
+  it('stamps the resolved agentType name in the transcript when a label is also set', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async (name) =>
+          name.toLowerCase() === 'code-reviewer'
+            ? {
+                name: 'code-reviewer',
+                description: 'reviews chunks',
+                systemPrompt: 'You review code.',
+                level: 'session',
+              }
+            : null,
+        onCreate: async () => ({
+          finalText: 'review-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('review chunk 1 of 3', {
+        agentType: 'Code-Reviewer',
+        label: 'chunk-1',
+      });
+
+      expect(calls[0]!.config.name).toBe('code-reviewer');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe(calls[0]!.config.name);
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // The agentType definition is resolved exactly once per dispatch:
+  // resolveWorkflowAgentIdentity hands the resolved config to the override
+  // path instead of letting it re-run findSubagentByName — an uncached
+  // directory read + frontmatter parse per non-session level, paid on the
+  // dispatch hot path and again per stall-retry attempt.
+  it('resolves the agentType once per dispatch instead of per path', async () => {
+    let lookups = 0;
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async (name) => {
+        lookups += 1;
+        return name === 'Explore'
+          ? {
+              name: 'Explore',
+              description: 'fast read-only',
+              systemPrompt: 'You are Explore.',
+              level: 'builtin',
+            }
+          : null;
+      },
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('find foo', {
+      agentType: 'Explore',
+    });
+
+    expect(lookups).toBe(1);
+  });
+
   // The identity invariant's third leg: an ephemeral override (model /
   // isolation / schema only, no agentType) runs the runtime agent under the
   // resolved display name and the transcript records that same name — a
@@ -2865,7 +2949,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     }
   });
 
-  // resolveWorkflowAgentName's truthy check keeps `agentType: ''` from
+  // resolveWorkflowAgentIdentity's truthy check keeps `agentType: ''` from
   // naming the agent '' — the dispatch still throws "agent type '' not
   // found", but the transcript seeded before that throw records the shared
   // default, not a blank identity.

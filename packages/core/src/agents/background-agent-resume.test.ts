@@ -3146,12 +3146,23 @@ describe('BackgroundAgentResumeService', () => {
   // The resume attach recomputes the transcript path instead of reusing the
   // registered outputFile; the recomputed path must follow
   // meta.parentSessionId, not the current session (the divergence a CLI
-  // restart produces, reachable via send-message revive).
+  // restart produces, reachable via send-message revive). The registered
+  // outputFile is a decoy the attach must NOT write to — seeded with the
+  // same chain, so a regression back to attaching the registered
+  // outputFile would land the resumed record in the decoy and fail here.
   it('appends resumed records to the launch-session transcript when the current session differs', async () => {
     const launchSessionId = 'session-launch'; // config.getSessionId() is 'session-1'
     const agentId = 'agent-cross-session';
     const metaPath = getAgentMetaPath(tempDir, launchSessionId, agentId);
     const outputFile = getAgentJsonlPath(tempDir, launchSessionId, agentId);
+    // Diverges from the recomputed path the way a future registration path
+    // could when it builds outputFile under a session dir other than
+    // meta.parentSessionId.
+    const decoyOutputFile = getAgentJsonlPath(
+      tempDir,
+      'session-registry-decoy',
+      agentId,
+    );
 
     writeAgentMeta(metaPath, {
       agentId,
@@ -3164,8 +3175,7 @@ describe('BackgroundAgentResumeService', () => {
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
     });
-    fs.writeFileSync(
-      outputFile,
+    const seedRecords =
       [
         JSON.stringify({
           uuid: 'u1',
@@ -3183,9 +3193,12 @@ describe('BackgroundAgentResumeService', () => {
           type: 'assistant',
           message: { role: 'model', parts: [{ text: 'partial answer' }] },
         }),
-      ].join('\n') + '\n',
-      'utf8',
-    );
+      ].join('\n') + '\n';
+    fs.writeFileSync(outputFile, seedRecords, 'utf8');
+    // The revive gate and the recovery read the registered outputFile, so
+    // the decoy carries the same seed chain.
+    fs.mkdirSync(path.dirname(decoyOutputFile), { recursive: true });
+    fs.writeFileSync(decoyOutputFile, seedRecords, 'utf8');
 
     registry.register({
       agentId,
@@ -3196,7 +3209,7 @@ describe('BackgroundAgentResumeService', () => {
       startTime: Date.now(),
       abortController: new AbortController(),
       prompt: 'original task',
-      outputFile,
+      outputFile: decoyOutputFile,
       metaPath,
     });
     registry.complete(agentId, 'partial answer');
@@ -3228,7 +3241,8 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     // Resumed records land in the LAUNCH session's transcript, chained onto
-    // its last stable record — the current session's dir stays untouched.
+    // its last stable record — the current session's dir stays untouched and
+    // the decoy keeps exactly its seed records.
     const records = fs
       .readFileSync(outputFile, 'utf8')
       .split('\n')
@@ -3241,6 +3255,11 @@ describe('BackgroundAgentResumeService', () => {
       parentUuid: 'a1',
       message: { role: 'user', parts: [{ text: 'keep going' }] },
     });
+    const decoyRecords = fs
+      .readFileSync(decoyOutputFile, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim());
+    expect(decoyRecords).toHaveLength(2);
     expect(
       fs.existsSync(getAgentJsonlPath(tempDir, 'session-1', agentId)),
     ).toBe(false);
