@@ -21,9 +21,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`) with object keys sorted, so
- * cosmetic opt differences (a re-ordered schema, a `label` change) don't
- * bust the cache.
+ * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
+ * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
+ * don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`

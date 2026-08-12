@@ -99,7 +99,11 @@ export async function resolveExternalWorktreeDir(
     .realpath(resolvedPath)
     .catch(() => resolvedPath);
   const relToRepo = path.relative(realRepoRoot, realResolved);
-  if (relToRepo.startsWith('..') || path.isAbsolute(relToRepo)) {
+  if (
+    relToRepo === '..' ||
+    relToRepo.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relToRepo)
+  ) {
     return {
       error:
         `${label} "${resolvedPath}" resolves outside this repository ` +

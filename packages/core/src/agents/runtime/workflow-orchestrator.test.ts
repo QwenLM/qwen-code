@@ -2585,6 +2585,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeContextSame: boolean;
     /** What the subagent's Config answers for "where am I?". */
     runtimeTargetDir?: string;
+    runtimeIgnoreFiles?: string;
     options?: { runConfigOverrides?: unknown };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
@@ -2640,6 +2641,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
       getTargetDir: () => '/fake/repo',
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+        customIgnoreFiles: ['.cursorignore'],
+      }),
       getSessionId: () => 'sess_fake_test_id',
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
@@ -2657,6 +2663,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
             runtimeTargetDir: runtimeContext.getTargetDir(),
+            runtimeIgnoreFiles: runtimeContext
+              .getFileService?.()
+              .getQwenIgnoreFileNamesDisplay(),
             options: { runConfigOverrides: options?.runConfigOverrides },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
@@ -3398,6 +3407,18 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       '/fake/repo/.qwen/tmp/review-pr-7',
     );
     expect(helper.calls[0]!.runtimeContextSame).toBe(false);
+    expect(helper.calls[0]!.runtimeIgnoreFiles).toContain('.cursorignore');
+  });
+
+  it('workingDir rejects invalid values before dispatch', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
   });
 
   // A refused pin must abort the dispatch, not fall through to an agent
@@ -3417,6 +3438,29 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     ).rejects.toThrow(
       /agent\(\{workingDir: "not-a-worktree"\}\).*not a registered linked worktree/,
     );
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir scrubs control characters from resolver errors', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'refused\r\nforged\u0000line',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\r');
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).not.toContain('\u0000');
     expect(helper.calls).toHaveLength(0);
   });
 

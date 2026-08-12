@@ -57,6 +57,11 @@ describe('resolveExternalWorktreeDir', () => {
     });
   });
 
+  it('accepts an in-repository worktree whose name starts with two dots', async () => {
+    const result = await resolveExternalWorktreeDir(config, '..hidden-wt');
+    expect(result).toMatchObject({ path: '/repo/..hidden-wt' });
+  });
+
   // Pinning replaces the child's WorkspaceContext wholesale, so a path that
   // escapes the repository would silently move the boundary of every file,
   // shell and search tool the agent has.

@@ -792,7 +792,12 @@ async function runOverridePath(
       config,
       worktreeIsolation.path,
     );
-  } else if (typeof opts.workingDir === 'string' && opts.workingDir) {
+  } else if (opts.workingDir !== undefined) {
+    if (typeof opts.workingDir !== 'string' || !opts.workingDir) {
+      throw new Error(
+        'agent({workingDir}): must be a non-empty string naming an existing git worktree of this repository.',
+      );
+    }
     // Caller-owned worktree: same rebind, no provisioning and no cleanup.
     // Validated by AgentTool's own `working_dir` resolver so a script-supplied
     // path cannot move the subagent's workspace boundary somewhere the
@@ -805,7 +810,7 @@ async function runOverridePath(
     );
     if ('error' in resolved) {
       throw new Error(
-        `agent({workingDir: ${JSON.stringify(opts.workingDir)}}): ${resolved.error}`,
+        `agent({workingDir: ${JSON.stringify(opts.workingDir)}}): ${sanitizeForErrorMessage(resolved.error)}`,
       );
     }
     effectiveContext = createDirScopedConfigOverride(config, resolved.path);
@@ -1196,7 +1201,10 @@ function createDirScopedConfigOverride(base: Config, wtPath: string): Config {
   ov.getCwd = () => wtPath;
   ov.getWorkingDir = () => wtPath;
   ov.getProjectRoot = () => wtPath;
-  const wtFileService = new FileDiscoveryService(wtPath);
+  const wtFileService = new FileDiscoveryService(
+    wtPath,
+    base.getFileFilteringOptions().customIgnoreFiles,
+  );
   ov.fileDiscoveryService = wtFileService;
   ov.getFileService = () => wtFileService;
   const wtWorkspace = new WorkspaceContext(wtPath);

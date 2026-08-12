@@ -1670,13 +1670,16 @@ describe('createWorkflowSandbox security', () => {
     );
   });
 
-  it('agent({workingDir}) rejects a non-string', async () => {
+  it('agent({workingDir}) rejects invalid values', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return agent("x", { workingDir: 7 });`),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    await expect(
+      sandbox.run(`return agent("x", { workingDir: "" });`),
     ).rejects.toThrow(/workingDir.*non-empty string/);
   });
 
