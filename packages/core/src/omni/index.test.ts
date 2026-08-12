@@ -890,6 +890,9 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         getObjectsDir() {
           return objectsDir;
         }
+        objectPathFor(sha256: string, extension: string) {
+          return path.join(objectsDir, `${sha256}${extension}`);
+        }
       },
     }));
     vi.doMock('./upload.js', () => ({
@@ -1893,6 +1896,53 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
           removeByDegradedSha256: expect.any(Function),
         }),
       },
+    );
+  });
+
+  it('anchors tool-result media to the object store, not its staging file', async () => {
+    // The tool-result funnel writes bytes to a staging `.part` and deletes
+    // it in `finally` the same turn, while this delivery promotes the same
+    // bytes into the content-addressed store. Recording the staging path
+    // as the persistent identity handed the model a handle resolving to a
+    // deleted file (ENOENT for any policy tool pointed at it) and made
+    // recall report `artifact_unavailable` for an artifact that persists.
+    const runMock = vi
+      .fn()
+      .mockResolvedValue({ deliveries: [], records: [], fileDeliveries: [] });
+    const { mod } = await armPipeline(runMock);
+    const registry = new MediaResourceRegistry();
+    const stagingPath = await realFile('tool-media.part');
+    const config = {
+      ...policyConfig({ policies: [] }),
+      getOmniMemoryConfig: () => ({ collection: { maxInlineTextBytes: 4096 } }),
+      getOmniMediaResourceRegistry: () => registry,
+    } as unknown as Config;
+
+    const delivery = await mod.processMediaForOmniDelivery(
+      stagingPath,
+      config,
+      { origin: 'tool' },
+    );
+
+    const binding = registry.resolve(delivery.resourceId!);
+    expect(binding).toBeDefined();
+    // Content-addressed location derived from the hash — survives the
+    // funnel's cleanup of the staging file.
+    expect(binding!.fileRef).toBe(
+      path.join(tmpDir, 'objects', `${'a'.repeat(64)}.jpg`),
+    );
+    expect(binding!.fileRef).not.toBe(stagingPath);
+    // A user file keeps its own path (its bytes stay in place, S §4).
+    const userRegistry = new MediaResourceRegistry();
+    const userDelivery = await mod.processMediaForOmniDelivery(
+      await realFile('photo.png'),
+      {
+        ...config,
+        getOmniMediaResourceRegistry: () => userRegistry,
+      } as unknown as Config,
+    );
+    expect(userRegistry.resolve(userDelivery.resourceId!)!.fileRef).toContain(
+      'photo.png',
     );
   });
 

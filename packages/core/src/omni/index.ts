@@ -473,16 +473,21 @@ export async function processMediaForOmniDelivery(
     : undefined;
   const bindSessionResource = (
     item: PolicyDeliveryResource,
+    /** Overrides the locator the handle resolves to — used for the source
+     * of tool-result media, whose `filePath` is an ephemeral staging file
+     * while its persistent bytes live in the object store. */
+    fileRefOverride?: string,
   ): ReturnType<MediaResourceRegistry['bind']> | undefined =>
     registry && item.memoryBinding
       ? registry.bind({
           ...item.memoryBinding,
-          fileRef: item.filePath,
+          fileRef: fileRefOverride ?? item.filePath,
           mediaType: item.recognized.modality,
         })
       : undefined;
   let sourceSha256: string | undefined;
   let sourceBinding: MediaMemoryBinding | undefined;
+  let sourceFileRef = filePath;
   if (memoryService) {
     try {
       sourceSha256 = await hashFileSha256(filePath, signal);
@@ -494,15 +499,38 @@ export async function processMediaForOmniDelivery(
       );
     }
     if (sourceSha256) {
+      // Persistent identity of the SOURCE. A user file's bytes stay in
+      // place, so its own path is the identity (S §4). A tool-result
+      // file's path is a staging `.part` the funnel deletes in its
+      // `finally` THIS turn — recording it would hand out a handle that
+      // resolves to a deleted path (ENOENT for any policy tool the model
+      // points at it) and make recall report `artifact_unavailable` for
+      // an artifact that actually persists. Its bytes are promoted into
+      // the content-addressed object store by this same delivery, and
+      // that location is derivable from the hash — so name it directly.
+      // If promotion never happens (the transport guard omitted the
+      // media), the ref dangles and recall says `artifact_unavailable`:
+      // honest, because the bytes were genuinely not retained.
+      const origin = options?.origin ?? 'user';
+      sourceFileRef =
+        origin === 'tool'
+          ? store.objectPathFor(
+              sourceSha256,
+              extensionForMime(recognized.detectedMimeType),
+            )
+          : filePath;
       sourceBinding = await memoryService.recordFileRecognized({
-        fileRef: filePath,
+        fileRef: sourceFileRef,
         sha256: sourceSha256,
         mediaType: recognized.modality,
         metadata: recognized.metadata,
         sizeBytes: recognized.sizeBytes,
         mimeType: recognized.detectedMimeType,
-        origin: options?.origin ?? 'user',
-        source: { protocol: 'local', locator: displayName },
+        origin,
+        source:
+          origin === 'tool'
+            ? { protocol: 'managed', locator: `sha256/${sourceSha256}` }
+            : { protocol: 'local', locator: displayName },
         recognition: {
           ingestionConfigHash: '',
           detectorVersion: MEDIA_DETECTOR_VERSION,
@@ -521,7 +549,10 @@ export async function processMediaForOmniDelivery(
   // later replaces the delivered bytes with a derivative. Its handle is
   // the one disclosed to the model (M §5.2): recall requests and future
   // evidence-gathering tool calls reference the SOURCE, never a path.
-  const sessionResourceId = bindSessionResource(final)?.resourceId;
+  const sessionResourceId = bindSessionResource(
+    final,
+    sourceFileRef,
+  )?.resourceId;
   /** Media deliverables beyond the primary (multi-output fixed policies). */
   let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
