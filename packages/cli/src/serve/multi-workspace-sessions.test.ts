@@ -39,8 +39,8 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './live/session-source.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from './conversations/session-source.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   serializeWorkspaceTranscriptResponseForTesting,
@@ -947,7 +947,7 @@ function makeHarness(opts?: {
   secondaryRestoreCurrentCwd?: string;
   secondaryKillSessionResult?: boolean;
   secondaryProvenance?: WorkspaceRuntimeProvenance;
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   serveOptions?: Partial<ServeOptions>;
   primaryRuntimeBaseDir?: string;
   secondaryRuntimeBaseDir?: string;
@@ -1830,7 +1830,7 @@ describe('multi-workspace session dispatch', () => {
           }),
           liveConversationWorkspace: {
             materializeConversationDirectory,
-          } as unknown as LiveConversationWorkspace,
+          } as unknown as ConversationWorkspace,
         });
 
         for (const action of ['load', 'resume'] as const) {
@@ -1892,7 +1892,7 @@ describe('multi-workspace session dispatch', () => {
           }),
           liveConversationWorkspace: {
             materializeConversationDirectory,
-          } as unknown as LiveConversationWorkspace,
+          } as unknown as ConversationWorkspace,
         });
 
         const response = await request(app)
@@ -1938,7 +1938,7 @@ describe('multi-workspace session dispatch', () => {
             ),
             liveConversationWorkspace: {
               materializeConversationDirectory,
-            } as unknown as LiveConversationWorkspace,
+            } as unknown as ConversationWorkspace,
           });
 
           const response = await request(app)
@@ -1974,7 +1974,7 @@ describe('multi-workspace session dispatch', () => {
             operationLog.push(`materialize:${sessionId}`);
             return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
           },
-        } as unknown as LiveConversationWorkspace,
+        } as unknown as ConversationWorkspace,
       });
 
       const response = await request(app)
@@ -2009,7 +2009,7 @@ describe('multi-workspace session dispatch', () => {
         liveConversationWorkspace: {
           materializeConversationDirectory: async (sessionId: string) =>
             path.join(SECONDARY_CWD, `conversation-${sessionId}`),
-        } as unknown as LiveConversationWorkspace,
+        } as unknown as ConversationWorkspace,
       });
 
       const response = await request(app)
@@ -2038,7 +2038,7 @@ describe('multi-workspace session dispatch', () => {
         liveConversationWorkspace: {
           materializeConversationDirectory: async (sessionId: string) =>
             path.join(SECONDARY_CWD, `conversation-${sessionId}`),
-        } as unknown as LiveConversationWorkspace,
+        } as unknown as ConversationWorkspace,
       });
 
       const response = await request(app)
@@ -2068,7 +2068,7 @@ describe('multi-workspace session dispatch', () => {
               'Live conversation child was replaced by a symlink.',
             );
           },
-        } as unknown as LiveConversationWorkspace,
+        } as unknown as ConversationWorkspace,
       });
 
       const response = await request(app)

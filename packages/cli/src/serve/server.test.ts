@@ -174,7 +174,7 @@ import {
   createVirtualSubagentSessionId,
   VirtualSubagentSessions,
 } from './virtual-subagent-sessions.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
 import type { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import {
@@ -29210,7 +29210,7 @@ describe('Live conversation runtime lifecycle', () => {
         async (sessionId: string) =>
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
@@ -29418,6 +29418,47 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('shares the boot publication with a concurrent Live Host bind', async () => {
+    const restoreLiveSettings = await enableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    try {
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      const coordinator = setup.app.locals[
+        'liveCoordinator'
+      ] as LiveHostCoordinator;
+      const socket = new FakeLiveHostSocket();
+      coordinator.attachHost(
+        socket as unknown as WebSocket,
+        coordinator.daemonInstanceNonce,
+      );
+      socket.hello('host_live_runtime_concurrent_0001');
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+
+      setup.resolveCreation();
+      await vi.waitFor(() => {
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+      });
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+    } finally {
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      await restoreLiveSettings();
+    }
+  });
+
   it('hot-enables and disables the Live runtime without restarting the daemon', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29601,6 +29642,67 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('rolls back a partial Live bind and retries without republishing the runtime', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    const setTaskHandler = vi
+      .spyOn(setup.liveBridge, 'setLiveTaskToolRequestHandler')
+      .mockImplementationOnce(() => {
+        throw new Error('task handler bind failed');
+      });
+    try {
+      const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
+        | ((enabled: boolean) => Promise<void>)
+        | undefined;
+      if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
+      const capabilitiesBefore = await request(setup.app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capabilitiesBefore.body.workspaces).not.toContainEqual(
+        expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+      );
+
+      const firstEnable = setEnabled(true);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+      await expect(firstEnable).rejects.toThrow('task handler bind failed');
+
+      expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
+        setup.liveRuntime,
+      );
+      expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+      expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+      expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+      expect(setTaskHandler).toHaveBeenCalledTimes(2);
+      const capabilitiesAfter = await request(setup.app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(capabilitiesAfter.body.workspaces).toContainEqual(
+        expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+      );
+
+      await expect(setEnabled(true)).resolves.toBeUndefined();
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+        expect.any(Function),
+      );
+      expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+        expect.any(Function),
+      );
+      expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+        expect.any(Function),
+      );
+      expect(setTaskHandler.mock.calls.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      await restoreLiveSettings();
+    }
+  });
+
   it('shutdown waits for the in-flight boot publication', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29736,7 +29838,7 @@ describe('Live Appshot server integration', () => {
         return root;
       }),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: 'daemon_live_appshot_nonce_0001',
       getProviderReadiness: () => ({ state: 'ready' }),
@@ -29868,7 +29970,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-disabled-conversations',
@@ -29973,7 +30075,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-acp-disabled-conversations',
@@ -30154,6 +30256,7 @@ describe('Live Appshot server integration', () => {
       await shutdown;
       expect(settled).toBe(true);
       expect(setup.captureHandler).toBeUndefined();
+      expect(setup.speakHandler).toBeUndefined();
       expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
     } finally {
       channelGate.resolve(undefined);

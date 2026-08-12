@@ -130,7 +130,7 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
-import { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import {
   workspaceRegistrationId,
@@ -1037,7 +1037,7 @@ export interface RunQwenServeDeps {
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
   liveDiscoveryStableBaseDir?: string;
   /** Test/embed override for stable Live locator ownership handoff. */
@@ -3377,7 +3377,7 @@ async function runQwenServeImpl(
       );
     }
     const liveConversationWorkspace =
-      deps.liveConversationWorkspace ?? new LiveConversationWorkspace();
+      deps.liveConversationWorkspace ?? new ConversationWorkspace();
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
