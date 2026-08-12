@@ -20,10 +20,10 @@ import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
 import { StreamEventType } from '../core/geminiChat.js';
 import {
-  canonicalToolName,
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
@@ -299,6 +299,7 @@ async function runSpeculativeLoop(
           args,
           state.overlayFs!,
           approvalMode,
+          config.getTargetDir?.(),
         );
 
         if (gate.action === 'boundary') {

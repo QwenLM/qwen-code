@@ -30,13 +30,24 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { compressSummary } from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
+  ROUND_CAP_PHRASE,
   budgetStopDisclosure,
+  roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
+import { MAX_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
-import { gh, setGhHost } from './lib/gh.js';
+import {
+  HOSTNAME_RE,
+  gh,
+  getGhHost,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
@@ -61,6 +72,7 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
+  FOOTER_MARKER,
   REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
@@ -239,6 +251,182 @@ function withMarker(line: string): string {
   return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
 
+/** The plan's PR identity, when it names one — the base for comment anchors. */
+interface PrIdentity {
+  ownerRepo: string;
+  prNumber: string;
+  /** The host fetch-pr recorded for a non-default instance, else null. */
+  host: string | null;
+}
+
+/**
+ * The one rule for "this parsed plan names a PR" — the bilingual recovery
+ * and the comment anchors both read it, so a hardening of plan-identity
+ * validation lands once, not twice in this file.
+ */
+function planPrIdentity(plan: unknown): PrIdentity | null {
+  if (typeof plan !== 'object' || plan === null) return null;
+  const p = plan as {
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+    host?: unknown;
+  };
+  const ownerRepo =
+    typeof p.ownerRepo === 'string' && isOwnerRepo(p.ownerRepo)
+      ? p.ownerRepo
+      : null;
+  const prNumber = isPositivePrNumber(p.prNumber) ? String(p.prNumber) : null;
+  // The plan is a file on disk; hold a recorded host to the same standard
+  // the rest of this surface applies (HOSTNAME_RE in setGhHost) before it
+  // rides into a posted anchor URL.
+  const host =
+    typeof p.host === 'string' && HOSTNAME_RE.test(p.host) ? p.host : null;
+  return ownerRepo && prNumber ? { ownerRepo, prNumber, host } : null;
+}
+
+function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
+  if (!planPath) return null;
+  try {
+    return planPrIdentity(JSON.parse(readFileSync(planPath, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `comment 3733696855` in a model-written unresolved entry is a bare number
+ * the PR page cannot navigate; with the plan's PR identity it becomes the
+ * anchor GitHub already serves — review-thread comments under
+ * `#discussion_r`, issue-level ones under `#issuecomment`. An entry that
+ * already carries a markdown link is left alone: the model linked it itself,
+ * and rewriting inside its link text would corrupt it.
+ */
+function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
+  if (!pr || text.includes('](')) return text;
+  // The anchor must point at the instance the PR lives on: the host the
+  // plan recorded, else this run's routed host, else an operator-exported
+  // GH_HOST — the same effective-host resolution `submit` posts through.
+  // Defaulting to github.com 404s a GHE review's anchors, or lands them on
+  // a same-named public repo's different PR.
+  // Normalized before the github.com comparison below: hostnames are
+  // case-insensitive, :443 is the implicit port (leading zeros included),
+  // a trailing dot is the same DNS name, and www. fronts the same default
+  // instance — every one of these variants must land on the floor, or a
+  // `GH_HOST=www.github.com` run links an ordinal `comment 5` into a dead
+  // anchor.
+  const host = (resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com')
+    .toLowerCase()
+    .replace(/:0*443$/, '')
+    .replace(/\.$/, '')
+    .replace(/^www\.github\.com$/, 'github.com');
+  const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
+  // github.com's comment ids run long, so a short number after "comment"
+  // reads likelier as an ordinal; a GHE instance's id space is its own and
+  // often short, and the floor would leave the feature inert there.
+  // Case-insensitive: the pipeline's own label is capitalized
+  // (`**Issue-level comment**` in pr-context), and an entry echoing that
+  // casing must still anchor under #issuecomment, not #discussion_r.
+  const commentRef =
+    host === 'github.com'
+      ? /\b(issue-level )?comment (\d{6,})\b/gi
+      : /\b(issue-level )?comment (\d+)\b/gi;
+  // The anchor family is decided per ENTRY, not per match: issue-comment
+  // ids and review-comment ids are separate id spaces, and an issue-level
+  // entry that echoes pr-context's own header shape (`**Issue-level
+  // comment** — … (comment 5199834809)`) carries its id apart from the
+  // phrase — routed by adjacency alone, that id anchors under
+  // #discussion_r, a link that can never resolve.
+  const issueLevelEntry = /\bissue(?:-level)?\s+comment\b/i.test(text);
+  return text.replace(
+    commentRef,
+    (_m, issueLevel: string | undefined, id: string) =>
+      issueLevel || issueLevelEntry
+        ? `[${issueLevel ?? ''}comment ${id}](${base}#issuecomment-${id})`
+        : `[comment ${id}](${base}#discussion_r${id})`,
+  );
+}
+
+/**
+ * The unresolved-existing-Critical block, as a Markdown list instead of a
+ * space-joined paragraph: #8388's posted body ran 31 of these together in
+ * one unreadable wall. Entries sharing the exact reason after their first
+ * ` — ` collapse into one marked group that states the reason once and
+ * lists the subjects — the same repetition-killing move the not-reviewed
+ * sentences already make. Nothing is dropped: every subject and every
+ * distinct reason still renders, because erasing one is how a review
+ * approves the very thing it is asking about. The Chinese half carries a
+ * count and a pointer instead of duplicating the untranslatable English
+ * list — on #8388 that duplication alone doubled the body.
+ */
+function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+  const parsed = cannotTell.map((raw) => {
+    // Entries render as one-line list items: an unindented newline ends a
+    // list item (CommonMark), so a model-written entry spanning lines would
+    // leak its continuation out of the list. Collapsed by split/join, not
+    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
+    // a long whitespace run with no newline in it, and these entries are
+    // model-written with no length cap — one such entry stalled a measured
+    // probe for seconds at 80k characters.
+    const unmarked = raw.startsWith(CRITICAL_PREFIX)
+      ? raw.slice(CRITICAL_PREFIX.length).trim()
+      : raw;
+    const line = linkifyCommentRefs(
+      unmarked.includes('\n')
+        ? unmarked
+            .split('\n')
+            .map((seg) => seg.trim())
+            .filter((seg) => seg !== '')
+            .join(' ')
+        : unmarked,
+      pr,
+    );
+    const idx = line.indexOf(' — ');
+    // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
+    // empty-string reason would become a group key and render `2 entries — :`.
+    return idx === -1
+      ? { head: line, reason: null }
+      : {
+          head: line.slice(0, idx),
+          reason: line.slice(idx + 3).trim() || null,
+        };
+  });
+  // Grouped on the exact reason text, in first-appearance order. A reasonless
+  // entry stays its own item — there is nothing to share.
+  interface Group {
+    reason: string | null;
+    heads: string[];
+  }
+  const groups: Group[] = [];
+  const byReason = new Map<string, Group>();
+  for (const p of parsed) {
+    const existing = p.reason === null ? undefined : byReason.get(p.reason);
+    if (existing) {
+      existing.heads.push(p.head);
+      continue;
+    }
+    const group: Group = { reason: p.reason, heads: [p.head] };
+    groups.push(group);
+    if (p.reason !== null) byReason.set(p.reason, group);
+  }
+  const lines: string[] = [];
+  for (const { reason, heads } of groups) {
+    if (heads.length === 1) {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+      );
+    } else {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
+        ...heads.map((head) => `  - ${head}`),
+      );
+    }
+  }
+  return {
+    en: `Unresolved, please confirm:\n\n${lines.join('\n')}`,
+    zh: `未决，请确认：共 ${cannotTell.length} 条（原文未翻译，列表见上方英文部分）。`,
+  };
+}
+
 // The input arrives as JSON a model wrote, and the skill tells it to omit
 // fields that do not apply — so absence is normal and means zero/empty. What
 // must never pass is a PRESENT field of the wrong shape: `undefined + 1` is
@@ -268,7 +456,14 @@ function toStringList(value: unknown, field: string): string[] {
 }
 
 function stripReviewFooter(entry: string): string {
-  return entry.replace(REVIEW_FOOTER_RE, '');
+  // Guarded on the marker: the strip regex opens `\s*` under an unanchored
+  // search, which scans quadratically on a long whitespace run in an entry
+  // that carries no footer at all — and these entries are model-written
+  // with no length cap (measured ~20 s at 80k characters). An entry
+  // without the marker has nothing to strip.
+  return entry.includes(FOOTER_MARKER)
+    ? entry.replace(REVIEW_FOOTER_RE, '')
+    : entry;
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is
@@ -420,12 +615,22 @@ function composeReviewBody(
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
+      // A round-cap stop and a time-budget stop both cap the verdict, but
+      // read differently and dedup against a different relayed phrase. The
+      // marker's `cause` picks which; an absent cause is a time stop, for
+      // markers written before the cause field existed.
+      const isRoundCap = stop.cause === 'round-cap';
+      const phrase = isRoundCap ? ROUND_CAP_PHRASE : BUDGET_STOP_PHRASE;
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (unreviewed[i].includes(BUDGET_STOP_PHRASE)) {
+        if (unreviewed[i].includes(phrase)) {
           unreviewed.splice(i, 1);
         }
       }
-      budgetEntry = budgetStopDisclosure(stop.round ?? undefined);
+      budgetEntry = isRoundCap
+        ? roundCapStopDisclosure(
+            typeof stop.cap === 'number' ? stop.cap : MAX_REVERSE_AUDIT_ROUNDS,
+          )
+        : budgetStopDisclosure(stop.round ?? undefined);
       coverageEntries.push(budgetEntry);
     }
   }
@@ -434,6 +639,19 @@ function composeReviewBody(
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
   // lines of the second register posted to the first reader.
   const remediation: string[] = [];
+  // Budget-gap disclosures from the coverage report — the checks agents said
+  // their soft tool budget cut short. A DISCLOSURE channel, deliberately not
+  // a cap: these render in the body's "Not reviewed" section mechanically
+  // (so a disclosed gap reaches the author whether or not the orchestrator
+  // relays it), while judging which gaps name an incomplete REQUIRED trace —
+  // and so belong in `unreviewedDimensions`, which caps — stays the
+  // orchestrator's ruling, exactly as the skill's Step 3D writes it. Capping
+  // on every gap here would make the soft ceiling hard: any large diff's
+  // routine budget stop would forbid an Approve the review otherwise earned.
+  const budgetGapNotes: Array<{ agent: string; gaps: string[] }> = [];
+  // Sibling caps MAX_DIMENSIONS and MAX_NOTES bound their lists for the
+  // same reason; this bounds the one budget-gap sentence.
+  const MAX_BUDGET_GAP_LINES = 5;
   // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
   // and fill; pasted literally it parses as a shell redirection. The run KNOWS
   // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
@@ -558,6 +776,7 @@ function composeReviewBody(
       for (const label of cov.idleAgents) {
         coverageEntries.push({
           subject: label,
+          publicSubject: publicAgentSubject(label),
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
         });
@@ -579,6 +798,7 @@ function composeReviewBody(
       for (const label of cov.blindAgents) {
         coverageEntries.push({
           subject: label,
+          publicSubject: publicAgentSubject(label),
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
@@ -600,11 +820,13 @@ function composeReviewBody(
       for (const label of cov.unopenedAgents) {
         coverageEntries.push({
           subject: label,
+          publicSubject: publicAgentSubject(label),
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
           reasonZh:
-            '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
+            '启动 prompt 为它指定了 diff 中的行，但它从未打开：有工具调用，' +
+            '却没有一次读取 diff',
         });
       }
       if (cov.unopenedAgents.length > 0) {
@@ -614,6 +836,7 @@ function composeReviewBody(
             'the read is what proves the review happened',
         );
       }
+      budgetGapNotes.push(...cov.budgetGaps);
       // The prompt was built in code and edited on the way to the agent. This caps
       // for the same reason the others do: what the agent was actually asked is not
       // what this skill's guarantees are written against.
@@ -1065,6 +1288,49 @@ function composeReviewBody(
       zh: `未审查：${d}。`,
     });
   }
+  // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
+  // review findings shaped this: each gap rides through `mdField` (inline
+  // code neutralizes @-mentions, #123 cross-references, links and any
+  // stray `</details>` an agent quoted — the first path by which raw
+  // sub-agent prose could reach a public PR body); the line is capped like
+  // its siblings (unbounded entries joined into one disclosure drown the
+  // verdict they ride on — and ~50 uncapped agents would break GitHub's
+  // 64 KB body limit and lose the whole POST); each gap carries its
+  // agent's label so N agents stopping on the same trace stay tellable
+  // apart; and a gap the caller already promoted into
+  // `unreviewedDimensions` is dropped here — the capping relay owns it,
+  // and the body must not say it twice in two registers. These are
+  // "stopped at the budget", not "nobody looked": the phrasing must not
+  // claim the stronger gap, and the entries do not join the capping lists.
+  const budgetGapItems: Array<{ agent: string; gap: string }> = [];
+  for (const g of budgetGapNotes) {
+    for (const gap of g.gaps) budgetGapItems.push({ agent: g.agent, gap });
+  }
+  const keptBudgetGaps = budgetGapItems.filter(
+    (it) => !unreviewed.some((d) => d.includes(it.gap)),
+  );
+  if (keptBudgetGaps.length > 0) {
+    const shown = keptBudgetGaps.slice(0, MAX_BUDGET_GAP_LINES);
+    const more = keptBudgetGaps.length - shown.length;
+    const enList =
+      shown
+        .map(
+          (it) =>
+            `${publicAgentSubject(it.agent) ?? it.agent}: ${mdField(it.gap)}`,
+        )
+        .join('; ') + (more > 0 ? `, and ${more} more` : '');
+    const zhList =
+      shown
+        .map(
+          (it) =>
+            `${publicAgentSubject(it.agent) ?? it.agent}：${mdField(it.gap)}`,
+        )
+        .join('；') + (more > 0 ? `，另有 ${more} 条` : '');
+    notReviewedParts.push({
+      en: `Not explored to full depth (tool budget reached): ${enList}.`,
+      zh: `未探索到全部深度（达到工具调用预算）：${zhList}。`,
+    });
+  }
   // Same cause, one sentence: forty-three chunks launched with rewritten
   // prompts are one failure with forty-three subjects, not forty-three
   // paragraphs — a posted body on #7166 was ninety-nine clauses over four
@@ -1115,20 +1381,35 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
-    const named: string[] = [];
-    const namedZh: string[] = [];
+    const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = /^chunk (\d+)$/.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
       else {
-        named.push(e.publicSubject ?? e.subject);
-        namedZh.push(e.subjectZh ?? e.publicSubject ?? e.subject);
+        const subject = e.publicSubject ?? e.subject;
+        const existing = named.get(subject);
+        if (existing) existing.count++;
+        else
+          named.set(subject, {
+            zh: e.subjectZh ?? subject,
+            count: 1,
+          });
       }
     }
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
-    const shown = [...(gap ? [gap.phrase] : []), ...named];
-    const shownZh = [...(gap ? [gap.phraseZh] : []), ...namedZh];
+    const shown = [
+      ...(gap ? [gap.phrase] : []),
+      ...[...named].map(([subject, { count }]) =>
+        count > 1 ? `${subject} (×${count})` : subject,
+      ),
+    ];
+    const shownZh = [
+      ...(gap ? [gap.phraseZh] : []),
+      ...[...named.values()].map(({ zh, count }) =>
+        count > 1 ? `${zh}（×${count}）` : zh,
+      ),
+    ];
     const reasonZh = reasonZhOf.get(reason) ?? reason;
     notReviewedParts.push({
       en: reason
@@ -1146,14 +1427,7 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [
-          {
-            en: `Unresolved, please confirm: ${cannotTell
-              .map((l) => withMarker(l))
-              .join(' ')}`,
-            zh: `未决，请确认：${cannotTell.map((l) => withMarker(l)).join(' ')}`,
-          },
-        ];
+      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
@@ -1164,6 +1438,31 @@ function composeReviewBody(
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
+
+  const disclosedChunkIds = new Set<number>();
+  for (const e of coverageEntries) {
+    const m = /^chunk (\d+)$/.exec(e.subject);
+    if (m) disclosedChunkIds.add(Number(m[1]));
+  }
+  const nothingCertified =
+    coverageEntries.some((e) => e.subject === 'coverage') ||
+    (plannedChunks.length > 0 &&
+      coveredChunks.every((id) => disclosedChunkIds.has(id)));
+  const hasCoverageGaps =
+    unreviewed.length + coverageEntries.length > 0 ||
+    missingReceipts.length > 0 ||
+    uncoverable.length > 0;
+  const coverageOpener: Bi | undefined = nothingCertified
+    ? {
+        en: '⚠️ This run could not certify that any of this diff was reviewed.',
+        zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+      }
+    : hasCoverageGaps
+      ? {
+          en: 'Partially reviewed — gaps disclosed.',
+          zh: '仅完成部分审查，审查缺口已披露。',
+        }
+      : undefined;
 
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
@@ -1225,6 +1524,7 @@ function composeReviewBody(
     // trust warning (clause 2), an undecided existing Critical (clause 5),
     // or the unread-scope disclosure (clause 6).
     const parts = [
+      ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
@@ -1247,16 +1547,24 @@ function composeReviewBody(
   }
 
   if (event === 'APPROVE') {
+    // `notReviewedParts` here is exactly the budget-gap disclosures: every
+    // other source of a not-reviewed entry also caps, and a capped run never
+    // reaches this branch. They render on the Approve because they are a
+    // disclosure, not a defect — hiding "stopped at the tool budget" behind
+    // an unqualified LGTM would break the one promise the disclosure channel
+    // makes, that it reaches the author mechanically.
     return {
       event,
       body: render(
         [
           { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
           ...repositoryContextBlock,
         ],
-        deferredBlock.length ||
+        notReviewedParts.length ||
+          deferredBlock.length ||
           testPlanBlock.length ||
           repositoryContextBlock.length
           ? '\n\n'
@@ -1285,9 +1593,9 @@ function composeReviewBody(
     });
   }
 
-  // 2. Context-unavailable clause — when present, it opens the body and no
-  //    clause may certify "no blockers".
+  // 2. Context-unavailable clause — no later clause may certify "no blockers".
   if (contextUnavailable) {
+    if (coverageOpener) clauses.push(coverageOpener);
     clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
@@ -1302,13 +1610,17 @@ function composeReviewBody(
       !downgradeRequestChanges &&
       c === 0 &&
       cannotTell.length === 0 &&
-      uncoverable.length === 0 &&
-      unreviewed.length + coverageEntries.length === 0 &&
+      !hasCoverageGaps &&
       // A missing receipt caps the event but was left out of certification, so a
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free — and neither
       // can a loop that ended with findings no verifier ever ruled on.
-      missingReceipts.length === 0 &&
+      // A disclosed budget gap is not a blocker, but "Reviewed — no
+      // blockers." two lines above "Not explored to full depth" is the
+      // opener certifying what the disclosure takes back — the exact
+      // shape the comment below forbids. (A gap the caller promoted into
+      // `unreviewedDimensions` already denies certification above.)
+      keptBudgetGaps.length === 0 &&
       !findingsUnverifiedAtCompose;
     // The opener may not say "Reviewed." over a disclosure set that denies it.
     // #7268's posted body opened exactly that way — "Reviewed. Suggestions are
@@ -1320,24 +1632,27 @@ function composeReviewBody(
     // `coverage` subject is the no-plan/unreadable-transcripts family — there
     // is no chunk universe to count, and what cannot be counted cannot be
     // certified.
-    const disclosedChunkIds = new Set<number>();
-    for (const e of coverageEntries) {
-      const m = /^chunk (\d+)$/.exec(e.subject);
-      if (m) disclosedChunkIds.add(Number(m[1]));
-    }
-    const nothingCertified =
-      coverageEntries.some((e) => e.subject === 'coverage') ||
-      (plannedChunks.length > 0 &&
-        coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    // Any opener starting with "Reviewed" reads as contradicting the
+    // "Not reviewed:" clauses below it — announcing the gaps does not fix
+    // it, as the first cut of this wording showed (#8811). When disclosures
+    // follow, the opener says the review is PARTIAL instead, so the pair
+    // reads in one direction; the certifying and the zero-certified openers
+    // above keep their exact wording.
     clauses.push(
-      nothingCertified
-        ? {
-            en: '⚠️ This run could not certify that any of this diff was reviewed.',
-            zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
-          }
-        : canCertify
+      coverageOpener ??
+        (canCertify
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
-          : { en: 'Reviewed.', zh: '已审查。' },
+          : findingsFileUnreadable
+            ? {
+                en: 'Review incomplete — findings unavailable.',
+                zh: '审查未完成——发现不可用。',
+              }
+            : findingsUnverifiedAtCompose
+              ? {
+                  en: 'Review incomplete — unverified findings disclosed.',
+                  zh: '审查未完成——未验证的发现已披露。',
+                }
+              : { en: 'Reviewed.', zh: '已审查。' }),
     );
   }
 
@@ -1364,6 +1679,13 @@ function composeReviewBody(
         `此处无需进一步处理。`,
     });
   }
+
+  // Clauses 1–4 are the verdict: short sentences that read as one opener
+  // paragraph. Everything after — unresolved Criticals, disclosures, body
+  // blockers — gets a paragraph of its own: #8388's posted body joined all
+  // of it with spaces, 31 unresolved entries and seven disclosures in a
+  // single unreadable wall.
+  const openerCount = clauses.length;
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
@@ -1395,9 +1717,21 @@ function composeReviewBody(
     clauses.push(...bodyCriticalBlock);
   }
 
+  const openerParts = clauses.slice(0, openerCount);
+  const paragraphs: Bi[] = [
+    ...(openerParts.length > 0
+      ? [
+          {
+            en: openerParts.map((c) => c.en).join(' '),
+            zh: openerParts.map((c) => c.zh).join(' '),
+          },
+        ]
+      : []),
+    ...clauses.slice(openerCount),
+  ];
   return {
     event,
-    body: render(clauses, ' '),
+    body: render(paragraphs, '\n\n'),
     baseEvent,
     cappedBy,
     downgraded,
@@ -1405,6 +1739,22 @@ function composeReviewBody(
     remediation,
     lowSignal,
   };
+}
+
+/**
+ * The public subject for an agent-derived disclosure label. A `chunk N`
+ * label stays bare — the chunk collapse translates it into the author's
+ * units. Any other label is the truncated first line of a launch prompt:
+ * prose. Rendered bare it reads as a claim about the PR itself —
+ * #8811's posted body carried "Not reviewed: This PR narrows the
+ * daemon-marker check from a truthy tes..." — not as the name of the agent
+ * that failed. Quoted, it reads as a name. The INTERNAL subject stays the
+ * unquoted label: the dedup and certification checks key on it.
+ */
+function publicAgentSubject(label: string): string | undefined {
+  return /^chunk \d+$/.test(label)
+    ? undefined
+    : mdField(JSON.stringify(compressSummary(label.replace(/[`\r\n]+/g, ' '))));
 }
 
 /**
@@ -1785,29 +2135,23 @@ function bilingualFromPlan(
   fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
 ): boolean {
   if (!planPath) return false;
-  let plan: {
-    prDescriptionHasHan?: unknown;
-    ownerRepo?: unknown;
-    prNumber?: unknown;
-  };
+  let plan: unknown;
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
     return false;
   }
-  if (typeof plan?.prDescriptionHasHan === 'boolean') {
-    return plan.prDescriptionHasHan;
+  const han = (plan as { prDescriptionHasHan?: unknown })?.prDescriptionHasHan;
+  if (typeof han === 'boolean') {
+    return han;
   }
-  const ownerRepo =
-    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
-      ? plan.ownerRepo
-      : undefined;
-  const prNumber = isPositivePrNumber(plan?.prNumber)
-    ? String(plan.prNumber)
-    : undefined;
-  if (!ownerRepo || !prNumber) return false;
+  // The identity rule is shared with the comment anchors (planPrIdentity).
+  // The stricter ownerRepo shape changes no outcome: a misshapen one failed
+  // the gh fetch and fell back to English anyway.
+  const pr = planPrIdentity(plan);
+  if (!pr) return false;
   try {
-    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
+    return /\p{Script=Han}/u.test(fetchPrBody(pr.ownerRepo, pr.prNumber));
   } catch {
     return false;
   }

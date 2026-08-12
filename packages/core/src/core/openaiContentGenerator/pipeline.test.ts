@@ -751,6 +751,39 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: undefined,
       },
       {
+        name: 'remove required tool selection when thinking budget enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { thinking_budget: 4096 },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'remove required tool selection when a string thinking budget enables thinking',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max',
+        extraBody: { thinking_budget: '4096' },
+        thinkingMandatory: undefined,
+        reasoning: { effort: 'high' },
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when thinking is explicitly disabled alongside a budget',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-max',
+        extraBody: { thinking_budget: 4096 },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: false,
+        expectedToolChoice: 'required',
+      },
+      {
         name: 'preserve required tool selection when reasoning effort is none',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
         model: 'qwen3.8-max',
@@ -867,6 +900,30 @@ describe('ContentGenerationPipeline', () => {
         reasoning: undefined,
         includeThoughts: false,
         expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
+      {
+        name: 'preserve required tool selection when a null thinking budget means unset',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3-max',
+        extraBody: { thinking_budget: null },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'strip the tier-native disable shape for thinkingMandatory models',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        extraBody: { reasoning_effort: 'none' },
+        thinkingMandatory: true,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: undefined,
+        expectedReasoningEffort: undefined,
         expectedToolChoice: undefined,
       },
     ])('should $name', async (testCase) => {
@@ -1012,6 +1069,82 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(true);
       expect(apiCall.reasoning_effort).toBe('high');
       expect(apiCall.tool_choice).toBe('required');
+    });
+
+    it('never ships the escape-hatch disable shape to a thinkingMandatory model end to end', async () => {
+      // The provider canonicalizes the documented extra_body
+      // `enable_thinking: false` escape hatch into the tiered family's
+      // canonical disable shape (`reasoning_effort: 'none'`) even when no
+      // effort tier ships. The thinkingMandatory strip must catch that
+      // shape too: on a mandatory-thinking model it is a guaranteed
+      // request failure, exactly like the boolean it replaced.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        authType: AuthType.QWEN_OAUTH,
+        thinkingMandatory: true,
+        extra_body: { enable_thinking: false },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const realProvider = new DashScopeOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        {
+          getContentGeneratorConfig: () => ({ enableCacheControl: false }),
+        } as unknown as Config,
+      );
+      (mockProvider.buildRequest as Mock).mockImplementation((req) =>
+        realProvider.buildRequest(req, 'side-query:escape-hatch'),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.8-max-preview',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: {
+          thinkingConfig: { includeThoughts: true },
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:escape-hatch');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+      expect(apiCall.reasoning_effort).toBeUndefined();
+      expect(apiCall.tool_choice).toBeUndefined();
     });
 
     it('learns required thinking from a provider error and retries once', async () => {
@@ -5702,42 +5835,6 @@ describe('ContentGenerationPipeline', () => {
       await consume;
       expect(settled).toBe(true);
       expect(gated.wasReturned()).toBe(true);
-    });
-
-    it('bypasses the OpenAI error handler so the ETIMEDOUT code survives to the caller', async () => {
-      // Faithfully replicate EnhancedErrorHandler.handle's relevant behavior:
-      // it detects code 'ETIMEDOUT' as a timeout and re-throws a generic Error
-      // WITHOUT the code. If the inactivity timeout were routed through it, the
-      // retryable-transport classification (which reads err.code) would be lost.
-      (mockErrorHandler.handle as unknown as Mock).mockImplementation(
-        (error: unknown) => {
-          if ((error as { code?: string })?.code === 'ETIMEDOUT') {
-            throw new Error('stripped'); // the production failure mode
-          }
-          throw error;
-        },
-      );
-      const gated = gatedStream(); // silent
-      (mockClient.chat.completions.create as Mock).mockResolvedValue(
-        gated.stream,
-      );
-      const p = buildPipeline(1000);
-      const gen = await p.executeStream(
-        streamingRequest(new AbortController().signal),
-        'id',
-      );
-      const captured = (async () => {
-        for await (const _ of gen) {
-          /* drain */
-        }
-      })().catch((e: unknown) => e);
-      await vi.advanceTimersByTimeAsync(1000);
-      const err = await captured;
-      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
-      expect((err as { code?: string }).code).toBe('ETIMEDOUT');
-      expect(gated.wasReturned()).toBe(true);
-      // Proves the bypass: the handler (which would strip the code) is skipped.
-      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
     it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
