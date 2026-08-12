@@ -416,6 +416,28 @@ describe('createSpawnChannelFactory env policy', () => {
     });
   });
 
+  it('charges JSON string escaping before admitting prepared responses', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 64_000,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 6_000,
+      },
+    })('/tmp/project');
+    const response = {
+      content: '\u0001'.repeat(700),
+    };
+
+    expect(() =>
+      channel.transportGuard?.reservePreparedResponse(response),
+    ).toThrow('NDJSON decoded queue is full');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+    });
+  });
+
   it('keeps the default factory unbounded and validates opt-in limits early', () => {
     expect(DAEMON_ACP_NDJSON_LIMITS).toEqual({
       maxFrameBytes: 64 * 1024 * 1024,
