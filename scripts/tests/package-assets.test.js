@@ -723,14 +723,11 @@ describe('package asset scripts', () => {
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
 
-    const corePackageJson = JSON.parse(
-      readFileSync(
-        path.join(rootDir, 'packages', 'core', 'package.json'),
-        'utf8',
-      ),
+    const lockfile = JSON.parse(
+      readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
     );
     expect(distPackageJson.optionalDependencies.sharp).toBe(
-      corePackageJson.dependencies.sharp.replace(/^\^/, ''),
+      lockfile.packages['node_modules/sharp'].version,
     );
     expect(
       existsSync(
@@ -1079,6 +1076,22 @@ describe('package asset scripts', () => {
           },
           devDependencies: {
             'patch-package': '^8.0.1',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    writeFile(
+      rootDir,
+      'package-lock.json',
+      JSON.stringify(
+        {
+          packages: {
+            'node_modules/sharp': {
+              version: '0.35.3',
+            },
           },
         },
         null,

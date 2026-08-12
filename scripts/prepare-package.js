@@ -272,13 +272,6 @@ function writeDistPackageJson(rootDir, distDir) {
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
 
-  const corePackageJson = JSON.parse(
-    fs.readFileSync(
-      path.join(rootDir, 'packages', 'core', 'package.json'),
-      'utf-8',
-    ),
-  );
-
   const distPackageJson = {
     name: rootPackageJson.name,
     version: rootPackageJson.version,
@@ -329,7 +322,9 @@ function writeDistPackageJson(rootDir, distDir) {
       // is sufficient: its own optionalDependencies pull in the matching @img
       // platform binary for every OS/arch npm installs onto, so the platform
       // packages are not pinned here (pinning them drifts on a sharp bump).
-      sharp: corePackageJson.dependencies.sharp.replace(/^\^/, ''),
+      sharp: JSON.parse(
+        fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
+      ).packages['node_modules/sharp'].version,
     },
     engines: rootPackageJson.engines,
   };
