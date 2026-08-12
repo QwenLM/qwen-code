@@ -4528,6 +4528,36 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/config-option',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/config-option',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const configId = body['configId'];
+        const value = body['value'];
+        if (configId !== 'reasoning_effort') {
+          res.status(400).json({
+            error: '`configId` must be reasoning_effort',
+          });
+          return;
+        }
+        if (typeof value !== 'string' || !value) {
+          res.status(400).json({
+            error: '`value` is required and must be a non-empty string',
+          });
+          return;
+        }
+        const response = await runtime.bridge.setSessionConfigOption(
+          sessionId,
+          { sessionId, configId, value },
+        );
+        res.status(200).json(response);
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/recap',
     mutate(),
     withOwnerMutableSession(

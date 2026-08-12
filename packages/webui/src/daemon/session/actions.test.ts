@@ -1205,6 +1205,76 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('does not apply stale context from an earlier model switch', async () => {
+    const session = createMockSession('session-a');
+    const firstContext = {
+      ...contextStatus(session.sessionId),
+      workspaceCwd: '/workspace/model-a',
+    };
+    const secondContext = {
+      ...contextStatus(session.sessionId),
+      workspaceCwd: '/workspace/model-b',
+    };
+    const first = createDeferred<typeof firstContext>();
+    const second = createDeferred<typeof secondContext>();
+    session.context
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { actions, getConnection } = createActionsHarness({ session });
+
+    const selectA = actions.setModel('model-a');
+    await vi.waitFor(() => expect(session.context).toHaveBeenCalledTimes(1));
+    const selectB = actions.setModel('model-b');
+    await vi.waitFor(() => expect(session.context).toHaveBeenCalledTimes(2));
+    second.resolve(secondContext);
+    await expect(selectB).resolves.toEqual({});
+    first.resolve(firstContext);
+    await expect(selectA).resolves.toEqual({});
+
+    expect(getConnection()).toMatchObject({
+      currentModel: 'model-b',
+      context: secondContext,
+    });
+  });
+
+  it('does not apply a reasoning response after the model changes away and back', async () => {
+    const session = createMockSession('session-a');
+    const response = createDeferred<{ configOptions: unknown[] }>();
+    session.setConfigOption.mockReturnValueOnce(response.promise);
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        currentModel: 'qwen3.8-max',
+        reasoning: {
+          enabled: true,
+          effort: 'xhigh',
+          efforts: ['low', 'medium', 'xhigh'],
+        },
+      },
+      session,
+    });
+
+    const pending = actions.setReasoningEffort('medium');
+    await actions.setModel('qwen3-coder-plus');
+    await actions.setModel('qwen3.8-max');
+    response.resolve({
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'medium',
+          options: [{ value: 'none' }, { value: 'medium' }],
+        },
+      ],
+    });
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(getConnection()).toMatchObject({
+      currentModel: 'qwen3.8-max',
+      reasoning: undefined,
+    });
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -1436,6 +1506,11 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    setConfigOption: vi.fn(
+      async (): Promise<{ configOptions: unknown[] }> => ({
+        configOptions: [],
+      }),
+    ),
     shellCommand: vi.fn(async () => ({})),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),

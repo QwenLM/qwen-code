@@ -62,6 +62,7 @@ import {
   getTokenCountFromUsage,
   mapProviderStatus,
   mapSessionContextModels,
+  mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
@@ -2220,6 +2221,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               models: sessionModels.length > 0 ? sessionModels : current.models,
               currentModel: sessionCurrentModel ?? current.currentModel,
               currentMode: currentMode ?? current.currentMode,
+              reasoning:
+                context !== undefined
+                  ? mapSessionContextReasoning(
+                      context,
+                      current.reasoning?.effort,
+                    )
+                  : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
                 current.displayName,

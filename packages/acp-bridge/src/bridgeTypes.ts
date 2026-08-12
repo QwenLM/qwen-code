@@ -17,6 +17,8 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -1544,6 +1546,12 @@ export interface AcpSessionBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /** Change one advertised ACP configuration option for a live session. */
+  setSessionConfigOption(
+    sessionId: string,
+    req: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse>;
 
   /**
    * Switch UI language and optionally LLM output language for a live

@@ -28,7 +28,11 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus } from './httpErrors.js';
-import { mapSupportedCommands } from './mappers.js';
+import {
+  mapReasoningControls,
+  mapSessionContextReasoning,
+  mapSupportedCommands,
+} from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
@@ -150,6 +154,7 @@ export function getConnectionAfterSessionClear(
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
+    delete next.reasoning;
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -205,6 +210,9 @@ export function createDaemonSessionActions({
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
   let noticeOwner = sessionRef.current;
+  let reasoningActionToken = 0;
+  let appliedReasoningActionToken = 0;
+  let modelMutationGeneration = 0;
 
   function requireStableSession(): void {
     if (isCrossSessionTransitionPending()) {
@@ -724,8 +732,46 @@ export function createDaemonSessionActions({
           session.setModel(modelId),
           'Set model timed out',
         );
-        if (sessionRef.current === session) {
-          setConnection((current) => ({ ...current, currentModel: modelId }));
+        const modelGeneration =
+          sessionRef.current === session
+            ? ++modelMutationGeneration
+            : undefined;
+        if (modelGeneration !== undefined) {
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              modelGeneration !== modelMutationGeneration
+            ) {
+              return current;
+            }
+            return { ...current, currentModel: modelId, reasoning: undefined };
+          });
+        }
+        const context = await withActionTimeout(
+          session.context(),
+          'Refresh model context timed out',
+        ).catch(() => undefined);
+        if (
+          modelGeneration !== undefined &&
+          sessionRef.current === session &&
+          modelGeneration === modelMutationGeneration
+        ) {
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              modelGeneration !== modelMutationGeneration ||
+              current.currentModel !== modelId
+            ) {
+              return current;
+            }
+            return {
+              ...current,
+              context: context ?? current.context,
+              reasoning: context
+                ? mapSessionContextReasoning(context)
+                : undefined,
+            };
+          });
         }
         return result;
       } catch (error) {
@@ -734,6 +780,64 @@ export function createDaemonSessionActions({
           'Set model failed',
           error,
           'switch_model',
+        );
+      }
+    },
+
+    async setReasoningEffort(value) {
+      requireStableSession();
+      const actionToken = ++reasoningActionToken;
+      const sourceModel = getConnection().currentModel;
+      const sourceModelGeneration = modelMutationGeneration;
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Set reasoning effort failed',
+        'set_reasoning_effort',
+      );
+      try {
+        const result = await withActionTimeout(
+          session.setConfigOption('reasoning_effort', value),
+          'Set reasoning effort timed out',
+        );
+        const current = getConnection();
+        if (
+          sessionRef.current === session &&
+          sourceModelGeneration === modelMutationGeneration &&
+          current.currentModel === sourceModel &&
+          actionToken > appliedReasoningActionToken
+        ) {
+          appliedReasoningActionToken = actionToken;
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              sourceModelGeneration !== modelMutationGeneration ||
+              current.currentModel !== sourceModel
+            ) {
+              return current;
+            }
+            const configOptions = result.configOptions;
+            return {
+              ...current,
+              reasoning: mapReasoningControls(
+                configOptions,
+                current.reasoning?.effort,
+              ),
+              context: current.context
+                ? {
+                    ...current.context,
+                    state: { ...current.context.state, configOptions },
+                  }
+                : current.context,
+            };
+          });
+        }
+      } catch (error) {
+        throw dispatchActionError(
+          noticeForSession(session),
+          'Set reasoning effort failed',
+          error,
+          'set_reasoning_effort',
         );
       }
     },
@@ -1111,6 +1215,10 @@ export function createDaemonSessionActions({
               getModeFromSessionContext(context) ?? current.currentMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
+            reasoning: mapSessionContextReasoning(
+              context,
+              current.reasoning?.effort,
+            ),
           }));
         }
         return context;
