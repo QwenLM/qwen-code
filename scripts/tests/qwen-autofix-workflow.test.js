@@ -12312,9 +12312,7 @@ describe('run-agent idle watchdog', () => {
     // runs halve it, and retry: 2 in this config rides residual spikes.
     // The assertion carries the script's own verdict so a flake names its
     // cause.
-    expect(
-      readFileSync(autofixRunnerScriptPath, 'utf8'),
-    ).toContain(
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(
       'Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0',
     );
     for (const idleMs of [-1, 0]) {
