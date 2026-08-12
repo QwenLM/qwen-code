@@ -8433,6 +8433,11 @@ describe('createAcpSessionBridge', () => {
     const replayAttach = bridge.loadSession({
       sessionId: first.sessionId,
       workspaceCwd: WS_A,
+      // historyPageSize only takes effect in response-mode replay (#8933);
+      // without historyReplay the request silently degrades to 'stream',
+      // no transcript page is ever requested, and the waitFor below times
+      // out. This test predates that gating (logical merge conflict — both
+      // PRs were green on their own branches).
       historyReplay: 'response',
       historyPageSize: 10,
       clientId: 'rejected-load-client',
