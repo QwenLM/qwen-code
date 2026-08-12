@@ -1428,6 +1428,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setThemeError,
     historyManager.addItem,
     initializationResult.themeError,
+    config,
   );
 
   const {
@@ -1487,7 +1488,12 @@ export const AppContainer = (props: AppContainerProps) => {
     openEditorDialog,
     handleEditorSelect,
     exitEditorDialog,
-  } = useEditorSettings(settings, setEditorError, historyManager.addItem);
+  } = useEditorSettings(
+    settings,
+    setEditorError,
+    historyManager.addItem,
+    config,
+  );
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
