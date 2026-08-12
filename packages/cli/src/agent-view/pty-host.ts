@@ -5,11 +5,24 @@
  */
 
 import { StringDecoder } from 'node:string_decoder';
+import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { AGENT_VIEW_WORKER_ENV_KEYS } from './worker-sideband.js';
 import type { AgentViewLaunchFile } from './protocol.js';
 
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
 const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
-  'QWEN_AGENT_VIEW_PTY_HOST_TOKEN',
+  PTY_HOST_AUTH_TOKEN_ENV,
+  'TMUX',
+  'TMUX_PANE',
+  'STY',
+  'WINDOW',
+  'WINDOWID',
+  'TERMCAP',
+  'COLUMNS',
+  'LINES',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  'CI',
 ]);
 
 export interface AgentViewPtySpawnOptions {
@@ -34,6 +47,8 @@ export interface AgentViewPtyProcess {
   ): AgentViewPtyDisposable | void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
+  pause?(): void;
+  resume?(): void;
 }
 
 export interface AgentViewPtyModule {
@@ -79,9 +94,12 @@ export interface AgentViewPtyHostHandle {
   exited: Promise<AgentViewPtyHostExit>;
   getOutput?(): Promise<string>;
   write(data: Buffer): void;
+  resetInput?(): void;
   onData(callback: (data: string) => void): AgentViewPtyDisposable | void;
   resize(size: { columns: number; rows: number }): void;
   kill(signal?: string): void;
+  pause?(): void;
+  resume?(): void;
   shutdown?(): void | Promise<void>;
   dispose(): void;
 }
@@ -101,6 +119,8 @@ export class AgentViewLaunchConfigError extends Error {
 }
 
 export class BoundedOutputRing {
+  private static readonly MAX_CHUNK_BYTES = 8192;
+
   private chunks: Buffer[] = [];
   private retainedBytesValue = 0;
   private totalBytesValue = 0;
@@ -128,15 +148,17 @@ export class BoundedOutputRing {
     this.totalBytesValue += chunk.byteLength;
 
     if (chunk.byteLength >= this.maxBytes) {
+      // Copy instead of retaining a subarray view: a view would pin the
+      // entire backing ArrayBuffer of the (potentially huge) source chunk.
       const retained = trimUtf8Start(
-        chunk.subarray(chunk.byteLength - this.maxBytes),
+        Buffer.from(chunk.subarray(chunk.byteLength - this.maxBytes)),
       );
       this.chunks = [retained];
       this.retainedBytesValue = retained.byteLength;
       return;
     }
 
-    this.chunks.push(chunk);
+    this.appendChunk(chunk);
     this.retainedBytesValue += chunk.byteLength;
     this.trim();
   }
@@ -171,6 +193,19 @@ export class BoundedOutputRing {
       }
     }
     this.trimLeadingUtf8ContinuationBytes();
+  }
+
+  private appendChunk(chunk: Buffer): void {
+    const previous = this.chunks[this.chunks.length - 1];
+    if (
+      previous &&
+      previous.byteLength + chunk.byteLength <=
+        BoundedOutputRing.MAX_CHUNK_BYTES
+    ) {
+      this.chunks[this.chunks.length - 1] = Buffer.concat([previous, chunk]);
+      return;
+    }
+    this.chunks.push(chunk);
   }
 
   private trimLeadingUtf8ContinuationBytes(): void {
@@ -248,6 +283,7 @@ export function validateAgentViewLaunchConfig(
   validateOptionalString(value, 'model', errors);
   validateOptionalString(value, 'approvalMode', errors);
   validateOptionalString(value, 'sandbox', errors);
+  validateOptionalString(value, 'initialPrompt', errors);
   validateOptionalString(value, 'settingsDigest', errors);
   validateOptionalString(value, 'mcpDigest', errors);
   validateTerminal(value['terminal'], errors);
@@ -283,19 +319,40 @@ export async function launchAgentViewPtyHost(
   const output = new BoundedOutputRing(
     options.maxOutputBytes ?? DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES,
   );
-  const env = buildWorkerPtyEnv(stringProcessEnv(process.env), launch.env);
-  const term = env['TERM'];
+  // Strip the outer session's sideband identity from the inherited env so a
+  // nested host cannot leak its token/endpoint into the inner worker; the
+  // launch env intentionally carries the inner worker's own sideband keys.
+  const inheritedEnv = stringProcessEnv(process.env);
+  for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
+    delete inheritedEnv[key];
+  }
+  const term = launch.env['TERM'] || 'xterm-256color';
+  const workerEnv: Record<string, string> = {
+    ...inheritedEnv,
+    ...launch.env,
+    TERM: term,
+  };
+  for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
+    delete workerEnv[key];
+  }
   const ptyProcess = pty.module.spawn(command[0], command.slice(1), {
     cwd: launch.activeCwd,
     name: term,
     cols: launch.terminal.columns,
     rows: launch.terminal.rows,
-    env,
-    handleFlowControl: true,
+    env: workerEnv,
+    handleFlowControl: false,
   });
-  const inputDecoder = new StringDecoder('utf8');
+  let inputDecoder = new StringDecoder('utf8');
 
   const disposables: AgentViewPtyDisposable[] = [];
+  let settled = false;
+  let resolveExit: (exit: AgentViewPtyHostExit) => void = () => {};
+  const resolveExitOnce = (exit: AgentViewPtyHostExit) => {
+    if (settled) return;
+    settled = true;
+    resolveExit(exit);
+  };
   const dataDisposable = ptyProcess.onData((data) => {
     output.append(data);
   });
@@ -304,8 +361,9 @@ export async function launchAgentViewPtyHost(
   }
 
   const exited = new Promise<AgentViewPtyHostExit>((resolve) => {
+    resolveExit = resolve;
     const exitDisposable = ptyProcess.onExit((event) => {
-      resolve(event);
+      resolveExitOnce(event);
     });
     if (exitDisposable) {
       disposables.push(exitDisposable);
@@ -328,48 +386,31 @@ export async function launchAgentViewPtyHost(
       ptyProcess.resize(size.columns, size.rows);
     },
     kill(signal?: string): void {
-      ptyProcess.kill(signal);
+      // WindowsTerminal.kill throws for any signal string; the argument-less
+      // kill terminates the conpty process tree instead.
+      ptyProcess.kill(process.platform === 'win32' ? undefined : signal);
+    },
+    pause(): void {
+      ptyProcess.pause?.();
+    },
+    resume(): void {
+      ptyProcess.resume?.();
     },
     shutdown(): void {
-      ptyProcess.kill('SIGTERM');
+      ptyProcess.kill(process.platform === 'win32' ? undefined : 'SIGTERM');
+    },
+    resetInput(): void {
+      inputDecoder = new StringDecoder('utf8');
     },
     dispose(): void {
       ptyProcess.kill();
+      resolveExitOnce({ exitCode: 1 });
       for (const disposable of disposables.splice(0)) {
         disposable.dispose();
       }
     },
   };
 }
-
-function buildWorkerPtyEnv(
-  inherited: Record<string, string>,
-  launchEnv: Record<string, string>,
-): Record<string, string> {
-  const env = { ...inherited };
-  for (const key of INTERNAL_ONLY_WORKER_ENV_KEYS) {
-    delete env[key];
-  }
-  for (const key of COLOR_ENV_KEYS) {
-    delete env[key];
-  }
-  return {
-    ...env,
-    ...launchEnv,
-    TERM: launchEnv['TERM'] ?? 'xterm-256color',
-  };
-}
-
-const COLOR_ENV_KEYS = [
-  'NO_COLOR',
-  'NODE_DISABLE_COLORS',
-  'FORCE_COLOR',
-  'CLICOLOR',
-  'CLICOLOR_FORCE',
-  'TERM',
-  'CODEX_CI',
-  'CI',
-];
 
 async function importPty(
   specifier: '@lydell/node-pty' | 'node-pty',

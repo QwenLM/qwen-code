@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import {
+  digestAgentViewWorkerToken,
   getAgentViewSessionPaths,
   removeAgentViewRosterEntry,
   upsertAgentViewRosterEntry,
@@ -101,7 +102,7 @@ export async function dispatchAgentViewSession(
         ...(options.sidebandEndpoint
           ? { endpoint: options.sidebandEndpoint }
           : {}),
-        tokenDigest: digestToken(token),
+        tokenDigest: digestAgentViewWorkerToken(token),
         recentOutputBytes: 0,
       },
       options,
@@ -159,7 +160,9 @@ async function cleanupFailedDispatchCreation(
   }
 
   try {
-    await removeAgentViewRosterEntry(sessionId, options);
+    if (options.publishRoster ?? true) {
+      await removeAgentViewRosterEntry(sessionId, options);
+    }
   } catch {
     // Best-effort rollback only.
   }
@@ -172,10 +175,6 @@ async function cleanupFailedDispatchCreation(
   } catch {
     // Best-effort rollback only.
   }
-}
-
-function digestToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
 }
 
 function buildNativeWorkerArgv(sessionId: string, prompt?: string): string[] {

@@ -7,6 +7,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -841,5 +842,82 @@ describe('repo-hygiene runner', () => {
     const runner = readFileSync(runnerScriptPath, 'utf8');
     expect(runner).toContain("log.on('error', () => {});");
     expect(runner).toContain('if (log.destroyed)');
+  });
+});
+
+describe('repo-hygiene PR label step', () => {
+  // The label block sits inside the much larger 'Push and open PR' step;
+  // extract just it and replay it under `bash -e` against a recording gh
+  // stub, like the pr-self-report-label suite does.
+  const labelBlock = stepBody('Push and open PR').match(
+    /# Label requested by issue #7383[\s\S]*?\nfi\n/,
+  )?.[0];
+
+  const runLabelBlock = ({ probeOk = true, postOk = true } = {}) =>
+    withTmpDir((dir) => {
+      const callsLog = join(dir, 'calls.log');
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/bin/bash',
+          `echo "gh $*" >> '${callsLog}'`,
+          'case "$*" in',
+          `  *labels/autofix%2Frepo-hygiene*) [ '${probeOk}' = true ] || exit 1 ;;`,
+          `  *'-X POST'*) [ '${postOk}' = true ] || exit 1 ;;`,
+          'esac',
+          'exit 0',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(dir, 'gh'), 0o755);
+      const script = join(dir, 'label.sh');
+      writeFileSync(script, labelBlock);
+      const result = spawnSync('bash', ['-e', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH ?? ''}`,
+          GITHUB_REPOSITORY: 'o/r',
+          PR_URL: 'https://github.com/o/r/pull/77',
+        },
+      });
+      return {
+        status: result.status,
+        out: result.stdout,
+        calls: existsSync(callsLog) ? readFileSync(callsLog, 'utf8') : '',
+      };
+    });
+
+  it('extracts the label block verbatim from the publish step', () => {
+    expect(labelBlock).toBeTruthy();
+    // The probe encodes the slashed label name in the PATH SEGMENT.
+    expect(labelBlock).toContain('labels/autofix%2Frepo-hygiene');
+  });
+
+  it('adds the label through REST when the probe finds it', () => {
+    const added = runLabelBlock();
+    expect(added.status).toBe(0);
+    expect(added.calls).toContain(
+      'gh api repos/o/r/labels/autofix%2Frepo-hygiene',
+    );
+    // The PR number comes from the ${PR_URL##*/} extraction.
+    expect(added.calls).toContain(
+      'gh api -X POST repos/o/r/issues/77/labels -f labels[]=autofix/repo-hygiene',
+    );
+  });
+
+  it('skips without creating when the probe cannot confirm the label', () => {
+    const skipped = runLabelBlock({ probeOk: false });
+    expect(skipped.status).toBe(0);
+    expect(skipped.calls).not.toContain('-X POST');
+    expect(skipped.out).toContain(
+      'Could not verify label autofix/repo-hygiene; skipping',
+    );
+  });
+
+  it('warns but does not fail the step when the POST fails', () => {
+    const failed = runLabelBlock({ postOk: false });
+    expect(failed.status).toBe(0);
+    expect(failed.out).toContain('Could not add label autofix/repo-hygiene');
   });
 });

@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { atomicWriteFile, Storage } from '@qwen-code/qwen-code-core';
 import type {
   AgentViewActivityFile,
@@ -43,6 +44,7 @@ interface StoreOptions {
 }
 
 const rosterMutationQueues = new Map<string, Promise<void>>();
+const stateMutationQueues = new Map<string, Promise<void>>();
 
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
@@ -198,6 +200,30 @@ export async function writeAgentViewSessionState(
   await fs.mkdir(paths.tmpDir, { recursive: true });
 }
 
+/**
+ * Merges only the given fields into the persisted session state, so the
+ * writer never re-asserts fields it does not own from a stale read.
+ */
+export async function patchAgentViewSessionState(
+  sessionId: string,
+  patch: Partial<AgentViewSessionStateFile>,
+  options: StoreOptions = {},
+): Promise<void> {
+  return mutateAgentViewState(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.statePath);
+    if (existing === undefined) {
+      return;
+    }
+    await writeJsonFile(paths.statePath, {
+      ...existing,
+      ...patch,
+      schemaVersion: 1,
+    });
+    await fs.mkdir(paths.tmpDir, { recursive: true });
+  });
+}
+
 export async function listAgentViewSessionStates(
   options: StoreOptions = {},
 ): Promise<AgentViewSessionStateFile[]> {
@@ -236,7 +262,9 @@ export async function listAgentViewSessionSnapshots(
         await readAgentViewLaunch(state.sessionId, options),
       ),
       activity: await readAgentViewActivity(state.sessionId, options),
-      worker: await readAgentViewWorker(state.sessionId, options),
+      worker: redactAgentViewWorker(
+        await readAgentViewWorker(state.sessionId, options),
+      ),
       rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
     })),
   );
@@ -289,6 +317,10 @@ export async function writeAgentViewActivity(
     ...activity,
     schemaVersion: 1,
   });
+}
+
+export function digestAgentViewWorkerToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 export async function readAgentViewWorker(
@@ -419,6 +451,30 @@ async function mutateAgentViewRoster<T>(
   }
 }
 
+async function mutateAgentViewState<T>(
+  sessionId: string,
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const statePath = getAgentViewSessionPaths(sessionId, options).statePath;
+  const previous = stateMutationQueues.get(statePath) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const current = previous.catch(() => {}).then(() => gate);
+  stateMutationQueues.set(statePath, current);
+  await previous.catch(() => {});
+  try {
+    return await action();
+  } finally {
+    release();
+    if (stateMutationQueues.get(statePath) === current) {
+      stateMutationQueues.delete(statePath);
+    }
+  }
+}
+
 async function writeJsonFile(
   filePath: string,
   value: JsonRecord,
@@ -531,18 +587,19 @@ function normalizeLaunch(
   const projectCwd = stringValue(raw['projectCwd']);
   const activeCwd = stringValue(raw['activeCwd']);
   if (!sessionId || !entrypoint || !projectCwd || !activeCwd) return undefined;
-  return {
+  return stripUndefined({
     ...raw,
     schemaVersion: 1,
     sessionId,
     argv: stringArrayValue(raw['argv']),
     env: stringMapValue(raw['env']),
     entrypoint,
+    initialPrompt: stringValue(raw['initialPrompt']),
     projectCwd: path.resolve(projectCwd),
     activeCwd: path.resolve(activeCwd),
     includeDirectories: stringArrayValue(raw['includeDirectories']),
     terminal: terminalValue(raw['terminal']),
-  };
+  }) as AgentViewLaunchFile;
 }
 
 function redactAgentViewLaunch(
@@ -561,33 +618,35 @@ function normalizeActivity(
   if (!raw) return undefined;
   const lastActivityAt = stringValue(raw['lastActivityAt']);
   if (!lastActivityAt) return undefined;
-  return {
+  return stripUndefined({
     ...raw,
     schemaVersion: 1,
-    ...(stringValue(raw['summary'])
-      ? { summary: stringValue(raw['summary']) }
-      : {}),
-    ...(stringValue(raw['waitingFor'])
-      ? { waitingFor: stringValue(raw['waitingFor']) }
-      : {}),
-    ...(inputKindValue(raw['inputKind'])
-      ? { inputKind: inputKindValue(raw['inputKind']) }
-      : {}),
-    ...(stringValue(raw['lastResult'])
-      ? { lastResult: stringValue(raw['lastResult']) }
-      : {}),
-    ...(numberValue(raw['queuedPromptCount'])
-      ? { queuedPromptCount: numberValue(raw['queuedPromptCount']) }
-      : {}),
-    ...(stringValue(raw['queuedPromptPreview'])
-      ? { queuedPromptPreview: stringValue(raw['queuedPromptPreview']) }
-      : {}),
-    ...(stringValue(raw['lastQueuedPromptAt'])
-      ? { lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']) }
-      : {}),
+    summary: stringValue(raw['summary']),
+    waitingFor: stringValue(raw['waitingFor']),
+    inputKind: inputKindValue(raw['inputKind']),
+    lastResult: stringValue(raw['lastResult']),
+    queuedPromptCount: numberValue(raw['queuedPromptCount']),
+    queuedPromptPreview: stringValue(raw['queuedPromptPreview']),
+    lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
-  };
+  }) as AgentViewActivityFile;
+}
+
+export function redactAgentViewWorker(
+  worker: AgentViewWorkerFile | undefined,
+): AgentViewWorkerFile | undefined {
+  if (!worker) return undefined;
+  return stripUndefined({
+    ...worker,
+    hostAuthToken: undefined,
+  }) as AgentViewWorkerFile;
+}
+
+function stripUndefined(value: JsonRecord): JsonRecord {
+  return Object.fromEntries(
+    Object.entries(value).filter((entry) => entry[1] !== undefined),
+  );
 }
 
 function normalizeWorker(
@@ -643,18 +702,24 @@ function ownershipValue(
     : 'managed';
 }
 
-function sessionStateValue(
+export function isAgentViewSessionState(
   value: unknown,
-): AgentViewSessionStateFile['sessionState'] {
-  return value === 'starting' ||
+): value is AgentViewSessionStateFile['sessionState'] {
+  return (
+    value === 'starting' ||
     value === 'working' ||
     value === 'needs_input' ||
     value === 'idle' ||
     value === 'completed' ||
     value === 'stopped' ||
     value === 'failed'
-    ? value
-    : 'failed';
+  );
+}
+
+function sessionStateValue(
+  value: unknown,
+): AgentViewSessionStateFile['sessionState'] {
+  return isAgentViewSessionState(value) ? value : 'failed';
 }
 
 function processStateValue(
@@ -682,7 +747,9 @@ function worktreeModeValue(
   return value === 'worktree' || value === 'shared-unisolated' ? value : 'none';
 }
 
-function inputKindValue(value: unknown): AgentViewActivityFile['inputKind'] {
+export function inputKindValue(
+  value: unknown,
+): AgentViewActivityFile['inputKind'] {
   return value === 'blocking' || value === 'soft' ? value : undefined;
 }
 

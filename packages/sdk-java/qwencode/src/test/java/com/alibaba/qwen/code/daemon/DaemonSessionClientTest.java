@@ -48,7 +48,7 @@ class DaemonSessionClientTest {
         server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
                 "{\"v\":1,\"mode\":\"http-bridge\",\"features\":["
                         + "\"session_scope_override\",\"client_heartbeat\","
-                        + "\"prompt_absolute_deadline\"],"
+                        + "\"prompt_absolute_deadline\",\"session_id_override\"],"
                         + "\"transports\":[\"rest\"]}"));
         server.createContext("/session", exchange -> {
             if ("POST".equals(exchange.getRequestMethod())
@@ -197,6 +197,59 @@ class DaemonSessionClientTest {
         try (DaemonClient daemon = newClient()) {
             assertThrows(DaemonProtocolException.class, daemon::createSession);
             assertEquals(null, createBody.get());
+        }
+    }
+
+    @Test
+    void serializesAndVerifiesCallerSuppliedSessionId() {
+        String sessionId = "550e8400-e29b-41d4-a716-446655440000";
+        String requestedSessionId = sessionId.toUpperCase(java.util.Locale.ROOT);
+        server.removeContext("/session");
+        server.createContext("/session", exchange -> {
+            createBody.set(new String(exchange.getRequestBody().readAllBytes(),
+                    StandardCharsets.UTF_8));
+            sendJson(exchange, 200, sessionJson(sessionId, "client-fixed"));
+        });
+        server.createContext("/session/" + sessionId + "/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient ignored = daemon.createSession(
+                        CreateSessionRequest.builder().sessionId(requestedSessionId).build())) {
+            assertTrue(createBody.get().contains(
+                    "\"sessionId\":\"" + requestedSessionId + "\""));
+        }
+    }
+
+    @Test
+    void refusesCallerSuppliedSessionIdBeforeMutationWhenCapabilityIsMissing() {
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> sendJson(exchange, 200,
+                "{\"v\":1,\"mode\":\"http-bridge\",\"features\":["
+                        + "\"session_scope_override\"],"
+                        + "\"transports\":[\"rest\"]}"));
+
+        try (DaemonClient daemon = newClient()) {
+            assertThrows(DaemonProtocolException.class,
+                    () -> daemon.createSession(CreateSessionRequest.builder()
+                            .sessionId("550e8400-e29b-41d4-a716-446655440000")
+                            .build()));
+            assertNull(createBody.get());
+        }
+    }
+
+    @Test
+    void mismatchedCallerSuppliedSessionIdIsOutcomeUnknown() {
+        server.removeContext("/session");
+        server.createContext("/session", exchange -> sendJson(exchange, 200,
+                sessionJson("550e8400-e29b-41d4-a716-446655440999", "client-fixed")));
+
+        try (DaemonClient daemon = newClient()) {
+            SessionCreationOutcomeUnknownException failure = assertThrows(
+                    SessionCreationOutcomeUnknownException.class,
+                    () -> daemon.createSession(CreateSessionRequest.builder()
+                            .sessionId("550e8400-e29b-41d4-a716-446655440000")
+                            .build()));
+            assertInstanceOf(DaemonProtocolException.class, failure.getCause());
         }
     }
 
@@ -1625,6 +1678,18 @@ class DaemonSessionClientTest {
             session.destroySession();
         }
         assertEquals(null, deleteClientId.get());
+    }
+
+    @Test
+    void destroyAcceptsAlreadyClosingForCurrentSession() {
+        server.createContext("/session/session-1", exchange ->
+                sendJson(exchange, 404,
+                        "{\"error\":\"closing\",\"code\":\"session_closing\",\"sessionId\":\"session-1\"}"));
+
+        try (DaemonClient daemon = newClient()) {
+            DaemonSessionClient session = daemon.createSession();
+            session.destroySession();
+        }
     }
 
     @Test

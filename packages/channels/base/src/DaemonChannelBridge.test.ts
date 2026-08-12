@@ -9,6 +9,7 @@ import {
   type DaemonChannelLoopMcpHost,
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
+import { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
 
 class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   private events: DaemonChannelEvent[] = [];
@@ -243,6 +244,7 @@ describe('DaemonChannelBridge', () => {
     expect(session.prompt).toHaveBeenCalledWith(
       {
         prompt: [{ type: 'text', text: 'summarize' }],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
       },
       expect.any(AbortSignal),
     );
@@ -1849,6 +1851,7 @@ describe('DaemonChannelBridge', () => {
           { type: 'image', data: 'base64-image', mimeType: 'image/png' },
           { type: 'text', text: 'describe' },
         ],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
       },
       expect.any(AbortSignal),
     );

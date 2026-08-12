@@ -15,9 +15,13 @@ import {
   createAgentViewPtyHostServer,
   connectAgentViewPtyHostProcess,
   getAgentViewPtyHostSocketPath,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   launchAgentViewPtyHostProcess,
+  runAgentViewPtyHostProcess,
 } from './pty-host-process.js';
+import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
 import { BoundedOutputRing, type AgentViewPtyHostHandle } from './pty-host.js';
+import { getAgentViewSessionPaths } from './supervisor-store.js';
 
 const socketDirs = new Set<string>();
 
@@ -28,7 +32,9 @@ describe('Agent View PTY host process server', () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
     await Promise.all(
       [...socketDirs].map((dir) =>
-        fs.rm(dir, { recursive: true, force: true }),
+        isWindowsPipePath(dir)
+          ? Promise.resolve()
+          : fs.rm(dir, { recursive: true, force: true }),
       ),
     );
     socketDirs.clear();
@@ -140,6 +146,83 @@ describe('Agent View PTY host process server', () => {
     expect(host.killedWith).toBe('SIGTERM');
   });
 
+  it('forwards attach input bytes without UTF-8 re-encoding', async () => {
+    const host = fakeHost();
+    const rawWrites: Buffer[] = [];
+    host.write = (data: Buffer) => {
+      rawWrites.push(Buffer.from(data));
+    };
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const socket = net.createConnection(socketPath);
+    await new Promise<void>((resolve) => socket.once('connect', resolve));
+    const request = Buffer.from(
+      `${JSON.stringify({ id: 'attach-1', op: 'attachStream' })}\n`,
+      'utf8',
+    );
+    // Latin-1 'e-acute' + 'A': invalid UTF-8 that a transparent
+    // transport must deliver verbatim.
+    const keystrokes = Buffer.from([0xe9, 0x41]);
+    socket.write(Buffer.concat([request, keystrokes]));
+    await waitFor(() => rawWrites.length > 0);
+    socket.write(Buffer.from([0xff, 0x00]));
+    await waitFor(() => Buffer.concat(rawWrites).length === 4);
+
+    expect([...Buffer.concat(rawWrites)]).toEqual([0xe9, 0x41, 0xff, 0x00]);
+
+    socket.destroy();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reclaims a stale socket lock left by a dead process',
+    async () => {
+      const host = fakeHost();
+      const socketPath = shortSocketPath();
+      await fs.mkdir(path.dirname(socketPath), { recursive: true });
+      await fs.writeFile(`${socketPath}.lock`, '2147483647');
+      const server = createAgentViewPtyHostServer(host, socketPath);
+      servers.push(server);
+
+      await expect(server.listen()).resolves.toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'releases the socket lock on close so the path can be reused',
+    async () => {
+      const host = fakeHost();
+      const socketPath = shortSocketPath();
+      const first = createAgentViewPtyHostServer(host, socketPath);
+      await first.listen();
+      const second = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      servers.push(second);
+
+      await expect(second.listen()).rejects.toThrow('already in use');
+      await first.close();
+      await expect(second.listen()).resolves.toBeUndefined();
+    },
+  );
+
+  it('rejects non-positive or non-integer resize dimensions', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    await expect(
+      requestHost(socketPath, 'resize', { columns: 0, rows: 40 }),
+    ).rejects.toThrow('columns must be a positive integer');
+    await expect(
+      requestHost(socketPath, 'resize', { columns: 120, rows: 2.5 }),
+    ).rejects.toThrow('rows must be a positive integer');
+
+    expect(host.resizes).toEqual([]);
+  });
+
   it('rejects unsupported kill signals', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -152,6 +235,63 @@ describe('Agent View PTY host process server', () => {
     ).rejects.toThrow('Agent View PTY host signal is not allowed.');
 
     expect(host.killedWith).toBeUndefined();
+  });
+
+  it('escalates a TERM-resistant worker to SIGKILL after the grace period', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      shutdownGraceMs: 20,
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
+      shuttingDown: true,
+    });
+    expect(host.shutdowns).toBe(1);
+
+    await waitFor(() => host.killedWith === 'SIGKILL');
+  });
+
+  it('does not escalate when the worker exits within the grace period', async () => {
+    const host = fakeHost();
+    let resolveExited: (exit: { exitCode: number }) => void = () => {};
+    host.exited = new Promise<{ exitCode: number }>((resolve) => {
+      resolveExited = resolve;
+    });
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      shutdownGraceMs: 20,
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
+      shuttingDown: true,
+    });
+    resolveExited({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(host.killedWith).toBeUndefined();
+  });
+
+  it('falls back to kill(SIGTERM) when the host has no shutdown method', async () => {
+    const host = fakeHost();
+    delete (host as Partial<typeof host>).shutdown;
+    host.exited = Promise.resolve({ exitCode: 0 });
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      shutdownGraceMs: 20,
+    });
+    servers.push(server);
+    await server.listen();
+
+    await expect(requestHost(socketPath, 'shutdown')).resolves.toEqual({
+      shuttingDown: true,
+    });
+
+    expect(host.killedWith).toBe('SIGTERM');
   });
 
   it('requires auth when the host server has a token', async () => {
@@ -171,6 +311,84 @@ describe('Agent View PTY host process server', () => {
     ).resolves.toMatchObject({
       workerPid: 1234,
     });
+  });
+
+  it('wires the env host token into the entrypoint server', async () => {
+    const launchDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-entrypoint-'),
+    );
+    socketDirs.add(launchDir);
+    const launchPath = path.join(launchDir, 'launch.json');
+    await fs.writeFile(
+      launchPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId: 'session-entry',
+        argv: ['qwen', '--agent-view-worker'],
+        env: { QWEN_AGENT_VIEW_WORKER: '1' },
+        entrypoint: 'qwen',
+        projectCwd: '/repo',
+        activeCwd: '/repo',
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      }),
+    );
+    let exitCallback: ((event: { exitCode: number }) => void) | undefined;
+    const socketPath = shortSocketPath();
+    // The token travels via the host env, mirroring the spawn contract.
+    const previousToken = process.env[PTY_HOST_AUTH_TOKEN_ENV];
+    process.env[PTY_HOST_AUTH_TOKEN_ENV] = 'entry-token';
+    try {
+      const runPromise = runAgentViewPtyHostProcess({
+        launchPath,
+        socketPath,
+        loadPty: async () => ({
+          name: 'injected',
+          module: {
+            spawn: () => ({
+              pid: 4321,
+              write: () => {},
+              onData: () => ({ dispose: () => {} }),
+              onExit: (callback: (event: { exitCode: number }) => void) => {
+                exitCallback = callback;
+                return { dispose: () => {} };
+              },
+              resize: () => {},
+              kill: () => {},
+            }),
+          },
+        }),
+      });
+      try {
+        let status: unknown;
+        for (let attempt = 0; attempt < 50 && status === undefined; attempt++) {
+          try {
+            status = await requestHost(
+              socketPath,
+              'status',
+              undefined,
+              'entry-token',
+            );
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        }
+
+        expect(status).toEqual({ pid: process.pid, workerPid: 4321 });
+        await expect(requestHost(socketPath, 'status')).rejects.toThrow(
+          'Unauthorized PTY host request.',
+        );
+      } finally {
+        exitCallback?.({ exitCode: 0 });
+        await runPromise;
+      }
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env[PTY_HOST_AUTH_TOKEN_ENV];
+      } else {
+        process.env[PTY_HOST_AUTH_TOKEN_ENV] = previousToken;
+      }
+    }
   });
 
   it('requires auth for attach streams', async () => {
@@ -251,13 +469,43 @@ describe('Agent View PTY host process server', () => {
     });
   });
 
+  it('returns escape-heavy logs near the output retention cap', async () => {
+    const host = fakeHost(1024 * 1024);
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const output = '\x1b[0m'.repeat(256 * 1024);
+    host.emitData(output);
+
+    await expect(requestHost(socketPath, 'logs')).resolves.toEqual({
+      output,
+    });
+  });
+
+  it('returns control-byte-heavy logs through the connected handle', async () => {
+    const host = fakeHost(1024 * 1024);
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+
+    const output = '\x01'.repeat(1024 * 1024);
+    host.emitData(output);
+
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-control-byte-logs'),
+      socketPath,
+    );
+
+    await expect(connected.getOutput?.()).resolves.toBe(output);
+  });
+
   it.skipIf(process.platform === 'win32')(
     'restricts Unix socket and parent directory permissions',
     async () => {
-      const socketDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-pty-host-'),
-      );
-      const socketPath = path.join(socketDir, 'nested', 'pty-host.sock');
+      const socketPath = shortSocketPath();
       const server = createAgentViewPtyHostServer(fakeHost(), socketPath);
       servers.push(server);
 
@@ -269,8 +517,75 @@ describe('Agent View PTY host process server', () => {
       ]);
       expect(dirStat.mode & 0o777).toBe(0o700);
       expect(socketStat.mode & 0o777).toBe(0o600);
+    },
+  );
 
-      await fs.rm(socketDir, { recursive: true, force: true });
+  it.skipIf(process.platform === 'win32')(
+    'rejects listening on a socket path owned by a live server',
+    async () => {
+      const socketPath = shortSocketPath();
+      const first = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      servers.push(first);
+      await first.listen();
+
+      const second = createAgentViewPtyHostServer(fakeHost(), socketPath);
+
+      await expect(second.listen()).rejects.toThrow('already in use');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'replaces a stale socket file when listening',
+    async () => {
+      const socketPath = shortSocketPath();
+      await fs.mkdir(path.dirname(socketPath), { recursive: true });
+      await fs.writeFile(socketPath, '');
+      const server = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      servers.push(server);
+
+      await expect(server.listen()).resolves.toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not unlink a socket path taken over by another live server',
+    async () => {
+      const socketPath = shortSocketPath();
+      const replacement = net.createServer((socket) => {
+        socket.on('error', () => {});
+      });
+      await listenServer(replacement, socketPath);
+      try {
+        const displaced = createAgentViewPtyHostServer(fakeHost(), socketPath);
+
+        await displaced.close();
+
+        await expect(fs.stat(socketPath)).resolves.toBeDefined();
+        await expect(connectOnce(socketPath)).resolves.toBe(true);
+      } finally {
+        replacement.close();
+        await removeTestSocket(socketPath);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a symlinked socket parent directory',
+    async () => {
+      const realDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qah-real-'));
+      const linkDir = path.join(
+        os.tmpdir(),
+        `qah-link-${process.pid}-${Date.now()}`,
+      );
+      await fs.symlink(realDir, linkDir);
+      const socketPath = path.join(linkDir, 'pty.sock');
+      const server = createAgentViewPtyHostServer(fakeHost(), socketPath);
+      try {
+        await expect(server.listen()).rejects.toThrow('must not be a symlink');
+      } finally {
+        await fs.rm(linkDir, { force: true });
+        await fs.rm(realDir, { recursive: true, force: true });
+      }
     },
   );
 
@@ -337,7 +652,7 @@ describe('Agent View PTY host process server', () => {
       );
 
       await server.close();
-      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(10000);
 
       await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
     } finally {
@@ -380,6 +695,23 @@ describe('Agent View PTY host process server', () => {
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
+  it('rejects input written before an attach stream is established', async () => {
+    const host = fakeHost();
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath);
+    servers.push(server);
+    await server.listen();
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-early-write'),
+      socketPath,
+    );
+
+    expect(() => connected.write(Buffer.from('early'))).toThrow(
+      'Agent View PTY host input requires an active attach stream.',
+    );
+    expect(host.input).toBe('');
+  });
+
   it('bridges data through a connected host handle', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
@@ -398,6 +730,35 @@ describe('Agent View PTY host process server', () => {
     await waitFor(() => host.input === 'hello');
     host.emitData('output');
     await waitFor(() => data.join('') === 'output');
+
+    disposable?.dispose();
+  });
+
+  it('passes auth tokens through connected host handle operations', async () => {
+    const host = fakeHost(1024 * 1024);
+    const socketPath = shortSocketPath();
+    const server = createAgentViewPtyHostServer(host, socketPath, {
+      authToken: 'secret',
+    });
+    servers.push(server);
+    await server.listen();
+    const connected = await connectAgentViewPtyHostProcess(
+      createLaunch('session-token-handle'),
+      socketPath,
+      'secret',
+    );
+    const data: string[] = [];
+
+    const disposable = connected.onData((chunk) => data.push(chunk));
+    connected.write(Buffer.from('hello'));
+    await waitFor(() => host.input === 'hello');
+    host.emitData('output');
+    await waitFor(() => data.join('') === 'output');
+    await expect(connected.getOutput?.()).resolves.toBe('output');
+    connected.resize({ columns: 120, rows: 40 });
+    await waitFor(() => host.resizes.length === 1);
+    connected.kill('SIGTERM');
+    await waitFor(() => host.killedWith === 'SIGTERM');
 
     disposable?.dispose();
   });
@@ -422,7 +783,7 @@ describe('Agent View PTY host process server', () => {
         globalDir: 'C:\\Users\\test\\.qwen',
         platform: 'win32',
       }),
-    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-pty-[a-f0-9]{16}$/);
+    ).toMatch(/^\\\\\.\\pipe\\qwen-agent-pty-[a-f0-9]{12}$/);
 
     const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
       globalDir: path.join(os.tmpdir(), 'qwen-agent-view-test'.repeat(10)),
@@ -430,10 +791,11 @@ describe('Agent View PTY host process server', () => {
     });
     const uid =
       typeof process.getuid === 'function' ? process.getuid() : 'user';
-    expect(path.dirname(fallbackPath)).toBe(
+    expect([
       path.join(os.tmpdir(), `qwen-avp-${uid}`),
-    );
-    expect(path.basename(fallbackPath)).toMatch(/^[a-f0-9]{16}\.sock$/);
+      path.join('/tmp', `qwen-avp-${uid}`),
+    ]).toContain(path.dirname(fallbackPath));
+    expect(path.basename(fallbackPath)).toMatch(/^[a-f0-9]{12}\.sock$/);
     expect(Buffer.byteLength(fallbackPath)).toBeLessThan(100);
   });
 
@@ -446,11 +808,43 @@ describe('Agent View PTY host process server', () => {
     expect(Buffer.byteLength(fallbackPath)).toBeLessThan(100);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'skips an unusable fallback socket directory',
+    async () => {
+      const tmpRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pty-bad-tmp-'),
+      );
+      const tmpFile = path.join(tmpRoot, 'tmp-file');
+      const previousTmpDir = process.env['TMPDIR'];
+      await fs.writeFile(tmpFile, 'not a directory');
+      process.env['TMPDIR'] = tmpFile;
+      try {
+        const fallbackPath = getAgentViewPtyHostSocketPath('session-1', {
+          globalDir: path.join('/very-long-path'.repeat(20), '.qwen'),
+          platform: 'linux',
+        });
+        const uid =
+          typeof process.getuid === 'function' ? process.getuid() : 'user';
+
+        expect(path.dirname(fallbackPath)).toBe(
+          path.join('/tmp', `qwen-avp-${uid}`),
+        );
+      } finally {
+        if (previousTmpDir === undefined) {
+          delete process.env['TMPDIR'];
+        } else {
+          process.env['TMPDIR'] = previousTmpDir;
+        }
+        await fs.rm(tmpRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('rejects oversized PTY host responses', async () => {
     const socketPath = shortSocketPath();
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
-      socket.write('x'.repeat(2 * 1024 * 1024 + 1));
+      socket.end(`${'x'.repeat(8 * 1024 * 1024 + 1)}\n`);
     });
     await listenServer(server, socketPath);
     try {
@@ -458,6 +852,8 @@ describe('Agent View PTY host process server', () => {
         connectAgentViewPtyHostProcess(
           createLaunch('session-oversized-response'),
           socketPath,
+          undefined,
+          { readyRetries: 3, requestTimeoutMs: 5000 },
         ),
       ).rejects.toThrow('Agent View PTY host response line is too large.');
     } finally {
@@ -477,6 +873,28 @@ describe('Agent View PTY host process server', () => {
       await expect(
         connectAgentViewPtyHostProcess(
           createLaunch('session-malformed-response'),
+          socketPath,
+        ),
+      ).rejects.toMatchObject({
+        name: 'AgentViewPtyHostProtocolError',
+      });
+    } finally {
+      server.close();
+      await removeTestSocket(socketPath);
+    }
+  });
+
+  it('rejects promptly when the host closes without a response', async () => {
+    const socketPath = shortSocketPath();
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.end();
+    });
+    await listenServer(server, socketPath);
+    try {
+      await expect(
+        connectAgentViewPtyHostProcess(
+          createLaunch('session-closed-response'),
           socketPath,
         ),
       ).rejects.toThrow();
@@ -513,7 +931,59 @@ describe('Agent View PTY host process server', () => {
     expect(child.killedWith).toBe('SIGKILL');
   });
 
-  it('kills a spawned child when the handle is disposed', async () => {
+  it('fails quickly when the spawned PTY host emits an error before ready', async () => {
+    const child = fakeChildProcess(2468);
+    const launched = launchAgentViewPtyHostProcess(
+      createLaunch('session-spawn-error'),
+      {
+        globalDir: '/tmp/qwen-agent-view-test',
+        spawnProcess: () => child,
+      },
+    );
+    child.emit('error', new Error('spawn failed'));
+
+    await expect(launched).rejects.toThrow('spawn failed');
+    expect(child.killedWith).toBe('SIGKILL');
+  });
+
+  it('passes the launch file, socket path, and token to spawned PTY hosts', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-spawn-'),
+    );
+    const launch = createLaunch('session-spawn-contract');
+    const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
+      globalDir,
+    });
+    socketDirs.add(path.dirname(socketPath));
+    const server = await createStatusServer(socketPath);
+    const child = fakeChildProcess(2468);
+    const spawnProcess = vi.fn(() => child);
+    try {
+      await launchAgentViewPtyHostProcess(launch, {
+        globalDir,
+        spawnProcess,
+      });
+
+      expect(spawnProcess).toHaveBeenCalledWith(
+        [
+          INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+          getAgentViewSessionPaths(launch.sessionId, { globalDir }).launchPath,
+          socketPath,
+        ],
+        expect.objectContaining({
+          [PTY_HOST_AUTH_TOKEN_ENV]: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+          ),
+        }),
+        expect.stringContaining('host-stderr.log'),
+      );
+    } finally {
+      server.close();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('asks a spawned host to shut down when the handle is disposed', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pty-launch-'),
     );
@@ -521,7 +991,9 @@ describe('Agent View PTY host process server', () => {
     const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
       globalDir,
     });
-    const server = await createStatusServer(socketPath);
+    socketDirs.add(path.dirname(socketPath));
+    const operations: string[] = [];
+    const server = await createStatusServer(socketPath, operations);
     const child = fakeChildProcess(2468);
     try {
       const handle = await launchAgentViewPtyHostProcess(launch, {
@@ -531,8 +1003,37 @@ describe('Agent View PTY host process server', () => {
 
       handle.dispose();
 
-      expect(child.killedWith).toBe('SIGTERM');
+      await waitFor(() => operations.includes('shutdown'));
+      expect(child.killedWith).toBeUndefined();
       await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
+    } finally {
+      server.close();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
+
+  it('asks a spawned host to deliver kill signals before falling back to the child', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pty-kill-'),
+    );
+    const launch = createLaunch('session-kill-child');
+    const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
+      globalDir,
+    });
+    socketDirs.add(path.dirname(socketPath));
+    const operations: string[] = [];
+    const server = await createStatusServer(socketPath, operations);
+    const child = fakeChildProcess(2468);
+    try {
+      const handle = await launchAgentViewPtyHostProcess(launch, {
+        globalDir,
+        spawnProcess: () => child,
+      });
+
+      handle.kill('SIGTERM');
+
+      await waitFor(() => operations.includes('kill'));
+      expect(child.killedWith).toBeUndefined();
     } finally {
       server.close();
       await fs.rm(globalDir, { recursive: true, force: true });
@@ -547,6 +1048,7 @@ describe('Agent View PTY host process server', () => {
     const socketPath = getAgentViewPtyHostSocketPath(launch.sessionId, {
       globalDir,
     });
+    socketDirs.add(path.dirname(socketPath));
     const server = await createStatusServer(socketPath);
     const child = fakeChildProcess(2468);
     try {
@@ -702,7 +1204,10 @@ async function listenServer(
   });
 }
 
-async function createStatusServer(socketPath: string): Promise<net.Server> {
+async function createStatusServer(
+  socketPath: string,
+  operations: string[] = [],
+): Promise<net.Server> {
   if (!isWindowsPipePath(socketPath)) {
     await fs.mkdir(path.dirname(socketPath), { recursive: true });
   }
@@ -716,7 +1221,9 @@ async function createStatusServer(socketPath: string): Promise<net.Server> {
       const request = JSON.parse(buffer.slice(0, newline)) as {
         id: string;
         op: string;
+        params?: Record<string, unknown>;
       };
+      operations.push(request.op);
       socket.end(
         `${JSON.stringify({
           id: request.id,
@@ -724,7 +1231,9 @@ async function createStatusServer(socketPath: string): Promise<net.Server> {
           result:
             request.op === 'status'
               ? { pid: process.pid, workerPid: 1234 }
-              : { shuttingDown: true },
+              : request.op === 'kill'
+                ? { killed: true }
+                : { shuttingDown: true },
         })}\n`,
       );
     });
@@ -734,9 +1243,21 @@ async function createStatusServer(socketPath: string): Promise<net.Server> {
 }
 
 async function waitForClose(socket: net.Socket): Promise<void> {
+  if (socket.destroyed) return;
   await new Promise<void>((resolve) => {
     socket.once('close', () => resolve());
     socket.once('error', () => resolve());
+  });
+}
+
+async function connectOnce(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => resolve(false));
   });
 }
 

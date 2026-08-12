@@ -11,7 +11,6 @@ import type {
   AgentViewRosterEntry,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
-  AgentViewWorkerFile,
 } from './protocol.js';
 
 export type AgentViewTaskState =
@@ -83,7 +82,6 @@ export interface AgentViewPresentationInput {
   rosterEntry?: AgentViewRosterEntry;
   launch?: AgentViewLaunchFile;
   activity?: AgentViewActivityFile;
-  worker?: AgentViewWorkerFile;
   now?: Date | string;
 }
 
@@ -222,6 +220,13 @@ function deriveRecoverability(
   if (state.processState === 'alive') {
     return 'live';
   }
+  if (
+    state.processState === 'starting' ||
+    state.processState === 'restarting' ||
+    state.processState === 'hibernating'
+  ) {
+    return 'blocked';
+  }
   if (taskState === 'waiting' && inputState !== 'soft_question') {
     return 'blocked';
   }
@@ -323,7 +328,7 @@ function deriveSubtitle(
   const result = cleanText(activity?.lastResult);
   if (result) return result;
   if (taskState === 'stopped') return 'Stopped by user';
-  if (taskState === 'failed') return 'Worker exited unexpectedly';
+  if (taskState === 'failed') return 'Session failed';
   return '';
 }
 

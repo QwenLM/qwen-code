@@ -36,15 +36,19 @@
 // The failure mode of a bug in this file is the old behaviour (audit every
 // territory every round), never a skipped one.
 
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { readTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
   deliveredVerbatimLines,
+  findingsPointerOf,
   flattenPrompt,
   promptLines,
+  promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
+import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -68,15 +72,6 @@ export interface RoundSchedule {
   /** Every chunk is retired and none is due: the audit has converged. */
   converged: boolean;
 }
-
-/**
- * The loop's hard cap, mirroring SKILL.md's Step 5 ("Stop after 5 rounds
- * regardless"). Enforcing it is the orchestrator's — the builder will build
- * a sixth round if asked — but the retirement note is the orchestrator's
- * only word about a skipped chunk, and it must not promise a cold check the
- * cap has already forbidden.
- */
-export const REVERSE_AUDIT_MAX_ROUNDS = 5;
 
 /**
  * The round part of a per-chunk reverse-audit record key, as `runAllChunks`
@@ -103,13 +98,13 @@ const REVERSE_AUDIT_MARKER = 'reverse-audit';
  * prompt bakes no read, where the bar falls back to "opened the diff at
  * all" — a shape this module's own records never have.
  *
- * The scan is bound to the diff's own path because the record is the FOLDED
- * launch prompt — the cumulative findings list rides inside it, verbatim,
- * above the builder's own text — and findings prose quoting ANY
- * `offset=N, limit=M` pair (a read_file call under discussion, this very
- * file in a diff) would otherwise inject its range into the territory.
+ * The scan is bound to the diff's own path because the prompt carries other
+ * `read_file` lines — the brief, the findings list file — and prose quoting
+ * ANY `offset=N, limit=M` pair (a read_file call under discussion, this very
+ * file in a diff) would otherwise inject its range into the territory. When
+ * the findings list was folded into the prompt verbatim it did exactly that:
  * `openedTheTerritory` passes on ANY overlap with ANY range, so an injected
- * range can only WIDEN the bar: an auditor whose only diff read was lines
+ * range can only WIDEN the bar — an auditor whose only diff read was lines
  * 1-50 would retire a chunk whose territory is 1001-1200 the moment a
  * finding quoted `offset=0, limit=50` — the same range-blind hole the
  * territory check exists to close, reopened by honest findings. Only a read
@@ -140,15 +135,15 @@ const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
 
 /**
  * The other half of a filed finding. A `**File:**` line alone is not proof
- * the auditor FILED anything: the cumulative list is folded into its launch
- * prompt, and an auditor explaining "already covered, not re-reporting" can
- * echo an entry's file line into its return. Every finding actually filed
- * carries the full block the format mandates — severity included — so the
- * pair is what distinguishes a report from a bare file-line echo; a
- * quotation of a WHOLE entry is caught in `classifyReturn`, where the
- * launch prompt carrying the cumulative list is on hand. Misreading an echo
- * as `yielded` is cost, not corruption (the chunk just stays hot), but it is
- * exactly the cost this module exists to stop paying.
+ * the auditor FILED anything: the auditor was launched against a cumulative
+ * findings list (a `.findings.md` file its prompt points at), and an auditor
+ * explaining "already covered, not re-reporting" can echo an entry's file
+ * line into its return. Every finding actually filed carries the full block
+ * the format mandates — severity included — so the pair is what
+ * distinguishes a report from a bare file-line echo; a quotation of a WHOLE
+ * entry is caught in `classifyReturn`, where the list is on hand. Misreading
+ * an echo as `yielded` is cost, not corruption (the chunk just stays hot),
+ * but it is exactly the cost this module exists to stop paying.
  */
 const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
 
@@ -237,6 +232,45 @@ function substantiveClause(clause: string): boolean {
 }
 
 /**
+ * The cumulative findings list an auditor was launched against. Since #8597
+ * the list rides a digest-named `.findings.md` file the prompt points at —
+ * read it back; a prompt with no pointer predates the file shape (or its
+ * file is gone), and the prompt itself is the fallback, which is where the
+ * list lived before. The pointer is the CLI's own record's (never the
+ * orchestrator's pasted copy, which `wasDeliveredVerbatim` allows additions
+ * around), confined to this plan's record dir before reading; an unreadable
+ * or out-of-bounds file degrades to the prompt: no entry matches there, a
+ * quotation counts as a yield, and the chunk stays hot — every failure in
+ * this module lands on the audit side. `memo` keys on the pointer so the
+ * pairing walk reads each round's list once, not once per record.
+ */
+function findingsListFor(
+  prompt: string,
+  recordDir: string,
+  memo: Map<string, string>,
+): string {
+  const pointer = findingsPointerOf(prompt);
+  if (pointer === null) return prompt;
+  const root = resolve(recordDir);
+  const target = resolve(pointer);
+  if (target !== root && !target.startsWith(root + sep)) return prompt;
+  const cached = memo.get(pointer);
+  if (cached !== undefined) return cached;
+  try {
+    const content = readFileSync(target, 'utf8');
+    // Memoize ONLY a successful read: the pointer is shared by every chunk of
+    // the round (the file key is chunk-free), so caching a failure's fallback
+    // — THIS record's prompt — would serve one chunk's launch text as every
+    // other chunk's findings list. On a miss each record falls back to its
+    // OWN prompt (no entry matches there → stays hot), uncached.
+    memo.set(pointer, content);
+    return content;
+  } catch {
+    return prompt; // Fall back to this record's own prompt.
+  }
+}
+
+/**
  * Classify one auditor's return.
  *
  * `yielded` outranks everything: a return that files a finding against a
@@ -257,31 +291,59 @@ function substantiveClause(clause: string): boolean {
 function classifyReturn(
   rec: AgentRecord,
   territory: Array<[number, number]>,
+  findingsList: string,
 ): AuditOutcome {
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
+    // The cumulative list is on hand for this agent: since #8597 it rides
+    // a digest-named findings file the launch prompt points at (before, it
+    // was folded into the prompt verbatim), and every entry in it is a full
+    // block — File AND Severity. An auditor explaining "already covered,
+    // not re-reporting" can quote one whole, and the quotation must not
+    // read as a filing: an entry whose exact file line is already on the
+    // list cannot be a new finding against it. Skipping costs an audit at
+    // most; counting a quotation re-opens the never-retire direction on
+    // the loop's most common honest return.
     for (const m of text.matchAll(FILE_LINE_RE)) {
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
-      // The cumulative list rides in this agent's own launch prompt,
-      // folded verbatim, and every entry in it is a full block — File
-      // AND Severity. An auditor explaining "already covered, not
-      // re-reporting" can quote one whole, and the quotation must not
-      // read as a filing: an entry whose exact file line is already on
-      // the list cannot be a new finding against it. Skipping costs an
-      // audit at most; counting a quotation re-opens the never-retire
-      // direction on the loop's most common honest return.
-      if (rec.launchPrompt.includes(`**File:** ${file}`)) continue;
+      if (findingsList.includes(`**File:** ${file}`)) continue;
       return 'yielded';
     }
   }
-  const receipt = DRY_RECEIPT_RE.exec(text);
+  // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
+  // failure modes bound this from opposite sides. An auditor's admission of
+  // what its soft ceiling cut short must not double as the receipt's
+  // substantive clause — stripped, a return whose only substance was its
+  // disclosures reads `unknown` and the chunk stays under audit. But a
+  // receipt that is substantive WITHOUT them — a real walk of the
+  // territory, proven by the same tool-call and territory-read bar as
+  // ever, that found nothing new and separately disclosed exploration it
+  // did not take — still retires: an earlier draft read any gap-bearing
+  // return as `unknown`, and since a reverse auditor's ceiling is routinely
+  // met (its brief orders a 65-82 KB findings list read in full), that made
+  // convergence impossible and ran every budgeted loop to the round cap —
+  // the exact never-retire failure this module's own docstrings warn
+  // about. The gap itself is not lost: coverage reports it and Step 3D
+  // rules on it; retirement certifies the audit that DID happen, not the
+  // exploration that did not.
+  const judged = stripBudgetGapLines(text);
+  const receipt = DRY_RECEIPT_RE.exec(judged);
+  // The clause is cut at any INLINE disclosure marker before its substance
+  // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
+  // slips past the line-based strip, and the `[\s\S]*` capture would
+  // otherwise absorb the gap text and get its substantiveness from it —
+  // the admission doubling as the receipt again, one line lower.
+  const clause = receipt?.[1] ?? '';
+  const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
+  const judgedClause =
+    inlineGap === null ? clause : clause.slice(0, inlineGap.index);
   if (
     rec.successfulToolCalls > 0 &&
     rec.diffToolCalls > 0 &&
     openedTheTerritory(rec.diffReads, territory) &&
     receipt !== null &&
-    substantiveClause(receipt[1] ?? '')
+    substantiveClause(judgedClause)
   ) {
     return 'dry';
   }
@@ -344,7 +406,8 @@ export function scheduleReverseAuditRound(
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
 ): RoundSchedule {
-  // Rounds 1 and 2 establish the record; there is nothing to retire on.
+  // Rounds 1 and 2 establish each chunk's record; retirement needs two
+  // consecutive dry audits, so nothing can retire before round 3.
   if (round < 3) {
     return {
       due: [...chunkIds],
@@ -372,11 +435,14 @@ export function scheduleReverseAuditRound(
   // The prior-round records: one per (chunk, round) prompt this CLI built.
   // Only PRIOR rounds are history — a record of the round being built is a
   // rebuild of it (a repaired delivery), not evidence about the territory.
+  const recordDir = promptRecordDir(planPath);
+  const findingsMemo = new Map<string, string>();
   const records: Array<{
     chunkId: number;
     round: number;
     lines: string[];
     territory: Array<[number, number]>;
+    findings: string;
   }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
@@ -391,6 +457,7 @@ export function scheduleReverseAuditRound(
       // pair.
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
+      findings: findingsListFor(prompt, recordDir, findingsMemo),
     });
   }
 
@@ -437,7 +504,7 @@ export function scheduleReverseAuditRound(
   const outcomesByRecord = matchesByRecord.map((matches, i) =>
     matches
       .filter((t) => recordsPerTranscript.get(t) === 1)
-      .map((t) => classifyReturn(t, records[i].territory)),
+      .map((t) => classifyReturn(t, records[i].territory, records[i].findings)),
   );
 
   // chunk id → prior round → every outcome that round's records produced. A
@@ -492,8 +559,9 @@ export function scheduleReverseAuditRound(
         dryRounds: [lastTwo[0].round, lastTwo[1].round],
         // The next even round — this branch only runs on odd rounds, so
         // that is always round + 1. Whether the cap allows it is the note
-        // composer's question, not the schedule's (see
-        // REVERSE_AUDIT_MAX_ROUNDS).
+        // composer's question, not the schedule's: the plan's cap
+        // (`reverseAuditRoundCap` in budget.ts, floored at the huge-diff
+        // tier's 3) is what the admission gate enforces.
         nextColdCheck: round + 1,
       });
     }
