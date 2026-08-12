@@ -11,13 +11,16 @@ const primaryDeleteSessions = vi.fn();
 const primaryReload = vi.fn();
 const primaryDeleteSession = vi.fn();
 const primaryReleaseSession = vi.fn();
-const listWorkspaceSessions = vi.fn();
+const listWorkspaceSessionsPage = vi.fn();
 const deleteSessionsData = vi.fn();
 const workspaceByCwd = vi.fn(() => ({
-  listWorkspaceSessions,
+  listWorkspaceSessionsPage,
   deleteSessionsData,
 }));
-const workspaceClient = { workspaceByCwd };
+const workspaceClient = {
+  workspaceByCwd,
+  listWorkspaceSessionsPage: vi.fn(),
+};
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useSessions: () => ({
@@ -29,7 +32,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     deleteSessions: primaryDeleteSessions,
     releaseSession: primaryReleaseSession,
   }),
-  useWorkspace: () => ({ client: workspaceClient }),
+  useWorkspace: () => ({ client: workspaceClient, workspaceCwd: '/primary' }),
 }));
 
 const { useScopedSessions } = await import('./useScopedSessions');
@@ -38,7 +41,7 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 function Probe({ cwd }: { cwd?: string }) {
-  const { sessions, deleteSessions } = useScopedSessions(cwd, {
+  const { sessions, deleteSessions, releaseSession } = useScopedSessions(cwd, {
     autoLoad: true,
   });
   return (
@@ -46,7 +49,18 @@ function Probe({ cwd }: { cwd?: string }) {
       <span data-testid="sessions">
         {sessions.map((session) => session.sessionId).join(',')}
       </span>
-      <button onClick={() => void deleteSessions(['secondary'])}>delete</button>
+      <button
+        data-action="delete"
+        onClick={() => void deleteSessions(['secondary'])}
+      >
+        delete
+      </button>
+      <button
+        data-action="release"
+        onClick={() => void releaseSession?.('secondary')}
+      >
+        release
+      </button>
     </div>
   );
 }
@@ -60,10 +74,12 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  listWorkspaceSessions.mockReset();
+  listWorkspaceSessionsPage.mockReset();
   deleteSessionsData.mockReset();
   workspaceByCwd.mockClear();
   primaryDeleteSessions.mockReset();
+  primaryReleaseSession.mockReset();
+  workspaceClient.listWorkspaceSessionsPage.mockReset();
 });
 
 afterEach(() => {
@@ -75,9 +91,11 @@ afterEach(() => {
 
 describe('useScopedSessions', () => {
   it('loads and mutates sessions through the requested workspace', async () => {
-    listWorkspaceSessions.mockResolvedValue([
-      { sessionId: 'secondary', workspaceCwd: '/wrong' },
-    ] satisfies DaemonSessionSummary[]);
+    listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        { sessionId: 'secondary', workspaceCwd: '/secondary' },
+      ] satisfies DaemonSessionSummary[],
+    });
     deleteSessionsData.mockResolvedValue({
       removed: ['secondary'],
       notFound: [],
@@ -86,23 +104,21 @@ describe('useScopedSessions', () => {
 
     render('/secondary');
     await act(async () => {
-      await listWorkspaceSessions.mock.results[0]?.value;
+      await listWorkspaceSessionsPage.mock.results[0]?.value;
     });
 
     expect(
       container!.querySelector('[data-testid="sessions"]')?.textContent,
     ).toBe('secondary');
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
-    expect(listWorkspaceSessions).toHaveBeenCalledWith({
-      pageSize: undefined,
-      archiveState: undefined,
-      view: undefined,
-      group: undefined,
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith({
       sourceType: 'default',
     });
 
     await act(async () => {
-      container!.querySelector('button')!.click();
+      container!
+        .querySelector<HTMLButtonElement>('[data-action="delete"]')!
+        .click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -110,19 +126,41 @@ describe('useScopedSessions', () => {
     expect(primaryDeleteSessions).not.toHaveBeenCalled();
   });
 
+  it('releases a scoped session without invalidating the primary catalog', async () => {
+    listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
+    primaryReleaseSession.mockResolvedValue(undefined);
+
+    render('/release-workspace');
+    await act(async () => {
+      await listWorkspaceSessionsPage.mock.results[0]?.value;
+    });
+
+    await act(async () => {
+      container!
+        .querySelector<HTMLButtonElement>('[data-action="release"]')!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(primaryReleaseSession).toHaveBeenCalledWith('secondary');
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.listWorkspaceSessionsPage).not.toHaveBeenCalled();
+  });
+
   it('ignores an older workspace response after the cwd changes', async () => {
-    let resolveA!: (sessions: DaemonSessionSummary[]) => void;
-    let resolveB!: (sessions: DaemonSessionSummary[]) => void;
-    listWorkspaceSessions
+    let resolveA!: (page: { sessions: DaemonSessionSummary[] }) => void;
+    let resolveB!: (page: { sessions: DaemonSessionSummary[] }) => void;
+    listWorkspaceSessionsPage
       .mockImplementationOnce(
         () =>
-          new Promise<DaemonSessionSummary[]>((resolve) => {
+          new Promise<{ sessions: DaemonSessionSummary[] }>((resolve) => {
             resolveA = resolve;
           }),
       )
       .mockImplementationOnce(
         () =>
-          new Promise<DaemonSessionSummary[]>((resolve) => {
+          new Promise<{ sessions: DaemonSessionSummary[] }>((resolve) => {
             resolveB = resolve;
           }),
       );
@@ -130,7 +168,7 @@ describe('useScopedSessions', () => {
     render('/a');
     render('/b');
     await act(async () => {
-      resolveA([{ sessionId: 'a', workspaceCwd: '/a' }]);
+      resolveA({ sessions: [{ sessionId: 'a', workspaceCwd: '/a' }] });
       await Promise.resolve();
     });
     expect(
@@ -138,7 +176,7 @@ describe('useScopedSessions', () => {
     ).toBe('');
 
     await act(async () => {
-      resolveB([{ sessionId: 'b', workspaceCwd: '/b' }]);
+      resolveB({ sessions: [{ sessionId: 'b', workspaceCwd: '/b' }] });
       await Promise.resolve();
     });
     expect(

@@ -115,6 +115,13 @@ export interface GoalPendingProposal {
 export interface GoalRuntime {
   getSnapshot(): GoalSnapshotV2;
   getSnapshotForPermit?(permit: GoalTurnPermit): GoalSnapshotV2;
+  /**
+   * The cause the last successful {@link restore} broadcast, or undefined if
+   * nothing was recovered. Lets a subscriber that attached after restore —
+   * the ACP resume path always does — republish the recovered state with the
+   * cause the broadcast carried.
+   */
+  getRecoveryCause?(): GoalStateCause | undefined;
   subscribe(
     listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
   ): () => void;
@@ -209,6 +216,14 @@ export function createGoalRuntime(
   let restored = false;
   let disposed = false;
   let recoveryError: Error | undefined;
+  /**
+   * The cause `restore()` broadcast. Retained because that broadcast can fire
+   * before anything has subscribed — the ACP resume path constructs its
+   * Session well after the Config constructor kicks restore off — and the
+   * `migrated -> paused` projection is only correct if the client sees the
+   * cause, not just the snapshot.
+   */
+  let recoveryCause: GoalStateCause | undefined;
   type VerificationAttempt = NonNullable<typeof verificationAttempt>;
   type CheckpointAttempt = NonNullable<typeof checkpointAttempt>;
 
@@ -876,6 +891,9 @@ export function createGoalRuntime(
   return {
     getSnapshot,
     getSnapshotForPermit,
+    getRecoveryCause(): GoalStateCause | undefined {
+      return recoveryCause;
+    },
     subscribe(
       listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
     ): () => void {
@@ -946,7 +964,10 @@ export function createGoalRuntime(
             if (recoveredSnapshot) snapshot = recoveredSnapshot;
             recoveryError = undefined;
             restored = true;
-            if (recoveredSnapshot) broadcast(recoveredCause);
+            if (recoveredSnapshot) {
+              recoveryCause = recoveredCause;
+              broadcast(recoveredCause);
+            }
             if (!checkpointAttempt) queueContinuation();
             return checkpointAttempt;
           } catch (error) {
@@ -1029,10 +1050,36 @@ export function createGoalRuntime(
           currentTurnFeedback = undefined;
           currentProposal = undefined;
           snapshot = { ...snapshot, activity: 'idle' };
+          // Promote a waiting reservation instead of minting a continuation,
+          // exactly as `finishTurn` does. A continuation only reaches the
+          // model once the host drains it, and the host that owns the drain
+          // is blocked by the very caller waiting on `queuedTurnKey` -- so
+          // scheduling one here strands that caller in `claimGoalTurn`
+          // forever.
+          const nextTurnKey = queuedTurnKey;
+          if (
+            nextTurnKey &&
+            snapshot.goal?.status === 'active' &&
+            !pendingProposal &&
+            !verificationAttempt
+          ) {
+            queuedTurnKey = undefined;
+            continuationQueued = false;
+            currentPermit = {
+              goalId: snapshot.goal.goalId,
+              revision: snapshot.goal.revision,
+              turnId: randomUUID(),
+            };
+            currentPermitHost = host;
+            currentTurnKey = nextTurnKey;
+            currentTurnFeedback = nextVerifierFeedback;
+            nextVerifierFeedback = undefined;
+            snapshot = { ...snapshot, activity: 'running' };
+          }
           broadcast();
           released = true;
         }
-        if (released) queueContinuation();
+        if (released && !currentPermit) queueContinuation();
         return released;
       });
     },
@@ -1274,11 +1321,26 @@ export function createGoalRuntime(
           goal: nextGoal,
           activity: 'idle',
         };
-        await options.journal.recordGoalState(recordUuid, {
-          v: GOAL_STATE_VERSION,
-          cause: request.action,
-          snapshot: nextSnapshot,
-        });
+        try {
+          await options.journal.recordGoalState(recordUuid, {
+            v: GOAL_STATE_VERSION,
+            cause: request.action,
+            snapshot: nextSnapshot,
+          });
+        } catch (error) {
+          // A lost session writer surfaces here as `SessionWriterUnavailableError`
+          // or as the raw latched write failure, neither of which callers can
+          // tell apart from a bug by class. Speak the same error `restore` uses
+          // for its migration write, so "this session cannot persist goals"
+          // stays one type: `/goal status` and `/goal clear` degrade to the
+          // empty snapshot instead of failing the caller's whole request.
+          throw error instanceof GoalPersistenceUnavailableError
+            ? error
+            : new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
+        }
         assertAvailable();
         const invalidatesPermit =
           request.action === 'create' ||
