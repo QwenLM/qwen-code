@@ -1534,9 +1534,11 @@ describe('TurnBoundaryCompactionEngine', () => {
 
     it('refuses a grant that cannot retain more than eviction already keeps', () => {
       // The newest entry alone exceeds the granted cap, so eviction retains
-      // exactly one entry with or without the grant. Accepting it would
-      // charge the shared pool while buying zero replay; the caps must stay
-      // at the baseline and eviction still keeps the oversized survivor.
+      // exactly one entry with or without the grant. The walk applies the
+      // flat 400-byte grant tentatively, sees no retention gain, asks again
+      // from 400, receives no further growth, and rolls back — the caps
+      // must stay at the baseline and eviction still keeps the oversized
+      // survivor, with the pool never charged.
       const advisor = vi.fn(() => ({ maxEvents: 10_000, maxBytes: 400 }));
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalBytes: 300,
@@ -1546,7 +1548,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       engine.ingest(makeUserMessage(2, 'second large event'), 150);
       engine.ingest(makeUserMessage(3, 'third large event'), 300);
 
-      expect(advisor).toHaveBeenCalledTimes(1);
+      expect(advisor).toHaveBeenCalledTimes(2);
       expect(engine.journalLimits()).toEqual({
         maxEvents: 10_000,
         maxBytes: 300,
@@ -1562,15 +1564,54 @@ describe('TurnBoundaryCompactionEngine', () => {
       ).toEqual([3]);
     });
 
-    it('never charges growth for a stream of events above the hard cap', () => {
-      // Each oversized event is retained as the sole survivor regardless of
-      // the caps, so repeated breaches must not ratchet the caps up toward
-      // the hard cap — the pool would drain while preserving nothing extra.
+    it('walks through intermediate grants to reach a later grant that retains more', () => {
+      // An 8 MiB baseline facing a ~6 MiB event followed by a ~20 MiB
+      // event needs 32 MiB to retain both. The first doubling to 16 MiB
+      // still retains only the newest event; refusing it there evicts the
+      // older event forever even though headroom exists. The walk must
+      // keep going through reachable intermediate grants until retention
+      // improves.
+      const MiB = 1024 * 1024;
+      const advisor = vi.fn(
+        (current: { maxEvents: number; maxBytes: number }) =>
+          current.maxBytes >= 32 * MiB
+            ? undefined
+            : {
+                maxEvents: current.maxEvents * 2,
+                maxBytes: current.maxBytes * 2,
+              },
+      );
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 8 * MiB,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'older event'), 6 * MiB);
+      engine.ingest(makeUserMessage(2, 'newer event'), 20 * MiB);
+
+      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 40_000,
+        maxBytes: 32 * MiB,
+      });
+      const snap = engine.snapshot();
+      expect(markerOf(snap)).toBeUndefined();
+      expect(
+        snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
+      ).toEqual([1, 2]);
+    });
+
+    it('never charges growth when no reachable cap can retain more', () => {
+      // Each oversized event survives alone at every cap the advisor can
+      // reach: retaining two of them needs 3000 bytes, but the advisor
+      // stops granting at 1200. The walk must run to that refusal and roll
+      // back — repeated breaches may not ratchet the caps upward while
+      // preserving nothing extra.
       let clockMs = 0;
-      const advisor = vi.fn((current: { maxBytes: number }) => ({
-        maxEvents: 10_000,
-        maxBytes: current.maxBytes * 2,
-      }));
+      const advisor = vi.fn((current: { maxBytes: number }) =>
+        current.maxBytes >= 1200
+          ? undefined
+          : { maxEvents: 10_000, maxBytes: current.maxBytes * 2 },
+      );
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalBytes: 300,
         now: () => clockMs,
@@ -1578,12 +1619,13 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       for (let i = 1; i <= 3; i++) {
         clockMs += 10_000; // clear the refusal throttle between breaches
-        engine.ingest(makeUserMessage(i, `oversized-${i}`), 1000);
+        engine.ingest(makeUserMessage(i, `oversized-${i}`), 1500);
       }
 
       // The first breach is a length-1 journal (no ask: the survivor is
-      // kept regardless), the next two breach with two entries each.
-      expect(advisor).toHaveBeenCalledTimes(2);
+      // kept regardless); each of the next two breaches walks two
+      // intermediate grants and then hits the refusal.
+      expect(advisor).toHaveBeenCalledTimes(6);
       expect(engine.journalLimits()).toEqual({
         maxEvents: 10_000,
         maxBytes: 300,

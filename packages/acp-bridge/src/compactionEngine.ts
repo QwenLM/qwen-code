@@ -30,6 +30,7 @@ export {
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
 } from './replayWindowLimits.js';
+export type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 
 interface SessionUpdateData {
   update?: {
@@ -142,8 +143,9 @@ export interface JournalLimits {
 /**
  * Asked before the journal evicts entries past its caps. Returning larger
  * caps raises them in place (no eviction needed while under the new caps);
- * returning `undefined` — or throwing — falls through to eviction. Called
- * at most once per eviction breach, throttled after a refusal.
+ * returning `undefined` — or throwing — falls through to eviction. The
+ * engine may ask several times per breach while walking toward a grant
+ * that retains more; a refusal throttles later asks.
  */
 export type JournalGrowthAdvisor = (
   current: JournalLimits,
@@ -185,6 +187,14 @@ export interface TurnBoundaryCompactionEngineOptions {
  * baseline) asks per session).
  */
 const JOURNAL_GROWTH_REASK_INTERVAL_MS = 10_000;
+
+/**
+ * Step budget for walking reachable grants on one breach. A well-behaved
+ * policy doubles toward the hard cap (~log2 steps) and refuses once the
+ * pool is empty; the budget only guards a misbehaving advisor granting
+ * unbounded non-improving increments.
+ */
+const JOURNAL_GROWTH_MAX_GRANTS_PER_BREACH = 64;
 
 /**
  * Compaction engine that merges events at turn boundaries.
@@ -508,10 +518,15 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   /**
    * Consults the growth advisor once the journal breaches its caps and
    * applies a grant in place, so the eviction loop below only drops what
-   * still exceeds the (possibly raised) caps. A grant that would retain no
-   * additional entries is refused without raising the caps. Never throws:
-   * a misbehaving advisor degrades to plain eviction, matching the
-   * engine's best-effort contract.
+   * still exceeds the (possibly raised) caps. An intermediate grant that
+   * does not yet retain an extra entry is still applied tentatively —
+   * each applied cap is what the next ask reports and is charged for —
+   * and the walk continues until a grant retains strictly more than the
+   * pre-breach caps, the advisor refuses, or the step budget runs out. A
+   * walk that never improves retention rolls back to the original caps
+   * and counts as a refusal, so the pool is never charged for growth that
+   * preserves no replay. Never throws: a misbehaving advisor degrades to
+   * plain eviction, matching the engine's best-effort contract.
    */
   private maybeGrowJournalLimits(): void {
     const advisor = this.onJournalGrowth;
@@ -529,43 +544,44 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         return;
       }
     }
-    let grant: JournalLimits | undefined;
-    try {
-      grant = advisor({
-        maxEvents: this.maxJournalEvents,
-        maxBytes: this.maxJournalBytes,
-      });
-    } catch {
-      grant = undefined;
-    }
-    if (
-      grant &&
-      Number.isSafeInteger(grant.maxBytes) &&
-      Number.isSafeInteger(grant.maxEvents) &&
-      grant.maxBytes > this.maxJournalBytes &&
-      grant.maxEvents >= this.maxJournalEvents &&
-      this.retainsMoreWith(grant.maxEvents, grant.maxBytes)
-    ) {
+    const originalEvents = this.maxJournalEvents;
+    const originalBytes = this.maxJournalBytes;
+    const originalRetained = this.retainedTailCount(
+      originalEvents,
+      originalBytes,
+    );
+    for (let step = 0; step < JOURNAL_GROWTH_MAX_GRANTS_PER_BREACH; step++) {
+      let grant: JournalLimits | undefined;
+      try {
+        grant = advisor({
+          maxEvents: this.maxJournalEvents,
+          maxBytes: this.maxJournalBytes,
+        });
+      } catch {
+        grant = undefined;
+      }
+      if (
+        !grant ||
+        !Number.isSafeInteger(grant.maxBytes) ||
+        !Number.isSafeInteger(grant.maxEvents) ||
+        grant.maxBytes <= this.maxJournalBytes ||
+        grant.maxEvents < this.maxJournalEvents
+      ) {
+        break;
+      }
       this.maxJournalBytes = grant.maxBytes;
       this.maxJournalEvents = grant.maxEvents;
-      this.journalGrowthDeniedAt = undefined;
-      return;
+      if (
+        this.retainedTailCount(grant.maxEvents, grant.maxBytes) >
+        originalRetained
+      ) {
+        this.journalGrowthDeniedAt = undefined;
+        return;
+      }
     }
+    this.maxJournalEvents = originalEvents;
+    this.maxJournalBytes = originalBytes;
     this.journalGrowthDeniedAt = now;
-  }
-
-  /**
-   * True when eviction under the granted caps would retain strictly more
-   * journal entries than under the current caps. A grant that cannot
-   * change the eviction result — an entry larger than the granted cap
-   * survives as the sole retained entry either way — is refused, so the
-   * shared pool is never charged for growth that preserves no replay.
-   */
-  private retainsMoreWith(maxEvents: number, maxBytes: number): boolean {
-    return (
-      this.retainedTailCount(maxEvents, maxBytes) >
-      this.retainedTailCount(this.maxJournalEvents, this.maxJournalBytes)
-    );
   }
 
   /** Entries of the newest-first tail the eviction loop would retain. */

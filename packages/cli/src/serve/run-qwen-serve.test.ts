@@ -78,6 +78,10 @@ process.env['QWEN_RUNTIME_DIR'] = isolatedTestRuntimeDir;
 
 afterEach(() => {
   process.env['QWEN_RUNTIME_DIR'] = isolatedTestRuntimeDir;
+  // Unconditional: a test that pins host memory but rejects before its
+  // try/finally cleanup would otherwise leak the figure into later
+  // memory-budget tests.
+  mockTotalMemBytes.value = undefined;
 });
 
 afterAll(() => {
@@ -1731,10 +1735,19 @@ describe('runQwenServe telemetry validation', () => {
         createBridge.mock.calls[0]?.[0].journalGrowthPoolBytes,
       );
       // The dynamically attached workspace must share the ONE aggregate
-      // view and registrar, not a fresh per-runtime copy.
+      // view and registrar, not a fresh per-runtime copy. Assert the
+      // hooks exist first: `undefined === undefined` would pass the
+      // identity checks if a regression unwired the pool from BOTH
+      // bridges at once.
+      expect(
+        createBridge.mock.calls[0]?.[0].journalGrowthSessionLimits,
+      ).toBeTypeOf('function');
       expect(createBridge.mock.calls[1]?.[0].journalGrowthSessionLimits).toBe(
         createBridge.mock.calls[0]?.[0].journalGrowthSessionLimits,
       );
+      expect(
+        createBridge.mock.calls[0]?.[0].registerJournalGrowthSessionLimits,
+      ).toBeTypeOf('function');
       expect(
         createBridge.mock.calls[1]?.[0].registerJournalGrowthSessionLimits,
       ).toBe(
@@ -2741,6 +2754,17 @@ describe('runQwenServe memory budget', () => {
   });
 
   it('disables adaptive journal growth when a journal flag is pinned', async () => {
+    // Pin host memory to a usable figure so ONLY the pinned-flag gate can
+    // disable growth: on a runner below the minimum usable budget,
+    // insufficientMemory would disable it independently and mask a gate
+    // regression.
+    mockTotalMemBytes.value = 8 * 1024 * 1024 * 1024;
+    const constrainedSpy = vi
+      .spyOn(
+        process as { constrainedMemory: () => number },
+        'constrainedMemory',
+      )
+      .mockReturnValue(0);
     const dir = makeTmpDir();
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
@@ -2772,13 +2796,24 @@ describe('runQwenServe memory budget', () => {
       }
     } finally {
       createBridge.mockRestore();
+      constrainedSpy.mockRestore();
+      mockTotalMemBytes.value = undefined;
       await handle.close();
     }
   });
 
   it('disables adaptive journal growth when only the entry cap is pinned', async () => {
     // Symmetric to the byte-cap pin: the gate must disable growth on
-    // EITHER pinned journal flag, as the docs promise.
+    // EITHER pinned journal flag, as the docs promise. Host memory is
+    // pinned as in the byte-cap case so only this gate can disable
+    // growth.
+    mockTotalMemBytes.value = 8 * 1024 * 1024 * 1024;
+    const constrainedSpy = vi
+      .spyOn(
+        process as { constrainedMemory: () => number },
+        'constrainedMemory',
+      )
+      .mockReturnValue(0);
     const dir = makeTmpDir();
     const createBridge = vi
       .spyOn(acpBridge, 'createAcpSessionBridge')
@@ -2810,6 +2845,8 @@ describe('runQwenServe memory budget', () => {
       }
     } finally {
       createBridge.mockRestore();
+      constrainedSpy.mockRestore();
+      mockTotalMemBytes.value = undefined;
       await handle.close();
     }
   });
@@ -2964,10 +3001,15 @@ describe('runQwenServe memory budget', () => {
         ([options]) => options.journalGrowthSessionLimits,
       );
       const unregisters = createBridge.mock.calls.map(([options], index) =>
-        options.registerJournalGrowthSessionLimits?.(() => [1000 + index]),
+        options.registerJournalGrowthSessionLimits?.(() => [
+          { limitBytes: 1000 + index, baselineBytes: 8 * 1024 * 1024 },
+        ]),
       );
       for (const view of views) {
-        expect(view?.()).toEqual([1000, 1001]);
+        expect(view?.()).toEqual([
+          { limitBytes: 1000, baselineBytes: 8 * 1024 * 1024 },
+          { limitBytes: 1001, baselineBytes: 8 * 1024 * 1024 },
+        ]);
       }
       for (const unregister of unregisters) {
         unregister?.();

@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
+import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 
 /**
  * Sink for serve-level diagnostic lines (set by the cli daemon logger).
@@ -280,13 +281,14 @@ export interface BridgeOptions {
   journalGrowthPoolBytes?: number;
   /**
    * Current journal byte caps of EVERY live session sharing this bridge's
-   * growth pool, including this bridge's own. `runQwenServe` wires an
-   * aggregator over all of its bridges so the daemon-wide pool is
-   * accounted once; a standalone bridge leaves it unset and the advisor
-   * accounts only this bridge's sessions. Ignored without
-   * `journalGrowthPoolBytes`.
+   * growth pool, including this bridge's own, each with the baseline cap
+   * that session started at (bridges sharing a pool may run different
+   * baselines). `runQwenServe` wires an aggregator over all of its
+   * bridges so the daemon-wide pool is accounted once; a standalone
+   * bridge leaves it unset and the advisor accounts only this bridge's
+   * sessions. Ignored without `journalGrowthPoolBytes`.
    */
-  journalGrowthSessionLimits?: () => readonly number[];
+  journalGrowthSessionLimits?: () => readonly JournalGrowthSessionLimit[];
   /**
    * Registers this bridge's own live-session journal-cap enumerator with
    * the shared pool (called once at construction when growth is enabled)
@@ -295,7 +297,7 @@ export interface BridgeOptions {
    * `journalGrowthPoolBytes`.
    */
   registerJournalGrowthSessionLimits?: (
-    provider: () => readonly number[],
+    provider: () => readonly JournalGrowthSessionLimit[],
   ) => () => void;
   /**
    * Per-`requestPermission` wall clock. After this many ms with

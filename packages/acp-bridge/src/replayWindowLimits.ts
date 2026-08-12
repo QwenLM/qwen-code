@@ -18,6 +18,19 @@ export const DEFAULT_MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
  */
 export const JOURNAL_GROWTH_HARD_CAP_BYTES = 256 * 1024 * 1024;
 
+/**
+ * One live session's contribution to growth-pool accounting: its current
+ * journal byte cap plus the cap it started at. Growth beyond the session's
+ * OWN baseline is the accounted resource, so sessions on bridges with
+ * different baselines are each charged from their own starting cap.
+ */
+export interface JournalGrowthSessionLimit {
+  /** The session's current journal byte cap. */
+  limitBytes: number;
+  /** The journal byte cap the session started at. */
+  baselineBytes: number;
+}
+
 export function normalizeCompactedReplayMaxBytes(
   value: number | undefined,
 ): number {

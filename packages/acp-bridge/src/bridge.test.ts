@@ -69,7 +69,10 @@ import type {
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import { EventBus, type BridgeEvent } from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
-import { JOURNAL_GROWTH_HARD_CAP_BYTES } from './replayWindowLimits.js';
+import {
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
+  type JournalGrowthSessionLimit,
+} from './replayWindowLimits.js';
 import {
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
@@ -5088,6 +5091,71 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps granting across repeated doublings for one runaway turn', async () => {
+      // The production failure truncated 230,123 of 247,413 events; the
+      // three-event breach above exercises one tiny grant. Forty events
+      // at a two-entry baseline need five grants (2 -> 4 -> 8 -> 16 ->
+      // 32 -> 64 entries) before the caps alone retain them, so an
+      // integration that stopped granting — or stopped propagating the
+      // grown caps — after the first doubling fails here.
+      const gate = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await gate.promise;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 256 * 1024 * 1024,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'grow' }],
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'prompt-multi-grow' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      for (let i = 0; i < 40; i++) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: `chunk-${i}` },
+          },
+        });
+      }
+
+      const snap = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snap.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toBeUndefined();
+      for (const text of ['chunk-0', 'chunk-19', 'chunk-39']) {
+        expect(JSON.stringify(snap.liveJournal)).toContain(text);
+      }
+      // The effective limits grew through every doubling up to the hard
+      // cap; a regression that grants once and then stops propagating
+      // caps would leave these at an intermediate value.
+      const status = bridge.getDaemonStatusSnapshot();
+      expect(status.sessions[0]?.maxJournalBytes).toBe(
+        JOURNAL_GROWTH_HARD_CAP_BYTES,
+      );
+      expect(status.sessions[0]?.maxJournalEvents).toBe(64);
+
+      gate.resolve();
+      await prompt;
+      await bridge.shutdown();
+    });
+
     it('refuses growth for a second session once the first consumes the pool', async () => {
       // Cross-session accounting is the pool's reason to exist: growth
       // granted to one session must shrink the headroom every other live
@@ -5470,14 +5538,15 @@ describe('createAcpSessionBridge', () => {
     // sibling workspaces breaching concurrently must therefore share a
     // single pool — the first growth exhausts it and the second bridge
     // truncates, where per-bridge pools would have funded both.
-    const providers = new Set<() => readonly number[]>();
-    const journalGrowthSessionLimits = (): readonly number[] => {
-      const limits: number[] = [];
-      for (const provider of providers) limits.push(...provider());
-      return limits;
-    };
+    const providers = new Set<() => readonly JournalGrowthSessionLimit[]>();
+    const journalGrowthSessionLimits =
+      (): readonly JournalGrowthSessionLimit[] => {
+        const limits: JournalGrowthSessionLimit[] = [];
+        for (const provider of providers) limits.push(...provider());
+        return limits;
+      };
     const registerJournalGrowthSessionLimits = (
-      provider: () => readonly number[],
+      provider: () => readonly JournalGrowthSessionLimit[],
     ): (() => void) => {
       providers.add(provider);
       return () => {
@@ -5585,19 +5654,145 @@ describe('createAcpSessionBridge', () => {
     await promptA;
     await promptB;
     // The shared view carries the grown cap from A's doubling (the whole
-    // pool) plus B's untouched baseline.
+    // pool) plus B's untouched baseline, each with its own baseline.
     expect(journalGrowthSessionLimits()).toEqual([
-      16 * 1024 * 1024,
-      8 * 1024 * 1024,
+      { limitBytes: 16 * 1024 * 1024, baselineBytes: 8 * 1024 * 1024 },
+      { limitBytes: 8 * 1024 * 1024, baselineBytes: 8 * 1024 * 1024 },
     ]);
     await bridgeA.shutdown();
     // A shut-down bridge's provider must leave the daemon-wide aggregator:
     // left registered it keeps reporting (and leaks) until daemon restart.
     expect(providers.size).toBe(1);
-    expect(journalGrowthSessionLimits()).toEqual([8 * 1024 * 1024]);
+    expect(journalGrowthSessionLimits()).toEqual([
+      { limitBytes: 8 * 1024 * 1024, baselineBytes: 8 * 1024 * 1024 },
+    ]);
     await bridgeB.shutdown();
     expect(providers.size).toBe(0);
     expect(journalGrowthSessionLimits()).toEqual([]);
+  }, 15_000);
+
+  it('does not mischarge an untouched sibling baseline against the shared pool', async () => {
+    // Bridges sharing one pool may run different baselines. A session on
+    // the 16 MiB-baseline bridge sitting AT its baseline has not grown;
+    // the 8 MiB-baseline bridge's policy must not read it as 8 MiB of
+    // granted growth — that would exhaust the pool while it is unused
+    // and refuse every grant.
+    const providers = new Set<() => readonly JournalGrowthSessionLimit[]>();
+    const journalGrowthSessionLimits =
+      (): readonly JournalGrowthSessionLimit[] => {
+        const limits: JournalGrowthSessionLimit[] = [];
+        for (const provider of providers) limits.push(...provider());
+        return limits;
+      };
+    const registerJournalGrowthSessionLimits = (
+      provider: () => readonly JournalGrowthSessionLimit[],
+    ): (() => void) => {
+      providers.add(provider);
+      return () => {
+        providers.delete(provider);
+      };
+    };
+    const sharedGrowthOpts = {
+      journalGrowthPoolBytes: 8 * 1024 * 1024,
+      journalGrowthSessionLimits,
+      registerJournalGrowthSessionLimits,
+    };
+    const gates = new Map<
+      string,
+      { promise: Promise<void>; resolve: (value: void) => void }
+    >();
+    const heldPromptImpl = async (req: { sessionId: string }) => {
+      const gate = gates.get(req.sessionId);
+      if (gate) await gate.promise;
+      return { stopReason: 'end_turn' as const };
+    };
+    const handleA = makeChannel({ promptImpl: heldPromptImpl });
+    // A distinct agent-side id prefix keeps the two sessions' gates
+    // apart — the default prefix would synthesize the same
+    // `sess:<cwd>` id on both channels.
+    const handleB = makeChannel({
+      promptImpl: heldPromptImpl,
+      sessionIdPrefix: 'sess-b',
+    });
+    // A breaches at a two-entry / 8 MiB baseline; B runs a 16 MiB
+    // baseline and never breaches, so its session stays exactly at its
+    // own baseline.
+    const bridgeA = makeBridge({
+      channelFactory: async () => handleA.channel,
+      maxJournalEvents: 2,
+      ...sharedGrowthOpts,
+    });
+    const bridgeB = makeBridge({
+      channelFactory: async () => handleB.channel,
+      maxJournalEvents: 10,
+      maxJournalBytes: 16 * 1024 * 1024,
+      ...sharedGrowthOpts,
+    });
+
+    const sessionB = await bridgeB.spawnOrAttach({ workspaceCwd: WS_A });
+    gates.set(sessionB.sessionId, deferred<void>());
+    const promptB = bridgeB.sendPrompt(
+      sessionB.sessionId,
+      {
+        sessionId: sessionB.sessionId,
+        prompt: [{ type: 'text', text: 'baseline-holder' }],
+      },
+      undefined,
+      { clientId: sessionB.clientId, promptId: 'prompt-b' },
+    );
+    await vi.waitFor(() => expect(handleB.agent.promptCalls).toHaveLength(1));
+    for (const text of ['b-1', 'b-2', 'b-3']) {
+      await handleB.agentConnection.sessionUpdate({
+        sessionId: sessionB.sessionId,
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+
+    const sessionA = await bridgeA.spawnOrAttach({ workspaceCwd: WS_A });
+    gates.set(sessionA.sessionId, deferred<void>());
+    const promptA = bridgeA.sendPrompt(
+      sessionA.sessionId,
+      {
+        sessionId: sessionA.sessionId,
+        prompt: [{ type: 'text', text: 'grow' }],
+      },
+      undefined,
+      { clientId: sessionA.clientId, promptId: 'prompt-a' },
+    );
+    await vi.waitFor(() => expect(handleA.agent.promptCalls).toHaveLength(1));
+    for (const text of ['a-1', 'a-2', 'a-3']) {
+      await handleA.agentConnection.sessionUpdate({
+        sessionId: sessionA.sessionId,
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+        },
+      });
+    }
+
+    // B's untouched 16 MiB baseline is not growth: A's breach must still
+    // receive the full pool and retain all three events.
+    const snapA = await bridgeA.loadSession({
+      sessionId: sessionA.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(
+      snapA.liveJournal?.find((event) => event.type === 'history_truncated'),
+    ).toBeUndefined();
+    for (const text of ['a-1', 'a-2', 'a-3']) {
+      expect(JSON.stringify(snapA.liveJournal)).toContain(text);
+    }
+
+    gates.get(sessionA.sessionId)?.resolve();
+    gates.get(sessionB.sessionId)?.resolve();
+    await promptA;
+    await promptB;
+    await bridgeA.shutdown();
+    await bridgeB.shutdown();
   }, 15_000);
 
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {

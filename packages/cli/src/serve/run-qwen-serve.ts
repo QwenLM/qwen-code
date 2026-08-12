@@ -35,6 +35,7 @@ import {
   normalizeCompactedReplayMaxBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
+  type JournalGrowthSessionLimit,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -2600,16 +2601,19 @@ async function runQwenServeImpl(
   // live-session cap enumerator here and receives the aggregator, so each
   // bridge's growth advisor accounts every sharing session — across all
   // workspaces — against the same pool instead of holding its own copy.
-  const journalGrowthSessionLimitProviders = new Set<() => readonly number[]>();
-  const journalGrowthSessionLimits = (): readonly number[] => {
-    const limits: number[] = [];
-    for (const provider of journalGrowthSessionLimitProviders) {
-      limits.push(...provider());
-    }
-    return limits;
-  };
+  const journalGrowthSessionLimitProviders = new Set<
+    () => readonly JournalGrowthSessionLimit[]
+  >();
+  const journalGrowthSessionLimits =
+    (): readonly JournalGrowthSessionLimit[] => {
+      const limits: JournalGrowthSessionLimit[] = [];
+      for (const provider of journalGrowthSessionLimitProviders) {
+        limits.push(...provider());
+      }
+      return limits;
+    };
   const registerJournalGrowthSessionLimits = (
-    provider: () => readonly number[],
+    provider: () => readonly JournalGrowthSessionLimit[],
   ): (() => void) => {
     journalGrowthSessionLimitProviders.add(provider);
     return () => {

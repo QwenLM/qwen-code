@@ -22,10 +22,14 @@
  * reports every sharing session's current cap, so each bridge's advisor
  * accounts against the same aggregate. The accounting is stateless on
  * purpose: the caller reports every sharing session's CURRENT journal byte
- * cap on each request, so there is no grant ledger to reconcile when
- * sessions are reaped. Growth beyond the baseline is the accounted
- * resource; baseline caps are not charged against the pool.
+ * cap and its own starting baseline on each request, so there is no grant
+ * ledger to reconcile when sessions are reaped. Growth beyond the baseline
+ * is the accounted resource; baseline caps are not charged against the
+ * pool. Baselines are per-session, so bridges sharing one pool may run
+ * different baselines without mischarging each other's untouched sessions.
  */
+
+import type { JournalGrowthSessionLimit } from './replayWindowLimits.js';
 
 export interface JournalGrowthPolicyOptions {
   /** The per-session journal entry cap every session starts at. */
@@ -48,9 +52,10 @@ export interface JournalGrowthRequest {
   currentMaxBytes: number;
   /**
    * Current journal byte caps of all live sessions sharing the pool,
-   * INCLUDING the requester's pre-growth cap.
+   * INCLUDING the requester's pre-growth cap, each with the baseline cap
+   * that session started at.
    */
-  allSessionLimitBytes: readonly number[];
+  allSessionLimits: readonly JournalGrowthSessionLimit[];
 }
 
 export interface JournalGrowthGrant {
@@ -81,8 +86,9 @@ export function createJournalGrowthPolicy(
   return {
     grant(request: JournalGrowthRequest): JournalGrowthGrant | undefined {
       if (request.currentMaxBytes >= opts.hardCapBytes) return undefined;
-      const extraGranted = request.allSessionLimitBytes.reduce(
-        (sum, limit) => sum + Math.max(0, limit - opts.baselineBytes),
+      const extraGranted = request.allSessionLimits.reduce(
+        (sum, session) =>
+          sum + Math.max(0, session.limitBytes - session.baselineBytes),
         0,
       );
       const available = opts.poolBytes - extraGranted;

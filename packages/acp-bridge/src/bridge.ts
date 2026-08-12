@@ -53,6 +53,7 @@ import {
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
   TurnBoundaryCompactionEngine,
+  type JournalGrowthSessionLimit,
 } from './compactionEngine.js';
 import { createJournalGrowthPolicy } from './journalGrowthPolicy.js';
 import {
@@ -3014,17 +3015,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const pendingRestoreEvents = new Map<string, EventBus>();
 
   // Current journal byte caps of this bridge's live sessions, including
-  // in-flight restores whose buses are not registered in byId yet. Shared
-  // with sibling bridges through the daemon-wide aggregator so ONE pool
-  // covers every workspace; without it the advisor accounts this
-  // bridge's sessions only.
-  const journalSessionLimitBytes = (): number[] => {
-    const limits = [...byId.values()].map(
-      (entry) => entry.events.journalLimitBytes() ?? maxJournalBytes,
-    );
+  // in-flight restores whose buses are not registered in byId yet, each
+  // with this bridge's baseline cap. Shared with sibling bridges through
+  // the daemon-wide aggregator so ONE pool covers every workspace;
+  // without it the advisor accounts this bridge's sessions only.
+  const journalSessionLimits = (): JournalGrowthSessionLimit[] => {
+    const limits = [...byId.values()].map((entry) => ({
+      limitBytes: entry.events.journalLimitBytes() ?? maxJournalBytes,
+      baselineBytes: maxJournalBytes,
+    }));
     for (const [restoreId, bus] of pendingRestoreEvents) {
       if (!byId.has(restoreId)) {
-        limits.push(bus.journalLimitBytes() ?? maxJournalBytes);
+        limits.push({
+          limitBytes: bus.journalLimitBytes() ?? maxJournalBytes,
+          baselineBytes: maxJournalBytes,
+        });
       }
     }
     return limits;
@@ -3032,7 +3037,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const unregisterJournalGrowthSessionLimits =
     journalGrowthPolicy !== undefined &&
     opts.registerJournalGrowthSessionLimits !== undefined
-      ? opts.registerJournalGrowthSessionLimits(journalSessionLimitBytes)
+      ? opts.registerJournalGrowthSessionLimits(journalSessionLimits)
       : undefined;
 
   const createClientId = (): string => `client_${randomUUID()}`;
@@ -4877,9 +4882,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // The daemon-wired aggregator already covers every
                 // sharing bridge's live sessions (this bridge's included);
                 // standalone bridges fall back to their own enumeration.
-                const allSessionLimitBytes = journalGrowthSessionLimits
+                const allSessionLimits = journalGrowthSessionLimits
                   ? [...journalGrowthSessionLimits()]
-                  : journalSessionLimitBytes();
+                  : journalSessionLimits();
                 // A requester whose bus lives outside both maps (defensive
                 // — today it is either registered or mid-restore) must
                 // still be charged at its current cap.
@@ -4887,12 +4892,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   !byId.has(sessionId) &&
                   !pendingRestoreEvents.has(sessionId)
                 ) {
-                  allSessionLimitBytes.push(current.maxBytes);
+                  allSessionLimits.push({
+                    limitBytes: current.maxBytes,
+                    baselineBytes: maxJournalBytes,
+                  });
                 }
                 const grant = journalGrowthPolicy.grant({
                   currentMaxEvents: current.maxEvents,
                   currentMaxBytes: current.maxBytes,
-                  allSessionLimitBytes,
+                  allSessionLimits,
                 });
                 if (grant) {
                   teeServeDebugLine(
