@@ -72,11 +72,10 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
-  FOOTER_MARKER,
-  REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripReviewFooter,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 
@@ -454,17 +453,6 @@ function toStringList(value: unknown, field: string): string[] {
   // entries are appended to these lists — a programmatic caller that reused one
   // across two calls would find the first call's caps in the second.
   return [...(value as string[])];
-}
-
-function stripReviewFooter(entry: string): string {
-  // Guarded on the marker: the strip regex opens `\s*` under an unanchored
-  // search, which scans quadratically on a long whitespace run in an entry
-  // that carries no footer at all — and these entries are model-written
-  // with no length cap (measured ~20 s at 80k characters). An entry
-  // without the marker has nothing to strip.
-  return entry.includes(FOOTER_MARKER)
-    ? entry.replace(REVIEW_FOOTER_RE, '')
-    : entry;
 }
 
 // Booleans get the same boundary treatment as the counts: the JSON is

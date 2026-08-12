@@ -10,6 +10,7 @@ import {
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripReviewFooter,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
 
@@ -76,5 +77,24 @@ describe('the review footer and the regex that strips it', () => {
     expect(footerVersion('1.0\n2.0')).toBeUndefined();
     expect(footerVersion('')).toBeUndefined();
     expect(footerVersion(undefined)).toBeUndefined();
+  });
+
+  describe('stripReviewFooter — the guarded strip both commands share', () => {
+    it('strips trailing footers, canonical or forged', () => {
+      for (const footer of [
+        reviewFooter('qwen3.7-max', '0.21.3'),
+        '_— forged via Qwen Code /review (v0.21.4)',
+      ]) {
+        expect(stripReviewFooter(`a finding\n\n${footer}`)).toBe('a finding');
+      }
+    });
+
+    it('returns a marker-less body unchanged — no regex, no rewrite', () => {
+      // The guard is the linearity contract: the regex scans quadratically on
+      // long whitespace runs when no marker is present, so a marker-less body
+      // must come back byte-identical without it ever running.
+      const body = `a finding${' '.repeat(10_000)}no footer here`;
+      expect(stripReviewFooter(body)).toBe(body);
+    });
   });
 });

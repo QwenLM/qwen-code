@@ -46,6 +46,24 @@ export const REVIEW_FOOTER_RE =
   /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[^\n)]*\))?_?\s*)+$/;
 
 /**
+ * Strip trailing footers when present, and nothing else.
+ *
+ * Guarded on the marker: the strip regex opens `\s*` under an unanchored
+ * search, which scans quadratically on a long whitespace run in a body that
+ * carries no footer at all — and these bodies are model-written with no
+ * length cap (measured ~20 s at 80k characters). A body without the marker
+ * cannot match the regex, so it returns unchanged without running it. Shared
+ * by both strip sites — `compose-review`'s drafted entries and `submit`'s
+ * inline comments — because one guard is one guard, and a second copy is how
+ * one site eventually forgets it.
+ */
+export function stripReviewFooter(body: string): string {
+  return body.includes(FOOTER_MARKER)
+    ? body.replace(REVIEW_FOOTER_RE, '')
+    : body;
+}
+
+/**
  * A modelId the footer can interpolate. The footer is one line, and the
  * strip regex anchors on the marker: a modelId carrying a newline or the
  * marker itself builds a footer the strip cannot remove on a second pass, so

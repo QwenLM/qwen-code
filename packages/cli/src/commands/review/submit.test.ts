@@ -197,6 +197,21 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       }).ok,
     ).toBe(true);
   });
+
+  it('the audit text names the source that authorised — flag and setting stay distinguishable', () => {
+    // `why` rides the success line and the persisted refusal record. Swapping
+    // the gate's two ternary branches attributes a setting-authorised post to
+    // a flag the operator never typed — and survives every other test, so pin
+    // both branches here.
+    const bySetting = authFor('123', { defaultComment: true });
+    expect(bySetting.ok).toBe(true);
+    expect(bySetting.why).toContain('`review.comment` is enabled in settings');
+    expect(bySetting.why).toContain('#123');
+
+    const byFlag = authFor('123 --comment');
+    expect(byFlag.ok).toBe(true);
+    expect(byFlag.why).toContain('`--comment` was in the review arguments');
+  });
 });
 
 describe('the posting gate', () => {
@@ -687,6 +702,27 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(
       inline.endsWith('_— qwen3.7-max via Qwen Code /review (v0.21.3)_'),
     ).toBe(true);
+  });
+
+  it('does not scan a marker-less body quadratically under the strip', () => {
+    // The strip regex opens with an unanchored `\s*` and scans quadratically
+    // on a long whitespace run in a body that carries the footer's `_— `
+    // opening but no marker — a forged footer truncated mid-line is exactly
+    // that shape, and the `_— ` defeats the engine's literal prefilter, so
+    // only the marker guard keeps this linear. The attribution-off path
+    // routes such bodies through the strip; an unguarded replace dies on the
+    // suite timeout long before the assertion runs.
+    const body = `**[Suggestion]** tidy\n\n_— cut short${' '.repeat(
+      500_000,
+    )}end`;
+    const review = file('footer-perf.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body }],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    expect(posted().comments[0].body).toBe(body);
   });
 
   it('counts the blockers it is actually carrying, not the ones it was told about', () => {

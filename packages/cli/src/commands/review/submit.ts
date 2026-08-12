@@ -66,9 +66,9 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import {
-  REVIEW_FOOTER_RE,
   footerVersion,
   reviewFooter,
+  stripReviewFooter,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -155,8 +155,8 @@ function normalizeInlineComments(
           // authored by the model must not carry one the operator turned off.
           body:
             footer === undefined
-              ? comment.body.replace(REVIEW_FOOTER_RE, '')
-              : `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+              ? stripReviewFooter(comment.body)
+              : `${stripReviewFooter(comment.body)}\n\n${footer}`,
         }
       : comment,
   );
@@ -614,7 +614,7 @@ export const submitCommand: CommandModule = {
       .option('skill-args', {
         type: 'string',
         describe:
-          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
+          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` — or the standing `review.comment` setting — is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
       })
       .option('user-authorized', {
         type: 'boolean',
