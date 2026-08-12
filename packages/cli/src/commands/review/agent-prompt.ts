@@ -45,7 +45,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
-  expectedRoundSeconds,
+  expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
@@ -1862,12 +1862,17 @@ function requireAuditableChunks(report: PlanReport): DiffChunk[] {
  * round was refused: the caller builds nothing. The admission STAMP is not
  * written here — it lands after the build succeeds, in each build path: the
  * stamp is what the next round's gate measures cost from, and a build that
- * throws must not leave one behind.
+ * throws must not leave one behind. `fanOutWidth` is the auditors this
+ * round fans out (1 for a whole-diff round): when the previous round is
+ * still in flight — the convergence pair's second member — the price
+ * covers both members' wall in waves of the tool-concurrency pool, not
+ * just this round's (deadline.ts `expectedAdmissionSeconds`).
  */
 function admitReverseAuditRound(
   planPath: string,
   round: number | undefined,
   cap: number,
+  fanOutWidth: number,
 ): boolean {
   // The plan's round cap first: deterministic, and cheaper than the
   // deadline arithmetic. The full cap normally; a reduced cap for a huge
@@ -1900,7 +1905,7 @@ function admitReverseAuditRound(
   }
   const spent = reverseAuditBudgetExhausted(
     process.env,
-    expectedRoundSeconds(planPath, round),
+    expectedAdmissionSeconds(planPath, round, fanOutWidth, process.env),
   );
   if (spent !== null) {
     writeBudgetStop(planPath, spent, round);
@@ -2009,6 +2014,7 @@ function runAllChunks(
       planPath,
       round,
       reverseAuditRoundCap(report.budget),
+      chunks.length,
     )
   ) {
     return;
@@ -2403,7 +2409,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // admits on the reserve alone hands the terminal round a start right at
   // the boundary, which is the killed-mid-verification failure one round
   // wide. The round's cost is the previous round's, measured admission to
-  // admission. The admission is stamped AFTER the build succeeds (below),
+  // admission — except when this round launches with the previous one still
+  // in flight (the convergence pair), where it covers both. The admission is
+  // stamped AFTER the build succeeds (below),
   // never here: the stamp is what the next round's gate measures cost from,
   // and a build that throws must not leave one behind — priced from a
   // failed build, the next round would be floored to the 600s minimum,
@@ -2421,6 +2429,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       args.plan,
       args.round,
       reverseAuditRoundCap(report.budget),
+      1,
     )
   ) {
     return;
@@ -2471,14 +2480,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     hasChunk &&
     !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
   ) {
+    const planChunkIds = (
+      Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : []
+    )
+      .map((c) => c?.id)
+      .filter((id): id is number => typeof id === 'number');
     if (args.round !== undefined) {
       let schedule: RoundSchedule | null = null;
       try {
         schedule = scheduleReverseAuditRound(
           args.plan,
-          (Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : [])
-            .map((c) => c?.id)
-            .filter((id): id is number => typeof id === 'number'),
+          planChunkIds,
           args.round,
           process.env,
           typeof report.diffPathAbsolute === 'string'
@@ -2500,6 +2512,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         args.plan,
         args.round,
         reverseAuditRoundCap(report.budget),
+        planChunkIds.length,
       )
     )
       return;

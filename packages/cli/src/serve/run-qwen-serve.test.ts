@@ -1237,7 +1237,9 @@ describe('runQwenServe daemon logger wiring', () => {
 
     // Point daemon logger at our temp debug dir
     const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
     process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
 
     try {
       const handle = await runQwenServe(
@@ -1271,6 +1273,10 @@ describe('runQwenServe daemon logger wiring', () => {
       expect(logContent).toContain(
         `workspace=${fs.realpathSync.native(workspace)}`,
       );
+      expect(logContent).toContain('project memory scope resolved');
+      expect(logContent).toContain('projectMemoryScope=workspace');
+      expect(logContent).toContain('projectMemoryScopeSource=default');
+      expect(logContent).toContain('projectMemoryScopeRaw=workspace');
 
       await Promise.all(
         Array.from({ length: 70 }, (_, index) =>
@@ -1302,6 +1308,11 @@ describe('runQwenServe daemon logger wiring', () => {
       delete process.env['QWEN_RUNTIME_DIR'];
       if (origEnv !== undefined) {
         process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+      if (originalScope === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = originalScope;
       }
     }
   }, 10_000);
@@ -1599,6 +1610,7 @@ describe('runQwenServe telemetry validation', () => {
   });
 
   it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hot-remove-')),
     );
@@ -1671,6 +1683,14 @@ describe('runQwenServe telemetry validation', () => {
         body: JSON.stringify({ cwd: secondary, persist: true }),
       });
       expect(added.status).toBe(201);
+      expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['pipeLimits']).toEqual({
+          maxFrameBytes: 64 * 1024 * 1024,
+          maxQueuedMessages: 256,
+          maxQueuedBytes: 64 * 1024 * 1024,
+        });
+      }
       expect(createBridge.mock.calls[0]?.[0].onChannelDelivery).toBeTypeOf(
         'function',
       );
@@ -1914,6 +1934,7 @@ describe('runQwenServe telemetry validation', () => {
   });
 
   it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -1990,6 +2011,14 @@ describe('runQwenServe telemetry validation', () => {
     try {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
+      expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        expect(options['pipeLimits']).toEqual({
+          maxFrameBytes: 64 * 1024 * 1024,
+          maxQueuedMessages: 256,
+          maxQueuedBytes: 64 * 1024 * 1024,
+        });
+      }
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
@@ -3868,7 +3897,44 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('applies memoryProjectScope to every runtime without mutating process.env', async () => {
+  it.each([
+    [
+      'defaults every runtime to workspace project-memory scope',
+      undefined,
+      undefined,
+      'workspace',
+    ],
+    [
+      'applies memoryProjectScope to every runtime without mutating process.env',
+      'workspace',
+      'git-root',
+      'git-root',
+    ],
+    [
+      'preserves the launch environment scope when the option is omitted',
+      'git-root',
+      undefined,
+      'git-root',
+    ],
+    [
+      'treats a blank launch environment scope as unset',
+      '',
+      undefined,
+      'workspace',
+    ],
+    [
+      'treats a whitespace-only launch environment scope as unset',
+      '   ',
+      undefined,
+      'workspace',
+    ],
+    [
+      'passes an unrecognized launch environment scope through unchanged',
+      'workspce',
+      undefined,
+      'workspce',
+    ],
+  ] as const)('%s', async (_name, launchScope, optionScope, expectedScope) => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-memory-project-scope-')),
     );
@@ -3877,7 +3943,11 @@ describe('runQwenServe runtime startup failures', () => {
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
     const originalScope = process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
-    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    if (launchScope === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = launchScope;
+    }
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -3915,7 +3985,9 @@ describe('runQwenServe runtime startup failures', () => {
         hostname: '127.0.0.1',
         mode: 'http-bridge',
         workspace: [primary, secondary],
-        memoryProjectScope: 'git-root',
+        ...(optionScope === undefined
+          ? {}
+          : { memoryProjectScope: optionScope }),
         maxSessions: 1,
         serveWebShell: false,
       },
@@ -3928,9 +4000,9 @@ describe('runQwenServe runtime startup failures', () => {
       for (const runtime of workspaceRegistry?.list() ?? []) {
         expect(
           runtime.env.effectiveEnv?.['QWEN_CODE_MEMORY_PROJECT_SCOPE'],
-        ).toBe('git-root');
+        ).toBe(expectedScope);
       }
-      expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe('workspace');
+      expect(process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE']).toBe(launchScope);
     } finally {
       if (originalScope === undefined) {
         delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];

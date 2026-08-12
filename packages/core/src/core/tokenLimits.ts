@@ -141,6 +141,26 @@ export function normalize(model: string): string {
   // collapse whitespace to single hyphen
   s = s.replace(/\s+/g, '-');
 
+  // Anthropic Claude Model Group aliases from LiteLLM / Vertex / Bedrock-style
+  // proxies frequently use a dotted minor version (`claude-opus-4.8`) rather
+  // than the canonical hyphenated form (`claude-opus-4-8`). The trailing-
+  // suffix strip below treats `-4.8` as a dashed-word version tag and eats
+  // it, collapsing the id to `claude-opus` which then falls through to the
+  // generic Claude fallback (200K input / 64K output) and defeats the 1M /
+  // 128K carve-outs for Opus 4.6+. Rewrite the dotted minor to hyphenated
+  // up front so every downstream regex sees the canonical form regardless
+  // of which alias the proxy exposed.
+  //
+  // Runs AFTER the whitespace collapse so space-separated display names
+  // (`Claude Opus 4.8`) reach it hyphenated. The family segment is matched
+  // as `[a-z]+` rather than an enumerated list so it can't drift from
+  // anthropicContentGenerator.ts's CLAUDE_MODEL_FAMILIES; this is safe
+  // because the rewrite only has observable effect via the family-specific
+  // downstream patterns. An already-hyphenated minor plus any further dotted
+  // components (`claude-opus-4-8.0`, `claude-opus-4.8.0`) is folded too so
+  // the version parser and the limit tables agree on every alias shape.
+  s = s.replace(/^(claude-[a-z]+-\d+(?:-\d+)?)\.(\d+)(?:\.\d+)*/, '$1-$2');
+
   // remove trailing build / date / revision suffixes:
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
   s = s.replace(/-preview/g, '');
@@ -173,6 +193,15 @@ export function normalize(model: string): string {
   return s;
 }
 
+/**
+ * Opus tiers that get the extended 1M input / 128K output window (Opus
+ * 4.6-4.8 and every 5.x). One pattern feeds the input table, the output
+ * table, and defaultOutputCeiling's ceiling exemption so a future tier bump
+ * can't update one site and silently leave another clamping the same model.
+ * No `g`/`y` flag, so sharing the instance across `.test()` sites is safe.
+ */
+const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
+
 /** Ordered regex patterns: most specific -> most general (first match wins). */
 const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
@@ -191,7 +220,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
-  [/^claude-opus-4-(?:6|7|8)/, LIMITS['1m']], // Opus 4.6-4.8: 1M
+  [CLAUDE_OPUS_EXTENDED, LIMITS['1m']], // Opus 4.6-4.8, Opus 5.x: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -262,7 +291,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
+  [CLAUDE_OPUS_EXTENDED, 128_000 as TokenCount], // Opus 4.6-4.8, Opus 5.x: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
@@ -358,7 +387,7 @@ export function tokenLimit(
  */
 export function defaultOutputCeiling(model: Model): TokenCount {
   const outputLimit = tokenLimit(model, 'output');
-  if (/^claude-opus-4-(?:6|7|8)/.test(normalize(model))) {
+  if (CLAUDE_OPUS_EXTENDED.test(normalize(model))) {
     return outputLimit;
   }
   return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);

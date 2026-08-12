@@ -26,6 +26,10 @@ import {
   convertCompatibleExtension,
   SUPPORTED_EXTENSION_MANIFESTS,
 } from './extension-converter.js';
+import {
+  AGENT_PLUGIN_MANIFEST,
+  getAgentPluginSchemaStatus,
+} from './agent-plugins-v1/manifest.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 import { extractZipArchive } from './zip-extraction.js';
@@ -1081,12 +1085,18 @@ async function flattenSingleExtensionDirectory(
 }
 
 function getSupportedManifestList(): string {
-  return SUPPORTED_EXTENSION_MANIFESTS.join(', ');
+  return [
+    ...SUPPORTED_EXTENSION_MANIFESTS,
+    `${AGENT_PLUGIN_MANIFEST} (Agent Plugins)`,
+  ].join(', ');
 }
 
 function hasSupportedExtensionSourceManifest(rootPath: string): boolean {
-  return SUPPORTED_EXTENSION_MANIFESTS.some((manifestPath) =>
-    fs.existsSync(path.join(rootPath, manifestPath)),
+  return (
+    getAgentPluginSchemaStatus(rootPath) !== 'unrelated' ||
+    SUPPORTED_EXTENSION_MANIFESTS.some((manifestPath) =>
+      fs.existsSync(path.join(rootPath, manifestPath)),
+    )
   );
 }
 
