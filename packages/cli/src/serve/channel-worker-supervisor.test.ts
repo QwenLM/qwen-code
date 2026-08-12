@@ -641,6 +641,37 @@ describe('createChannelWorkerSupervisor', () => {
     );
   });
 
+  it('records a zero-channel ready without the all-selection placeholder (#8975)', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    // The worker's graceful zero-channel state reports empty arrays; they
+    // must replace the `['all']` launch placeholder instead of falling back
+    // to it, or the phantom `all` channel leaks into committed names, the
+    // stop route and status reporting.
+    child.emit('message', {
+      type: 'ready',
+      channels: [],
+      requestedChannels: [],
+    });
+    await started;
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'running',
+      channels: [],
+      requestedChannels: [],
+      adapters: [],
+    });
+    await supervisor.stop();
+  });
+
   it('rejects startup when the worker exits before ready', async () => {
     const child = new FakeChild();
     const supervisor = createChannelWorkerSupervisor({

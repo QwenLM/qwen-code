@@ -45,12 +45,47 @@ const mockDaemonChannelRuntimeStatePath = vi.hoisted(() =>
 const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
 const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
 const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStorePrune = vi.hoisted(() =>
+  vi.fn(() => mockChannelStateStoreReadAll()),
+);
 const mockChannelStateStore = vi.hoisted(() =>
   vi.fn(() => ({
     readAll: mockChannelStateStoreReadAll,
     set: mockChannelStateStoreSet,
     setMany: mockChannelStateStoreSetMany,
+    prune: mockChannelStateStorePrune,
+    // Mirror the real best-effort wrappers so throwing `set`/`setMany`
+    // mocks still exercise "persistence failure never blocks a connect".
+    trySet: (name: string, state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSet(name, state);
+      } catch {
+        // best-effort
+      }
+    },
+    trySetMany: (names: string[], state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSetMany(names, state);
+      } catch {
+        // best-effort
+      }
+    },
   })),
+);
+const mockSelectActiveChannels = vi.hoisted(
+  () =>
+    (
+      names: readonly string[],
+      states: Record<string, 'active' | 'stopped'>,
+      onSkipped?: (message: string) => void,
+    ): string[] =>
+      names.filter((name) => {
+        if (states[name] === 'stopped') {
+          onSkipped?.(`[Channel] "${name}" skipped (stopped before restart)`);
+          return false;
+        }
+        return true;
+      }),
 );
 const mockObserveContact = vi.hoisted(() => vi.fn());
 const mockListContacts = vi.hoisted(() => vi.fn());
@@ -265,6 +300,7 @@ vi.mock('./runtime.js', () => ({
 
 vi.mock('./channel-state-store.js', () => ({
   ChannelStateStore: mockChannelStateStore,
+  selectActiveChannels: mockSelectActiveChannels,
 }));
 
 vi.mock('./observed-contact-store.js', () => ({
@@ -1281,6 +1317,22 @@ describe('runChannelDaemonWorker', () => {
         text: 'hello',
       }),
     ).rejects.toThrow('Channel "telegram" is not running.');
+    // Webhooks must be rejected upfront too, not silently accepted and
+    // dropped (#8975).
+    const webhookTask = {
+      channelName: 'telegram',
+      source: 'github-ci',
+      eventType: 'check_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: { runId: 123 },
+    };
+    expect(() => handle.validateWebhookTask(webhookTask)).toThrow(
+      'Channel "telegram" is not running.',
+    );
+    await expect(handle.runWebhookTask(webhookTask)).rejects.toThrow(
+      'Channel "telegram" is not running.',
+    );
     await handle.close();
   });
 
@@ -1353,7 +1405,11 @@ describe('runChannelDaemonWorker', () => {
       requestedChannels: ['telegram'],
       pid: process.pid,
     });
-    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    // Connects are batched into one best-effort write after the loop.
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'active',
+    );
     await handle.close();
   });
 
@@ -1377,7 +1433,40 @@ describe('runChannelDaemonWorker', () => {
       expect.any(Object),
       expect.any(Object),
     );
-    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('telegram', 'active');
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'active',
+    );
+    await handle.close();
+  });
+
+  it('still reports connected channels when state persistence fails (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStoreSetMany.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // The persistence failure must not reclassify a connected channel as a
+    // startup failure or keep it out of the ready payload.
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "telegram" connected.',
+    );
+    expect(handle.channels).toEqual(['telegram']);
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
     await handle.close();
   });
 

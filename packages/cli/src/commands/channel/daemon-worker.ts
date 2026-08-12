@@ -85,7 +85,11 @@ import {
   selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
-import { ChannelStateStore } from './channel-state-store.js';
+import {
+  ChannelStateStore,
+  selectActiveChannels,
+  type ChannelRuntimeState,
+} from './channel-state-store.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 import {
   OBSERVED_CONTACT_MAX_FRESH_WITHIN_SECONDS,
@@ -460,17 +464,15 @@ export async function runChannelDaemonWorker(
   // persisted state.
   let selectedNames = names;
   if (opts.selection.mode === 'all') {
-    const states = stateStore.readAll();
-    selectedNames = [];
-    for (const name of names) {
-      if (states[name] === 'stopped') {
-        writeStdoutLine(
-          `[Channel] "${sanitizeLogText(name, 128)}" skipped (stopped before restart)`,
-        );
-        continue;
-      }
-      selectedNames.push(name);
+    let states: Record<string, ChannelRuntimeState>;
+    try {
+      // Drop entries for channels removed from settings so they cannot be
+      // skipped forever by a stale `stopped` record.
+      states = stateStore.prune(names);
+    } catch {
+      states = stateStore.readAll();
     }
+    selectedNames = selectActiveChannels(names, states, writeStdoutLine);
   }
   if (selectedNames.length === 0) {
     writeStdoutLine(
@@ -633,11 +635,6 @@ export async function runChannelDaemonWorker(
       try {
         await abortableStartup(channel.connect(), startupSignal);
         connected.push(name);
-        try {
-          stateStore.set(name, 'active');
-        } catch {
-          // State persistence is best-effort; never fail a successful connect.
-        }
         writeStdoutLine(`[Channel] "${safeName}" connected.`);
       } catch (err) {
         if (startupSignal?.aborted) {
@@ -696,6 +693,10 @@ export async function runChannelDaemonWorker(
         }
       }
     }
+
+    // One batched best-effort write after the connect loop instead of a
+    // fsync'd read-modify-write per channel on the startup critical path.
+    stateStore.trySetMany(connected, 'active');
 
     if (connected.length === 0) {
       throw new Error('No channels connected.');

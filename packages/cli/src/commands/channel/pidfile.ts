@@ -25,6 +25,13 @@ export interface ServiceInfo {
   pid: number;
   startedAt: string;
   channels: string[];
+  /**
+   * Workspace the standalone service was started from. Channel state is
+   * scoped per workspace (#8975), so `qwen channel stop` needs it to record
+   * stops in the right state file. Absent for pidfiles written by older
+   * releases.
+   */
+  workspaceCwd?: string;
   servePid?: number;
   workerPid?: number;
   /**
@@ -62,6 +69,12 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
   }
   if (info.servePid !== undefined && !isValidPid(info.servePid)) return null;
   if (info.workerPid !== undefined && !isValidPid(info.workerPid)) return null;
+  if (
+    info.workspaceCwd !== undefined &&
+    (typeof info.workspaceCwd !== 'string' || info.workspaceCwd.length === 0)
+  ) {
+    return null;
+  }
 
   const workers = parseServiceInfoWorkers(info.workers);
   if (workers === null) return null;
@@ -71,6 +84,9 @@ function parseServiceInfo(value: unknown): ServiceInfo | null {
     pid: info.pid,
     startedAt: info.startedAt,
     channels: info.channels,
+    ...(info.workspaceCwd !== undefined
+      ? { workspaceCwd: info.workspaceCwd }
+      : {}),
     ...(info.servePid !== undefined ? { servePid: info.servePid } : {}),
     ...(info.workerPid !== undefined ? { workerPid: info.workerPid } : {}),
     ...(workers !== undefined ? { workers } : {}),
@@ -206,12 +222,16 @@ function fileExistsError(message: string): NodeJS.ErrnoException {
 }
 
 /** Write PID file with current standalone channel process info. */
-export function writeServiceInfo(channels: string[]): void {
+export function writeServiceInfo(
+  channels: string[],
+  workspaceCwd?: string,
+): void {
   const info: ServiceInfo = {
     owner: 'channel',
     pid: process.pid,
     startedAt: new Date().toISOString(),
     channels,
+    ...(workspaceCwd !== undefined ? { workspaceCwd } : {}),
   };
 
   writeInfo(info, 'wx');

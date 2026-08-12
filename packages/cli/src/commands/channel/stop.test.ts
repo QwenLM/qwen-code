@@ -16,6 +16,22 @@ const mockChannelStateStore = vi.hoisted(() =>
     readAll: vi.fn(() => ({})),
     set: vi.fn(),
     setMany: mockChannelStateStoreSetMany,
+    // Mirror the real best-effort wrappers so throwing `set`/`setMany`
+    // mocks still exercise "persistence failure never blocks a stop".
+    trySet: (name: string, state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSetMany([name], state);
+      } catch {
+        // best-effort
+      }
+    },
+    trySetMany: (names: string[], state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSetMany(names, state);
+      } catch {
+        // best-effort
+      }
+    },
   })),
 );
 const mockChannelRuntimeStatePath = vi.hoisted(() =>
@@ -132,6 +148,7 @@ describe('stopCommand', () => {
       pid: 1234,
       startedAt: '2026-01-01T00:00:00.000Z',
       channels: ['telegram', 'feishu'],
+      workspaceCwd: '/workspace/a',
     });
     mockSignalService.mockReturnValue(true);
     mockWaitForExit.mockResolvedValue(true);
@@ -145,6 +162,39 @@ describe('stopCommand', () => {
     );
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
+  });
+
+  it('scopes the stop record to the workspace from the pidfile (#8975)', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith('/workspace/a');
+  });
+
+  it('falls back to the legacy global state file for older pidfiles (#8975)', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(undefined);
   });
 
   it('still stops the service when state persistence fails', async () => {

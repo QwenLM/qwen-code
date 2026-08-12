@@ -8,14 +8,34 @@ import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+interface MockStateStoreInstance {
+  path: string;
+  setMany: ReturnType<typeof vi.fn>;
+  trySetMany: (names: string[], state: 'active' | 'stopped') => void;
+}
+
+const mockChannelStateStoreInstances = vi.hoisted(
+  () => [] as MockStateStoreInstance[],
+);
 const mockChannelStateStore = vi.hoisted(() =>
-  vi.fn(() => ({
-    readAll: vi.fn(() => ({})),
-    get: vi.fn(),
-    set: vi.fn(),
-    setMany: mockChannelStateStoreSetMany,
-  })),
+  vi.fn((path: string) => {
+    const setMany = vi.fn();
+    const instance: MockStateStoreInstance = {
+      path,
+      setMany,
+      // Mirror the real best-effort wrapper so a throwing `setMany` mock
+      // still exercises "persistence failure never blocks a stop".
+      trySetMany: (names: string[], state: 'active' | 'stopped') => {
+        try {
+          setMany(names, state);
+        } catch {
+          // best-effort
+        }
+      },
+    };
+    mockChannelStateStoreInstances.push(instance);
+    return instance;
+  }),
 );
 
 vi.mock('../../commands/channel/channel-state-store.js', () => ({
@@ -59,6 +79,10 @@ function setup(options: {
     vi.fn(async () => ({
       changed: true,
       state: options.control ?? controlState(),
+      // What the manager tore down at commit time (#8975).
+      stoppedChannels: [
+        { workspaceCwd: '/workspace', names: ['telegram', 'feishu'] },
+      ],
     }));
   const app = express();
   registerWorkspaceChannelControlRoutes(app, {
@@ -78,11 +102,11 @@ function setup(options: {
 
 beforeEach(() => {
   mockChannelStateStore.mockClear();
-  mockChannelStateStoreSetMany.mockClear();
+  mockChannelStateStoreInstances.length = 0;
 });
 
 describe('DELETE /workspace/channel', () => {
-  it('records stopped channels so --channel all does not restart them (#8975)', async () => {
+  it('records stopped channels from the stop result so --channel all does not restart them (#8975)', async () => {
     const { app, stopChannelWorker } = setup({});
 
     const response = await request(app).delete('/workspace/channel');
@@ -93,8 +117,42 @@ describe('DELETE /workspace/channel', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       expect.stringContaining('channel-state.json'),
     );
-    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+    expect(mockChannelStateStoreInstances).toHaveLength(1);
+    expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
       ['telegram', 'feishu'],
+      'stopped',
+    );
+  });
+
+  it('records stops per workspace when the manager reports multiple workspaces (#8975)', async () => {
+    const { app } = setup({
+      stop: vi.fn(async () => ({
+        changed: true,
+        state: controlState(),
+        stoppedChannels: [
+          { workspaceCwd: '/workspace/a', names: ['telegram'] },
+          { workspaceCwd: '/workspace/b', names: ['feishu'] },
+        ],
+      })),
+    });
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(200);
+    // Each workspace gets its own state file and its own name set.
+    expect(mockChannelStateStoreInstances).toHaveLength(2);
+    const paths = mockChannelStateStoreInstances.map(
+      (instance) => instance.path,
+    );
+    expect(paths[0]).not.toEqual(paths[1]);
+    expect(paths[0]).toContain('channel-state.json');
+    expect(paths[1]).toContain('channel-state.json');
+    expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'stopped',
+    );
+    expect(mockChannelStateStoreInstances[1]!.setMany).toHaveBeenCalledWith(
+      ['feishu'],
       'stopped',
     );
   });
@@ -111,17 +169,51 @@ describe('DELETE /workspace/channel', () => {
     const response = await request(app).delete('/workspace/channel');
 
     expect(response.status).toBe(500);
-    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreInstances).toHaveLength(0);
   });
 
   it('records nothing when no channels were running', async () => {
     const { app } = setup({
       control: controlState({ enabled: false, selection: null, workers: [] }),
+      stop: vi.fn(async () => ({
+        changed: false,
+        state: controlState({
+          enabled: false,
+          selection: null,
+          workers: [],
+        }),
+      })),
     });
 
     const response = await request(app).delete('/workspace/channel');
 
     expect(response.status).toBe(200);
-    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreInstances).toHaveLength(0);
+  });
+
+  it('keeps serving the stop result even when state persistence fails (#8975)', async () => {
+    const { app } = setup({});
+    mockChannelStateStore.mockImplementationOnce((path: string) => {
+      const instance: MockStateStoreInstance = {
+        path,
+        setMany: vi.fn(() => {
+          throw new Error('disk full');
+        }),
+        trySetMany: (names: string[], state: 'active' | 'stopped') => {
+          try {
+            instance.setMany(names, state);
+          } catch {
+            // best-effort
+          }
+        },
+      };
+      mockChannelStateStoreInstances.push(instance);
+      return instance;
+    });
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(200);
+    expect(response.body.changed).toBe(true);
   });
 });

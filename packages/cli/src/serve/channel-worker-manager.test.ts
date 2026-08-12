@@ -961,6 +961,94 @@ describe('createChannelWorkerManager', () => {
     expect(test.releaseLease).toHaveBeenCalledTimes(2);
   });
 
+  it('reports the torn-down channels on stop for state persistence (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({ requestedChannels: ['telegram', 'feishu'] }),
+    ]);
+
+    await expect(test.manager.stopSelection()).resolves.toMatchObject({
+      changed: true,
+      stoppedChannels: [
+        { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+      ],
+    });
+  });
+
+  it('falls back to connected channels when requestedChannels is not committed yet (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // A mode-`all` worker only reports names in its ready message; during the
+    // starting window only the connected set is known.
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'starting',
+        requestedChannels: undefined,
+        channels: ['telegram'],
+      }),
+    ]);
+
+    await expect(test.manager.stopSelection()).resolves.toMatchObject({
+      changed: true,
+      stoppedChannels: [{ workspaceCwd: PRIMARY, names: ['telegram'] }],
+    });
+  });
+
+  it('groups torn-down channels per workspace on stop (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        workspaceId: 'primary',
+        workspaceCwd: PRIMARY,
+        primary: true,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      }),
+      workerSnapshot({
+        workspaceId: 'secondary',
+        workspaceCwd: SECONDARY,
+        primary: false,
+        channels: ['feishu'],
+        requestedChannels: ['feishu'],
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram'] },
+      { workspaceCwd: SECONDARY, names: ['feishu'] },
+    ]);
+  });
+
+  it('omits torn-down channels when only a lease was reserved (#8975)', async () => {
+    const test = setup();
+    test.createGroup.mockImplementationOnce(() => {
+      throw new Error('group construction failed');
+    });
+    // The failed rollback cannot release the lease, so the stop only has a
+    // lease to clean up — no workers, hence no channel names to persist.
+    test.releaseLease.mockImplementationOnce(() => {
+      throw new Error('lease release failed');
+    });
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['telegram'] }),
+    ).rejects.toMatchObject({ code: 'channel_worker_start_failed' });
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.changed).toBe(true);
+    expect(result.stoppedChannels).toBeUndefined();
+  });
+
   it('rejects webhook work after shutdown latches', async () => {
     const group = fakeGroup();
     const test = setup(group);

@@ -26,6 +26,8 @@ import type {
 import {
   ChannelStateStore,
   channelRuntimeStatePath,
+  selectActiveChannels,
+  type ChannelRuntimeState,
 } from './channel-state-store.js';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import { resolveProxy } from './proxy.js';
@@ -94,9 +96,13 @@ function channelMemoryOptions(
   };
 }
 
-function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
+function writeServiceInfoOrExit(
+  channels: string[],
+  cleanup: () => void,
+  workspaceCwd?: string,
+): void {
   try {
-    writeServiceInfo(channels);
+    writeServiceInfo(channels, workspaceCwd);
   } catch (err) {
     cleanup();
     if (isFileExistsError(err)) {
@@ -319,9 +325,12 @@ function checkDuplicateInstance(): void {
  * effective channel set is a legitimate state (nothing configured, or every
  * configured channel stopped before restart), not a startup failure (#8975).
  */
-async function serveWithoutChannels(message: string): Promise<void> {
+async function serveWithoutChannels(
+  message: string,
+  workspaceCwd: string,
+): Promise<void> {
   writeStdoutLine(message);
-  writeServiceInfoOrExit([], () => {});
+  writeServiceInfoOrExit([], () => {}, workspaceCwd);
   const shutdown = () => {
     writeStdoutLine('\n[Channel] Shutting down...');
     removeServiceInfo();
@@ -333,12 +342,11 @@ async function serveWithoutChannels(message: string): Promise<void> {
 }
 
 /** Best-effort: record a successfully connected channel as active. */
-function recordChannelActive(name: string): void {
-  try {
-    new ChannelStateStore(channelRuntimeStatePath()).set(name, 'active');
-  } catch {
-    // State persistence is best-effort; never fail a successful connect.
-  }
+function recordChannelActive(name: string, workspaceCwd: string): void {
+  new ChannelStateStore(channelRuntimeStatePath(workspaceCwd)).trySet(
+    name,
+    'active',
+  );
 }
 
 /** Start a single channel with its own bridge + crash recovery. */
@@ -346,9 +354,10 @@ async function startSingle(
   name: string,
   proxy: string | undefined,
   cronEnabled: boolean,
+  workspaceCwd: string,
 ): Promise<void> {
   checkDuplicateInstance();
-  const channelsConfig = loadChannelsConfig();
+  const channelsConfig = loadChannelsConfig(workspaceCwd);
 
   await loadChannelsFromExtensions();
 
@@ -364,7 +373,7 @@ async function startSingle(
     config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
-      process.cwd(),
+      workspaceCwd,
       { resolveEnvVars: 'available' },
     );
   } catch (err) {
@@ -426,9 +435,11 @@ async function startSingle(
     bridge.stop();
     process.exit(1);
   }
-  recordChannelActive(name);
-  writeServiceInfoOrExit([name], () =>
-    cleanupStartedChannels([channel], bridge, router),
+  recordChannelActive(name, workspaceCwd);
+  writeServiceInfoOrExit(
+    [name],
+    () => cleanupStartedChannels([channel], bridge, router),
+    workspaceCwd,
   );
   // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
   scheduler?.start();
@@ -468,9 +479,10 @@ async function startSingle(
 async function startAll(
   proxy: string | undefined,
   cronEnabled: boolean,
+  workspaceCwd: string,
 ): Promise<void> {
   checkDuplicateInstance();
-  const channelsConfig = loadChannelsConfig();
+  const channelsConfig = loadChannelsConfig(workspaceCwd);
 
   await loadChannelsFromExtensions();
 
@@ -478,24 +490,34 @@ async function startAll(
   if (configuredNames.length === 0) {
     await serveWithoutChannels(
       '[Channel] No channels configured; serving with 0 channels.',
+      workspaceCwd,
     );
     return;
   }
 
   // Restore semantics (#8975): skip channels explicitly stopped before the
   // last restart; channels without recorded state are treated as active.
-  const states = new ChannelStateStore(channelRuntimeStatePath()).readAll();
-  const selectedNames: string[] = [];
-  for (const name of configuredNames) {
-    if (states[name] === 'stopped') {
-      writeStdoutLine(`[Channel] "${name}" skipped (stopped before restart)`);
-      continue;
-    }
-    selectedNames.push(name);
+  // State is scoped to this workspace, matching the config load above.
+  const stateStore = new ChannelStateStore(
+    channelRuntimeStatePath(workspaceCwd),
+  );
+  let states: Record<string, ChannelRuntimeState>;
+  try {
+    // Drop entries for channels removed from settings so they cannot be
+    // skipped forever by a stale `stopped` record.
+    states = stateStore.prune(configuredNames);
+  } catch {
+    states = stateStore.readAll();
   }
+  const selectedNames = selectActiveChannels(
+    configuredNames,
+    states,
+    writeStdoutLine,
+  );
   if (selectedNames.length === 0) {
     await serveWithoutChannels(
       '[Channel] All configured channels are stopped; serving with 0 channels.',
+      workspaceCwd,
     );
     return;
   }
@@ -510,7 +532,7 @@ async function startAll(
   }
 
   const cliEntryPath = findCliEntryPath();
-  const defaultCwd = process.cwd();
+  const defaultCwd = workspaceCwd;
   let shuttingDown = false;
 
   const bridgeReadiness = createBridgeReadinessGate();
@@ -558,14 +580,11 @@ async function startAll(
   registerSessionCleanup(bridge, router, channels);
 
   // Connect all channels
-  let connectedCount = 0;
   const connectedChannels: Map<string, ChannelBase> = new Map();
   for (const [name, channel] of channels) {
     try {
       await channel.connect();
       connectedChannels.set(name, channel);
-      connectedCount++;
-      recordChannelActive(name);
       writeStdoutLine(`[Channel] "${name}" connected.`);
     } catch (err) {
       writeStderrLine(
@@ -573,6 +592,10 @@ async function startAll(
       );
     }
   }
+  // One batched best-effort write after the loop instead of a fsync'd
+  // read-modify-write per channel on the startup critical path.
+  stateStore.trySetMany([...connectedChannels.keys()], 'active');
+  const connectedCount = connectedChannels.size;
 
   if (connectedCount === 0) {
     writeStderrLine('[Channel] No channels connected. Exiting.');
@@ -589,6 +612,7 @@ async function startAll(
   writeServiceInfoOrExit(
     parsed.map((p) => p.name),
     () => cleanupStartedChannels(channels.values(), bridge, router),
+    workspaceCwd,
   );
   // Keep scheduled loops active; their prompt paths wait on bridgeReadiness.
   scheduler?.start();
@@ -642,16 +666,17 @@ export const startCommand: CommandModule<object, { name?: string }> = {
       describe: 'Channel name (omit to start all configured channels)',
     }),
   handler: async (argv) => {
-    const settings = loadSettings(process.cwd());
+    const workspaceCwd = process.cwd();
+    const settings = loadSettings(workspaceCwd);
     const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );
     const cronEnabled = isChannelCronEnabled(settings);
     if (argv.name) {
-      await startSingle(argv.name, proxy, cronEnabled);
+      await startSingle(argv.name, proxy, cronEnabled, workspaceCwd);
     } else {
-      await startAll(proxy, cronEnabled);
+      await startAll(proxy, cronEnabled, workspaceCwd);
     }
   },
 };

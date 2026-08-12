@@ -524,15 +524,9 @@ export function createChannelManagementService(
       );
       // An explicit stop must persist, so a later `--channel all` restart
       // does not bring this channel back (#8975).
-      try {
-        new ChannelStateStore(
-          daemonChannelRuntimeStatePath(
-            canonicalizeWorkspace(opts.workspaceCwd),
-          ),
-        ).set(name, 'stopped');
-      } catch {
-        // State persistence is best-effort; never block the stop itself.
-      }
+      new ChannelStateStore(
+        daemonChannelRuntimeStatePath(canonicalizeWorkspace(opts.workspaceCwd)),
+      ).trySet(name, 'stopped');
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },

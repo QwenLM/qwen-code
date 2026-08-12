@@ -159,6 +159,35 @@ describe('writeServiceInfo + readServiceInfo', () => {
       owner: 'channel',
       channels: ['telegram'],
     });
+    expect(info).not.toHaveProperty('workspaceCwd');
+  });
+
+  it('round-trips the standalone workspace for per-workspace state (#8975)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    writeServiceInfo(['telegram'], '/workspace/a');
+
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'channel',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+  });
+
+  it('rejects pidfiles with a malformed workspaceCwd', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = JSON.stringify({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: new Date().toISOString(),
+      channels: ['telegram'],
+      workspaceCwd: '',
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    expect(readServiceInfo()).toBeNull();
   });
 
   it('writes and reads serve-owned service info for a live serve process', () => {

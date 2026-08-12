@@ -1093,23 +1093,27 @@ export function createChannelWorkerSupervisor(
         settled = true;
         ready = true;
         cleanupStartupTimer();
+        // An explicit array in the ready message is authoritative even when
+        // empty: a zero-channel worker (nothing configured, or everything
+        // stopped) must not keep the `['all']` launch placeholder, or the
+        // phantom name leaks into committed names, stop routes and status
+        // (#8975).
         const next: ChannelWorkerSnapshot = {
           ...snapshot,
           state: 'running',
           pid: message.pid ?? startedChild.pid,
-          channels:
-            message.channels && message.channels.length > 0
-              ? [...message.channels]
-              : [...snapshot.channels],
+          channels: Array.isArray(message.channels)
+            ? [...message.channels]
+            : [...snapshot.channels],
         };
         delete next.error;
         delete next.lastHeartbeatAt;
         delete next.nextRestartAt;
         delete next.staleHeartbeatAt;
-        if (message.requestedChannels?.length) {
+        if (Array.isArray(message.requestedChannels)) {
           next.requestedChannels = [...message.requestedChannels];
         }
-        const adapterNames = message.requestedChannels?.length
+        const adapterNames = Array.isArray(message.requestedChannels)
           ? message.requestedChannels
           : (next.requestedChannels ?? next.channels);
         const connected = new Set(next.channels);

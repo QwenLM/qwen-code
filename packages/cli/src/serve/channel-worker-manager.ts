@@ -5,6 +5,7 @@
  */
 
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
   ChannelDeliveryError,
@@ -53,6 +54,13 @@ export interface ChannelWorkerSetResult {
 export interface ChannelWorkerStopResult {
   changed: boolean;
   state: ChannelWorkerControlState;
+  /**
+   * Channel names the stop actually tore down, grouped by workspace,
+   * captured inside the manager lane at stop time (a pre-stop snapshot
+   * taken by the caller can race an in-flight start). Callers persisting
+   * `stopped` state (#8975) must record from here.
+   */
+  stoppedChannels?: Array<{ workspaceCwd: string; names: string[] }>;
 }
 
 export class ChannelWorkerControlError extends Error {
@@ -218,6 +226,34 @@ function assertRequiredOwner(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Collect the channel names a stop tears down, grouped by workspace.
+ * `requestedChannels` is authoritative once a worker commits a ready report;
+ * until then (mode-`all` workers starting up) fall back to the connected
+ * set. Runs inside the manager lane, so an in-flight start has already
+ * committed and reported ready by the time a queued stop executes.
+ */
+function stoppedChannelsByWorkspace(
+  workers: readonly ChannelWorkerGroupSnapshot[],
+): Array<{ workspaceCwd: string; names: string[] }> {
+  const byWorkspace = new Map<string, Set<string>>();
+  for (const worker of workers) {
+    const names = worker.requestedChannels ?? worker.channels;
+    if (names.length === 0) continue;
+    const workspaceCwd = canonicalizeWorkspace(worker.workspaceCwd);
+    let collected = byWorkspace.get(workspaceCwd);
+    if (!collected) {
+      collected = new Set<string>();
+      byWorkspace.set(workspaceCwd, collected);
+    }
+    for (const name of names) collected.add(name);
+  }
+  return [...byWorkspace.entries()].map(([workspaceCwd, names]) => ({
+    workspaceCwd,
+    names: [...names],
+  }));
 }
 
 function startupFailureDetails(error: unknown): {
@@ -505,6 +541,12 @@ export function createChannelWorkerManager(
     if (!hadState) {
       return { changed: false, state: snapshot() };
     }
+    // Capture what this stop tears down before the workers go away, inside
+    // the lane (any in-flight start has already committed), so callers can
+    // persist `stopped` from the result instead of a racy pre-stop snapshot.
+    const stoppedChannels = stoppedChannelsByWorkspace(
+      group?.snapshots() ?? [],
+    );
     setTransition('stopping');
     try {
       if (group) {
@@ -517,7 +559,11 @@ export function createChannelWorkerManager(
       throw classifyFailure(error, 'channel_worker_stop_failed');
     }
     commit(undefined, []);
-    return { changed: hadState, state: snapshot() };
+    return {
+      changed: hadState,
+      state: snapshot(),
+      ...(stoppedChannels.length > 0 ? { stoppedChannels } : {}),
+    };
   };
 
   const manager: ChannelWorkerManager = {

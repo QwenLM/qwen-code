@@ -15,9 +15,18 @@ const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
 const mockChannelStateStore = vi.hoisted(() =>
   vi.fn(() => ({
     readAll: vi.fn(() => ({})),
-    get: vi.fn(),
     set: mockChannelStateStoreSet,
     setMany: vi.fn(),
+    // Mirror the real best-effort wrapper so a throwing `set` mock
+    // still exercises "persistence failure never blocks a stop".
+    trySet: (name: string, state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSet(name, state);
+      } catch {
+        // best-effort
+      }
+    },
+    trySetMany: vi.fn(),
   })),
 );
 

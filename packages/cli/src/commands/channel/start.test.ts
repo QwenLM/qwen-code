@@ -38,12 +38,47 @@ const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
 const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
 const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
 const mockChannelStateStoreSetMany = vi.hoisted(() => vi.fn());
+const mockChannelStateStorePrune = vi.hoisted(() =>
+  vi.fn(() => mockChannelStateStoreReadAll()),
+);
 const mockChannelStateStore = vi.hoisted(() =>
   vi.fn(() => ({
     readAll: mockChannelStateStoreReadAll,
     set: mockChannelStateStoreSet,
     setMany: mockChannelStateStoreSetMany,
+    prune: mockChannelStateStorePrune,
+    // Mirror the real best-effort wrappers so throwing `set`/`setMany`
+    // mocks still exercise "persistence failure never blocks startup".
+    trySet: (name: string, state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSet(name, state);
+      } catch {
+        // best-effort
+      }
+    },
+    trySetMany: (names: string[], state: 'active' | 'stopped') => {
+      try {
+        mockChannelStateStoreSetMany(names, state);
+      } catch {
+        // best-effort
+      }
+    },
   })),
+);
+const mockSelectActiveChannels = vi.hoisted(
+  () =>
+    (
+      names: readonly string[],
+      states: Record<string, 'active' | 'stopped'>,
+      onSkipped?: (message: string) => void,
+    ): string[] =>
+      names.filter((name) => {
+        if (states[name] === 'stopped') {
+          onSkipped?.(`[Channel] "${name}" skipped (stopped before restart)`);
+          return false;
+        }
+        return true;
+      }),
 );
 const mockChannelRuntimeStatePath = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home/channels/channel-state.json'),
@@ -154,6 +189,7 @@ vi.mock('./pidfile.js', () => ({
 vi.mock('./channel-state-store.js', () => ({
   ChannelStateStore: mockChannelStateStore,
   channelRuntimeStatePath: mockChannelRuntimeStatePath,
+  selectActiveChannels: mockSelectActiveChannels,
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -545,7 +581,10 @@ describe('startCommand.handler', () => {
       exitSpy.mockRestore();
     }
 
-    expect(mockWriteServiceInfo).toHaveBeenCalledWith(['telegram']);
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+      ['telegram'],
+      process.cwd(),
+    );
     expect(mockChannelDisconnect).toHaveBeenCalled();
     expect(mockBridgeStop).toHaveBeenCalled();
     expect(mockRouterClearAll).toHaveBeenCalled();
@@ -611,7 +650,10 @@ describe('startCommand.handler', () => {
       exitSpy.mockRestore();
     }
 
-    expect(mockWriteServiceInfo).toHaveBeenCalledWith(['telegram', 'feishu']);
+    expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+      ['telegram', 'feishu'],
+      process.cwd(),
+    );
     expect(mockChannelDisconnect).toHaveBeenCalledTimes(2);
     expect(mockBridgeStop).toHaveBeenCalled();
     expect(mockRouterClearAll).toHaveBeenCalled();
@@ -1417,7 +1459,7 @@ describe('startCommand.handler', () => {
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
           '[Channel] No channels configured; serving with 0 channels.',
         );
-        expect(mockWriteServiceInfo).toHaveBeenCalledWith([]);
+        expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
         expect(mockAcpBridge).not.toHaveBeenCalled();
         expect(mockCreateChannel).not.toHaveBeenCalled();
         // Startup no longer exits on an empty channel set.
@@ -1519,7 +1561,7 @@ describe('startCommand.handler', () => {
       );
     });
 
-    it('records connected channels as active', async () => {
+    it('records connected channels as active in one batched write', async () => {
       mockLoadSettings.mockReturnValue({
         merged: { channels: { telegram: { type: 'telegram' } } },
       });
@@ -1539,9 +1581,51 @@ describe('startCommand.handler', () => {
         exitSpy.mockRestore();
       }
 
-      expect(mockChannelStateStoreSet).toHaveBeenCalledWith(
-        'telegram',
+      // The connect loop batches into a single setMany; the store is scoped
+      // to the workspace the service starts from (#8975).
+      expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
+      expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+        ['telegram'],
         'active',
+      );
+      expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+      expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+        ['telegram'],
+        process.cwd(),
+      );
+    });
+
+    it('still finishes startup when state persistence fails during connect (#8975)', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: { channels: { telegram: { type: 'telegram' } } },
+      });
+      mockChannelConnect.mockResolvedValue(undefined);
+      mockChannelStateStoreSetMany.mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+      const err = new Error('EEXIST') as NodeJS.ErrnoException;
+      err.code = 'EEXIST';
+      mockWriteServiceInfo.mockImplementationOnce(() => {
+        throw err;
+      });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // The connected channel is reported and the service write is reached;
+      // the persistence failure must not abort startup.
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '[Channel] "telegram" connected.',
+      );
+      expect(mockWriteServiceInfo).toHaveBeenCalledWith(
+        ['telegram'],
+        process.cwd(),
       );
     });
   });

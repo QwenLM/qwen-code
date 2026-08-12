@@ -89,15 +89,12 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
 
     // An explicit stop must persist, so a later `--channel all` restart does
-    // not bring these channels back (#8975).
-    try {
-      new ChannelStateStore(channelRuntimeStatePath()).setMany(
-        info.channels,
-        'stopped',
-      );
-    } catch {
-      // State persistence is best-effort; never block the stop itself.
-    }
+    // not bring these channels back (#8975). Scope the record to the
+    // workspace the service was started from, matching its config scope;
+    // pidfiles from older releases fall back to the legacy global file.
+    new ChannelStateStore(
+      channelRuntimeStatePath(info.workspaceCwd),
+    ).trySetMany(info.channels, 'stopped');
 
     if (!signalService(info.pid, 'SIGTERM')) {
       writeStderrLine(
