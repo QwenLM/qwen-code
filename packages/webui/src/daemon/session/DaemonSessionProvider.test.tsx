@@ -12382,31 +12382,37 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('clears error during autoReconnect backoff after a retriable SSE error', async () => {
+  it('clears an existing error during autoReconnect backoff', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
     let callCount = 0;
+    const firstAttempt = createDeferred<void>();
     const secondAttempt = createDeferred<void>();
     const events = vi.fn(async function* retriableEvents(
       opts: { signal?: AbortSignal } = {},
     ) {
       callCount += 1;
       if (callCount === 1) {
-        yield {
-          id: 1,
-          v: 1 as const,
-          type: 'session_update' as const,
-          data: {
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'before' },
-            },
-          },
-        } satisfies DaemonEvent;
+        await firstAttempt.promise;
         throw new Error('network timeout');
       }
       await secondAttempt.promise;
       if (opts.signal?.aborted) return;
     });
-    const session = createMockSession({ events });
+    const laterHeartbeat = createDeferred<void>();
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('heartbeat lost'))
+      .mockImplementation(async () => {
+        await laterHeartbeat.promise;
+        return { ok: true };
+      });
+    const session = createMockSession({ events, heartbeat });
     sdkMocks.sessions.push(session);
     let connection: DaemonConnectionState | undefined;
 
@@ -12420,20 +12426,18 @@ describe('DaemonSessionProvider', () => {
       autoReconnect: true,
       reconnectDelayMs: 1,
       maxReconnectDelayMs: 1,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
     });
-    await act(async () => {
-      await wait(30);
-      await flushPromises();
-    });
-    await act(async () => {
-      await flushPromises();
-    });
+    await vi.waitFor(() => expect(connection?.error).toBe('heartbeat lost'));
 
-    expect(events).toHaveBeenCalledTimes(2);
-    // The retriable error is cleared during backoff.
+    firstAttempt.resolve();
+    await vi.waitFor(() => expect(events).toHaveBeenCalledTimes(2));
+
     expect(connection?.error).toBeUndefined();
 
     secondAttempt.resolve();
+    laterHeartbeat.resolve();
   });
 
   it('routes session_died errors to notices, not transcript', async () => {
