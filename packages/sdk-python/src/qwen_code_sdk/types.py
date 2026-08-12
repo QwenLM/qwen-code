@@ -26,6 +26,17 @@ AuthType: TypeAlias = Literal[
 Effort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
 
 
+class EffortOverride(TypedDict):
+    source: Literal["extra_body", "samplingParams"]
+    field: Literal["enable_thinking", "reasoning_effort", "thinking_budget"]
+
+
+class EffortStatus(TypedDict):
+    applied: bool
+    override: EffortOverride | None
+    reason: NotRequired[str]
+
+
 class PermissionSuggestion(TypedDict):
     type: Literal["allow", "deny", "modify"]
     label: str

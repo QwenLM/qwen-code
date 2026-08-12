@@ -20,6 +20,7 @@ import {
   EVENT_EXTENSION_ENABLE,
   EVENT_IDE_CONNECTION,
   EVENT_TOOL_CALL,
+  EVENT_REPEATED_TOOL_FAILURE_GUARD,
   EVENT_USER_PROMPT,
   EVENT_USER_RETRY,
   EVENT_FLASH_FALLBACK,
@@ -72,6 +73,7 @@ import {
   recordTokenUsageMetrics,
   recordToolCallMetrics,
   recordToolExecutionMetrics,
+  recordRepeatedToolFailureGuardMetrics,
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
@@ -96,6 +98,7 @@ import type {
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
+  RepeatedToolFailureGuardEvent,
   LoopDetectionDisabledEvent,
   SlashCommandEvent,
   ConversationFinishedEvent,
@@ -140,6 +143,7 @@ import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsag
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -201,6 +205,7 @@ function runToolTelemetrySink(sink: () => void): void {
 export function logStartSession(
   config: Config,
   event: StartSessionEvent,
+  previousSessionId?: string,
 ): void {
   QwenLogger.getInstance(config)?.logStartSessionEvent(event);
   if (!isTelemetrySdkInitialized()) return;
@@ -235,6 +240,12 @@ export function logStartSession(
     attributes,
   };
   logger.emit(logRecord);
+  emitSessionStart(config.getSessionId(), previousSessionId);
+}
+
+export function logSessionEnd(config: Config): void {
+  if (!isTelemetrySdkInitialized()) return;
+  emitSessionEnd(config.getSessionId());
 }
 
 export function logUserPrompt(config: Config, event: UserPromptEvent): void {
@@ -635,8 +646,11 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
 export function logLoopDetected(
   config: Config,
   event: LoopDetectedEvent,
+  options: { recordToQwenLogger?: boolean } = {},
 ): void {
-  QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  if (options.recordToQwenLogger !== false) {
+    QwenLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  }
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -650,6 +664,46 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logRepeatedToolFailureGuard(
+  event: RepeatedToolFailureGuardEvent,
+): void {
+  // Deployment cohort and service version come from the OpenTelemetry
+  // Resource, which is attached to both the logger and meter providers.
+  runToolTelemetrySink(() => {
+    if (isTelemetrySdkInitialized()) {
+      const logger = logs.getLogger(SERVICE_NAME);
+      logger.emit({
+        body: `Repeated tool failure guard decision: ${event.decision}.`,
+        attributes: {
+          ...event,
+          'event.name': EVENT_REPEATED_TOOL_FAILURE_GUARD,
+        },
+      });
+    }
+  });
+  runToolTelemetrySink(() => {
+    recordRepeatedToolFailureGuardMetrics({
+      route: event.route,
+      mode: event.mode,
+      phase_before: event.phase_before,
+      phase_after: event.phase_after,
+      decision: event.decision,
+      failure_count_bucket: event.failure_count_bucket,
+      batch_count_bucket: event.batch_count_bucket,
+      ...(event.reset_reason !== undefined
+        ? { reset_reason: event.reset_reason }
+        : {}),
+      ...(event.terminal_status !== undefined
+        ? { terminal_status: event.terminal_status }
+        : {}),
+      ...(event.execution_status !== undefined
+        ? { execution_status: event.execution_status }
+        : {}),
+      ...(event.tool_type !== undefined ? { tool_type: event.tool_type } : {}),
+    });
+  });
 }
 
 export function logLoopDetectionDisabled(
