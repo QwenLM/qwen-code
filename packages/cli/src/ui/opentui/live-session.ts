@@ -22,9 +22,23 @@
 
 import { appendFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { SendMessageType } from '@qwen-code/qwen-code-core';
-import type { PartListUnion } from '@google/genai';
-import { createEventMapper, type OpenTuiStreamEvent } from './event-adapter.js';
+import { CoreToolScheduler, SendMessageType } from '@qwen-code/qwen-code-core';
+import type { Part, PartListUnion } from '@google/genai';
+import {
+  createEventMapper,
+  renderResultDisplay,
+  type OpenTuiStreamEvent,
+} from './event-adapter.js';
+
+interface LooseCompletedCall {
+  request: { callId: string };
+  status: string;
+  response?: {
+    responseParts?: Part[];
+    resultDisplay?: unknown;
+    error?: unknown;
+  };
+}
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
@@ -55,30 +69,82 @@ export async function* livePromptEvents(
   const client = config.getGeminiClient();
   const promptId = `opentui-${Date.now()}`;
   const map = createEventMapper();
-  const sendMessageOptions = options?.modelOverride
-    ? {
-        type: SendMessageType.UserQuery,
-        modelOverride: options.modelOverride,
-      }
-    : undefined;
-  const stream = client.sendMessageStream(
-    prompt,
-    signal ?? new AbortController().signal,
-    promptId,
-    sendMessageOptions,
-  );
+  const abort = signal ?? new AbortController().signal;
   const dbg = process.env['QWEN_OPENTUI_DEBUG'];
-  for await (const ev of stream) {
-    if (dbg) {
-      try {
-        appendFileSync(
-          '/tmp/opentui-events.log',
-          `${(ev as { type?: string }).type}\n`,
-        );
-      } catch {
-        /* ignore */
+
+  // The ink app drives tool EXECUTION via useReactToolScheduler: the client
+  // only yields `tool_call_request` and ends the turn, then the UI schedules
+  // the tool and submits the functionResponses to continue. Replicate that
+  // loop here so tools actually run under OpenTUI (drain -> schedule ->
+  // submit results -> drain again).
+  let nextPrompt: PartListUnion = prompt;
+  let first = true;
+  for (;;) {
+    const sendOptions = first
+      ? options?.modelOverride
+        ? {
+            type: SendMessageType.UserQuery,
+            modelOverride: options.modelOverride,
+          }
+        : undefined
+      : { type: SendMessageType.ToolResult };
+    first = false;
+    const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
+    const stream = client.sendMessageStream(
+      nextPrompt,
+      abort,
+      promptId,
+      sendOptions,
+    );
+    for await (const ev of stream) {
+      if (dbg) {
+        try {
+          appendFileSync(
+            '/tmp/opentui-events.log',
+            `${(ev as { type?: string }).type}\n`,
+          );
+        } catch {
+          /* ignore */
+        }
       }
+      if ((ev as { type?: string }).type === 'tool_call_request') {
+        pending.push(
+          (ev as { value: { callId: string; name: string; args?: unknown } })
+            .value,
+        );
+      }
+      for (const neutral of map(ev)) yield neutral;
     }
-    for (const neutral of map(ev)) yield neutral;
+    if (pending.length === 0 || abort.aborted) return;
+
+    const completed = await new Promise<LooseCompletedCall[]>((resolve) => {
+      const scheduler = new CoreToolScheduler({
+        config,
+        getPreferredEditor: () => undefined,
+        onEditorClose: () => {},
+        onAllToolCallsComplete: async (calls) => {
+          resolve(calls as unknown as LooseCompletedCall[]);
+        },
+      });
+      void scheduler.schedule(pending as never, abort);
+    });
+
+    const responseParts: Part[] = [];
+    for (const call of completed) {
+      const resp = call.response;
+      const display = renderResultDisplay(resp?.resultDisplay);
+      if (display)
+        yield { type: 'tool-result', id: call.request.callId, display };
+      const failed = call.status === 'error' || call.status === 'cancelled';
+      yield {
+        type: 'tool-end',
+        id: call.request.callId,
+        success: !failed,
+        summary: failed ? 'error' : 'ok',
+      };
+      if (resp?.responseParts) responseParts.push(...resp.responseParts);
+    }
+    if (responseParts.length === 0) return;
+    nextPrompt = responseParts;
   }
 }

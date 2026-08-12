@@ -284,7 +284,7 @@ const WITTY_LOADING_PHRASES = [
   'Crafting a response worthy of your patience...',
 ];
 
-const SPINNER_FRAMES = ['⠋', '⠙', '', '', '⠼', '⠴', '', '', '⠇', '⠏'];
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 const LOGO_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
 function lerpHex(a: string, b: string, t: number): string {
@@ -1044,9 +1044,14 @@ function App({
         <box height={1} />
         {/* loading indicator above input while model responds (original) */}
         {(streaming || commandProcessing) && (
-          <box paddingLeft={1} paddingRight={1}>
+          <box paddingLeft={1} paddingRight={1} flexDirection="row">
+            <box width={2}>
+              <text fg={C.dim}>
+                {SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]}
+              </text>
+            </box>
             <text fg={C.dim}>
-              {`${SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]} ${loadingPhrase} (${elapsed}s · Esc to cancel)`}
+              {`${loadingPhrase} (${elapsed}s · Esc to cancel)`}
             </text>
           </box>
         )}
