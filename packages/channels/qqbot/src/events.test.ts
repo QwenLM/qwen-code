@@ -524,6 +524,24 @@ describe('handleGroup', () => {
     expect(env['text']).toBe('/status');
   });
 
+  it('其他成员 mention 后的斜杠命令仍被识别', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> <@OPENID_ALICE> /schedule list',
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true },
+          { member_openid: 'alice-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('/schedule list');
+    expect(env['displayText']).toBe('<@OPENID_ALICE> /schedule list');
+  });
+
   it('重复消息不触发', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;

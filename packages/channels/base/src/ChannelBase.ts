@@ -47,6 +47,7 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
+  sanitizeDisplayText,
   truncateCodePoints,
   PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
@@ -331,6 +332,7 @@ const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
+const MAX_DISPLAY_PROJECTION_CHARS = 8000;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -5039,7 +5041,14 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const displayText = envelope.displayText ?? envelope.text;
+    // Adapters that never set `displayText` fall back to the raw message
+    // text; sanitize at this boundary so attacker-controlled bidi/zero-width/
+    // control chars cannot reach the session-bus echo, recorded transcript,
+    // or session previews.
+    const displayText = sanitizeDisplayText(
+      envelope.displayText ?? envelope.text,
+      MAX_DISPLAY_PROJECTION_CHARS,
+    );
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);

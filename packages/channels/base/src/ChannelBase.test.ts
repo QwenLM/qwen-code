@@ -10273,6 +10273,27 @@ describe('ChannelBase', () => {
       expect(options).toMatchObject({ displayText: 'hello' });
     });
 
+    it('neutralizes display-unsafe controls in the raw-text display fallback', async () => {
+      const ch = createChannel();
+      const rlo = String.fromCharCode(0x202e); // bidi override (trojan-source)
+      const bel = String.fromCharCode(0x07); // C0 control
+      // Adapters that never set displayText fall back to the raw text; the
+      // projection must neutralize it before it reaches the session bus,
+      // transcript, and session previews.
+      await ch.handleInbound(
+        envelope({ text: `line1${rlo}${bel}\nline2${'A'.repeat(9000)}` }),
+      );
+
+      const [, , options] = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]!;
+      const displayText = (options as { displayText: string }).displayText;
+      // Controls are replaced, the real newline survives, and the projection
+      // is capped by code point.
+      expect(displayText.startsWith('line1  \nline2')).toBe(true);
+      expect(displayText).not.toContain(rlo);
+      expect(Array.from(displayText)).toHaveLength(8000);
+    });
+
     it('prepends channel boundary metadata after custom instructions once per session', async () => {
       const ch = createChannel({
         instructions: 'Be concise.',
