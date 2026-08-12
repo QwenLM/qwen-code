@@ -88,16 +88,34 @@ describe('createJournalGrowthPolicy', () => {
     ).toEqual({ maxBytes: HARD_CAP_BYTES, maxEvents: 320_000 });
   });
 
+  it('clamps a partial grant to the hard cap when doubling overshoots it', () => {
+    // Doubling lands at 384 MiB and pool headroom allows 192 + 328 MiB;
+    // only the hard-cap clamp term keeps the grant at 256 MiB (starting
+    // exactly at 128 MiB would make the clamp indistinguishable from the
+    // doubling term).
+    const policy = makePolicy(512 * MiB);
+    expect(
+      policy.grant({
+        currentMaxEvents: 240_000,
+        currentMaxBytes: 192 * MiB,
+        allSessionLimitBytes: [192 * MiB],
+      }),
+    ).toEqual({ maxBytes: HARD_CAP_BYTES, maxEvents: 320_000 });
+  });
+
   it('accounts the requester through its reported pre-growth cap', () => {
     // allSessionLimitBytes carries the requester's CURRENT cap; granting
-    // `current + available` keeps the daemon-wide sum at or below the pool.
-    const policy = makePolicy(24 * MiB);
+    // `current + available` keeps the daemon-wide sum at or below the
+    // pool. The numbers make the pool-remainder term alone win (doubling
+    // would reach 32 MiB), so a fixture that omits the requester's cap
+    // produces a different grant and fails this test.
+    const policy = makePolicy(20 * MiB);
     const grant = policy.grant({
       currentMaxEvents: 20_000,
       currentMaxBytes: 16 * MiB,
       allSessionLimitBytes: [16 * MiB],
     });
-    // Extra already granted to the requester: 8 MiB; left: 16 MiB.
-    expect(grant).toEqual({ maxBytes: 32 * MiB, maxEvents: 40_000 });
+    // Extra already granted to the requester: 8 MiB; left: 12 MiB.
+    expect(grant).toEqual({ maxBytes: 28 * MiB, maxEvents: 35_000 });
   });
 });

@@ -4858,6 +4858,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 if (!byId.has(sessionId)) {
                   allSessionLimitBytes.push(current.maxBytes);
                 }
+                // Other sessions concurrently mid-restore are invisible
+                // to byId too; without their caps each restore sees the
+                // full pool as available and concurrent restores
+                // over-grant it.
+                for (const [restoreId, bus] of pendingRestoreEvents) {
+                  if (restoreId !== sessionId && !byId.has(restoreId)) {
+                    allSessionLimitBytes.push(
+                      bus.journalLimitBytes() ?? maxJournalBytes,
+                    );
+                  }
+                }
                 const grant = journalGrowthPolicy.grant({
                   currentMaxEvents: current.maxEvents,
                   currentMaxBytes: current.maxBytes,

@@ -473,11 +473,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     // Mirror the eviction condition exactly: at a single entry the byte
     // loop below keeps the last entry, so a grant there would charge the
-    // shared pool while buying zero eviction.
+    // shared pool while buying zero eviction. Skip boundary appends for
+    // the same reason: compactCurrentTurn() discards the journal right
+    // after this call, so a grant would be charged for nothing.
     if (
-      this.liveJournal.length > this.maxJournalEvents ||
-      (this.journalTotalBytes > this.maxJournalBytes &&
-        this.liveJournal.length > 1)
+      !TURN_BOUNDARY_TYPES.has(event.type) &&
+      (this.liveJournal.length > this.maxJournalEvents ||
+        (this.journalTotalBytes > this.maxJournalBytes &&
+          this.liveJournal.length > 1))
     ) {
       this.maybeGrowJournalLimits();
     }

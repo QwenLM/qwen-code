@@ -5184,6 +5184,217 @@ describe('createAcpSessionBridge', () => {
       await secondPrompt;
       await bridge.shutdown();
     });
+
+    it('charges a mid-restore session for growth granted before registration', async () => {
+      // During a restore the bus exists in pendingRestoreEvents but the
+      // session is not registered in byId yet; a second breach before
+      // registration completes must still see the first grant charged
+      // against the pool, or the pool is over-granted.
+      const load = deferred<LoadSessionResponse>();
+      const handle = makeChannel({ loadSessionImpl: () => load.promise });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 8 * 1024 * 1024,
+      });
+
+      const restore = bridge.loadSession({
+        sessionId: 'restore-twice',
+        workspaceCwd: WS_A,
+      });
+      await vi.waitFor(() =>
+        expect(handle.agent.loadSessionCalls).toHaveLength(1),
+      );
+
+      // First breach doubles the caps (consuming the 8 MiB pool); the
+      // second breach must observe the grown cap and be refused.
+      for (const text of ['r-1', 'r-2', 'r-3', 'r-4', 'r-5']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: 'restore-twice',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      load.resolve({});
+      await restore;
+
+      const snap = await bridge.loadSession({
+        sessionId: 'restore-twice',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snap.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toMatchObject({ data: { scope: 'live_journal' } });
+
+      await bridge.shutdown();
+    });
+
+    it('accounts concurrent in-flight restores against the shared pool', async () => {
+      // Two concurrent restores for different session ids hold buses in
+      // pendingRestoreEvents (not yet in byId); each ask must charge the
+      // other restore's already-granted growth, or both see the full pool
+      // as available and the pool is over-granted.
+      const loadA = deferred<LoadSessionResponse>();
+      const loadB = deferred<LoadSessionResponse>();
+      const handle = makeChannel({
+        loadSessionImpl: (p) =>
+          p.sessionId === 'restore-a' ? loadA.promise : loadB.promise,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 8 * 1024 * 1024,
+      });
+
+      const restoreA = bridge.loadSession({
+        sessionId: 'restore-a',
+        workspaceCwd: WS_A,
+      });
+      const restoreB = bridge.loadSession({
+        sessionId: 'restore-b',
+        workspaceCwd: WS_A,
+      });
+      await vi.waitFor(() =>
+        expect(handle.agent.loadSessionCalls).toHaveLength(2),
+      );
+
+      // Breach A's journal mid-restore: the pool (one baseline's worth)
+      // fully funds A's doubling.
+      for (const text of ['a-1', 'a-2', 'a-3']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: 'restore-a',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+      // Breach B's journal: with A's in-flight restore accounted, no
+      // headroom remains and B falls back to eviction.
+      for (const text of ['b-1', 'b-2', 'b-3']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: 'restore-b',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      loadA.resolve({});
+      loadB.resolve({});
+      await Promise.all([restoreA, restoreB]);
+
+      const snapA = await bridge.loadSession({
+        sessionId: 'restore-a',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snapA.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toBeUndefined();
+
+      const snapB = await bridge.loadSession({
+        sessionId: 'restore-b',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snapB.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toMatchObject({ data: { scope: 'live_journal' } });
+
+      await bridge.shutdown();
+    });
+
+    it('returns granted headroom to the pool when the grown session is closed', async () => {
+      // The accounting is stateless — current caps are read from byId on
+      // each ask — so once a grown session is closed, another session can
+      // grow into the returned headroom.
+      const gates = new Map<
+        string,
+        { promise: Promise<void>; resolve: (value: void) => void }
+      >();
+      const handle = makeChannel({
+        promptImpl: async (req) => {
+          const gate = gates.get(req.sessionId);
+          if (gate) await gate.promise;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionScope: 'thread',
+        channelIdleTimeoutMs: 60_000,
+        maxJournalEvents: 2,
+        journalGrowthPoolBytes: 8 * 1024 * 1024,
+      });
+
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      gates.set(first.sessionId, deferred<void>());
+      const firstPrompt = bridge.sendPrompt(
+        first.sessionId,
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { clientId: first.clientId, promptId: 'prompt-first' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      for (const text of ['a-1', 'a-2', 'a-3']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: first.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+      gates.get(first.sessionId)?.resolve();
+      await firstPrompt;
+      // The first session's doubling consumed the whole pool; closing it
+      // returns the headroom.
+      await bridge.closeSession(first.sessionId);
+
+      const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      gates.set(second.sessionId, deferred<void>());
+      const secondPrompt = bridge.sendPrompt(
+        second.sessionId,
+        {
+          sessionId: second.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { clientId: second.clientId, promptId: 'prompt-second' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+      for (const text of ['b-1', 'b-2', 'b-3']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: second.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text },
+          },
+        });
+      }
+
+      const snap = await bridge.loadSession({
+        sessionId: second.sessionId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      });
+      expect(
+        snap.liveJournal?.find((event) => event.type === 'history_truncated'),
+      ).toBeUndefined();
+
+      gates.get(second.sessionId)?.resolve();
+      await secondPrompt;
+      await bridge.shutdown();
+    });
   });
 
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {

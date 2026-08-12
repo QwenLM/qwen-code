@@ -1705,6 +1705,15 @@ describe('runQwenServe telemetry validation', () => {
         permissionPolicy: 'local-only',
         sessionRestoreTimeoutMs: 90_000,
       });
+      // The dynamically attached workspace's bridge must carry the same
+      // adaptive-growth pool as the boot bridge — the budget here is
+      // host-derived, so assert parity, not a fixed figure.
+      expect(createBridge.mock.calls[1]?.[0].journalGrowthPoolBytes).toEqual(
+        expect.any(Number),
+      );
+      expect(createBridge.mock.calls[1]?.[0].journalGrowthPoolBytes).toBe(
+        createBridge.mock.calls[0]?.[0].journalGrowthPoolBytes,
+      );
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );

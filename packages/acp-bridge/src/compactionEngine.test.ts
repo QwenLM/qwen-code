@@ -1424,6 +1424,9 @@ describe('TurnBoundaryCompactionEngine', () => {
           { maxEvents: 10, maxBytes: 8 * 1024 * 1024 },
           // not a safe integer
           { maxEvents: 10, maxBytes: Number.POSITIVE_INFINITY },
+          // maxEvents not a safe integer; the bytes side here is valid and
+          // growing, so only the maxEvents safe-integer conjunct refuses it.
+          { maxEvents: Number.POSITIVE_INFINITY, maxBytes: 16 * 1024 * 1024 },
         ];
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
@@ -1435,6 +1438,8 @@ describe('TurnBoundaryCompactionEngine', () => {
       engine.ingest(makeUserMessage(3, 'message-3'));
       clockMs += 10_000;
       engine.ingest(makeUserMessage(4, 'message-4'));
+      clockMs += 10_000;
+      engine.ingest(makeUserMessage(5, 'message-5'));
 
       const snap = engine.snapshot();
       expect(markerOf(snap)).toBeDefined();
@@ -1494,6 +1499,55 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(engine.journalLimits()).toEqual({
         maxEvents: 20_000,
         maxBytes: 600,
+      });
+    });
+
+    it('evicts down to the raised cap when a partial grant does not resolve the breach', () => {
+      // A partial grant leaves the journal over the raised cap; the
+      // eviction loop must still trim the excess and stamp the marker.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalBytes: 300,
+        onJournalGrowth: () => ({ maxEvents: 10_000, maxBytes: 400 }),
+      });
+      engine.ingest(makeUserMessage(1, 'first large event'), 150);
+      engine.ingest(makeUserMessage(2, 'second large event'), 150);
+      engine.ingest(makeUserMessage(3, 'third large event'), 300);
+
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 10_000,
+        maxBytes: 400,
+      });
+      const snap = engine.snapshot();
+      expect(markerOf(snap)?.data).toMatchObject({
+        scope: 'live_journal',
+        truncatedEvents: 2,
+        maxBytes: 400,
+      });
+      expect(
+        snap.liveJournal.filter((e) => e.id !== undefined).map((e) => e.id),
+      ).toEqual([3]);
+    });
+
+    it('does not ask for growth when the breaching append is a turn boundary', () => {
+      // compactCurrentTurn() discards the journal immediately after the
+      // boundary append, so a grant would charge the shared pool while
+      // buying zero eviction.
+      const advisor = vi.fn(() => ({
+        maxEvents: 10_000,
+        maxBytes: 16 * 1024 * 1024,
+      }));
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        onJournalGrowth: advisor,
+      });
+      engine.ingest(makeUserMessage(1, 'message-1'));
+      engine.ingest(makeUserMessage(2, 'message-2'));
+      engine.ingest(makeTurnComplete(3));
+
+      expect(advisor).not.toHaveBeenCalled();
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 2,
+        maxBytes: 8 * 1024 * 1024,
       });
     });
 
