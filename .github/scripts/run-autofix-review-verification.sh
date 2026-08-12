@@ -347,57 +347,89 @@ fi
 # lint/test`) — a scripts edit can hollow out the gate while every check
 # "passes". Only root and first-level `packages/*/package.json` count:
 # fixture manifests deeper in a src tree are ordinary test data.
+at_workspace_root() {
+  # True when the path sits at the repo root or at a DECLARED workspace's
+  # root (resolved through the same trusted resolver the package-test loop
+  # uses — nested workspaces like packages/channels/* included). Deeper
+  # copies are fixtures/templates: ordinary data, not machinery.
+  local f="${1}" d
+  [[ "${f}" == */* ]] || return 0
+  d="${f%/*}"
+  [[ "$(printf '%s\n' "${f}" | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")" == "${d}" ]]
+}
 sensitive_class_of() {
   # Prints the class name for a path, or nothing. Kept as one function so
   # the round scan and the PR-footprint scan cannot drift. Classes are
   # NARROW on purpose: a PR that only edits issue templates must not
-  # thereby license rounds to rewrite workflows, so executable CI surface,
-  # repo scripts, and passive .github metadata are separate capabilities.
-  # scripts/tests/** is ordinary test code, not gate machinery — the gate
-  # never executes it, and tooling PRs routinely grow tests there.
+  # thereby license rounds to rewrite workflows, and the loop's OWN
+  # enforcement files are their own classes — no footprint short of
+  # touching them themselves licenses a round to rewrite the referee.
+  # scripts/tests/** is ordinary test code the gate never executes.
   local f="${1}"
   case "${f}" in
+    .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh) echo 'autofix-loop' ;;
     .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
     .github/scripts/*) echo 'ci-scripts' ;;
     .github/*) echo 'gh-metadata' ;;
     .husky/*) echo 'git-hooks' ;;
+    .qwen/*) echo 'agent-skills' ;;
     scripts/tests/*) ;;
-    # The transitive executable surface of the gate's own commands:
-    # `npm run build/lint/…` resolve through manifests INTO these files,
-    # and .npmrc steers what npm itself executes.
     scripts/*) echo 'repo-scripts' ;;
     .npmrc | .nvmrc) echo 'toolchain-config' ;;
     *) case "${f##*/}" in
-      eslint.config.*) echo 'lint-config' ;;
-      vitest.config.*) echo 'test-config' ;;
-      tsconfig.json | tsconfig.*.json) echo 'ts-config' ;;
+      eslint.config.* | vitest.config.* | tsconfig.json | tsconfig.*.json)
+        # Workspace-root configs are machinery; a scaffold template deep in
+        # a src tree is test/fixture data (same exemption manifests get).
+        if at_workspace_root "${f}"; then
+          case "${f##*/}" in
+            eslint.config.*) echo 'lint-config' ;;
+            vitest.config.*) echo 'test-config' ;;
+            *) echo 'ts-config' ;;
+          esac
+        fi ;;
     esac ;;
   esac
 }
 manifest_scripts_changed() {
-  # True when the scripts section of a root/workspace manifest differs
-  # between the two refs. Missing file on either side reads as {}.
-  local f="${1}" from="${2}" to="${3}" a b
-  a="$(git show "${from}:${f}" 2> /dev/null | jq -cS '.scripts // {}' 2> /dev/null)" || a='{}'
-  b="$(git show "${to}:${f}" 2> /dev/null | jq -cS '.scripts // {}' 2> /dev/null)" || b='{}'
+  # True when the gate-relevant sections of a manifest differ between two
+  # refs. For the ROOT manifest that is scripts AND the workspaces array —
+  # both steer what the gate's npm commands execute (a negated workspaces
+  # entry silently drops a package from build/typecheck). Missing file on
+  # either side reads as {}.
+  local f="${1}" from="${2}" to="${3}" filt a b
+  filt='.scripts // {}'
+  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // [])}'
+  a="$(git show "${from}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || a='{}'
+  b="$(git show "${to}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || b='{}'
   [[ "${a}" != "${b}" ]]
 }
 ROUND_RANGE="origin/${BRANCH}...${BRANCH}"
 PR_RANGE="origin/main...origin/${BRANCH}"
+# Content comparisons for the PR footprint anchor at the MERGE BASE, not a
+# moving origin/main: main-side drift on a manifest must not read as "the
+# PR touched scripts" and license a round to rewrite the command surface.
+PR_BASE="$(git merge-base origin/main "origin/${BRANCH}" 2> /dev/null)" || PR_BASE='origin/main'
 ROUND_CLASSES=''
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [[ -n "${f}" ]] || continue
   c="$(sensitive_class_of "${f}")"
   if [[ -z "${c}" ]]; then
     case "${f}" in
-      package.json | packages/*/package.json)
-        [[ "${f}" == packages/*/*/* ]] && continue
-        # A manifest the round ADDED (a new workspace) is the round's own
+      package.json | */package.json)
+        # Any DECLARED workspace manifest (nested included) is command
+        # surface; fixture manifests deeper in a src tree are data. A
+        # manifest the round ADDED (a new workspace) is the round's own
         # new surface, not a rewrite of commands the gate already ran —
-        # only scripts edits to a manifest that existed pre-round count.
+        # only edits to a manifest that existed pre-round count. Root and
+        # workspace manifests are SEPARATE classes: a workspace-scripts
+        # footprint must not license rewriting the root dispatcher.
+        at_workspace_root "${f}" || continue
         git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null || continue
-        manifest_scripts_changed "${f}" "origin/${BRANCH}" "${BRANCH}" &&
-          c='manifest-scripts' ;;
+        if manifest_scripts_changed "${f}" "origin/${BRANCH}" "${BRANCH}"; then
+          c='manifest-scripts-ws'
+          [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
+        fi ;;
     esac
   fi
   [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
@@ -405,22 +437,24 @@ while IFS= read -r f; do
 # core.quotePath-mangled past the case patterns), and a rename decomposes
 # into A+D so the VACATED sensitive path is classified too — moving a
 # workflow out of .github/ is a removal of verification machinery.
-done < <(git diff --name-only -z --no-renames "${ROUND_RANGE}" | tr '\0' '\n')
+done < <(git diff --name-only -z --no-renames "${ROUND_RANGE}")
 if [[ -n "${ROUND_CLASSES}" ]]; then
   PR_CLASSES=''
-  while IFS= read -r f; do
+  while IFS= read -r -d '' f; do
     [[ -n "${f}" ]] || continue
     c="$(sensitive_class_of "${f}")"
     if [[ -z "${c}" ]]; then
       case "${f}" in
-        package.json | packages/*/package.json)
-          [[ "${f}" == packages/*/*/* ]] && continue
-          manifest_scripts_changed "${f}" 'origin/main' "origin/${BRANCH}" &&
-            c='manifest-scripts' ;;
+        package.json | */package.json)
+          at_workspace_root "${f}" || continue
+          if manifest_scripts_changed "${f}" "${PR_BASE}" "origin/${BRANCH}"; then
+            c='manifest-scripts-ws'
+            [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
+          fi ;;
       esac
     fi
     [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
-  done < <(git diff --name-only -z --no-renames "${PR_RANGE}" | tr '\0' '\n')
+  done < <(git diff --name-only -z --no-renames "${PR_RANGE}")
   VIOLATIONS="$(while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     cls="${line%% *}"
@@ -429,7 +463,9 @@ if [[ -n "${ROUND_CLASSES}" ]]; then
   if [[ -n "${VIOLATIONS}" ]]; then
     {
       echo 'This round modified CI/verification machinery in area(s) the PR itself never touched:'
-      printf '%s\n' "${VIOLATIONS}"
+      # Branch-controlled paths in a trusted-voice document: same safe
+      # charset as the advisory renderer.
+      printf '%s\n' "${VIOLATIONS//[^A-Za-z0-9._\/ -]/?}"
       echo 'Review feedback alone — from ANY author — cannot authorize changes to the loop'"'"'s own guardrails. Revert these files; if the feedback genuinely requires them, escalate it to a maintainer as an open question instead of implementing it.'
     } >> "${GATE_LOG}"
     reject_fix 'round expands into CI/verification machinery outside the PR footprint'
@@ -554,7 +590,11 @@ fi
 #     produces. KNOWN LIMIT, deliberate: the verdict is existential over
 #     the batch, so in a mixed Critical round one genuinely biting test
 #     vouches for the batch — binding each behavior to its own probe needs
-#     per-test result parsing and is out of scope here.
+#     per-test result parsing and is out of scope here. Also known: a
+#     re-raised finding whose fix already sits in origin/<branch> is
+#     legitimately all-green (SKILL directs re-verified items into
+#     resolved-comments.txt); the rejection text tells the agent to
+#     resolve such items in a no-code round of their own.
 BITE_RUNNER="${BITE_RUNNER:-bite_runner_default}"
 bite_runner_default() {
   # $1 = workspace dir, rest = test paths relative to the workspace.
@@ -562,8 +602,14 @@ bite_runner_default() {
   shift
   npm run test --workspace "${ws}" --if-present -- "$@"
 }
-mapfile -t BITE_FILES < <(git diff --name-only --diff-filter=AM "${ROUND_RANGE}" \
-  -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' | grep -v '__snapshots__' || true)
+mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
+  -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \
+  ':(exclude,glob)integration-tests/**' || true)
+# Changed snapshots ride the overlay (a fix proven by a regenerated
+# snapshot must not revert to the pre-round snapshot and read as green)
+# but are never passed to the runner as test-file arguments.
+mapfile -d '' -t BITE_SNAPS < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
+  -- ':(glob)**/__snapshots__/**' || true)
 # No blanket *.md exclusion: .qwen/skills/**/*.md is EXECUTABLE agent
 # behavior (and scripts/tests pins it), so markdown counts as source; the
 # consequence gating above keeps doc-only rounds from ever being rejected.
@@ -577,26 +623,80 @@ BITE_SRC="$(git diff --name-only "${ROUND_RANGE}" \
 # the scan already fetched. Absent/empty inputs read as "no defect claim".
 BITE_ENFORCE='false'
 if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
+  # Ids tolerate the rc: prefix and CR the other consumers strip (SKILL
+  # tells the agent to write the rc:<id> handle); a reply resolved inside a
+  # Critical-rooted thread is a defect claim too, matching how the feedback
+  # renderers classify replies.
   BITE_ENFORCE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
     --slurpfile reviews "${WORKDIR}/rv.json" '
     (add // []) as $comments
     | ($reviews | add // []) as $reviews
-    | ($ids | split("\n") | map(select(test("^[0-9]+$")) | tonumber)) as $resolved
-    | any($comments[];
-        (.id as $id | $resolved | index($id) != null)
-        and (
-          ((.body // "") | contains("**[Critical]**"))
-          or ((.pull_request_review_id // null) as $review
-            | $review != null
-            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")))
-        ))' "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
+    | ($ids | split("\n")
+        | map(sub("^rc:"; "") | sub("\r$"; "")
+          | select(test("^[0-9]+$")) | tonumber)) as $resolved
+    | def critical($c):
+        (($c.body // "") | contains("**[Critical]**"))
+        or (($c.in_reply_to_id // null) as $root
+          | $root != null
+          and any($comments[];
+            .id == $root and ((.body // "") | contains("**[Critical]**"))))
+        or (($c.pull_request_review_id // null) as $review
+          | $review != null
+          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+    any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
+    "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
   [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
+fi
+if [[ "${#BITE_FILES[@]}" -gt 0 && -z "${BITE_SRC}" && "${BITE_ENFORCE}" == 'true' ]]; then
+  # A defect-claim round that changed only tests cannot be bite-checked
+  # (a fixed test legitimately passes on the pre-round tree) — surface
+  # that the claim went unverified rather than skipping silently.
+  {
+    echo '🦷 **Gate advisory — this round resolves a Critical/Request-changes finding with test-only changes** (machine-measured): the bite check cannot verify a test-side fix, so the resolution rests on the round summary alone. · 本轮以纯测试改动解决 Critical/Request-changes 反馈（门自动测量）：bite 检查无法验证测试侧修复，该解决仅以轮次摘要为凭。'
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo "🦷 defect-claim round changed only tests — advisory written (bite not applicable)" \
+    | tee -a "${GATE_LOG}"
 fi
 if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
   BITE_PKGS="$(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}" |
     bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
-  if [[ "$(wc -l <<< "${BITE_PKGS}")" -ne 1 || -z "${BITE_PKGS}" ]]; then
+  # The resolver silently drops files owned by NO workspace (repo-level
+  # scripts, root configs): the single-workspace verdict below would then
+  # judge only the workspace subset. Detect strays directly — every input
+  # path must live under the one resolved workspace.
+  BITE_STRAY='false'
+  while IFS= read -r f; do
+    [[ -z "${f}" ]] && continue
+    [[ "${f}" == "${BITE_PKGS}"/* ]] || BITE_STRAY='true'
+  done < <(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}")
+  BITE_TEST_SCRIPT=''
+  if [[ -n "${BITE_PKGS}" && -f "${BITE_PKGS}/package.json" ]]; then
+    BITE_TEST_SCRIPT="$(node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(p.scripts?.test||"")' "${BITE_PKGS}/package.json" 2> /dev/null)" || BITE_TEST_SCRIPT=''
+  fi
+  BITE_SELF_IMPORT='false'
+  if [[ -n "${BITE_PKGS}" && -f "${BITE_PKGS}/package.json" ]]; then
+    BITE_PKG_NAME="$(node -e 'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).name||"")' "${BITE_PKGS}/package.json" 2> /dev/null)" || BITE_PKG_NAME=''
+    if [[ -n "${BITE_PKG_NAME}" ]] &&
+      git grep -q --fixed-strings "${BITE_PKG_NAME}" "${BRANCH}" -- "${BITE_FILES[@]}" 2> /dev/null; then
+      # A test importing its own package BY NAME resolves through the
+      # package exports into round-built dist/ on the detached tree — the
+      # fix leaks into the "pre-round" run (packages/core has no self-alias
+      # in its vitest config). Fail open.
+      BITE_SELF_IMPORT='true'
+    fi
+  fi
+  if [[ "$(wc -l <<< "${BITE_PKGS}")" -ne 1 || -z "${BITE_PKGS}" || "${BITE_STRAY}" == 'true' ]]; then
     echo "🦷 bite check skipped: round spans multiple/no workspaces (dist confound)" \
+      | tee -a "${GATE_LOG}"
+  elif [[ "${BITE_TEST_SCRIPT}" != *vitest* ]]; then
+    # Mirrors the deterministic package-test loop's guard: a workspace
+    # without a vitest test script would run NOTHING under --if-present
+    # (or a non-vitest runner whose exit reflects environment health), and
+    # a vacuous "all passed" must never reject a round.
+    echo "🦷 bite check skipped: ${BITE_PKGS} test script is not Vitest" \
+      | tee -a "${GATE_LOG}"
+  elif [[ "${BITE_SELF_IMPORT}" == 'true' ]]; then
+    echo "🦷 bite check skipped: changed tests import ${BITE_PKG_NAME} by package name (dist confound)" \
       | tee -a "${GATE_LOG}"
   else
     echo "🦷 bite check: running this round's changed tests on the pre-round tree" \
@@ -605,7 +705,7 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
     if git checkout --quiet --detach "origin/${BRANCH}" 2>> "${GATE_LOG}"; then
       BITE_BIT='false'
       BITE_RAN='false'
-      if git checkout --quiet "${BRANCH}" -- "${BITE_FILES[@]}" 2>> "${GATE_LOG}"; then
+      if git checkout --quiet "${BRANCH}" -- "${BITE_FILES[@]}" "${BITE_SNAPS[@]}" 2>> "${GATE_LOG}"; then
         BITE_ARGS=()
         for f in "${BITE_FILES[@]}"; do
           BITE_ARGS+=("${f#"${BITE_PKGS}"/}")
@@ -641,11 +741,14 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
           echo
           echo 'If the finding does not reproduce, do not implement it: decline it (for a disproved finding) or escalate it as an open question, attaching this measurement as the evidence.'
           echo
+          echo 'If the finding was already fixed by an EARLIER commit on this branch (a re-raised item you re-verified), resolve it in a round of its own without bundling new code changes — re-verification is a no-code claim and is never bite-checked.'
+          echo
           echo 'Changed tests measured:'
           printf -- '- %s\n' "${BITE_FILES[@]}"
-          echo '````'
+          # No fence here: reject_fix wraps this whole tail in its own
+          # 4-backtick fence, and CommonMark closes a fence at any inner
+          # run of >= the opener's length.
           tail -c 1200 "${GATE_LOG}.bite" 2> /dev/null
-          echo '````'
         } >> "${GATE_LOG}"
         reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'
       elif [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then

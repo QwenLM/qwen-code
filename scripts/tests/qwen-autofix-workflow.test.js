@@ -8097,7 +8097,7 @@ exit 1
 
   it('rejects a round that expands into CI machinery outside the PR footprint', () => {
     const block = reviewVerificationRunner.match(
-      /(sensitive_class_of\(\) \{[\s\S]*?reject_fix 'round expands into CI\/verification machinery outside the PR footprint'\n {2}fi\nfi)/,
+      /(at_workspace_root\(\) \{[\s\S]*?reject_fix 'round expands into CI\/verification machinery outside the PR footprint'\n {2}fi\nfi)/,
     )?.[1];
     expect(block).toBeTruthy();
     const run = (build) => {
@@ -8111,6 +8111,10 @@ exit 1
             `cd "$1"`,
             'BRANCH=feat',
             'GATE_LOG="$(mktemp)"',
+            'RUNNER_TEMP="$(mktemp -d)"',
+            // Stub resolver: first-level packages/* manifests/configs are
+            // workspace-rooted; everything else is unowned.
+            `printf '%s\\n' 'read f; d=\${f%/*}; case "$f" in packages/*/*) case "$d" in packages/*/*) ;; *) echo "$d";; esac;; esac' > "$RUNNER_TEMP/resolve-owning-packages.sh"`,
             'reject_fix() { echo "REJECT:${1}"; exit 1; }',
             block,
             'echo PASSED',
@@ -8231,6 +8235,107 @@ exit 1
         round: ({ write }) => write('scripts/tests/new.test.js', 't\n'),
       }),
     ).toContain('PASSED');
+    // The loop's OWN enforcement files are their own class: a footprint on
+    // ordinary workflows does not license rewriting the referee.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('.github/workflows/ci.yml', 'on: push\n');
+          write('.github/workflows/qwen-autofix.yml', 'on: schedule\n');
+        },
+        pr: ({ write }) => write('.github/workflows/ci.yml', 'on: pull\n'),
+        round: ({ write }) =>
+          write('.github/workflows/qwen-autofix.yml', 'on: never\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // Skills are executable agent behavior.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.ts', 'a\n'),
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('.qwen/skills/autofix/SKILL.md', 'x\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // The root manifest's workspaces array steers the gate's dispatch.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"scripts":{},"workspaces":["packages/*"]}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) =>
+          write(
+            'package.json',
+            '{"scripts":{},"workspaces":["packages/*","!packages/x"]}\n',
+          ),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // A workspace-manifest footprint must not license the ROOT dispatcher:
+    // root and workspace manifests are separate classes.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"scripts":{"lint":"eslint ."}}\n');
+          write('packages/w/package.json', '{"scripts":{"test":"vitest"}}\n');
+        },
+        pr: ({ write }) =>
+          write(
+            'packages/w/package.json',
+            '{"scripts":{"test":"vitest run"}}\n',
+          ),
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"true"}}\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // Nested declared workspaces are command surface too (resolver-backed,
+    // not pattern-depth), while deep configs in a src tree are data.
+    const classifierProbe = (paths) => {
+      const helpers = reviewVerificationRunner.match(
+        /(at_workspace_root\(\) \{[\s\S]*?\n\})\n(sensitive_class_of\(\) \{[\s\S]*?\n\})/,
+      );
+      expect(helpers).toBeTruthy();
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'RUNNER_TEMP="$(mktemp -d)"',
+            `printf '%s\\n' 'read f; d=\${f%/*}; case "$f" in packages/channels/*/package.json|packages/channels/*/tsconfig.json) echo "$d";; packages/*/*) case "$d" in packages/*/*) ;; *) echo "$d";; esac;; esac' > "$RUNNER_TEMP/resolve-owning-packages.sh"`,
+            helpers[1],
+            helpers[2],
+            `for f in ${paths.map((x) => `'${x}'`).join(' ')}; do printf '%s=%s\\n' "$f" "$(sensitive_class_of "$f")"; done`,
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+    };
+    const classes = classifierProbe([
+      '.github/actions/a/action.yml',
+      '.github/scripts/x.sh',
+      '.husky/pre-commit',
+      '.npmrc',
+      '.nvmrc',
+      'eslint.config.js',
+      'packages/cli/vitest.config.ts',
+      'packages/cli/tsconfig.json',
+      'packages/cli/src/examples/starter/tsconfig.json',
+      'packages/channels/github/tsconfig.json',
+    ]);
+    expect(classes).toContain('.github/actions/a/action.yml=ci-workflows');
+    expect(classes).toContain('.github/scripts/x.sh=ci-scripts');
+    expect(classes).toContain('.husky/pre-commit=git-hooks');
+    expect(classes).toContain('.npmrc=toolchain-config');
+    expect(classes).toContain('.nvmrc=toolchain-config');
+    expect(classes).toContain('eslint.config.js=lint-config');
+    expect(classes).toContain('packages/cli/vitest.config.ts=test-config');
+    expect(classes).toContain('packages/cli/tsconfig.json=ts-config');
+    expect(classes).toContain(
+      'packages/cli/src/examples/starter/tsconfig.json=\n',
+    );
+    expect(classes).toContain(
+      'packages/channels/github/tsconfig.json=ts-config',
+    );
   });
 
   it('writes a gate-authored advisory when a round shrinks test coverage', () => {
@@ -8376,6 +8481,12 @@ exit 1
     };
     const srcAndTest = {
       base: ({ write }) => {
+        // The bite runner guard reads the workspace's test script and the
+        // self-import guard reads its name (absent from the test files).
+        write(
+          'packages/cli/package.json',
+          '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+        );
         write('packages/cli/src/a.ts', 'a\n');
         write('packages/cli/src/a.test.ts', 't\n');
       },
@@ -8387,7 +8498,9 @@ exit 1
     };
     // Artifacts that mark the round as resolving a Critical finding.
     const criticalClaim = {
-      'resolved-comments.txt': '101\n',
+      // rc: prefix + CRLF, exactly as SKILL tells the agent to write the
+      // handle and as the other consumers tolerate.
+      'resolved-comments.txt': 'rc:101\r\n',
       'rc.json': JSON.stringify([
         { id: 101, body: '**[Critical]** stale owner routes writes' },
       ]),
@@ -8413,6 +8526,51 @@ exit 1
     expect(advisory.advisory).toContain('pass on the pre-round tree');
     expect(advisory.status).toBe('');
     expect(advisory.head).toBe('feat');
+    // Enforcement needs a RESOLVED Critical: resolving only a Suggestion,
+    // or merely having an unresolved Critical present in rc.json, stays
+    // advisory-grade.
+    for (const workdir of [
+      {
+        'resolved-comments.txt': '303\n',
+        'rc.json': JSON.stringify([
+          { id: 303, body: '**[Suggestion]** rename this helper' },
+          { id: 101, body: '**[Critical]** stale owner routes writes' },
+        ]),
+        'rv.json': JSON.stringify([]),
+      },
+      {
+        'resolved-comments.txt': '999\n',
+        'rc.json': JSON.stringify([
+          { id: 101, body: '**[Critical]** stale owner routes writes' },
+        ]),
+        'rv.json': JSON.stringify([]),
+      },
+    ]) {
+      const soft = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir,
+      });
+      expect(soft.out).toContain('SURVIVED');
+      expect(soft.out).not.toContain('REJECT:');
+      expect(soft.advisory).toContain('pass on the pre-round tree');
+    }
+    // A reply resolved inside a Critical-rooted thread is a defect claim,
+    // matching how the feedback renderers classify replies.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '404\n',
+          'rc.json': JSON.stringify([
+            { id: 101, body: '**[Critical]** stale owner routes writes' },
+            { id: 404, body: 'fixed here', in_reply_to_id: 101 },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      }).out,
+    ).toContain('REJECT:bite check');
     // Resolving a comment attached to a CHANGES_REQUESTED review enforces
     // the same way a Critical tag does.
     expect(
