@@ -3,31 +3,76 @@
 ## Problem
 
 Managed-memory recall starts asynchronously for each user query. The initial
-request currently performs a zero-wait consume, so a useful selector result can
-miss the first prompt because of incidental scheduling. If the turn has no tool
-call, that result has no later safe delivery point.
+request originally performed a zero-wait consume, so a useful selector result
+could miss the first prompt. If the turn has no tool call, that result has no
+later safe delivery point and is discarded.
 
-The model selector remains the normal precision gate. Its failure fallback has
-two independent correctness problems: it tokenizes only ASCII text and gives
+A fixed 100 ms initial budget was the first attempt at a fix. Measurement
+showed it is not sufficient on its own. Recall awaits the model selector
+whenever a `Config` is present — the normal case — and that selector is a
+network side query whose abort ceiling is 30 s. The budget is therefore
+dominated by round-trip time, not by the incidental scheduler timing it was
+sized for, so it expires on the common path. Delivery then falls through to the
+ToolResult point, which a tool-free turn never reaches. Tool-free turns are
+exactly the ones where user-level memory matters most: short questions answered
+from context rather than from the repository.
+
+The model selector remains the normal precision gate. Its failure fallback had
+two independent correctness problems: it tokenized only ASCII text and gave
 every non-empty document a positive score even without a lexical match.
 
 ## Decision
 
-Keep the existing single-result recall lifecycle and model-primary selection.
+Keep a single recall lifecycle and model-primary selection. Add one
+deterministic delivery stage in front of it — not the two-stage shared-scan
+Fast/Refined architecture originally proposed in RFC #7040.
 
 - Give user-query recall a fixed 100 ms initial wait budget.
 - Deliver a result that settles inside the budget in the initial prompt.
-- If the budget expires, leave recall pending for the existing same-query
-  ToolResult delivery point.
-- Do not abort recall or run heuristic fallback merely because the initial
-  budget expires.
+- If the budget expires, deliver the deterministic result instead of nothing.
+  `selectModelCandidateDocuments` already computes lexically ranked,
+  active-tool-filtered candidates in order to build the model manifest, so the
+  fast result reuses them and costs no extra scan or I/O. It is capped at two
+  documents (`MAX_FAST_RECALL_DOCS`), well below the five-document prompt
+  limit, because it carries no model judgement.
+- Leave recall pending after a fast delivery so the model-selected result still
+  lands at the existing same-query ToolResult delivery point.
+- Exclude documents the fast phase already delivered from that later delivery,
+  rebuilding the prompt from what remains. Both results come from one scan, so
+  the selector never saw the fast documents as excluded and can legitimately
+  re-select them. When nothing remains, record `already_delivered`.
+- Do not abort recall merely because the initial budget expires.
 - Preserve the existing cancellation and exactly-once terminal telemetry paths.
+  A cancelled turn delivers no fast result.
 
 The 100 ms budget stays internal, per RFC #7040's direction of a small fixed
 internal budget determined by benchmark rather than exposed as public
 configuration; telemetry can show whether a later change is justified.
 
-Improve only the existing failure fallback:
+### Why not the original Fast/Refined architecture
+
+RFC #7040 specified two results produced from one shared scan, with the refined
+pass excluding already-delivered fast documents and filling up to a combined
+five-document limit. The delivery guarantee that design existed to provide is
+worth having; its machinery is not. A second selection pathway needs its own
+scan plumbing, its own budget accounting, and cross-phase document bookkeeping —
+and that bookkeeping is the source of the duplicate-injection class of bug the
+RFC itself warned about. Reusing the candidates the selector was already going
+to score gets the same guarantee from one added callback and one exclusion set.
+
+### Telemetry: `phase` and `strategy` are orthogonal
+
+`phase` is the **delivery stage**: `fast` for a deterministic result injected
+at budget expiry, `refined` for the model-selected result. `strategy` is the
+**selection method**: `none`, `heuristic`, or `model`. They are not redundant
+and neither subsumes the other. A `fast` delivery is always `heuristic`, but a
+`refined` delivery is `model` normally and `heuristic` when the selector failed
+and the fallback ran. Reading delivery-stage behaviour off `strategy` alone
+would silently merge "the deterministic result arrived first" with "the model
+selector broke".
+
+Improve the deterministic scorer, which now serves both the fast path and the
+selector-failure fallback:
 
 - normalize query and document text with Unicode NFKC;
 - keep ASCII alphanumeric tokens of at least three characters;
@@ -42,7 +87,7 @@ Improve only the existing failure fallback:
 
 ## Non-goals
 
-- No Fast/Refined two-stage architecture.
+- No second scan, second selector, or separate fast/refined budget accounting.
 - No public recall timing or retrieval-mode setting.
 - No new tokenizer or retrieval dependency.
 - No change to memory writes, scopes, extraction, DREAM, forget, or compaction.
@@ -52,12 +97,35 @@ Improve only the existing failure fallback:
 
 ## Verification
 
+Recall quality is measured in `packages/core/src/memory/recall-eval.test.ts`
+against a 45-case labeled corpus, scored both by the shipped scorer and by a
+frozen copy of the pre-change one so "no regression" is reproducible rather
+than asserted. Delivery is measured separately in `recall-delivery-eval.test.ts`,
+because a correct selection that never reaches the model is worth nothing.
+
 - Recall settling inside the budget is delivered initially.
-- A deadline miss leaves recall alive for later ToolResult delivery.
+- A budget expiry delivers the deterministic result rather than nothing, and
+  leaves recall alive for later ToolResult delivery.
+- The later delivery never repeats a document the fast phase already sent.
 - Cancellation ends the bounded wait and prevents stale delivery.
-- Slow recall is released by the fixed-budget timer before the initial request.
+- A fast result never crosses a query boundary.
+- No-result queries stay silent under both designs.
 - A labeled set covers Chinese, English, Japanese, Korean, mixed text,
   NFKC normalization, body-only matches, and no-result queries.
 - Long CJK queries keep bounded scoring work and preserve both query ends.
 - Existing active-tool noise filtering and model-selector fallback behavior
   remain unchanged.
+
+### Known limitations
+
+- The delivery evaluation models selector latency rather than measuring it; a
+  network round trip cannot be timed in a unit test. Results are reported per
+  latency scenario, and the structural claim — that a selector slower than the
+  budget leaves a tool-free turn with no delivery point under the single-path
+  design — holds for every scenario above the budget.
+- The fast result has no model judgement behind it. It is capped at two
+  documents to bound the cost of being wrong, but on a tool-free turn where the
+  selector never lands, a mis-ranked fast document is what the model sees.
+- Scoring is substring-based, so a query token can match inside a longer word
+  ("owner" inside "ownership"). The evaluation corpus records one such case
+  rather than hiding it.
