@@ -56,6 +56,10 @@ vi.mock('@opentelemetry/instrumentation-http');
 vi.mock('@opentelemetry/instrumentation-undici');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
+vi.mock('./session-events.js', () => ({
+  emitSessionEnd: vi.fn(),
+  emitSessionStart: vi.fn(),
+}));
 vi.mock('./session-context.js');
 vi.mock('./trace-context.js');
 vi.mock('./tracer.js', () => ({
@@ -63,9 +67,10 @@ vi.mock('./tracer.js', () => ({
 }));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
-import { setSessionContext } from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 
@@ -188,6 +193,21 @@ describe('Telemetry SDK', () => {
 
       expect(NodeSDK).toHaveBeenCalledTimes(1);
       expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+      // One shared init means one settle-time catch-up, even with concurrent
+      // callers.
+      expect(emitSessionStart).toHaveBeenCalledTimes(1);
+      expect(emitSessionStart).toHaveBeenCalledWith('test-session');
+    });
+
+    it('emits the initial session start after the SDK settles', async () => {
+      await initializeTelemetry(mockConfig);
+
+      expect(emitSessionStart).toHaveBeenCalledWith('test-session');
+      expect(
+        vi.mocked(emitSessionStart).mock.invocationCallOrder[0],
+      ).toBeGreaterThan(
+        vi.mocked(NodeSDK.prototype.start).mock.invocationCallOrder[0],
+      );
     });
 
     it('ignores external exporter selectors while starting explicit exporters', async () => {
@@ -316,6 +336,28 @@ describe('Telemetry SDK', () => {
       await shutdownTelemetry();
       expect(NodeSDK.prototype.shutdown).toHaveBeenCalledTimes(1);
       expect(isTelemetrySdkInitialized()).toBe(false);
+    });
+
+    it('ends the active session before the SDK shuts down', async () => {
+      vi.mocked(getCurrentSessionId).mockReturnValueOnce('active-session');
+      await initializeTelemetry(mockConfig);
+
+      await shutdownTelemetry();
+
+      expect(emitSessionEnd).toHaveBeenCalledWith('active-session');
+      expect(
+        vi.mocked(emitSessionEnd).mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(NodeSDK.prototype.shutdown).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not end a session at shutdown when no session context exists', async () => {
+      await initializeTelemetry(mockConfig);
+
+      await shutdownTelemetry();
+
+      expect(emitSessionEnd).not.toHaveBeenCalled();
     });
   });
 
