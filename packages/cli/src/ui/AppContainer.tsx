@@ -33,6 +33,7 @@ import {
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
+import { ICON } from './constants.js';
 import {
   type EditorType,
   type Config,
@@ -4236,7 +4237,20 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     const folderName = basename(config.getTargetDir());
-    const title = formatSessionWindowTitle(sessionName, folderName);
+    // Mirror Claude Code's tab status icons: a leading symbol conveys the
+    // streaming state in the window/tab title (◐ working,  awaiting
+    // confirmation). Idle gets no prefix.
+    const statusPrefix =
+      streamingState === StreamingState.Responding
+        ? `${ICON.CIRCLE_LEFT_HALF} `
+        : streamingState === StreamingState.WaitingForConfirmation
+          ? '✳\uFE0E '
+          : '';
+    const title = formatSessionWindowTitle(
+      sessionName,
+      folderName,
+      statusPrefix,
+    );
 
     // Only update the title if it's different from the last value we set
     if (lastTitleRef.current !== title) {
@@ -4249,6 +4263,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
     sessionName,
+    streamingState,
     settings.merged.ui?.hideWindowTitle,
     settings.merged.ui?.showStatusInTitle,
     config,

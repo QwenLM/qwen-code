@@ -71,7 +71,9 @@ export function writeTerminalTitle(
 }
 
 /**
- * Formats the terminal window title based on session name and fallback.
+ * Formats the terminal window title based on session name and fallback, with
+ * an optional leading status symbol (mirroring Claude Code's tab status
+ * icons, e.g. ◐ working /  awaiting confirmation).
  *
  * Priority:
  *  1. sessionName — from /rename, auto-title, or --resume
@@ -79,13 +81,17 @@ export function writeTerminalTitle(
  *
  * @param sessionName - Current session name, or null if not set.
  * @param folderName - Optional workspace folder name for the fallback chain.
+ * @param statusPrefix - Optional leading status symbol (e.g. "◐ "). Prepended
+ *   verbatim; callers derive it from the streaming state.
  * @returns The formatted title string with control characters removed.
  */
 export function formatSessionWindowTitle(
   sessionName: string | null,
   folderName?: string,
+  statusPrefix = '',
 ): string {
-  return sessionName
+  const base = sessionName
     ? sanitizeWindowTitle(sessionName)
     : computeWindowTitle(folderName);
+  return statusPrefix + base;
 }

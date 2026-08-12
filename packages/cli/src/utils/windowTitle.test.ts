@@ -211,4 +211,20 @@ describe('formatSessionWindowTitle', () => {
   it('should use default title when sessionName is null and no folder', () => {
     expect(formatSessionWindowTitle(null)).toBe('Qwen - qwen');
   });
+
+  it('should prepend a status prefix when provided', () => {
+    expect(formatSessionWindowTitle('my session', 'proj', '◐ ')).toBe(
+      '◐ my session',
+    );
+  });
+
+  it('should prepend status prefix to the fallback title too', () => {
+    expect(formatSessionWindowTitle(null, 'my-project', '✳\uFE0E ')).toBe(
+      '✳\uFE0E Qwen - my-project',
+    );
+  });
+
+  it('should not add a prefix when statusPrefix is empty', () => {
+    expect(formatSessionWindowTitle('s', 'p', '')).toBe('s');
+  });
 });
