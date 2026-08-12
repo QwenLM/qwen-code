@@ -25,6 +25,11 @@ import {
 } from './workflow-prompts.js';
 import { AgentTerminateMode } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
+import {
+  attachJsonlTranscriptWriter,
+  getAgentJsonlPath,
+} from '../agent-transcript.js';
+import { getCachedGitBranch } from '../../utils/gitUtils.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
   AgentToolCallEvent,
@@ -386,9 +391,23 @@ export function createProductionDispatch(
     const stallMs = resolveStallMs(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
+    // Minted per `agent()` call rather than per attempt, so a stall-retried
+    // dispatch appends to ONE transcript instead of presenting as two agents
+    // to every reader of the subagent transcript dir.
+    const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+    let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
+        attempt += 1;
         const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        const cleanupTranscript = attachDispatchTranscript(
+          config,
+          workflowAgentId,
+          prompt,
+          opts,
+          emitter,
+          attempt > 1,
+        );
         try {
           return await runSingleDispatch(
             config,
@@ -396,9 +415,11 @@ export function createProductionDispatch(
             opts,
             attemptSignal,
             emitter,
+            workflowAgentId,
             onTokens,
           );
         } finally {
+          cleanupTranscript();
           cleanupApprovalBridge?.();
         }
       },
@@ -412,12 +433,75 @@ export function createProductionDispatch(
 }
 
 /**
+ * Attach the harness's per-agent JSONL transcript writer to one dispatch
+ * attempt, so a workflow subagent leaves the same on-disk record as one
+ * launched through `AgentTool`.
+ *
+ * Workflow dispatch used to leave none. `AgentTool` attaches this writer on
+ * both its foreground and background paths, but a workflow `agent()` call
+ * goes straight to `AgentHeadless` — so a finished run left only the journal,
+ * which stores a hash of the prompt and the returned value and nothing about
+ * what any agent actually did (and no `result` line at all for a dispatch
+ * that threw). Attaching here, in the stall wrapper's attempt closure rather
+ * than inside either dispatch path, covers the fast path and the override
+ * path alike: both already receive this same per-attempt emitter.
+ *
+ * Best-effort by construction. The writer swallows its own IO errors, and a
+ * throw from the attach itself must not take down a dispatch that would
+ * otherwise succeed — an unobservable agent is strictly better than a failed
+ * one.
+ */
+function attachDispatchTranscript(
+  config: Config,
+  agentId: string,
+  prompt: string,
+  opts: WorkflowAgentOpts,
+  emitter: AgentEventEmitter,
+  /** Retry attempt: append to the transcript the first attempt opened. */
+  append: boolean,
+): () => void {
+  try {
+    const sessionId = config.getSessionId();
+    const projectRoot = config.getProjectRoot();
+    const { cleanup } = attachJsonlTranscriptWriter(
+      emitter,
+      getAgentJsonlPath(config.storage.getProjectDir(), sessionId, agentId),
+      {
+        agentId,
+        agentName:
+          typeof opts.label === 'string' && opts.label
+            ? opts.label
+            : 'workflow-agent',
+        sessionId,
+        cwd: projectRoot,
+        version: config.getCliVersion() || 'unknown',
+        gitBranch: getCachedGitBranch(projectRoot),
+        // The prompt the SCRIPT dispatched, seeded as the transcript's first
+        // user record — the same shape AgentTool writes, so a reader that
+        // recovers a launch prompt from a transcript needs no workflow-
+        // specific branch. A retry re-uses the first attempt's record rather
+        // than seeding a second one.
+        initialUserPrompt: append ? undefined : prompt,
+        appendToExisting: append,
+      },
+    );
+    return cleanup;
+  } catch (error) {
+    debugLogger.warn(
+      `[Workflow] failed to attach transcript for ${agentId}: ${error}`,
+    );
+    return () => {};
+  }
+}
+
+/**
  * One single-attempt production dispatch. Receives the per-attempt abort
  * signal (the stall wrapper chains the parent signal into it + the watchdog
  * aborts it on stall) and the per-attempt event emitter (the stall watchdog
- * is already attached; the override/schema path additionally attaches its
- * `structured_output` capture listeners to the same emitter). Returns the
- * agent result on success; throws on any non-success terminal.
+ * and the transcript writer are already attached; the override/schema path
+ * additionally attaches its `structured_output` capture listeners to the same
+ * emitter). Returns the agent result on success; throws on any non-success
+ * terminal.
  */
 async function runSingleDispatch(
   config: Config,
@@ -425,12 +509,16 @@ async function runSingleDispatch(
   opts: WorkflowAgentOpts,
   attemptSignal: AbortSignal,
   emitter: AgentEventEmitter,
+  /**
+   * Owned by the caller so every attempt of one `agent()` call shares an
+   * identity — it keys the transcript file and the ALS agent-context frame.
+   */
+  workflowAgentId: string,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
-  const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
   if (

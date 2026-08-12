@@ -129,23 +129,9 @@ import type {
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
-import { getGitBranch } from '../../utils/gitUtils.js';
+import { getCachedGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
-
-// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
-// shells out to `git rev-parse` synchronously; caching avoids the per-launch
-// execSync on a path that runs every time a subagent (foreground or
-// background) starts. Branches don't change within a process under normal
-// use; the transcript annotation is best-effort audit metadata, so a stale
-// value after a user `git checkout` mid-session is acceptable.
-const gitBranchCache = new Map<string, string | undefined>();
-function getCachedGitBranch(cwd: string): string | undefined {
-  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
-  const branch = getGitBranch(cwd);
-  gitBranchCache.set(cwd, branch);
-  return branch;
-}
 
 function persistBackgroundCancellation(
   metaPath: string,

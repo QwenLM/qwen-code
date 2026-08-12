@@ -8,6 +8,8 @@
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -3225,5 +3227,182 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     ).rejects.toThrow(
       /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
     );
+  });
+});
+
+// Every workflow `agent()` dispatch leaves the same per-agent JSONL
+// transcript AgentTool writes, in the same session-scoped directory. Before
+// this, a finished workflow run left only the journal — which stores a hash
+// of the prompt, not the prompt, and no `result` line at all for a dispatch
+// that threw.
+describe('createProductionDispatch — subagent transcripts', () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    created.length = 0;
+    nextFinalText.value = undefined;
+    nextTerminateMode.value = 'GOAL';
+    nextExecuteHook.value = undefined;
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-transcript-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  function transcriptConfig(): Config {
+    return {
+      getSessionId: () => 'sess-1',
+      getProjectRoot: () => projectDir,
+      getCliVersion: () => '9.9.9',
+      storage: { getProjectDir: () => projectDir },
+    } as unknown as Config;
+  }
+
+  const sessionDir = () => path.join(projectDir, 'subagents', 'sess-1');
+
+  function transcriptNames(): string[] {
+    if (!fs.existsSync(sessionDir())) return [];
+    return fs.readdirSync(sessionDir()).filter((n) => n.endsWith('.jsonl'));
+  }
+
+  function recordsIn(name: string): Array<Record<string, unknown>> {
+    return fs
+      .readFileSync(path.join(sessionDir(), name), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  const partsOf = (rec: Record<string, unknown>): unknown[] =>
+    ((rec['message'] as { parts?: unknown[] } | undefined)?.parts ??
+      []) as unknown[];
+
+  it('writes one transcript per dispatch, seeded with the dispatched prompt', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('review chunk 3 of 7', { label: 'chunk-3' });
+
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    const recs = recordsIn(names[0]!);
+    // The launch prompt is the first `user` record — the shape every
+    // transcript reader already recovers a launch prompt from.
+    expect(recs[0]!['type']).toBe('user');
+    expect(partsOf(recs[0]!)).toEqual([{ text: 'review chunk 3 of 7' }]);
+    expect(recs[0]!['agentId']).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(recs[0]!['agentName']).toBe('chunk-3');
+    expect(recs[0]!['sessionId']).toBe('sess-1');
+    expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
+  });
+
+  it("records the subagent's tool calls and their results", async () => {
+    nextExecuteHook.value = async (emitter) => {
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'sub',
+        round: 1,
+        callId: 'c1',
+        name: 'read_file',
+        args: { absolute_path: '/tmp/diff.txt', offset: 0, limit: 40 },
+        description: 'read the diff',
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+        subagentId: 'sub',
+        round: 1,
+        responses: [
+          {
+            callId: 'c1',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'diff text' },
+                },
+              },
+            ],
+          },
+        ],
+        timestamp: 2,
+      });
+    };
+
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('read it', { label: 'reader' });
+
+    const recs = recordsIn(transcriptNames()[0]!);
+    expect(partsOf(recs[1]!)).toEqual([
+      {
+        functionCall: {
+          id: 'c1',
+          name: 'read_file',
+          args: { absolute_path: '/tmp/diff.txt', offset: 0, limit: 40 },
+        },
+      },
+    ]);
+    expect(recs[2]!['type']).toBe('tool_result');
+    expect(recs[2]!['toolCallResult']).toEqual({ callId: 'c1' });
+  });
+
+  // A stall-retried dispatch is ONE `agent()` call. Minting the agent id per
+  // attempt would present it to every transcript reader as two agents — one
+  // of them with almost no tool calls, which is exactly the shape a coverage
+  // gate reads as an agent that did nothing.
+  it('appends a stall retry to the first attempt transcript', async () => {
+    let attempt = 0;
+    nextExecuteHook.value = async (emitter, signal) => {
+      attempt += 1;
+      if (attempt > 1) {
+        nextTerminateMode.value = 'GOAL';
+        return;
+      }
+      nextTerminateMode.value = 'CANCELLED';
+      emitter.emit(AgentEventType.ROUND_START, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        promptId: 'prompt-1',
+        timestamp: Date.now(),
+      });
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await expect(dispatch('flaky', { label: 'f1', stallMs: 5 })).resolves.toBe(
+      'headless-said:flaky',
+    );
+
+    expect(attempt).toBe(2);
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    // One launch record, not one per attempt.
+    const users = recordsIn(names[0]!).filter((r) => r['type'] === 'user');
+    expect(users).toHaveLength(1);
+  });
+
+  // The journal writes no `result` line for a dispatch that throws, so a
+  // failed agent is invisible there. The transcript is what keeps it
+  // visible — the run left evidence of what it was asked and how far it got.
+  it('leaves a transcript for a dispatch that ends on a non-GOAL terminal', async () => {
+    nextTerminateMode.value = 'MAX_TURNS';
+    const dispatch = createProductionDispatch(transcriptConfig());
+
+    await expect(dispatch('doomed', { label: 'd1' })).rejects.toThrow(
+      /did not complete \(terminate mode: MAX_TURNS\)/,
+    );
+
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    expect(partsOf(recordsIn(names[0]!)[0]!)).toEqual([{ text: 'doomed' }]);
+  });
+
+  it('is best-effort: a config that cannot supply the paths still dispatches', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'headless-said:hello',
+    );
+    expect(transcriptNames()).toHaveLength(0);
   });
 });
