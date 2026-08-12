@@ -561,6 +561,22 @@ const EN: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'askUser.shortcuts.previous': '← previous',
+  'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
+  'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
+  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.multiNext':
+    '↑↓ move · Space select/deselect · Enter select & next',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ move · Enter edit',
+  'askUser.shortcuts.inputEmpty': 'Type an answer · Esc stop editing',
+  'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
+  'askUser.shortcuts.inputNext': 'Enter next · Esc stop editing',
+  'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
     'No matching inline LaTeX expression found in the last AI output.',
@@ -1444,7 +1460,6 @@ const EN: Messages = {
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
-  'compact.hint': 'Press Ctrl+O to show full tool output',
   'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
@@ -1946,6 +1961,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
   'goal.check': 'Goal check',
   'goal.cleared': 'Goal cleared',
@@ -2474,9 +2490,9 @@ const EN: Messages = {
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
-    `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `Running ${v?.count ?? 0} tools: ${v?.name ?? 'tool'}`
+      : `Running ${v?.name ?? 'tool'}`,
   'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
@@ -3382,6 +3398,22 @@ const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
+  'askUser.shortcuts.previous': '← 上一步',
+  'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
+  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.multiNext':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并下一步',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ 移动 · Enter 编辑',
+  'askUser.shortcuts.inputEmpty': '输入答案 · Esc 退出编辑',
+  'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
+  'askUser.shortcuts.inputNext': 'Enter 下一步 · Esc 退出编辑',
+  'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
   'copy.latexMissing': '最后一条 AI 输出中没有匹配的 LaTeX 块。',
@@ -4206,7 +4238,6 @@ const ZH: Messages = {
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
-  'compact.hint': '按 Ctrl+O 显示完整工具输出',
   'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
@@ -4663,6 +4694,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
   'goal.check': '目标检查',
   'goal.cleared': '目标已清除',
@@ -5156,9 +5188,9 @@ const ZH: Messages = {
   'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
-    `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `正在执行 ${v?.count ?? 0} 个工具：${v?.name ?? '工具'}`
+      : `正在执行 ${v?.name ?? '工具'}`,
   'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
