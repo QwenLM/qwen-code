@@ -18,7 +18,9 @@
       "delayMs": 2000
     }
   ],
-  "env": {},
+  "env": {
+    "TERM": "xterm-256color"
+  },
   "compareParams": [],
   "commands": {
     "base": {
