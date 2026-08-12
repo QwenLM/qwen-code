@@ -38,6 +38,7 @@ import type {
   MediaMemoryBinding,
   MediaMemoryService,
   PolicyOutputInput,
+  ReusableExecutionOutputs,
 } from '../../services/media-memory/index.js';
 import type {
   FixedPolicyOrigin,
@@ -724,6 +725,53 @@ async function executePolicy(
   // the cache-hit path (which re-materializes the same execution node)
   // records honest, if near-zero, durations.
   const startedAt = new Date().toISOString();
+  // Execution-free reuse (#8189 «同文件同 settings 二次触发同一 policy：
+  // 直接复用，无重复执行»). Consulted BEFORE the degradation cache because
+  // memory covers every output shape — multi-output tools and text
+  // products (an 81-minute transcript!) that the cache deliberately never
+  // stores, and therefore used to re-transcode on every delivery.
+  if (memory) {
+    const reusable = await memory.service.findReusableOutputs(
+      item.sha256,
+      fingerprint,
+    );
+    const rebuilt = reusable
+      ? await rebuildReusedOutputs(reusable, descriptor, signal)
+      : undefined;
+    if (rebuilt) {
+      debugLogger.debug(
+        `memory reuse hit: policy=${policy.id} sha256=${item.sha256.slice(0, 12)}… ` +
+          `outputs=${rebuilt.outputs.length} (tool not executed)`,
+      );
+      // The reusing file records its OWN execution, stamped with
+      // `reusedExecutionId` by the service (M §11.3) — provenance stays
+      // per-file while the computation is shared.
+      const commit = await memory.service.commitPolicySucceeded({
+        invocationId: 'memory-reuse',
+        source: memory.source,
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: policy.id,
+          stage: policy.stage,
+        },
+        toolName: policy.toolName,
+        toolVersion: descriptor.version,
+        finalArguments: effectiveArguments,
+        omniConfigHash: fingerprint,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        outputs: rebuilt.outputs,
+      });
+      return {
+        outcome: 'succeeded',
+        derived: rebuilt.derived.map((d) => ({
+          ...d,
+          memoryBinding: commit?.mediaBindings.get(d.sha256),
+        })),
+        derivedFiles: rebuilt.derivedFiles,
+      };
+    }
+  }
   const hit = await cache.get(item.sha256, fingerprint);
   if (hit) {
     try {
@@ -1037,6 +1085,104 @@ async function executePolicy(
  * protocol), bounded strict-UTF-8 text matching a declared file output —
  * and, for lossy outputs, a non-empty `metadata.omniDisclosure`.
  */
+/**
+ * Rebuild the deliverables of a recorded execution without running the
+ * tool. Every reuse is verified exactly like a degradation-cache hit: the
+ * object must still be a regular file, its bytes must still hash to the
+ * recorded identity (memory.json is project-local and hand-editable), and
+ * a media object must re-recognize as a type this tool DECLARES producing
+ * — otherwise a crafted record could route arbitrary store content
+ * through a policy that never made it. Any doubt returns undefined and the
+ * caller re-derives from source.
+ */
+async function rebuildReusedOutputs(
+  reusable: ReusableExecutionOutputs,
+  descriptor: MediaPolicyToolDescriptor,
+  signal: AbortSignal | undefined,
+): Promise<
+  | {
+      outputs: PolicyOutputInput[];
+      derived: PolicyExecution['derived'];
+      derivedFiles: PolicyExecution['derivedFiles'];
+    }
+  | undefined
+> {
+  const outputs: PolicyOutputInput[] = [];
+  const derived: PolicyExecution['derived'] = [];
+  const derivedFiles: PolicyExecution['derivedFiles'] = [];
+  try {
+    for (const record of reusable.outputs) {
+      const objectPath = record.objectPath;
+      if (!objectPath) return undefined;
+      const stat = await fs.lstat(objectPath).catch(() => undefined);
+      if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
+      if ((await hashFileSha256(objectPath, signal)) !== record.sha256) {
+        return undefined;
+      }
+      if (record.kind === 'media') {
+        const recognized = await recognizeMediaFile(objectPath, { signal });
+        const declared = descriptor.outputs.some(
+          (o) =>
+            o.kind === 'media' &&
+            o.mimeTypes?.includes(recognized.detectedMimeType),
+        );
+        if (!declared) return undefined;
+        outputs.push({
+          kind: 'media',
+          objectPath,
+          sha256: record.sha256,
+          mediaType: recognized.modality,
+          metadata: recognized.metadata,
+          sizeBytes: recognized.sizeBytes,
+          mimeType: recognized.detectedMimeType,
+          role: record.role,
+          disclosure: record.disclosure,
+        });
+        derived.push({
+          filePath: objectPath,
+          recognized,
+          sha256: record.sha256,
+          disclosure: record.disclosure,
+          degraded: record.disclosure !== undefined,
+          role: record.role,
+        });
+      } else {
+        // Read the FULL text back from the promoted object: the entry's
+        // inlineText is bounded by `collection.maxInlineTextBytes`, and a
+        // truncated transcript must never be delivered as the whole one.
+        const text = await fs.readFile(objectPath, 'utf8');
+        outputs.push({
+          kind: 'text',
+          objectPath,
+          sha256: record.sha256,
+          mimeType: record.mimeType,
+          text,
+          sizeBytes: record.sizeBytes,
+          role: record.role,
+          disclosure: record.disclosure,
+        });
+        derivedFiles.push({
+          filePath: objectPath,
+          role: record.role,
+          mimeType: record.mimeType,
+          text,
+          sha256: record.sha256,
+          sizeBytes: record.sizeBytes,
+          disclosure: record.disclosure,
+        });
+      }
+    }
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    debugLogger.debug(
+      `memory reuse could not be verified, re-deriving: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
+  return { outputs, derived, derivedFiles };
+}
+
 export async function validateArtifact(
   artifact: ToolArtifact,
   descriptor: MediaPolicyToolDescriptor,

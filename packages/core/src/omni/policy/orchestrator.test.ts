@@ -1802,4 +1802,54 @@ describe('runFixedPolicies', () => {
       expect(records[0]).toMatchObject({ outcome: 'succeeded' });
     });
   });
+  describe('memory reuse skips execution (#8189)', () => {
+    it('reuses recorded outputs on the second run without calling the tool', async () => {
+      const { MediaMemoryService } = await import(
+        '../../services/media-memory/index.js'
+      );
+      const service = new MediaMemoryService(store.getOmniRootDir());
+      const sha256 = createHash('sha256')
+        .update(await fs.readFile(sourcePath))
+        .digest('hex');
+      const sourceBinding = await service.recordFileRecognized({
+        fileRef: sourcePath,
+        sha256,
+        mediaType: 'image',
+        metadata: recognizedImage().metadata,
+        sizeBytes: recognizedImage().sizeBytes,
+        mimeType: 'image/png',
+        origin: 'user',
+        source: { protocol: 'local', locator: 'source.png' },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: 'omni-sniff-ffprobe/1',
+          probeStatus: 'complete',
+        },
+      });
+      const options = {
+        store,
+        policies: [makePolicy({})],
+        memory: { service, sourceBinding },
+      };
+
+      mockToolSuccess();
+      const first = await runFixedPolicies(config, source, options);
+      expect(first.records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+
+      // Second delivery of the same bytes under the same configuration:
+      // the tool must NOT run again, and the derivative must be the very
+      // same content-addressed object.
+      const second = await runFixedPolicies(config, source, options);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      expect(second.records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(second.deliveries[0]!.sha256).toBe(first.deliveries[0]!.sha256);
+      expect(second.deliveries[0]!.filePath).toBe(
+        first.deliveries[0]!.filePath,
+      );
+      expect(second.deliveries[0]!.disclosure).toBe(
+        first.deliveries[0]!.disclosure,
+      );
+    });
+  });
 });

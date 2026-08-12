@@ -138,6 +138,28 @@ export interface PolicySucceededInput {
   outputs: PolicyOutputInput[];
 }
 
+/** One recorded output of a reusable execution: where its bytes live and
+ * the provenance the reusing caller must reproduce. */
+export interface ReusableOutputRecord {
+  kind: 'media' | 'text';
+  sha256: string;
+  /** Object-store path recorded for the derivative. Absent for text
+   * outputs (no version node); reconstruct it from `sha256`. */
+  objectPath?: string;
+  mimeType: string;
+  sizeBytes: number;
+  role?: string;
+  disclosure?: string;
+}
+
+/** Outputs of a prior execution eligible for reuse (M §11.3). */
+export interface ReusableExecutionOutputs {
+  /** The original execution — recorded as `reusedExecutionId` when the
+   * reusing file commits its own execution. */
+  executionId: PolicyExecutionId;
+  outputs: ReusableOutputRecord[];
+}
+
 export interface PolicySucceededCommit {
   executionId: PolicyExecutionId;
   /** Bindings for derived media outputs, keyed by output sha256, so the
@@ -267,6 +289,74 @@ export class MediaMemoryService {
         `commitPolicySucceeded failed for ${input.toolName} ` +
           `(invocation ${input.invocationId}): ` +
           `${err instanceof Error ? err.message : err}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Recorded outputs of a prior execution that already performed THIS
+   * computation on THESE bytes (content-identity reuse key, M §11.3) —
+   * the read side of «同文件同 settings 二次触发同一 policy：直接复用，
+   * 无重复执行». Covers every output shape, so multi-output tools and text
+   * products (transcripts) are reusable too, unlike the S4 degradation
+   * cache which maps one input to a single media derivative.
+   *
+   * Returns locators and recorded provenance only: the caller must verify
+   * the bytes still exist and still hash to `sha256` before reusing them
+   * (memory.json is project-local and hand-editable — the same stance the
+   * degradation-cache hit path takes). Undefined when nothing matches or
+   * the store is unreadable (logged, never thrown).
+   */
+  async findReusableOutputs(
+    sourceSha256: string,
+    omniConfigHash: string,
+  ): Promise<ReusableExecutionOutputs | undefined> {
+    try {
+      return await this.store.read(undefined, (snapshot) => {
+        // No self to exclude: this is a pre-execution lookup.
+        const match = findReusableExecution(
+          snapshot,
+          `${sourceSha256}|${omniConfigHash}`,
+          '',
+        );
+        if (!match) return undefined;
+        const outputs: ReusableOutputRecord[] = [];
+        for (const entryId of match.outputRefs) {
+          const entry = snapshot.entries[entryId];
+          if (!entry?.artifactRef) return undefined; // incomplete — no reuse
+          const managedId = entry.artifactRef.managedId;
+          const sha256 = managedId?.startsWith('sha256/')
+            ? managedId.slice('sha256/'.length)
+            : undefined;
+          if (sha256 === undefined) return undefined;
+          const version = entry.derivedVersionId
+            ? snapshot.versions[entry.derivedVersionId]
+            : undefined;
+          // Media outputs resolve their object through the derived
+          // version's file record; a text output has no version node, so
+          // the caller re-derives its path from the content hash.
+          const objectPath = version
+            ? snapshot.files[version.fileId]?.fileRef
+            : undefined;
+          outputs.push({
+            kind: entry.kind === 'derived_media' ? 'media' : 'text',
+            sha256,
+            ...(objectPath !== undefined ? { objectPath } : {}),
+            mimeType: entry.artifactRef.mimeType,
+            sizeBytes: entry.artifactRef.sizeBytes,
+            ...(entry.role !== undefined ? { role: entry.role } : {}),
+            ...(entry.disclosure !== undefined
+              ? { disclosure: entry.disclosure }
+              : {}),
+          });
+        }
+        if (outputs.length === 0) return undefined;
+        return { executionId: match.executionId, outputs };
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `findReusableOutputs failed: ${err instanceof Error ? err.message : err}`,
       );
       return undefined;
     }

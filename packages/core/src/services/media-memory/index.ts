@@ -22,6 +22,8 @@ export {
   type PolicyTextOutputInput,
   type PolicySucceededInput,
   type PolicySucceededCommit,
+  type ReusableExecutionOutputs,
+  type ReusableOutputRecord,
 } from './service.js';
 export {
   MediaResourceRegistry,
