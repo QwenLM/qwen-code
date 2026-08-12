@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 // paths so the suite also passes on the Windows gate.
 const toPosix = (value) => value.replaceAll(path.sep, '/');
 
-describe('getLinterTempDir', () => {
+describe('linter directories', () => {
   const originalArgv = process.argv;
 
   beforeEach(() => {
@@ -68,5 +68,25 @@ describe('getLinterTempDir', () => {
     expect(toPosix(first)).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
     expect(toPosix(second)).toMatch(/\/qwen-code-linters\/local-[a-f0-9]{16}$/);
     expect(first).not.toBe(second);
+  });
+
+  it('shares cached downloads across GitHub Actions runs', async () => {
+    const { getLinterCacheDir } = await import('../lint.js');
+
+    const first = getLinterCacheDir({
+      env: {
+        XDG_CACHE_HOME: '/runner/cache',
+        GITHUB_RUN_ID: '31583913822',
+      },
+    });
+    const second = getLinterCacheDir({
+      env: {
+        XDG_CACHE_HOME: '/runner/cache',
+        GITHUB_RUN_ID: '31583913823',
+      },
+    });
+
+    expect(toPosix(first)).toBe('/runner/cache/qwen-code/linters');
+    expect(second).toBe(first);
   });
 });

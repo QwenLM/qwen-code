@@ -9,7 +9,7 @@
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const ACTIONLINT_VERSION = '1.7.12';
@@ -46,7 +46,20 @@ export function getLinterTempDir({
   return join(baseDir, 'qwen-code-linters', `local-${workspaceHash}`);
 }
 
+export function getLinterCacheDir({
+  env = process.env,
+  homeDir = homedir(),
+} = {}) {
+  return join(
+    env.XDG_CACHE_HOME || join(homeDir, '.cache'),
+    'qwen-code',
+    'linters',
+  );
+}
+
 const TEMP_DIR = getLinterTempDir();
+// Share versioned archives; extracted binaries stay job-scoped in TEMP_DIR.
+const CACHE_DIR = getLinterCacheDir();
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -88,13 +101,29 @@ let lintersCache;
 function getLinters() {
   if (!lintersCache) {
     const platformArch = getPlatformArch();
+    const actionlintArchive = join(
+      CACHE_DIR,
+      `actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz`,
+    );
+    const shellcheckArchive = join(
+      CACHE_DIR,
+      `shellcheck_${SHELLCHECK_VERSION}_${platformArch.shellcheck}.tar.xz`,
+    );
     lintersCache = {
       actionlint: {
         check: 'command -v actionlint',
         installer: `
-      mkdir -p "${TEMP_DIR}/actionlint"
-      curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
-      tar -xzf "${TEMP_DIR}/.actionlint.tgz" -C "${TEMP_DIR}/actionlint"
+      set -e
+      mkdir -p "${TEMP_DIR}/actionlint" "${CACHE_DIR}"
+      if ! tar -tzf "${actionlintArchive}" >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
+          -o "${TEMP_DIR}/.actionlint.tgz" \
+          "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
+        tar -tzf "${TEMP_DIR}/.actionlint.tgz" >/dev/null
+        cp "${TEMP_DIR}/.actionlint.tgz" "${actionlintArchive}.$$"
+        mv -f "${actionlintArchive}.$$" "${actionlintArchive}"
+      fi
+      tar -xzf "${actionlintArchive}" -C "${TEMP_DIR}/actionlint"
     `,
         run: `
       actionlint \
@@ -111,9 +140,17 @@ function getLinters() {
       shellcheck: {
         check: 'command -v shellcheck',
         installer: `
-      mkdir -p "${TEMP_DIR}/shellcheck"
-      curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
-      tar -xf "${TEMP_DIR}/.shellcheck.txz" -C "${TEMP_DIR}/shellcheck" --strip-components=1
+      set -e
+      mkdir -p "${TEMP_DIR}/shellcheck" "${CACHE_DIR}"
+      if ! tar -tf "${shellcheckArchive}" >/dev/null 2>&1; then
+        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
+          -o "${TEMP_DIR}/.shellcheck.txz" \
+          "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
+        tar -tf "${TEMP_DIR}/.shellcheck.txz" >/dev/null
+        cp "${TEMP_DIR}/.shellcheck.txz" "${shellcheckArchive}.$$"
+        mv -f "${shellcheckArchive}.$$" "${shellcheckArchive}"
+      fi
+      tar -xf "${shellcheckArchive}" -C "${TEMP_DIR}/shellcheck" --strip-components=1
     `,
         run: `
       git ls-files | grep -v '^integration-tests/terminal-bench/' | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
