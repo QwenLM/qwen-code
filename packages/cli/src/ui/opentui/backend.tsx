@@ -29,7 +29,7 @@ import {
   type LiveToolItem,
 } from './live-session-model.js';
 import { formatDuration } from '../utils/displayUtils.js';
-import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
 import {
   findProviderByCredentials,
   resolveMetadataKey,
@@ -231,6 +231,22 @@ function AssistantMessage(props: {
 /** Original-style header banner. Stable: depends only on config/width, so it
  *  does not re-render on streaming; resize re-renders without flicker via the
  *  erase-free painter. */
+// Original witty loading phrases (i18n WITTY_LOADING_PHRASES, en subset).
+const WITTY_LOADING_PHRASES = [
+  "I'm Feeling Lucky",
+  'Shipping awesomeness... ',
+  'Reticulating splines...',
+  'Consulting the digital spirits...',
+  'Warming up the AI hamsters...',
+  'Generating witty retort...',
+  'Polishing the algorithms...',
+  'Brewing fresh bytes...',
+  'Engaging cognitive processors...',
+  'Untangling neural nets...',
+  'Compiling brilliance...',
+  'Crafting a response worthy of your patience...',
+];
+
 const LOGO_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
 function lerpHex(a: string, b: string, t: number): string {
   const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
@@ -399,6 +415,31 @@ function App({
   const [items, setItems] = useState<LiveHistoryItem[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
+  const [loadingPhrase, setLoadingPhrase] = useState(WITTY_LOADING_PHRASES[0]);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!streaming) return;
+    setElapsed(0);
+    setLoadingPhrase(
+      WITTY_LOADING_PHRASES[
+        Math.floor(Math.random() * WITTY_LOADING_PHRASES.length)
+      ],
+    );
+    const tick = setInterval(() => setElapsed((s) => s + 1), 1000);
+    const phrase = setInterval(
+      () =>
+        setLoadingPhrase(
+          WITTY_LOADING_PHRASES[
+            Math.floor(Math.random() * WITTY_LOADING_PHRASES.length)
+          ],
+        ),
+      15000,
+    );
+    return () => {
+      clearInterval(tick);
+      clearInterval(phrase);
+    };
+  }, [streaming]);
   const [_toast, setToast] = useState<string | null>(null);
   const [, setThemeTick] = useState(0);
   const [dialog, setDialog] = useState<MountedDialog | null>(null);
@@ -592,6 +633,43 @@ function App({
     if (key.name === 'c' && key.ctrl) {
       renderer.destroy();
       setTimeout(() => process.exit(0), 100);
+      return;
+    }
+    if (key.name === 'd' && key.ctrl) {
+      renderer.destroy();
+      setTimeout(() => process.exit(0), 100);
+      return;
+    }
+    if (key.name === 'l' && key.ctrl) {
+      // clear transcript (mirrors original Ctrl+L)
+      setItems([]);
+      return;
+    }
+    if (key.name === 'o' && key.ctrl) {
+      // toggle the most recent expandable item (thinking/tool/task)
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (
+          it.kind === 'thinking' ||
+          it.kind === 'tool' ||
+          it.kind === 'task'
+        ) {
+          toggle(it.id);
+          break;
+        }
+      }
+      return;
+    }
+    if (key.name === 'tab' && key.shift) {
+      // cycle approval mode (mirrors original Shift+Tab)
+      const order = [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO_EDIT,
+        ApprovalMode.AUTO,
+        ApprovalMode.YOLO,
+      ];
+      const idx = order.indexOf(approvalMode ?? ApprovalMode.DEFAULT);
+      setApprovalMode(order[(idx + 1) % order.length]);
       return;
     }
     if (key.name === 'escape' && streaming) {
@@ -900,6 +978,14 @@ function App({
           }
         })}
         <box height={1} />
+        {/* loading indicator above input while model responds (original) */}
+        {(streaming || commandProcessing) && (
+          <box paddingLeft={1} paddingRight={1}>
+            <text fg={C.dim}>
+              {`${nextSpinner()} ${loadingPhrase} (${elapsed}s · Esc to cancel)`}
+            </text>
+          </box>
+        )}
         {/* prompt (flows after messages; top-aligned when empty) */}
         <box flexDirection="column">
           <OpenTuiInputPrompt
