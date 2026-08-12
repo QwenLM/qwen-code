@@ -101,12 +101,6 @@ function ToolCard(props: {
       : item.confirm === 'rejected'
         ? ' · rejected'
         : '';
-  const hint = item.done
-    ? expanded
-      ? ' · click to collapse'
-      : ' · click to expand'
-    : '';
-
   return (
     <box flexDirection="column">
       <box
@@ -125,11 +119,10 @@ function ToolCard(props: {
         <text fg={item.done ? C.dim : C.text}>
           {item.title}
           {suffix}
-          {hint}
         </text>
         {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
       </box>
-      {item.args && (
+      {expanded && item.args && (
         <box paddingLeft={3}>
           <text fg={C.dim}>{argsPreview(item.args)}</text>
         </box>
