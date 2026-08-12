@@ -133,6 +133,13 @@ describe('linter directories', () => {
         const expectedSha256 = createHash('sha256')
           .update(readFileSync(fixture))
           .digest('hex');
+        expect(() =>
+          getCachedArchiveInstaller({
+            cacheArchive,
+            localArchive,
+            downloadUrl: 'https://example.invalid/unpinned.tar',
+          }),
+        ).toThrow('Missing SHA-256 pin');
         const installer = getCachedArchiveInstaller({
           cacheArchive,
           localArchive,
@@ -163,6 +170,19 @@ describe('linter directories', () => {
         expect(readFileSync(cacheArchive, 'utf8')).toBe('official archive');
         expect(readFileSync(executable, 'utf8')).toBe('official archive');
         expect(readFileSync(curlLog, 'utf8')).toBe('download\ndownload\n');
+
+        rmSync(localArchive);
+        rmSync(executable);
+        const nonExecutableInstaller = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256,
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: `cp "${localArchive}" "${executable}"`,
+          executable,
+        });
+        expect(() => execSync(nonExecutableInstaller, { env })).toThrow();
 
         rmSync(localArchive);
         rmSync(executable);

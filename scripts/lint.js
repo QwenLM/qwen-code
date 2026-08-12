@@ -82,6 +82,9 @@ export function getCachedArchiveInstaller({
   extract,
   executable,
 }) {
+  if (!expectedSha256) {
+    throw new Error(`Missing SHA-256 pin for ${downloadUrl}`);
+  }
   return `
       set -e
       verify_sha256() {
