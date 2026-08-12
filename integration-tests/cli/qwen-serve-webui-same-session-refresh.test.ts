@@ -152,6 +152,7 @@ describe('qwen serve WebUI transactional same-session refresh', () => {
               token: activeDaemon!.token,
               sessionId: source.sessionId,
               workspaceCwd: resolvedWorkspace,
+              historyPageSize: 100,
               ...(clientId ? { clientId } : {}),
             },
             createElement(Harness),
