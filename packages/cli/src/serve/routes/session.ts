@@ -31,6 +31,7 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import { DAEMON_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -108,6 +109,7 @@ import {
   deleteBranch,
 } from '../server/git-branch-ops.js';
 import {
+  MAX_VIRTUAL_SESSION_ID_PART_LENGTH,
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
@@ -126,6 +128,10 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+import {
+  CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  isChannelWorkerPromptAuthorized,
+} from '../channel-worker-prompt-authorization.js';
 import {
   createRequestedSessionIdAdmission,
   RequestedSessionIdAdmissionError,
@@ -787,16 +793,22 @@ export function registerSessionRoutes(
     return runtime;
   };
 
-  const hasActivePersistedSessions = async (runtime: WorkspaceRuntime) => {
+  const hasActivePersistedSessions = async (
+    runtime: WorkspaceRuntime,
+    signal: AbortSignal,
+  ) => {
     try {
       const page = await createWorkspaceRuntimeSessionService(
         runtime,
       ).listSessions({
         archiveState: 'active',
         size: 1,
+        signal,
       });
+      signal.throwIfAborted();
       return page.items.length > 0;
     } catch {
+      signal.throwIfAborted();
       return false;
     }
   };
@@ -2392,8 +2404,8 @@ export function registerSessionRoutes(
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
 
-  app.get('/session/:id/subagents/:toolCallId', async (req, res) => {
-    const route = 'GET /session/:id/subagents/:toolCallId';
+  app.get('/session/:id/subagents/:subagentRef', async (req, res) => {
+    const route = 'GET /session/:id/subagents/:subagentRef';
     const sessionId = requireSessionId(req, res);
     if (!sessionId) return;
     if (!virtualSubagentSessions) {
@@ -2404,11 +2416,14 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const toolCallId = req.params['toolCallId'];
-    if (!toolCallId || toolCallId.length > 500) {
+    const subagentRef = req.params['subagentRef'];
+    if (
+      !subagentRef ||
+      subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+    ) {
       res.status(400).json({
-        error: '`toolCallId` must be a non-empty tool call id',
-        code: 'invalid_tool_call_id',
+        error: '`subagentRef` must be a non-empty subagent reference',
+        code: 'invalid_subagent_ref',
       });
       return;
     }
@@ -2424,14 +2439,14 @@ export function registerSessionRoutes(
       const resolved = await virtualSubagentSessions.resolve(
         runtime,
         sessionId,
-        toolCallId,
+        subagentRef,
       );
       if (!resolved) {
         res.status(404).json({
           error: 'Subagent session not found',
           code: 'session_not_found',
           sessionId,
-          toolCallId,
+          subagentRef,
         });
         return;
       }
@@ -2442,10 +2457,10 @@ export function registerSessionRoutes(
   });
 
   app.post(
-    '/session/:id/subagents/:toolCallId/cancel',
+    '/session/:id/subagents/:subagentRef/cancel',
     mutate(),
     async (req, res) => {
-      const route = 'POST /session/:id/subagents/:toolCallId/cancel';
+      const route = 'POST /session/:id/subagents/:subagentRef/cancel';
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
       if (!virtualSubagentSessions) {
@@ -2456,11 +2471,14 @@ export function registerSessionRoutes(
         });
         return;
       }
-      const toolCallId = req.params['toolCallId'];
-      if (!toolCallId || toolCallId.length > 500) {
+      const subagentRef = req.params['subagentRef'];
+      if (
+        !subagentRef ||
+        subagentRef.length > MAX_VIRTUAL_SESSION_ID_PART_LENGTH
+      ) {
         res.status(400).json({
-          error: '`toolCallId` must be a non-empty tool call id',
-          code: 'invalid_tool_call_id',
+          error: '`subagentRef` must be a non-empty subagent reference',
+          code: 'invalid_subagent_ref',
         });
         return;
       }
@@ -2476,14 +2494,14 @@ export function registerSessionRoutes(
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
           sessionId,
-          toolCallId,
+          subagentRef,
         );
         if (!resolved) {
           res.status(404).json({
             error: 'Subagent session not found',
             code: 'session_not_found',
             sessionId,
-            toolCallId,
+            subagentRef,
           });
           return;
         }
@@ -3339,6 +3357,33 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
+        const forwardedMeta =
+          typeof forwardedBody['_meta'] === 'object' &&
+          forwardedBody['_meta'] !== null &&
+          !Array.isArray(forwardedBody['_meta'])
+            ? { ...(forwardedBody['_meta'] as Record<string, unknown>) }
+            : undefined;
+        const promptAuthorization =
+          forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
+        const promptDisplayText =
+          forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+        if (forwardedMeta) {
+          delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
+          delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          if (Object.keys(forwardedMeta).length > 0) {
+            forwardedBody['_meta'] = forwardedMeta;
+          } else {
+            delete forwardedBody['_meta'];
+          }
+        }
+        const trustedPromptDisplayText =
+          typeof promptDisplayText === 'string' &&
+          isChannelWorkerPromptAuthorized(
+            promptAuthorization,
+            runtime.workspaceCwd,
+          )
+            ? promptDisplayText
+            : undefined;
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
@@ -3384,6 +3429,9 @@ export function registerSessionRoutes(
               promptId,
               ...(effectiveDeadlineMs !== undefined
                 ? { deadlineMs: effectiveDeadlineMs }
+                : {}),
+              ...(trustedPromptDisplayText !== undefined
+                ? { promptDisplayText: trustedPromptDisplayText }
                 : {}),
               ...(delivery !== undefined
                 ? {
@@ -4371,53 +4419,82 @@ export function registerSessionRoutes(
           ...(parentSessionId !== undefined ? { parentSessionId } : {}),
           ...parsedSource,
         };
-        // Organized/archived views always need the persisted store: organized
-        // cursors are opaque (non-numeric) and archived-only workspaces have no
-        // active persisted sessions, so the live-only fallback would drop them.
-        // Metadata filters gather the whole workspace
-        // (persisted + live) to filter completely and paginates with an opaque
-        // activity cursor, so the numeric-cursor live fallback can't serve it.
-        const usePersisted =
-          readOnlySecondary ||
-          runtime.primary ||
-          view === 'organized' ||
-          archiveState === 'archived' ||
-          parentSessionId !== undefined ||
-          parsedSource.sourceType !== undefined ||
-          (cursor !== undefined && cursor !== ''
-            ? isNumericSessionCursor(cursor)
-            : await hasActivePersistedSessions(runtime));
-        // The live path only reads cursor/size; persisted-only options
-        // (organized view or archived state) would be silently dropped there.
-        // usePersisted already routes those to the persisted path — assert it so
-        // a future option added to validation but not to that gate fails loudly.
-        if (
-          !usePersisted &&
-          (view !== undefined ||
+        const controller = new AbortController();
+        const onRequestAborted = () => {
+          controller.abort(new DOMException('Request aborted', 'AbortError'));
+        };
+        const onResponseClosed = () => {
+          if (!res.writableEnded) {
+            controller.abort(new DOMException('Response closed', 'AbortError'));
+          }
+        };
+        req.once('aborted', onRequestAborted);
+        res.once('close', onResponseClosed);
+        if (req.aborted || res.destroyed) onRequestAborted();
+        try {
+          // Organized/archived views always need the persisted store: organized
+          // cursors are opaque (non-numeric) and archived-only workspaces have no
+          // active persisted sessions, so the live-only fallback would drop them.
+          // Metadata filters gather the whole workspace
+          // (persisted + live) to filter completely and paginates with an opaque
+          // activity cursor, so the numeric-cursor live fallback can't serve it.
+          const usePersisted =
+            readOnlySecondary ||
+            runtime.primary ||
+            view === 'organized' ||
             archiveState === 'archived' ||
             parentSessionId !== undefined ||
-            parsedSource.sourceType !== undefined)
-        ) {
-          throw new Error(
-            'session list live path received persisted-only options',
-          );
+            parsedSource.sourceType !== undefined ||
+            (cursor !== undefined && cursor !== ''
+              ? isNumericSessionCursor(cursor)
+              : await hasActivePersistedSessions(runtime, controller.signal));
+          // The live path only reads cursor/size; persisted-only options
+          // (organized view or archived state) would be silently dropped there.
+          // usePersisted already routes those to the persisted path — assert it so
+          // a future option added to validation but not to that gate fails loudly.
+          if (
+            !usePersisted &&
+            (view !== undefined ||
+              archiveState === 'archived' ||
+              parentSessionId !== undefined ||
+              parsedSource.sourceType !== undefined)
+          ) {
+            throw new Error(
+              'session list live path received persisted-only options',
+            );
+          }
+          const result = usePersisted
+            ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
+                listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
+                  mergeLive: !readOnlySecondary,
+                  runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+                  signal: controller.signal,
+                }),
+              )
+            : listLiveWorkspaceSessionsForResponse(
+                runtime.bridge,
+                key,
+                options,
+              );
+          controller.signal.throwIfAborted();
+          if (res.destroyed) return;
+          res.status(200).json({
+            sessions: result.sessions,
+            ...(result.nextCursor != null
+              ? { nextCursor: result.nextCursor }
+              : {}),
+            ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
+            ...(result.truncated ? { truncated: true } : {}),
+          });
+        } catch (err) {
+          if (controller.signal.aborted || res.destroyed) {
+            return;
+          }
+          throw err;
+        } finally {
+          req.off('aborted', onRequestAborted);
+          res.off('close', onResponseClosed);
         }
-        const result = usePersisted
-          ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
-              listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
-                mergeLive: !readOnlySecondary,
-                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
-              }),
-            )
-          : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
-        res.status(200).json({
-          sessions: result.sessions,
-          ...(result.nextCursor != null
-            ? { nextCursor: result.nextCursor }
-            : {}),
-          ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
-          ...(result.truncated ? { truncated: true } : {}),
-        });
       } catch (err) {
         if (err instanceof InvalidCursorError) {
           res.status(400).json({

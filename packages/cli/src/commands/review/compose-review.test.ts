@@ -200,6 +200,7 @@ function transcript(
     toolCalls?: number;
     text?: string;
     opens?: string[];
+    toolPath?: string;
     /** `[offset, limit]` making the diff reads ranged, as a compliant agent's are. */
     range?: [number, number];
   } = {},
@@ -234,7 +235,7 @@ function transcript(
                       offset: opts.range[0],
                       limit: opts.range[1],
                     }
-                  : { file_path: DIFF },
+                  : { file_path: opts.toolPath ?? DIFF },
               },
             },
           ],
@@ -441,6 +442,116 @@ describe('composeReview — the C/S table', () => {
     const r = composeReview(base({ bodyCriticals: ['whole-PR blocker X'] }));
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+});
+
+describe('composeReview — modeled-system defect-layer cap', () => {
+  const sentinel = (domains: string[]) => ({
+    version: 1,
+    provider: 'test',
+    label: 'guard',
+    domains,
+    relatedPaths: [],
+    recommendedTests: [],
+    requiredConfigurations: [],
+    requiredAgents: [],
+    unverifiedDimensions: [],
+    verificationNotes: [],
+  });
+  const IDENTITY =
+    'You are review agent `reverse-audit` — Reverse audit agent.';
+  const ALL = [
+    'lexing',
+    'expansion',
+    'scope-propagation',
+    'resolution-order',
+    'inheritance',
+    'toctou',
+  ];
+  const walked = (...ids: string[]) =>
+    ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
+  // A genuine reverse-audit auditor: the identity line, a real diff read
+  // (so `diffToolCalls > 0`), and the given receipts as its final text.
+  const auditor = (id: string, receipts: string) =>
+    transcript(id, `${IDENTITY}\nread_file(file_path="${DIFF}")`, {
+      toolCalls: 1,
+      range: [0, 100],
+      text: receipts,
+    });
+  const markedPlan = (domains: string[]) =>
+    coveredPlan(['verify', 'reverse-audit'], {
+      repositoryContext: sentinel(domains),
+    });
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('caps Approve to Comment when a marked diff leaves layers unwalked', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked('lexing', 'expansion')); // 2 of 6
+    const r = compose(p);
+    // Reverting the compose-review wiring line leaves this green as APPROVE.
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('scope-propagation');
+  });
+
+  it('leaves Approve intact when every layer is walked', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked(...ALL));
+    expect(compose(p).event).toBe('APPROVE');
+  });
+
+  it('does not count a parrot that never read the diff (diffToolCalls === 0)', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked('lexing', 'expansion')); // genuine: 4 owed
+    // Identity line and ALL six receipts, but a brief read, not a diff read:
+    // successfulToolCalls > 0, diffToolCalls === 0 — corroboration must drop it,
+    // or its six receipts would cover the four the genuine auditor left owed.
+    transcript('ra-parrot', `${IDENTITY}\nread_file(file_path="/x/brief.md")`, {
+      opens: ['/x/brief.md'],
+      text: walked(...ALL),
+    });
+    const r = compose(p);
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('scope-propagation');
+  });
+
+  it('does not count a verifier whose prompt merely mentions reverse-audit', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked('lexing', 'expansion')); // genuine: 4 owed
+    // A verifier identity, a real diff read, and all six receipts quoted in its
+    // verdict: the substring `reverse-audit` appears, the identity line does not.
+    transcript(
+      'vr',
+      `You are review agent \`verify\` — Verification agent, ruling on reverse-audit findings.\nread_file(file_path="${DIFF}")`,
+      { toolCalls: 1, range: [0, 100], text: walked(...ALL) },
+    );
+    expect(compose(p).event).toBe('COMMENT');
+  });
+
+  it('does not count an auditor whose diff read misses its baked territory', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    // A reverse auditor whose launch baked territory 3301-4000 but whose only diff
+    // read was lines 1-50: retirement's territory bar drops it, so its six parroted
+    // receipts do not count and the layers stay owed. `diffToolCalls > 0` alone
+    // would (wrongly) credit them and release Approve.
+    transcript(
+      'ra-off',
+      `${IDENTITY}\nread_file(file_path="${DIFF}", offset=3300, limit=700)`,
+      { toolCalls: 1, range: [0, 50], text: walked(...ALL) },
+    );
+    expect(compose(p).event).toBe('COMMENT');
+  });
+
+  it('is inert without the sentinel domain — an ordinary review is unaffected', () => {
+    const p = markedPlan(['some-other-domain']);
+    auditor('ra-1', ''); // zero receipts, but the domain is not armed
+    expect(compose(p).event).toBe('APPROVE');
   });
 });
 
@@ -948,7 +1059,12 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       base({ suggestionsInline: 1, unreviewedDimensions: ['security'] }),
     );
     expect(r.event).toBe('COMMENT');
-    expect(r.body).toContain('Reviewed. Suggestions are inline.');
+    // The gap disclosure follows, so the opener says the review is partial —
+    // any "Reviewed…" opener above "Not reviewed:" read as the body
+    // contradicting itself (#8811).
+    expect(r.body).toContain(
+      'Partially reviewed — gaps disclosed. Suggestions are inline.',
+    );
     expect(r.body).not.toContain('no blockers');
   });
 });
@@ -970,6 +1086,15 @@ describe('composeReview — context-unavailable (clause 2)', () => {
     expect(r.body).toContain('Reviewed diff-only');
     expect(r.body).toContain('Suggestions are inline.');
     expect(r.body).not.toMatch(/Reviewed\.\s/);
+  });
+
+  it('discloses coverage gaps before the diff-only warning', () => {
+    const r = composeReview(
+      base({ contextUnavailable: true, unreviewedDimensions: ['security'] }),
+    );
+    expect(r.body.indexOf('Partially reviewed')).toBeLessThan(
+      r.body.indexOf('Reviewed diff-only'),
+    );
   });
 
   it('does not soften a REQUEST_CHANGES', () => {
@@ -1117,7 +1242,7 @@ describe('composeReview — stacked states compose, none erased', () => {
     // downgradeApprove did not fire (base event was COMMENT), so no sentence…
     expect(r.body).not.toContain('Downgraded');
     // …but every disclosure is present exactly once, and nothing certifies.
-    expect(r.body).toContain('Reviewed.');
+    expect(r.body).toContain('Partially reviewed — gaps disclosed.');
     expect(r.body).toContain('Suggestions are inline.');
     expect(r.body).toContain('1 Suggestion-level finding(s)');
     expect(r.body).toContain('Unresolved, please confirm:');
@@ -1173,9 +1298,16 @@ describe('composeReview — stacked states compose, none erased', () => {
 describe('composeReview — RC carries every applicable disclosure (no clause squeezed out)', () => {
   it('RC + context-unavailable keeps the diff-only trust warning in the body', () => {
     const r = composeReview(
-      base({ criticalsInline: 1, contextUnavailable: true }),
+      base({
+        criticalsInline: 1,
+        contextUnavailable: true,
+        unreviewedDimensions: ['security'],
+      }),
     );
     expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body.indexOf('Partially reviewed')).toBeLessThan(
+      r.body.indexOf('Reviewed diff-only'),
+    );
     expect(r.body).toContain('Reviewed diff-only');
   });
 
@@ -1328,6 +1460,8 @@ describe('composeReview — budget-gap disclosures (a channel, never a cap)', ()
     });
     expect(r.body).toContain('Not explored to full depth');
     expect(r.body).not.toContain('no blockers');
+    expect(r.body).toContain('Reviewed.');
+    expect(r.body).not.toContain('Partially reviewed');
   });
 });
 
@@ -2117,16 +2251,18 @@ describe('coverage is recomputed, never accepted', () => {
     expect(r.body).not.toContain('Reviewed.');
   });
 
-  it('keeps the "Reviewed." opener while any chunk is certified', () => {
+  it('opens partial, not zero-certified, while any chunk is certified — and names the gaps it carries', () => {
     // chunk 1 built and never launched; chunk 2 reviewed properly. A partial
-    // gap is a disclosure, not a zero-certification.
+    // gap is a disclosure, not a zero-certification — and the opener says
+    // the review is partial, so no "Reviewed…" opener ever sits beside
+    // "Not reviewed:" (#8811).
     const p = plan();
     recordBuilt(p, 1);
     recordBuilt(p, 2);
     recordMatrix(p);
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
-    expect(r.body).toContain('Reviewed.');
+    expect(r.body).toContain('Partially reviewed — gaps disclosed.');
     expect(r.body).not.toContain('could not certify');
   });
 
@@ -2182,6 +2318,93 @@ describe('coverage is recomputed, never accepted', () => {
     // without this line, deleting the idle push would fail no test.
     expect(r.remediation.join(' ')).toMatch(
       /idle agents: relaunch each with the same printed prompt/,
+    );
+  });
+
+  it('quotes a prose agent label — it is the agent’s name, not a claim about the PR', () => {
+    // #8811: a whole-diff agent (no `chunk N of M` in its prompt) was
+    // disclosed by the truncated first line of its launch prompt, rendered
+    // bare — "Not reviewed: This PR narrows the daemon-marker check from a
+    // truthy tes..." read as a sentence about the whole PR, not the name of
+    // the one agent that failed. Quotes say which it is, and the truncation
+    // stops at a word boundary instead of mid-word.
+    const p = plan({ han: true });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    const brief = briefPath(p, 'chunk-1');
+    writeFileSync(brief, 'The chunk-1 brief.');
+    const launch =
+      'This PR narrows the daemon-marker check from a truthy test to an exact one\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    writeFileSync(join(promptRecordDir(p), 'chunk-1.txt'), launch);
+    transcript('p1', launch, {
+      toolCalls: 1,
+      toolPath: join(dir, 'other.ts'),
+      opens: [brief],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      'Not reviewed: `"This PR narrows the daemon-marker check from a truthy test…"`',
+    );
+    expect(r.body).not.toContain('truthy tes...');
+    expect(r.body).toContain(
+      '启动 prompt 为它指定了 diff 中的行，但它从未打开',
+    );
+  });
+
+  it('keeps long agent labels distinct when their first word matches', () => {
+    transcript(
+      'p1',
+      `Verify the daemon marker rename does not break macos-build behavior\n${DIFF}`,
+    );
+    transcript(
+      'p2',
+      `Verify the daemon marker rename does not break linux-build behavior\n${DIFF}`,
+    );
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain('macos-build…');
+    expect(r.body).toContain('linux-build…');
+  });
+
+  it('counts agent labels that truncate to the same public subject', () => {
+    const prefix = `Verify ${'the same long scope '.repeat(5)}`;
+    transcript('p1', `${prefix}macos behavior\n${DIFF}`);
+    transcript('p2', `${prefix}linux behavior\n${DIFF}`);
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain('(×2)');
+  });
+
+  it('renders prompt-derived labels as inert Markdown', () => {
+    transcript(
+      'p1',
+      `Fix the "daemon marker" regression for @owner from #123\n${DIFF}`,
+    );
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain(
+      'Not reviewed: `"Fix the \\"daemon marker\\" regression for @owner from #123"`',
+    );
+  });
+
+  it('collapses spaces after removing backticks from agent labels', () => {
+    transcript(
+      'p1',
+      `You are review agent \`security\` — inspect auth\n${DIFF}`,
+    );
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain(
+      'Not reviewed: `"You are review agent security — inspect auth"`',
     );
   });
 
@@ -2962,6 +3185,9 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(r.body).toContain('未审查：全 diff 测试覆盖检查——');
     // The zh sentence carries the translated reason, not the English one.
     expect(r.body).toContain('没有记录表明它的 brief 到达过任何 agent');
+    // The partial opener, in both halves (#8811).
+    expect(r.body).toContain('Partially reviewed — gaps disclosed.');
+    expect(r.body).toContain('仅完成部分审查，审查缺口已披露。');
   });
 
   it('keeps the untranslatable unresolved list in the English half; the Chinese half points at it', () => {
@@ -4016,6 +4242,9 @@ describe('composeReview — the findings file tag check', () => {
       '1 finding(s) still carried the `— [unverified]` tag when the loop ' +
         'ended',
     );
+    expect(r.body).toContain(
+      'Review incomplete — unverified findings disclosed.',
+    );
     // The opener may not certify over a loop that ended mid-verification.
     expect(r.body).not.toContain('no blockers');
     expect(r.remediation.join(' ')).toContain('--role verify');
@@ -4085,6 +4314,8 @@ describe('composeReview — the findings file tag check', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
     expect(r.body).toContain('findings file could not be read at compose time');
+    expect(r.body).toContain('Review incomplete — findings unavailable.');
+    expect(r.body).not.toContain('unverified findings disclosed');
     expect(r.remediation.join(' ')).toContain('findingsPath');
   });
 

@@ -40,7 +40,10 @@ interface CachedSnapshot {
 
 interface InFlightLoad {
   generation: number;
+  controller: AbortController;
   promise: Promise<PersistedSessionListSnapshot>;
+  waiterCount: number;
+  settled: boolean;
 }
 
 interface CacheSlot {
@@ -60,8 +63,10 @@ export class PersistedSessionListCache {
 
   lookup(
     scope: PersistedSessionListScope,
-    loader: () => Promise<PersistedSessionListSnapshot>,
+    loader: (signal: AbortSignal) => Promise<PersistedSessionListSnapshot>,
+    options: { signal?: AbortSignal } = {},
   ): PersistedSessionListLookup {
+    options.signal?.throwIfAborted();
     const key = this.key(scope);
     let slot = this.slots.get(key);
     if (!slot) {
@@ -73,9 +78,13 @@ export class PersistedSessionListCache {
     if (slot.value) {
       const cacheAgeMs = Math.max(0, now - slot.value.completedAt);
       if (cacheAgeMs < this.ttlMs) {
+        const snapshot = slot.value.snapshot;
         return {
           status: 'cache_hit',
-          promise: Promise.resolve(slot.value.snapshot),
+          promise: Promise.resolve().then(() => {
+            options.signal?.throwIfAborted();
+            return snapshot;
+          }),
           cacheAgeMs,
         };
       }
@@ -84,24 +93,38 @@ export class PersistedSessionListCache {
 
     if (
       slot.inFlight !== undefined &&
-      slot.inFlight.generation === slot.generation
+      slot.inFlight.generation === slot.generation &&
+      !slot.inFlight.controller.signal.aborted
     ) {
       return {
         status: 'single_flight',
-        promise: slot.inFlight.promise,
+        promise: this.attachWaiter(key, slot, slot.inFlight, options.signal),
       };
     }
 
     const generation = slot.generation;
+    const controller = new AbortController();
+    const load: InFlightLoad = {
+      generation,
+      controller,
+      promise: undefined as unknown as Promise<PersistedSessionListSnapshot>,
+      waiterCount: 0,
+      settled: false,
+    };
     const managed = Promise.resolve()
-      .then(loader)
+      .then(() => {
+        controller.signal.throwIfAborted();
+        return loader(controller.signal);
+      })
       .then(
         (snapshot) => {
+          load.settled = true;
           const current = this.slots.get(key);
-          if (current === slot && current.inFlight?.promise === managed) {
+          if (current === slot && current.inFlight === load) {
             current.inFlight = undefined;
             if (
               current.generation === generation &&
+              !controller.signal.aborted &&
               snapshot.sessions.length <= this.maxRetainedSummaries
             ) {
               this.installValue(key, current, snapshot);
@@ -112,17 +135,22 @@ export class PersistedSessionListCache {
           return snapshot;
         },
         (error: unknown) => {
+          load.settled = true;
           const current = this.slots.get(key);
-          if (current === slot && current.inFlight?.promise === managed) {
+          if (current === slot && current.inFlight === load) {
             current.inFlight = undefined;
             if (current.value === undefined) this.slots.delete(key);
           }
           throw error;
         },
       );
-    slot.inFlight = { generation, promise: managed };
+    load.promise = managed;
+    slot.inFlight = load;
 
-    return { status: 'scan', promise: managed };
+    return {
+      status: 'scan',
+      promise: this.attachWaiter(key, slot, load, options.signal),
+    };
   }
 
   invalidate(scope: PersistedSessionListScope): void {
@@ -192,6 +220,46 @@ export class PersistedSessionListCache {
     clearTimeout(value.expiryTimer);
     this.retainedSummaries -= value.snapshot.sessions.length;
     slot.value = undefined;
+  }
+
+  private attachWaiter(
+    key: string,
+    slot: CacheSlot,
+    load: InFlightLoad,
+    signal?: AbortSignal,
+  ): Promise<PersistedSessionListSnapshot> {
+    load.waiterCount += 1;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (finish: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        load.waiterCount -= 1;
+        if (load.waiterCount === 0 && !load.settled) {
+          load.controller.abort(
+            new DOMException('No active session list waiters', 'AbortError'),
+          );
+          const current = this.slots.get(key);
+          if (current === slot && current.inFlight === load) {
+            current.inFlight = undefined;
+            if (current.value === undefined) this.slots.delete(key);
+          }
+        }
+        finish();
+      };
+      const onAbort = () => {
+        if (load.settled) return;
+        settle(() => reject(signal?.reason));
+      };
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      void load.promise.then(
+        (snapshot) => settle(() => resolve(snapshot)),
+        (error: unknown) => settle(() => reject(error)),
+      );
+    });
   }
 
   private key(scope: PersistedSessionListScope): string {
