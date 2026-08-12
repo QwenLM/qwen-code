@@ -2049,6 +2049,30 @@ describe('goal runtime', () => {
     });
   });
 
+  it('promotes a waiting reservation when the current turn is released', async () => {
+    // The host drains continuations one at a time and the caller holding
+    // `queued-user` is what blocks that drain, so minting a fresh
+    // continuation here would leave the reservation waiting on a turn that
+    // can never start. `finishTurn` promotes in the same situation.
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const initialPermit = host.started[0];
+
+    expect(runtime.beginTurn('queued-user')).toBeUndefined();
+    await expect(
+      runtime.releaseTurn(`goal-runtime:${initialPermit.turnId}`),
+    ).resolves.toBe(true);
+
+    expect(runtime.permitForTurn('queued-user')).toBeDefined();
+    expect(host.started).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active' },
+    });
+  });
+
   it('releases a promoted user reservation and resumes autonomously', async () => {
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
@@ -2583,6 +2607,43 @@ describe('goal runtime', () => {
     });
     expect(observed).toEqual([]);
     expect(vi.isMockFunction(journal.recordGoalState)).toBe(false);
+  });
+
+  it('reports a lost session writer as GoalPersistenceUnavailableError', async () => {
+    // The journal rejects a lost writer with its own error type, but callers
+    // key the "no persistence, so no goal" degradation off this class. A raw
+    // writer error escaping `clear` is what makes an ACP `/goal clear` fail
+    // the user's whole prompt request for the rest of the session.
+    class SessionWriterUnavailableError extends Error {
+      constructor() {
+        super('Session writer is unavailable');
+        this.name = 'SessionWriterUnavailableError';
+      }
+    }
+    const writerLost = new SessionWriterUnavailableError();
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, writerLost],
+    });
+    const runtime = createGoalRuntime({ journal });
+    await runtime.dispatch({ action: 'create', objective: 'ship it' });
+    const current = runtime.getSnapshot().goal;
+    if (!current) throw new Error('expected the created goal');
+
+    const clearing = runtime.dispatch({
+      action: 'clear',
+      expectedGoalId: current.goalId,
+      expectedRevision: current.revision,
+    });
+
+    await expect(clearing).rejects.toBeInstanceOf(
+      GoalPersistenceUnavailableError,
+    );
+    await expect(clearing).rejects.toMatchObject({
+      message: 'Session writer is unavailable',
+      cause: writerLost,
+    });
+    // The failed write must not be mistaken for a committed clear.
+    expect(runtime.getSnapshot().goal?.goalId).toBe(current.goalId);
   });
 
   it('publishes a lifecycle cause only after its append commits', async () => {
