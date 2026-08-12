@@ -158,7 +158,7 @@ describe('OmniExtractKeyframesTool', () => {
           '4',
           '-update',
           '1',
-          path.join(outputDir, 'keyframe_0001.jpg'),
+          path.join(outputDir, 'clip-keyframe-0001.jpg'),
         ],
         { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
       );
@@ -177,7 +177,7 @@ describe('OmniExtractKeyframesTool', () => {
         kind: 'image',
         storage: 'workspace',
         title: 'Keyframe 4/4',
-        workspacePath: 'keyframe_0004.jpg',
+        workspacePath: 'clip-keyframe-0004.jpg',
         mimeType: 'image/jpeg',
         sizeBytes: FRAME_SIZE,
         metadata: {
@@ -230,7 +230,7 @@ describe('OmniExtractKeyframesTool', () => {
           '4',
           '-update',
           '1',
-          path.join(outputDir, 'keyframe_0001.jpg'),
+          path.join(outputDir, 'clip-keyframe-0001.jpg'),
         ],
         { signal, timeoutMs: expect.any(Number) },
       );
@@ -410,7 +410,7 @@ describe('OmniExtractKeyframesTool', () => {
           '8',
           '-q:v',
           '4',
-          path.join(outputDir, 'keyframe_%04d.jpg'),
+          path.join(outputDir, 'clip-keyframe-%04d.jpg'),
         ],
         { signal, timeoutMs: DEFAULT_POLICY_TOOL_TIMEOUT_MS },
       );
@@ -430,7 +430,7 @@ describe('OmniExtractKeyframesTool', () => {
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
       const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
       expect(args[args.length - 1]).toBe(
-        path.join(outputDir, 'keyframe_%04d.jpg'),
+        path.join(outputDir, 'clip-keyframe-%04d.jpg'),
       );
       expect(result.artifacts).toHaveLength(1);
     });

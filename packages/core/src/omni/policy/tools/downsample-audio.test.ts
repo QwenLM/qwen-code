@@ -109,7 +109,7 @@ describe('OmniDownsampleAudioTool', () => {
       'audio',
       signal,
     );
-    const outputPath = path.join(outputDir, 'downsampled.m4a');
+    const outputPath = path.join(outputDir, 'track-downsampled.m4a');
     expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
     expect(mocks.runFfmpeg).toHaveBeenCalledWith(
       [
@@ -136,7 +136,7 @@ describe('OmniDownsampleAudioTool', () => {
         kind: 'audio',
         storage: 'workspace',
         title: 'Downsampled audio',
-        workspacePath: 'downsampled.m4a',
+        workspacePath: 'track-downsampled.m4a',
         mimeType: 'audio/mp4',
         sizeBytes: OUTPUT_SIZE,
         metadata: {

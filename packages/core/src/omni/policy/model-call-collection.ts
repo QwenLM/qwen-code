@@ -60,6 +60,9 @@ export async function collectModelPolicyCall(params: {
   /** Resolved arguments the tool actually ran with (post-gate: a
    * `resourceId` the caller passed has already become `inputPath`). */
   args: Record<string, unknown>;
+  /** Epoch ms when the tool actually began executing. The caller owns this
+   * — measuring it here would time the COLLECTION, not the work. */
+  startedAt?: number;
   signal?: AbortSignal;
 }): Promise<void> {
   const { config, batch, descriptor, args, signal } = params;
@@ -87,7 +90,9 @@ export async function collectModelPolicyCall(params: {
     });
     if (!source) return;
 
-    const startedAt = new Date().toISOString();
+    // Fall back to "now" only when the caller could not supply the real
+    // start; that degrades the recorded duration, never correctness.
+    const startedAt = new Date(params.startedAt ?? Date.now()).toISOString();
     // Same containment rule the orchestrator applies to its staging dir:
     // an artifact must live inside the output directory the call declared.
     const validated = await Promise.all(

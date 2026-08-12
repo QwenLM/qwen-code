@@ -3838,6 +3838,26 @@ const SETTINGS_SCHEMA = {
                   default: 0,
                 },
               },
+              maxDurationSeconds: {
+                type: 'number',
+                label: 'Max Duration Seconds',
+                category: 'Experimental',
+                requiresRestart: true,
+                default: 0,
+                description:
+                  'Duration ceiling in seconds for a single omni media ' +
+                  'input, checked at the delivery boundary. 0 disables it. ' +
+                  'Byte and token limits cannot express a provider duration ' +
+                  'cap: a long film downscaled under the byte ceiling still ' +
+                  'gets rejected by the API, after paying for the transcode. ' +
+                  'Set this and the guard omits it honestly instead.',
+                showInDialog: false,
+                jsonSchemaOverride: {
+                  type: 'number',
+                  minimum: 0,
+                  default: 0,
+                },
+              },
               policies: {
                 type: 'object',
                 label: 'Omni Transport Guard Policies',

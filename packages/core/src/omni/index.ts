@@ -18,6 +18,7 @@ import {
 } from './estimation.js';
 import {
   assertWithinByteLimit,
+  assertWithinDurationLimit,
   assertWithinTokenLimit,
   effectiveMaxUploadFileBytes,
   OmniTransportGuardError,
@@ -83,6 +84,7 @@ export {
 export {
   OmniTransportGuardError,
   DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
+  assertWithinDurationLimit,
 } from './guard.js';
 export {
   downloadMediaUrl,
@@ -309,6 +311,10 @@ function evaluateTransportLimits(
 ): { estimate: OmniTokenEstimate; violation?: string } {
   try {
     assertWithinByteLimit(config, recognized.sizeBytes, displayName);
+    // Duration is a transport limit too: downscaling can bring a long
+    // file under the byte ceiling but never under a duration cap, so the
+    // guard must reject it here instead of letting the provider do it.
+    assertWithinDurationLimit(config, recognized, displayName);
     return {
       estimate: assertWithinTokenLimit(config, recognized, displayName),
     };

@@ -1112,6 +1112,7 @@ export interface ConfigParameters {
   omniMaxUploadFileBytes?: number;
   /** Estimated-token ceiling for omni media (0/unset = guard disabled). */
   omniMaxEstimatedTokens?: number;
+  omniMaxDurationSeconds?: number;
   /** Byte ceiling for omni URL downloads (unset = follow upload cap). */
   omniUrlDownloadMaxFileBytes?: number;
   /** Upload URL TTL in hours (0 disables the cache; default 47). */
@@ -1961,6 +1962,7 @@ export class Config {
   private readonly omniEnabled: boolean = false;
   private readonly omniMaxUploadFileBytes?: number;
   private readonly omniMaxEstimatedTokens?: number;
+  private readonly omniMaxDurationSeconds?: number;
   private readonly omniUrlDownloadMaxFileBytes?: number;
   private readonly omniUploadUrlTtlHours?: number;
   private readonly omniPolicyTools?: OmniPolicyToolsSettings;
@@ -2258,6 +2260,7 @@ export class Config {
     this.omniEnabled = params.omniEnabled ?? false;
     this.omniMaxUploadFileBytes = params.omniMaxUploadFileBytes;
     this.omniMaxEstimatedTokens = params.omniMaxEstimatedTokens;
+    this.omniMaxDurationSeconds = params.omniMaxDurationSeconds;
     this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
     this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
     this.omniPolicyTools = params.omniPolicyTools;
@@ -6468,6 +6471,10 @@ export class Config {
 
   getOmniMaxEstimatedTokens(): number | undefined {
     return this.omniMaxEstimatedTokens;
+  }
+
+  getOmniMaxDurationSeconds(): number | undefined {
+    return this.omniMaxDurationSeconds;
   }
 
   getOmniUrlDownloadMaxFileBytes(): number | undefined {

@@ -109,7 +109,7 @@ describe('OmniClipVideoTool', () => {
       'video',
       signal,
     );
-    const outputPath = path.join(outputDir, 'clip.mp4');
+    const outputPath = path.join(outputDir, 'clip-clip-10s+15s.mp4');
     expect(mocks.runFfmpeg).toHaveBeenCalledWith(
       [
         '-y',
@@ -144,7 +144,7 @@ describe('OmniClipVideoTool', () => {
         kind: 'video',
         storage: 'workspace',
         title: 'Clipped video',
-        workspacePath: 'clip.mp4',
+        workspacePath: 'clip-clip-10s+15s.mp4',
         mimeType: 'video/mp4',
         sizeBytes: OUTPUT_SIZE,
         metadata: {

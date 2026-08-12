@@ -28,6 +28,7 @@ import {
   MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
   mediaPolicyToolError,
   mediaPolicyToolFailure,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   createPolicyToolTimeoutBudget,
   type MediaPolicyIoParams,
@@ -44,7 +45,13 @@ export const EXTRACT_KEYFRAMES_DEFAULTS = {
   maxDimension: 768,
 } as const;
 
-const FRAME_FILE_PATTERN = /^keyframe_(\d{4})\.jpg$/;
+/** Matcher for the frames of ONE source, derived from the name template
+ * so the lister can never pick up a sibling video's frames out of a
+ * shared outputDir. */
+function frameFileMatcher(nameTemplate: string): RegExp {
+  const escaped = nameTemplate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped.replace('%04d', '(\\d{4})')}$`);
+}
 
 export interface ExtractKeyframesParams extends MediaPolicyIoParams {
   /** Maximum number of frames to extract. */
@@ -131,9 +138,13 @@ export function parseShowinfoTimestamps(stderr: string): number[] {
 }
 
 /** List produced keyframe files in frame order. */
-async function listFrameFiles(outputDir: string): Promise<string[]> {
+async function listFrameFiles(
+  outputDir: string,
+  nameTemplate: string,
+): Promise<string[]> {
+  const matcher = frameFileMatcher(nameTemplate);
   const entries = await fs.readdir(outputDir);
-  return entries.filter((name) => FRAME_FILE_PATTERN.test(name)).sort();
+  return entries.filter((name) => matcher.test(name)).sort();
 }
 
 /**
@@ -327,7 +338,14 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         break;
       }
       const bucketStart = i * bucket;
-      const fileName = `keyframe_${String(i + 1).padStart(4, '0')}.jpg`;
+      // Frame index is the natural variant; the source stem keeps two
+      // videos' frames from colliding in one persistent outputDir.
+      const fileName = policyOutputFileName({
+        inputPath: this.params.inputPath,
+        operation: 'keyframe',
+        variant: String(i + 1).padStart(4, '0'),
+        extension: '.jpg',
+      });
       const outputPath = path.join(this.params.outputDir, fileName);
 
       // Scene attempt: first scene change within the bucket's opening
@@ -438,7 +456,15 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       remainingTimeoutMs,
       signal,
     } = context;
-    const outputPattern = path.join(this.params.outputDir, 'keyframe_%04d.jpg');
+    // Same self-describing scheme as the bucketed path, expressed as an
+    // ffmpeg output pattern. `%04d` is ffmpeg's own frame counter.
+    const frameNameTemplate = policyOutputFileName({
+      inputPath: this.params.inputPath,
+      operation: 'keyframe',
+      variant: '%04d',
+      extension: '.jpg',
+    });
+    const outputPattern = path.join(this.params.outputDir, frameNameTemplate);
     const scenePass = await runFfmpeg(
       [
         '-y',
@@ -469,7 +495,10 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       );
     }
 
-    const frameFiles = await listFrameFiles(this.params.outputDir);
+    const frameFiles = await listFrameFiles(
+      this.params.outputDir,
+      frameNameTemplate,
+    );
     if (frameFiles.length === 0) {
       return mediaPolicyToolError(
         `no keyframes could be extracted from ${path.basename(this.params.inputPath)}`,

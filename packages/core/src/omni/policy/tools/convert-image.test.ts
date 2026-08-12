@@ -127,7 +127,9 @@ describe('OmniConvertImageTool', () => {
     });
     expect(rotate).toHaveBeenCalledOnce();
     expect(jpeg).toHaveBeenCalledWith({ quality: 90 });
-    expect(toFile).toHaveBeenCalledWith(path.join(outputDir, 'converted.jpg'));
+    expect(toFile).toHaveBeenCalledWith(
+      path.join(outputDir, 'photo-converted.jpg'),
+    );
 
     expect(result.error).toBeUndefined();
     expect(result.artifacts).toEqual([
@@ -135,7 +137,7 @@ describe('OmniConvertImageTool', () => {
         kind: 'image',
         storage: 'workspace',
         title: 'Converted image',
-        workspacePath: 'converted.jpg',
+        workspacePath: 'photo-converted.jpg',
         mimeType: 'image/jpeg',
         sizeBytes: OUTPUT_SIZE,
         metadata: {
@@ -169,9 +171,11 @@ describe('OmniConvertImageTool', () => {
     const { result } = await run({ format: 'png' });
     expect(png).toHaveBeenCalledWith();
     expect(jpeg).not.toHaveBeenCalled();
-    expect(toFile).toHaveBeenCalledWith(path.join(outputDir, 'converted.png'));
+    expect(toFile).toHaveBeenCalledWith(
+      path.join(outputDir, 'photo-converted.png'),
+    );
     expect(result.artifacts?.[0]).toMatchObject({
-      workspacePath: 'converted.png',
+      workspacePath: 'photo-converted.png',
       mimeType: 'image/png',
     });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
@@ -184,7 +188,7 @@ describe('OmniConvertImageTool', () => {
     const { result } = await run({ format: 'webp', quality: 60 });
     expect(webp).toHaveBeenCalledWith({ quality: 60 });
     expect(result.artifacts?.[0]).toMatchObject({
-      workspacePath: 'converted.webp',
+      workspacePath: 'photo-converted.webp',
       mimeType: 'image/webp',
     });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(

@@ -22,6 +22,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   sharpTimeoutSeconds,
   type MediaPolicyIoParams,
@@ -36,8 +37,6 @@ export const DOWNSAMPLE_IMAGE_DEFAULTS = {
   maxDimension: 1568,
   quality: 75,
 } as const;
-
-const OUTPUT_FILE_NAME = 'downsampled.jpg';
 
 export interface DownsampleImageParams extends MediaPolicyIoParams {
   /** Longest-edge ceiling in pixels; aspect ratio is preserved. */
@@ -142,7 +141,14 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
         );
       }
 
-      const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
+      const outputPath = path.join(
+        this.params.outputDir,
+        policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'downsampled',
+          extension: '.jpg',
+        }),
+      );
       // `rotate()` bakes in the EXIF orientation so the resized pixels
       // match what the user saw; `fit: 'inside'` preserves aspect ratio;
       // `withoutEnlargement` keeps already-small originals at native size.
@@ -177,7 +183,11 @@ class DownsampleImageInvocation extends BaseMediaPolicyToolInvocation<Downsample
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: OUTPUT_FILE_NAME,
+        outputFileName: policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'downsampled',
+          extension: '.jpg',
+        }),
         artifactKind: 'image',
         title: 'Downsampled image',
         mimeType: 'image/jpeg',

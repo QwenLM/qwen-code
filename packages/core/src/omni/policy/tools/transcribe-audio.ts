@@ -24,6 +24,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolSettings,
   resolvePolicyToolTimeoutMs,
   type MediaPolicyIoParams,
@@ -49,7 +50,6 @@ export const TRANSCRIBE_AUDIO_DEFAULTS = {
 } as const;
 
 /** Output file the transcript artifact is written to (staging-relative). */
-const OUTPUT_FILE_NAME = 'transcript.txt';
 
 /** How many chunk transcription requests run concurrently. */
 const CHUNK_CONCURRENCY = 3;
@@ -426,7 +426,14 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
         }
       }
 
-      const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
+      const outputPath = path.join(
+        this.params.outputDir,
+        policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'transcript',
+          extension: '.txt',
+        }),
+      );
       const encoded = Buffer.from(transcript, 'utf-8');
       await fs.writeFile(outputPath, encoded);
 
@@ -444,7 +451,11 @@ class TranscribeAudioInvocation extends BaseMediaPolicyToolInvocation<Transcribe
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: OUTPUT_FILE_NAME,
+        outputFileName: policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'transcript',
+          extension: '.txt',
+        }),
         artifactKind: 'file',
         title: 'Audio transcript',
         mimeType: 'text/plain',

@@ -4870,6 +4870,13 @@ export class CoreToolScheduler {
             batch: policyArtifacts,
             descriptor: scheduledCall.tool.mediaPolicyDescriptor,
             args: scheduledCall.invocation.params as Record<string, unknown>,
+            // The REAL execution window (approval wait excluded). Without
+            // it the record would hold the collection window instead, and
+            // a 98-minute audio extraction reads as 0.6s.
+            ...('executionStartTime' in scheduledCall &&
+            typeof scheduledCall.executionStartTime === 'number'
+              ? { startedAt: scheduledCall.executionStartTime }
+              : {}),
             signal,
           });
         }

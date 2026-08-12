@@ -2237,6 +2237,8 @@ export async function loadCliConfig(
       settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
     omniMaxEstimatedTokens:
       settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniMaxDurationSeconds:
+      settings.omni?.processing?.transportGuard?.maxDurationSeconds,
     omniUrlDownloadMaxFileBytes:
       settings.omni?.ingestion?.localization?.url?.maxFileBytes,
     omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,

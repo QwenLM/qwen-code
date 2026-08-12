@@ -25,6 +25,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
@@ -38,8 +39,6 @@ export const DOWNSAMPLE_AUDIO_DEFAULTS = {
   sampleRateHz: 16_000,
   channels: 1,
 } as const;
-
-const OUTPUT_FILE_NAME = 'downsampled.m4a';
 
 export interface DownsampleAudioParams extends MediaPolicyIoParams {
   /** Output bit rate in kbit/s. */
@@ -137,7 +136,14 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
           ? Math.min(requestedChannels, probe.channels)
           : requestedChannels;
 
-      const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
+      const outputPath = path.join(
+        this.params.outputDir,
+        policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'downsampled',
+          extension: '.m4a',
+        }),
+      );
       const run = await runFfmpeg(
         [
           '-y',
@@ -197,7 +203,11 @@ class DownsampleAudioInvocation extends BaseMediaPolicyToolInvocation<Downsample
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: OUTPUT_FILE_NAME,
+        outputFileName: policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'downsampled',
+          extension: '.m4a',
+        }),
         artifactKind: 'audio',
         title: 'Downsampled audio',
         mimeType: 'audio/mp4',

@@ -23,6 +23,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
@@ -38,8 +39,6 @@ export const CLIP_VIDEO_DEFAULTS = {
   preset: 'veryfast',
   audioBitrateKbps: 128,
 } as const;
-
-const OUTPUT_FILE_NAME = 'clip.mp4';
 
 export interface ClipVideoParams extends MediaPolicyIoParams {
   /** Clip start in seconds (default 0). */
@@ -142,7 +141,18 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         );
       }
 
-      const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
+      // Self-describing name: two different spans of one source coexist
+      // instead of the later clip destroying the earlier one.
+      const outputFileName = policyOutputFileName({
+        inputPath: this.params.inputPath,
+        operation: 'clip',
+        variant:
+          durationSec !== undefined
+            ? `${Math.round(startSec)}s+${Math.round(durationSec)}s`
+            : `${Math.round(startSec)}s-end`,
+        extension: '.mp4',
+      });
+      const outputPath = path.join(this.params.outputDir, outputFileName);
       // Input-side -ss/-t plus a full re-encode: frame-accurate cuts
       // regardless of keyframe placement (`-c copy` snaps to keyframes).
       // The scale filter only forces even dimensions (libx264 hard
@@ -198,7 +208,7 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: OUTPUT_FILE_NAME,
+        outputFileName,
         artifactKind: 'video',
         title: 'Clipped video',
         mimeType: 'video/mp4',

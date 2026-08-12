@@ -51,6 +51,44 @@ export function assertWithinByteLimit(
 }
 
 /**
+ * Duration-dimension guard. Runs alongside the token check (both need
+ * probe metadata) and BEFORE store/upload.
+ *
+ * Byte and token limits alone cannot express the provider's duration cap,
+ * and that gap is not theoretical: a 98-minute film downscaled to 474 MB
+ * clears a 1 GB byte limit, gets uploaded, and is then rejected by the API
+ * for being too long. The guard reported success, the creator got an
+ * opaque 400, and a full transcode was paid for nothing. Duration is a
+ * transport limit like any other, so it belongs here — where exceeding it
+ * turns into an honest omission that names duration as the reason.
+ *
+ * Threshold semantics mirror the token guard
+ * (`omni.processing.transportGuard.maxDurationSeconds`): unset / 0 /
+ * negative disables it; a missing duration never rejects (metadata is
+ * never guessed).
+ */
+export function assertWithinDurationLimit(
+  config: Config,
+  media: RecognizedMedia,
+  displayName: string,
+): void {
+  const maxSeconds = config.getOmniMaxDurationSeconds?.();
+  if (maxSeconds === undefined || maxSeconds <= 0) return;
+  const durationMs = media.metadata.durationMs;
+  if (durationMs === undefined || !Number.isFinite(durationMs)) return;
+  const seconds = durationMs / 1000;
+  if (seconds > maxSeconds) {
+    throw new OmniTransportGuardError(
+      `${displayName} exceeds the omni duration limit: ` +
+        `${Math.round(seconds)}s > ${maxSeconds}s ` +
+        `(omni.processing.transportGuard.maxDurationSeconds). ` +
+        `Clip a shorter span — downscaling cannot bring a long file ` +
+        `within a duration limit.`,
+    );
+  }
+}
+
+/**
  * Token-dimension guard. Runs AFTER recognition (needs probe metadata) and
  * BEFORE store/upload, so an oversized input costs one probe — not a copy
  * and a multi-minute upload.
