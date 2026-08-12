@@ -2420,7 +2420,7 @@ describe('qwen-autofix workflow', () => {
     // `push --no-verify …` match would still satisfy): the host-scoped
     // credential prefix must immediately precede the push.
     expect(workflow).toMatch(
-      /git -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+      /git -c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -6862,6 +6862,11 @@ exit 1
     expect(denylistOf(sanitizeStep)).toBeTruthy();
     expect(denylistOf(resanitize)).toBe(denylistOf(sanitizeStep));
     expect(allowlistOf(resanitize)).toBe(allowlistOf(sanitizeStep));
+    // Belt over the byte-identity pin: the list comparison holds against
+    // EVERY inlined copy, not only the canonical first.
+    for (const step of sanitizeSteps) {
+      expect(denylistOf(step)).toBe(denylistOf(sanitizeStep));
+    }
     // Functional: the extracted pipeline drops every command-execution key
     // and keeps the routing/credential keys the pool image may own — the
     // global file is infra territory, so this must stay a denylist. The
@@ -6870,17 +6875,34 @@ exit 1
     // SUBSECTION names: git subsection names may contain dots, so a
     // `[^.]+` slot would let `[diff "a.b"] command` slip through — the
     // incident-class regression the `.+` slots exist to prevent.
+    // The scrub is a for-loop over BOTH files of the global scope —
+    // ~/.gitconfig and the XDG file — because `git config --global`
+    // lists/unsets only the former once both exist (probed: the listing
+    // omits the XDG keys and --unset-all exits 5 with them live).
     const scrub = sanitizeStep.match(
-      /\{ git config --global --name-only --list[\s\S]*?--unset-all "\$key" 2>\/dev\/null \|\| true; done/,
+      /for global_file in[\s\S]*?\|\| true; done\n\s+done/,
     )?.[0];
     expect(scrub).toBeTruthy();
-    const runScrub = (cfg) =>
-      spawnSync('bash', ['-e', '-o', 'pipefail', '-c', scrub], {
-        env: { ...process.env, GIT_CONFIG_GLOBAL: cfg },
+    const runScrub = (home) => {
+      const env = {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, '.config'),
+      };
+      delete env['GIT_CONFIG_GLOBAL'];
+      return spawnSync('bash', ['-e', '-o', 'pipefail', '-c', scrub], {
+        env,
         encoding: 'utf8',
       });
+    };
     const dir = mkdtempSync(join(tmpdir(), 'autofix-global-scrub-'));
-    const cfg = join(dir, 'gitconfig');
+    const cfg = join(dir, '.gitconfig');
+    mkdirSync(join(dir, '.config', 'git'), { recursive: true });
+    const xdgCfg = join(dir, '.config', 'git', 'config');
+    writeFileSync(
+      xdgCfg,
+      '[diff]\n\texternal = xdg-evil\n[user]\n\temail = keep@x\n',
+    );
     writeFileSync(
       cfg,
       [
@@ -6941,19 +6963,25 @@ exit 1
         '\tallow = always',
         '[submodule "s.t"]',
         '\tupdate = !evil',
+        '[url "https://mirror.example/"]',
+        '\tinsteadOf = https://github.com/',
+        '\tpushInsteadOf = https://github.com/',
+        '[http "https://github.com"]',
+        '\tsslVerify = false',
+        '\tsslCAInfo = /tmp/evil-ca',
         '',
       ].join('\n'),
     );
-    expect(runScrub(cfg).status).toBe(0);
-    const kept = execFileSync(
-      'git',
-      ['config', '--global', '--name-only', '--list'],
-      { env: { ...process.env, GIT_CONFIG_GLOBAL: cfg }, encoding: 'utf8' },
-    )
-      .trim()
-      .split('\n')
-      .sort();
-    expect(kept).toEqual([
+    expect(runScrub(dir).status).toBe(0);
+    const keysOf = (file) =>
+      execFileSync('git', ['config', '--file', file, '--name-only', '--list'], {
+        encoding: 'utf8',
+      })
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .sort();
+    expect(keysOf(cfg)).toEqual([
       'core.autocrlf',
       'credential.helper',
       'http.proxy',
@@ -6961,15 +6989,19 @@ exit 1
       'safe.directory',
       'user.name',
     ]);
+    // The XDG leg of the loop scrubbed its exec key and kept its benign one.
+    expect(keysOf(xdgCfg)).toEqual(['user.email']);
     // The two `|| true` guards are load-bearing under the step's default
     // `bash -e` + pipefail: a config with NO exec keys (the steady state on
     // a clean runner) makes grep exit 1, and a corrupt or missing global
     // file makes git exit non-zero — none may kill the sanitize step.
     writeFileSync(cfg, '[user]\n\tname = clean\n');
-    expect(runScrub(cfg).status).toBe(0);
+    rmSync(join(dir, '.config'), { recursive: true, force: true });
+    expect(runScrub(dir).status).toBe(0);
     writeFileSync(cfg, '[[[ not a git config\n');
-    expect(runScrub(cfg).status).toBe(0);
-    expect(runScrub(join(dir, 'no-such-file')).status).toBe(0);
+    expect(runScrub(dir).status).toBe(0);
+    rmSync(cfg);
+    expect(runScrub(dir).status).toBe(0);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -6989,57 +7021,102 @@ exit 1
       expect(step.indexOf(resanitizeCall)).toBeLessThan(
         step.indexOf('credential."https://github.com".helper'),
       );
+      // The staged copy's provenance holds at cp time only — RUNNER_TEMP
+      // is writable by that same branch code — so the invocation must
+      // verify the digest the staging step parked in GITHUB_OUTPUT
+      // (expression context, unreachable from a disk write), and it must
+      // do so BEFORE executing the script.
+      const shaCheck = step.indexOf('sha256sum -c');
+      expect(shaCheck).toBeGreaterThan(-1);
+      expect(shaCheck).toBeLessThan(step.indexOf(resanitizeCall));
+      expect(step).toContain(
+        "RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'",
+      );
+      // GITHUB_ENV-injected GIT_CONFIG_KEY/VALUE entries apply at
+      // command-line precedence — above every file any scrub can reach —
+      // so the PAT steps zero them out before their first git.
+      expect(step).toContain('export GIT_CONFIG_COUNT=0');
     }
+    // Both staging steps stage the script and record its digest.
     expect(
       workflow.match(
         /cp \.github\/scripts\/resanitize-git-config\.sh "\$\{RUNNER_TEMP\}\/resanitize-git-config\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
+    expect(
+      workflow.match(/resanitize_sha256=\$\(sha256sum /g) ?? [],
+    ).toHaveLength(2);
     // Every one-shot credential helper leads with an empty-helper reset:
     // helpers run in config order and the FIRST to answer wins, so without
     // the reset a helper planted at any earlier scope sees the request
-    // (and the env) before ours answers — probe-verified. Count equality
-    // pins a future push site to ship with the reset or fail here.
+    // (and the env) before ours answers — probe-verified. http.sslVerify
+    // rides the same chain: a kept http.proxy plus a planted
+    // sslVerify=false would otherwise read the credential off the wire.
+    // Count equality pins a future push site to ship with both or fail.
     const helperSites =
       workflow.match(/-c credential\."https:\/\/github\.com"\.helper=/g) ?? [];
     const resetSites =
       workflow.match(
-        /-c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
+        /-c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
       ) ?? [];
     expect(helperSites).toHaveLength(3);
     expect(resetSites).toHaveLength(helperSites.length);
     // Functional: run the staged script against a fixture repo with exec
-    // keys planted in LOCAL config (what branch code can do between the
-    // job-start sanitize and the push) plus a polluted global file — the
-    // planted keys go, the allowlisted plumbing stays.
+    // keys planted in LOCAL and WORKTREE config (what branch code can do
+    // between the job-start sanitize and the push) plus a polluted global
+    // file — the planted keys go, the allowlisted plumbing stays.
     const dir = mkdtempSync(join(tmpdir(), 'autofix-resanitize-'));
-    const cfg = join(dir, 'global-gitconfig');
-    writeFileSync(cfg, '[diff]\n\texternal = global-driver\n');
-    execFileSync('git', ['init', '-q', dir]);
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[diff]\n\texternal = global-driver\n',
+    );
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    execFileSync('git', ['init', '-q', repo]);
     const env = {
       ...process.env,
-      GIT_CONFIG_GLOBAL: cfg,
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
       GIT_CONFIG_NOSYSTEM: '1',
     };
+    delete env['GIT_CONFIG_GLOBAL'];
     const lgit = (...args) =>
-      execFileSync('git', ['-C', dir, ...args], { env, encoding: 'utf8' });
+      execFileSync('git', ['-C', repo, ...args], { env, encoding: 'utf8' });
     lgit('config', '--local', 'credential.helper', '!evil');
     lgit('config', '--local', 'core.fsmonitor', 'evil');
     lgit('config', '--local', 'remote.origin.url', 'https://github.com/o/r');
+    // The worktree-config branch: extensions.worktreeConfig activates a
+    // second local file that `git config --local` neither lists nor unsets
+    // — the script must delete it, not merely sweep the local scope
+    // (mutation-tested: without this arm, deleting the `rm -f` line kept
+    // the whole suite green).
+    lgit('config', '--local', 'extensions.worktreeConfig', 'true');
+    lgit('config', '--worktree', 'core.fsmonitor', 'evil-wt');
     const run = spawnSync(
       'bash',
       [resolve('.github/scripts/resanitize-git-config.sh')],
-      { cwd: dir, env, encoding: 'utf8' },
+      { cwd: repo, env, encoding: 'utf8' },
     );
     expect(run.status).toBe(0);
+    expect(existsSync(join(repo, '.git', 'config.worktree'))).toBe(false);
     const localKeys = lgit('config', '--local', '--name-only', '--list')
       .trim()
       .split('\n');
     expect(localKeys).not.toContain('credential.helper');
     expect(localKeys).not.toContain('core.fsmonitor');
+    expect(localKeys).not.toContain('extensions.worktreeconfig');
     expect(localKeys).toContain('remote.origin.url');
+    // Full-scope resolution: nothing plants back through any surviving file.
     expect(
-      spawnSync('git', ['config', '--global', '--get', 'diff.external'], {
+      spawnSync('git', ['-C', repo, 'config', '--get', 'core.fsmonitor'], {
+        env,
+        encoding: 'utf8',
+      }).status,
+    ).not.toBe(0);
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'diff.external'], {
         env,
         encoding: 'utf8',
       }).status,
@@ -7072,6 +7149,10 @@ exit 1
       );
       // Before the deterministic checks, so they all see the redirect.
       expect(globalRedirect).toBeLessThan(gate.indexOf('npm run build'));
+      // GITHUB_ENV-injected GIT_CONFIG_KEY/VALUE entries apply at
+      // command-line precedence — they outrank BOTH redirects — so each
+      // gate zeroes the env channel too.
+      expect(gate).toContain('export GIT_CONFIG_COUNT=0');
     }
     // Before the FIRST git command in each gate, not merely before the
     // checks: the committed-ref probe and dirty-tree asserts must live in
@@ -7085,6 +7166,53 @@ exit 1
     expect(
       issueGate.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
     ).toBeLessThan(issueGate.indexOf('git status --porcelain'));
+    // Functional, not just positional: execute the extracted redirect
+    // block under a hostile HOME (a polluted ~/.gitconfig) AND a hostile
+    // env channel (GIT_CONFIG_COUNT-planted key). After the block, a child
+    // git must see neither, and a `git config --global` write must land in
+    // the throwaway file — the block can no longer be reverted or hollowed
+    // out while a string-presence test stays green.
+    const redirectBlock = reviewVerificationRunner.match(
+      /export GIT_CONFIG_SYSTEM=\/dev\/null[\s\S]*?safe\.directory "\$\(pwd\)"/,
+    )?.[0];
+    expect(redirectBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-gate-redirect-'));
+    const home = join(dir, 'home');
+    const temp = join(dir, 'temp');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(temp, { recursive: true });
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[diff]\n\texternal = global-driver\n',
+    );
+    const env = {
+      ...process.env,
+      HOME: home,
+      RUNNER_TEMP: temp,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.fsmonitor',
+      GIT_CONFIG_VALUE_0: 'evil',
+    };
+    delete env['GIT_CONFIG_GLOBAL'];
+    const probe = spawnSync(
+      'bash',
+      [
+        '-c',
+        `${redirectBlock}\n` +
+          'git config --get diff.external && exit 7\n' +
+          'git config --get core.fsmonitor && exit 8\n' +
+          'git config --global qwen.probe ok\n' +
+          'git config --global --get qwen.probe',
+      ],
+      { cwd: dir, env, encoding: 'utf8' },
+    );
+    expect(probe.status).toBe(0);
+    expect(probe.stdout.trim().endsWith('ok')).toBe(true);
+    // The write above landed in the throwaway file, not the hostile HOME.
+    expect(readFileSync(join(home, '.gitconfig'), 'utf8')).not.toContain(
+      'qwen',
+    );
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('never invokes a local action before checkout', () => {
@@ -8025,7 +8153,7 @@ exit 1
     // Same anchor as the dry-run: the publish push must carry the
     // host-scoped `git -c credential…` prefix, not a bare `git push`.
     expect(publishPrStep).toMatch(
-      /git -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
+      /git -c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
     );
     // Neither PAT push may expose the token — not persisted to .git/config
     // (a `git remote set-url`) and not in the process argv (a token-bearing
@@ -8074,7 +8202,7 @@ exit 1
       /git config core\.hooksPath \/dev\/null\n[\s\S]{0,900}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2200}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2600}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     // The agent step re-points hooks to .husky BEFORE invoking the runner.
     // Assert the ordering directly (not a fixed-width window) so adding a

@@ -25,8 +25,16 @@ set -eo pipefail
 # re-run resanitize-git-config.sh afterwards.
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+# Environment-carried config outranks BOTH redirects: GIT_CONFIG_KEY_n /
+# GIT_CONFIG_VALUE_n entries apply at command-line precedence, and branch
+# code in an earlier step can inject them into this one through
+# $GITHUB_ENV. Count 0 makes git read zero of them.
+export GIT_CONFIG_COUNT=0
 : > "${GIT_CONFIG_GLOBAL}"
 git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+if [ -s /etc/gitconfig ]; then
+  echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
+fi
 
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an

@@ -777,19 +777,35 @@ jobs:
           # the command-execution families go, plus include/includeIf (which
           # can pull any of them back in) and protocol.ext.allow (which arms
           # the command-executing ext:: transport a kept url.insteadOf could
-          # redirect to). Subsection slots are `.+`, never `[^.]+`: git
-          # subsection names may contain dots (`[diff "a.b"] command`
-          # flattens to diff.a.b.command and would slip past `[^.]+`);
-          # overmatching is harmless in a denylist. Guarded `|| true` twice:
-          # no global file and no match are both normal, and either would
-          # kill the step under the default `bash -e` + pipefail otherwise.
-          # The same denylist lives in resanitize-git-config.sh, which the
-          # PAT-bearing steps re-run AFTER branch code executed on the host;
-          # the workflow contract tests pin every copy byte-identical — edit
-          # them together.
-          { git config --global --name-only --list 2>/dev/null || true; } \
-            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
+          # redirect to). Two ROUTING exceptions ride the denylist because
+          # each defeats the PAT steps directly: url.*.insteadOf/
+          # pushInsteadOf (rewrites the push/fetch URL at transport time —
+          # the rest of url.* stays) and http.*.sslVerify/sslCAInfo (turns
+          # a kept http.proxy into a TLS-terminating interceptor; the pool
+          # works on the default CA today, so scrubbing these can only
+          # fail loudly, never silently). Subsection slots are `.+`, never
+          # `[^.]+`: git subsection names may contain dots (`[diff "a.b"]
+          # command` flattens to diff.a.b.command and would slip past
+          # `[^.]+`); overmatching is harmless in a denylist. Guarded
+          # `|| true` twice: no global file and no match are both normal,
+          # and either would kill the step under the default `bash -e` +
+          # pipefail otherwise. The same denylist lives in
+          # resanitize-git-config.sh, which the PAT-bearing steps re-run
+          # AFTER branch code executed on the host; the workflow contract
+          # tests pin every copy byte-identical — edit them together.
+          # The GLOBAL scope spans TWO files — ~/.gitconfig and
+          # ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both
+          # present, `git config --global` lists and unsets ONLY
+          # ~/.gitconfig (probed on git 2.43 and 2.55: the listing omits
+          # the XDG keys and --unset-all exits 5 with them live), so sweep
+          # each file explicitly by pointing GIT_CONFIG_GLOBAL at it — the
+          # env var replaces the whole global scope with exactly that
+          # file, for reads and writes alike.
+          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+          done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -919,11 +935,18 @@ jobs:
       # Same staging as the review-address job: the verify gate always runs the
       # trusted checkout's copy of the schema gate, never a working-tree copy.
       - name: 'Stage trusted schema gate'
+        id: 'stage'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
+          # The staged copy's trusted-base provenance holds at cp time only:
+          # RUNNER_TEMP is writable by the branch/agent code later steps run
+          # on this host, so record the digest in GITHUB_OUTPUT — expression
+          # context, which a disk write after staging cannot reach — for the
+          # PAT-bearing step to verify at invocation time.
+          echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Check bot credentials'
         env:
@@ -1435,12 +1458,17 @@ jobs:
           # Hermetic git config for the gate and every check it spawns, same
           # rationale and shape as run-autofix-review-verification.sh (a
           # leaked global exec knob on the persistent pool must not fail
-          # branch tests, and a branch-authored `git config --global` must
-          # not outlive the run) — edit the two copies together.
+          # branch tests, a branch-authored `git config --global` must not
+          # outlive the run, and GITHUB_ENV-injected GIT_CONFIG_* entries
+          # outrank every file layer) — edit the two copies together.
           export GIT_CONFIG_SYSTEM=/dev/null
           export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+          export GIT_CONFIG_COUNT=0
           : > "${GIT_CONFIG_GLOBAL}"
           git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+          if [ -s /etc/gitconfig ]; then
+            echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
+          fi
 
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
@@ -1564,6 +1592,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
         run: |-
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
@@ -1584,11 +1613,22 @@ jobs:
             exit 1
           fi
           BRANCH="autofix/issue-${ISSUE}"
+          # Environment-carried git config outranks every file this step
+          # or the re-sanitize below can scrub: branch code in an earlier
+          # step can inject GIT_CONFIG_KEY_n/VALUE_n through $GITHUB_ENV,
+          # and they apply at command-line precedence. Count 0 makes git
+          # read zero of them.
+          export GIT_CONFIG_COUNT=0
           # The agent and the verification gate ran branch code on the host
           # since the job-start sanitize; re-scrub the local and global git
-          # config surfaces this PAT-bearing step is about to read. Invoked
-          # from the trusted-base staged copy — the working tree holds the
-          # agent-authored branch at this point.
+          # config surfaces this PAT-bearing step is about to read. The
+          # staged copy's provenance holds at cp time only (RUNNER_TEMP is
+          # writable by that same branch code), so verify the digest the
+          # staging step recorded in GITHUB_OUTPUT — which a disk write
+          # cannot tamper with — before executing it. The working tree
+          # holds the agent-authored branch at this point; never run the
+          # script from there.
+          echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
           bash "${RUNNER_TEMP}/resanitize-git-config.sh"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config core.hooksPath /dev/null
@@ -1601,8 +1641,10 @@ jobs:
           # helpers run in config order and the first to answer wins, so a
           # helper planted at any earlier scope would otherwise see the
           # request (and the env) before ours answers — probe-verified in
-          # the #8961 review.
-          git -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+          # the #8961 review. http.sslVerify pins the transport: a kept
+          # http.proxy plus a planted sslVerify=false would otherwise let
+          # an interceptor read the credential off the wire.
+          git -c http.sslVerify=true -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
             push --no-verify "https://github.com/${REPO}.git" "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
@@ -3238,19 +3280,35 @@ jobs:
           # the command-execution families go, plus include/includeIf (which
           # can pull any of them back in) and protocol.ext.allow (which arms
           # the command-executing ext:: transport a kept url.insteadOf could
-          # redirect to). Subsection slots are `.+`, never `[^.]+`: git
-          # subsection names may contain dots (`[diff "a.b"] command`
-          # flattens to diff.a.b.command and would slip past `[^.]+`);
-          # overmatching is harmless in a denylist. Guarded `|| true` twice:
-          # no global file and no match are both normal, and either would
-          # kill the step under the default `bash -e` + pipefail otherwise.
-          # The same denylist lives in resanitize-git-config.sh, which the
-          # PAT-bearing steps re-run AFTER branch code executed on the host;
-          # the workflow contract tests pin every copy byte-identical — edit
-          # them together.
-          { git config --global --name-only --list 2>/dev/null || true; } \
-            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
+          # redirect to). Two ROUTING exceptions ride the denylist because
+          # each defeats the PAT steps directly: url.*.insteadOf/
+          # pushInsteadOf (rewrites the push/fetch URL at transport time —
+          # the rest of url.* stays) and http.*.sslVerify/sslCAInfo (turns
+          # a kept http.proxy into a TLS-terminating interceptor; the pool
+          # works on the default CA today, so scrubbing these can only
+          # fail loudly, never silently). Subsection slots are `.+`, never
+          # `[^.]+`: git subsection names may contain dots (`[diff "a.b"]
+          # command` flattens to diff.a.b.command and would slip past
+          # `[^.]+`); overmatching is harmless in a denylist. Guarded
+          # `|| true` twice: no global file and no match are both normal,
+          # and either would kill the step under the default `bash -e` +
+          # pipefail otherwise. The same denylist lives in
+          # resanitize-git-config.sh, which the PAT-bearing steps re-run
+          # AFTER branch code executed on the host; the workflow contract
+          # tests pin every copy byte-identical — edit them together.
+          # The GLOBAL scope spans TWO files — ~/.gitconfig and
+          # ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both
+          # present, `git config --global` lists and unsets ONLY
+          # ~/.gitconfig (probed on git 2.43 and 2.55: the listing omits
+          # the XDG keys and --unset-all exits 5 with them live), so sweep
+          # each file explicitly by pointing GIT_CONFIG_GLOBAL at it — the
+          # env var replaces the whole global scope with exactly that
+          # file, for reads and writes alike.
+          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+          done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -3558,19 +3616,35 @@ jobs:
           # the command-execution families go, plus include/includeIf (which
           # can pull any of them back in) and protocol.ext.allow (which arms
           # the command-executing ext:: transport a kept url.insteadOf could
-          # redirect to). Subsection slots are `.+`, never `[^.]+`: git
-          # subsection names may contain dots (`[diff "a.b"] command`
-          # flattens to diff.a.b.command and would slip past `[^.]+`);
-          # overmatching is harmless in a denylist. Guarded `|| true` twice:
-          # no global file and no match are both normal, and either would
-          # kill the step under the default `bash -e` + pipefail otherwise.
-          # The same denylist lives in resanitize-git-config.sh, which the
-          # PAT-bearing steps re-run AFTER branch code executed on the host;
-          # the workflow contract tests pin every copy byte-identical — edit
-          # them together.
-          { git config --global --name-only --list 2>/dev/null || true; } \
-            | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-            | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
+          # redirect to). Two ROUTING exceptions ride the denylist because
+          # each defeats the PAT steps directly: url.*.insteadOf/
+          # pushInsteadOf (rewrites the push/fetch URL at transport time —
+          # the rest of url.* stays) and http.*.sslVerify/sslCAInfo (turns
+          # a kept http.proxy into a TLS-terminating interceptor; the pool
+          # works on the default CA today, so scrubbing these can only
+          # fail loudly, never silently). Subsection slots are `.+`, never
+          # `[^.]+`: git subsection names may contain dots (`[diff "a.b"]
+          # command` flattens to diff.a.b.command and would slip past
+          # `[^.]+`); overmatching is harmless in a denylist. Guarded
+          # `|| true` twice: no global file and no match are both normal,
+          # and either would kill the step under the default `bash -e` +
+          # pipefail otherwise. The same denylist lives in
+          # resanitize-git-config.sh, which the PAT-bearing steps re-run
+          # AFTER branch code executed on the host; the workflow contract
+          # tests pin every copy byte-identical — edit them together.
+          # The GLOBAL scope spans TWO files — ~/.gitconfig and
+          # ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both
+          # present, `git config --global` lists and unsets ONLY
+          # ~/.gitconfig (probed on git 2.43 and 2.55: the listing omits
+          # the XDG keys and --unset-all exits 5 with them live), so sweep
+          # each file explicitly by pointing GIT_CONFIG_GLOBAL at it — the
+          # env var replaces the whole global scope with exactly that
+          # file, for reads and writes alike.
+          for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+              | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+          done
           # `.git` is a directory in a normal checkout but a gitlink file in
           # a worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -3689,12 +3763,19 @@ jobs:
       # dies without an outcome), and an in-branch copy would let branch code
       # define its own gate.
       - name: 'Stage trusted schema gate and agent runner'
+        id: 'stage'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
+          # The staged copy's trusted-base provenance holds at cp time only:
+          # RUNNER_TEMP is writable by the branch/agent code later steps run
+          # on this host, so record the digest in GITHUB_OUTPUT — expression
+          # context, which a disk write after staging cannot reach — for the
+          # PAT-bearing step to verify at invocation time.
+          echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -3939,7 +4020,11 @@ jobs:
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
             # of 403ing at the report step after the work is done.
-            if ! git -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
+            # One-shot host-scoped helper like the push steps: the leading
+            # empty credential.helper resets the inherited helper list (a
+            # planted helper must never answer first) and http.sslVerify
+            # pins the transport — see 'Publish PR' for the full rationale.
+            if ! git -c http.sslVerify=true -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' \
               push --no-verify --dry-run "https://github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
               echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
               {
@@ -4830,6 +4915,7 @@ jobs:
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
+          RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
         run: |-
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
@@ -4858,11 +4944,22 @@ jobs:
             exit 1
           fi
 
+          # Environment-carried git config outranks every file this step
+          # or the re-sanitize below can scrub: branch code in an earlier
+          # step can inject GIT_CONFIG_KEY_n/VALUE_n through $GITHUB_ENV,
+          # and they apply at command-line precedence. Count 0 makes git
+          # read zero of them.
+          export GIT_CONFIG_COUNT=0
           # The gates ran branch test code on the host (and the sandboxed
           # agent had the workspace mounted) since the job-start sanitize;
           # re-scrub the local and global git config surfaces this
-          # PAT-bearing step is about to read. Invoked from the trusted-base
-          # staged copy — the working tree holds the PR branch at this point.
+          # PAT-bearing step is about to read. The staged copy's provenance
+          # holds at cp time only (RUNNER_TEMP is writable by that same
+          # branch code), so verify the digest the staging step recorded in
+          # GITHUB_OUTPUT — which a disk write cannot tamper with — before
+          # executing it. The working tree holds the PR branch at this
+          # point; never run the script from there.
+          echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
           bash "${RUNNER_TEMP}/resanitize-git-config.sh"
 
           if [[ "${OUTCOME}" == "fixed" ]]; then
@@ -4876,9 +4973,11 @@ jobs:
             # Authenticate push/fetch with a one-shot, host-scoped credential
             # helper via a git_auth wrapper (see Publish PR) — nothing lands
             # in .git/config, argv holds only the ${GITHUB_TOKEN} reference,
-            # and the leading empty credential.helper resets the inherited
-            # helper list so a planted helper never answers first.
-            git_auth() { git -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
+            # the leading empty credential.helper resets the inherited
+            # helper list so a planted helper never answers first, and
+            # http.sslVerify pins the transport against a planted
+            # sslVerify=false + proxy interceptor.
+            git_auth() { git -c http.sslVerify=true -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
             if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
               # Push back to the FORK branch via allow-edits (PAT has push
               # rights on the upstream, which GitHub extends to the fork's

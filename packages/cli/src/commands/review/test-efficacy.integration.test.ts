@@ -12,7 +12,7 @@
 // where the probe runs and what it leaves behind.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -33,6 +33,7 @@ import {
   splitDiffIntoHunks,
   testEfficacyCommand,
 } from './test-efficacy.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 
 type Handler = (args: {
   report: string;
@@ -45,8 +46,7 @@ const runHandler = testEfficacyCommand.handler as unknown as Handler;
 
 let repo: string;
 let outside: string;
-let home: string;
-let savedEnv: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -165,21 +165,12 @@ process.stdout.write(JSON.stringify({
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
-  home = mkdtempSync(join(tmpdir(), 'efficacy-home-'));
-  writeFileSync(join(home, '.gitconfig'), '');
-
-  // Isolate the fixtures from the user's git environment, like
-  // git.integration.test.ts does. Without this the suite inherits whatever
-  // the host accumulated: a global `diff.external` kills every plain
-  // `git diff` in the helpers below ("external diff died" — seen on a
-  // persistent CI runner whose ~/.gitconfig a prior job had polluted),
-  // and a global `commit.gpgsign=true` fails commitAll for want of a key.
-  // The code under test spawns git with the ambient env, so setting
-  // process.env here reaches it too.
-  savedEnv = { ...process.env };
-  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-  process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
-  process.env['HOME'] = home;
+  // Isolate the fixtures from the user's git environment (shared helper —
+  // see isolateHostGitConfig for the incident class: a global
+  // `diff.external` kills every plain `git diff` in the helpers below,
+  // exactly what a polluted persistent CI runner did). The code under test
+  // spawns git with the ambient env, so process-level env reaches it too.
+  gitIsolation = isolateHostGitConfig();
   git(repo, 'init', '-q', '-b', 'main', '.');
   git(repo, 'config', 'core.autocrlf', 'false');
   const hooksDir = join(repo, '.git-hooks-disabled');
@@ -253,23 +244,41 @@ afterEach(() => {
   }
   rmSync(repo, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
-  process.env = savedEnv;
-  rmSync(home, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 describe('fixture git-config isolation', () => {
   it('spawned git reads the throwaway global config, not the host user config', () => {
-    // Tripwire for the beforeEach isolation: if the GIT_CONFIG_GLOBAL /
-    // HOME redirect is ever removed, the sentinel below becomes
-    // unreadable through a child git and this test goes red — instead of
-    // the whole suite going red only on hosts whose real config happens
-    // to be hostile (the incident mode: a leaked global diff.external
-    // killed the per-hunk tests on a persistent CI runner).
-    writeFileSync(join(home, '.gitconfig'), '[qwen]\n\tisolation = sentinel\n');
+    // Tripwire for every leg of the beforeEach isolation. Global leg: if
+    // the GIT_CONFIG_GLOBAL / HOME redirect is ever removed, the sentinel
+    // below becomes unreadable through a child git and this test goes red
+    // — instead of the whole suite going red only on hosts whose real
+    // config happens to be hostile (the incident mode: a leaked global
+    // diff.external killed the per-hunk tests on a persistent CI runner).
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      '[qwen]\n\tisolation = sentinel\n',
+    );
     expect(git(repo, 'config', '--global', 'qwen.isolation').trim()).toBe(
       'sentinel',
     );
-    expect(process.env['GIT_CONFIG_GLOBAL']).toBe(join(home, '.gitconfig'));
+    expect(process.env['GIT_CONFIG_GLOBAL']).toBe(
+      join(gitIsolation.home, '.gitconfig'),
+    );
+    // System leg: the sentinel resolves through the global redirect, which
+    // OUTRANKS system config — so the global check above stays green even
+    // with the NOSYSTEM leg deleted (mutation-tested in review). Pin the
+    // env, and prove behaviour: with NOSYSTEM set, a child git must not
+    // read a system file even when one is pointed at it.
+    expect(process.env['GIT_CONFIG_NOSYSTEM']).toBe('1');
+    const sysCfg = join(gitIsolation.home, 'system-gitconfig');
+    writeFileSync(sysCfg, '[qwen]\n\tsystemleak = yes\n');
+    const sys = spawnSync('git', ['config', '--get', 'qwen.systemleak'], {
+      cwd: repo,
+      env: { ...process.env, GIT_CONFIG_SYSTEM: sysCfg },
+      encoding: 'utf8',
+    });
+    expect(sys.status).not.toBe(0);
   });
 });
 

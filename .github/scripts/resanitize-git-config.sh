@@ -32,6 +32,15 @@ if [ -e .git ]; then
     | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.[^.]+\.(url|fetch|pushurl)|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
     | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
 fi
-{ git config --global --name-only --list 2>/dev/null || true; } \
-  | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
-  | while IFS= read -r key; do git config --global --unset-all "$key" 2>/dev/null || true; done
+# The GLOBAL scope spans TWO files — ~/.gitconfig and
+# ${XDG_CONFIG_HOME:-~/.config}/git/config — but with both present,
+# `git config --global` lists and unsets ONLY ~/.gitconfig (probed on
+# git 2.43 and 2.55: the listing omits the XDG keys and --unset-all
+# exits 5 with them live), so sweep each file explicitly by pointing
+# GIT_CONFIG_GLOBAL at it — the env var replaces the whole global
+# scope with exactly that file, for reads and writes alike.
+for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+  { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
+    | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.ext\.allow$)' || true; } \
+    | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+done
