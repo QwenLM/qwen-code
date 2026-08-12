@@ -31,6 +31,10 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "img-src 'self' data: blob:",
   "connect-src 'self'",
   "worker-src 'self' blob:",
+  // MCP Apps run in the daemon's dedicated loopback sandbox origin. The host
+  // swaps localhost/127.0.0.1 when the shell itself is daemon-served so the
+  // sandbox and host never share an origin.
+  'frame-src http://localhost:* http://127.0.0.1:*',
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
   // attacker origin.
@@ -108,7 +112,8 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
     // a raw `//` also matches `app.get('/')` pre-auth (but `///` does not).
     reqPath === '//' ||
     reqPath === '/assets' ||
-    reqPath.startsWith('/assets/')
+    reqPath.startsWith('/assets/') ||
+    reqPath === '/mcp-app-sandbox'
   )
     return true;
   return SESSION_DEEP_LINK_PATH.test(reqPath) && isDocumentNavigation(req);

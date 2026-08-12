@@ -69,6 +69,7 @@ import {
 } from '../../customization';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
+import { getMcpAppDisplay, McpApp } from './McpApp';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -100,6 +101,7 @@ function openMonitorDetailsOnce(
 }
 
 export function hasExpandableContent(tool: ACPToolCall): boolean {
+  if (getMcpAppDisplay(tool.rawOutput)) return true;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
@@ -1294,6 +1296,7 @@ export const ToolLine = memo(function ToolLine({
 
   const fullDescription = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
+  const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const summaryShell = summaryOnly && isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)
@@ -1437,7 +1440,8 @@ export const ToolLine = memo(function ToolLine({
           )}
         </div>
       )}
-      {(!summaryOnly || expanded) && isTodo && hasTodoList && (
+      {mcpApp && <McpApp display={mcpApp} />}
+      {!mcpApp && (!summaryOnly || expanded) && isTodo && hasTodoList && (
         <TodoToolBody
           tool={tool}
           todos={todoItems!}
@@ -1447,12 +1451,16 @@ export const ToolLine = memo(function ToolLine({
       )}
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
-      {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
-        <div className={styles.lineOutput}>
-          {renderWithSessionLinks(result, transcriptRenderMode)}
-        </div>
-      )}
-      {showExpandedSummaryPanel && (
+      {!mcpApp &&
+        (!summaryOnly || expanded) &&
+        isTodo &&
+        !hasTodoList &&
+        result && (
+          <div className={styles.lineOutput}>
+            {renderWithSessionLinks(result, transcriptRenderMode)}
+          </div>
+        )}
+      {!mcpApp && showExpandedSummaryPanel && (
         <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
           {result && (
             <div
@@ -1463,7 +1471,8 @@ export const ToolLine = memo(function ToolLine({
           )}
         </ToolExpandedCard>
       )}
-      {!isTodo &&
+      {!mcpApp &&
+        !isTodo &&
         !hideCollapsedOutput &&
         result &&
         !showExpandedSummaryPanel &&
@@ -1479,7 +1488,7 @@ export const ToolLine = memo(function ToolLine({
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
-      {!isTodo && expanded && detailView && (
+      {!mcpApp && !isTodo && expanded && detailView && (
         <div
           className={
             useMarkdownDetail
@@ -1535,6 +1544,11 @@ export const ToolGroup = memo(function ToolGroup({
     singleTool && singleTool.toolName.toLowerCase() === 'monitor'
       ? singleTool
       : undefined;
+  const singleMcpApp = singleTool
+    ? getMcpAppDisplay(singleTool.rawOutput)
+    : undefined;
+  const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
+  const hasSingleMcpApp = singleMcpApp !== undefined;
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -1563,9 +1577,14 @@ export const ToolGroup = memo(function ToolGroup({
 
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
-    setChatExpanded(false);
+    setChatExpanded(hasSingleMcpApp);
     monitorDetailsRequestRef.current = null;
-  }, [monitorDetailsAvailable, singleMonitor?.callId]);
+  }, [
+    monitorDetailsAvailable,
+    singleMonitor?.callId,
+    hasSingleMcpApp,
+    singleMcpAppResourceUri,
+  ]);
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;

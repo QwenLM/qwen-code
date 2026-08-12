@@ -1150,6 +1150,89 @@ describe('DiscoveredMCPTool', () => {
     });
   });
 
+  describe('MCP Apps display', () => {
+    const createAppTool = (mcpClient: McpDirectClient) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        'ui://demo/dashboard',
+      );
+
+    it('loads an MCP App resource without changing model-visible content', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+          structuredContent: { revenue: 42 },
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://api.example.com'] },
+                  permissions: { clipboardWrite: {} },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        resourceUri: 'ui://demo/dashboard',
+        html: '<main>Revenue</main>',
+        toolArguments: { param: 'test' },
+        fallbackText: 'Dashboard ready',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('falls back to the normal tool text when the app resource is invalid', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html',
+              text: '<main>Wrong MIME</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toBe('Dashboard ready');
+    });
+  });
+
   describe('output truncation for large MCP results', () => {
     const THRESHOLD = 1000;
     const TRUNCATE_LINES = 50;

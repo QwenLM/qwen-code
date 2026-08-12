@@ -49,6 +49,7 @@ import {
   isActiveToolStatus,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -1358,6 +1359,19 @@ function turnHasActiveAgent(
   );
 }
 
+function turnHasMcpApp(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+): boolean {
+  return someTurnToolCall(
+    items,
+    start,
+    end,
+    (tool) => getMcpAppDisplay(tool.rawOutput) !== undefined,
+  );
+}
+
 function turnHasAutomaticallyExpandedAgent(
   items: DisplayItem[],
   start: number,
@@ -1566,6 +1580,7 @@ export function applyTurnCollapse(
     const isLastTurn = k === userIdxs.length - 1;
     const isActiveTurn = isLastTurn && isResponding;
     const hasActiveAgent = turnHasActiveAgent(items, start, end);
+    const hasMcpApp = turnHasMcpApp(items, start, end);
     const hasAutomaticallyExpandedAgent = turnHasAutomaticallyExpandedAgent(
       items,
       start,
@@ -1671,6 +1686,7 @@ export function applyTurnCollapse(
     const shouldStayOpen =
       isActiveTurn ||
       hasActiveAgent ||
+      hasMcpApp ||
       hasAutomaticallyExpandedAgent ||
       awaitsBackgroundSummary ||
       ((hasTurnError || answerIdx < 0) && isLastTurn);

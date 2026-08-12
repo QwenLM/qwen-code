@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { MCPServerConfig } from '../config/config.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
+  getMcpAppResourceUri,
   connectToMcpServer,
   invokeMcpPrompt,
   listMcpPrompts,
@@ -158,6 +159,15 @@ describe('configured MCP SDK v2 negotiation', () => {
           [CLIENT_CAPABILITIES_META_KEY]: expect.any(Object),
         });
       }
+      expect(
+        requests[0]?.params?._meta?.[CLIENT_CAPABILITIES_META_KEY],
+      ).toMatchObject({
+        extensions: {
+          'io.modelcontextprotocol/ui': {
+            mimeTypes: ['text/html;profile=mcp-app'],
+          },
+        },
+      });
     } finally {
       await client.close();
     }
@@ -362,8 +372,37 @@ describe('configured MCP SDK v2 negotiation', () => {
         requests.find((request) => request.method === 'tools/list')?.params
           ?._meta,
       ).toBeUndefined();
+      expect(
+        requests.find((request) => request.method === 'initialize')?.params?.[
+          'capabilities'
+        ],
+      ).toMatchObject({
+        extensions: {
+          'io.modelcontextprotocol/ui': {
+            mimeTypes: ['text/html;profile=mcp-app'],
+          },
+        },
+      });
     } finally {
       await client.close();
     }
+  });
+
+  it('accepts nested and legacy MCP Apps tool metadata', () => {
+    expect(
+      getMcpAppResourceUri({
+        _meta: { ui: { resourceUri: 'ui://demo/dashboard' } },
+      }),
+    ).toBe('ui://demo/dashboard');
+    expect(
+      getMcpAppResourceUri({
+        _meta: { 'ui/resourceUri': 'ui://demo/legacy' },
+      }),
+    ).toBe('ui://demo/legacy');
+    expect(
+      getMcpAppResourceUri({
+        _meta: { ui: { resourceUri: 'https://example.com/app' } },
+      }),
+    ).toBeUndefined();
   });
 });

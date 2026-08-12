@@ -81,6 +81,8 @@ export type SendSdkMcpMessage = (
 ) => Promise<JSONRPCMessage>;
 
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
+export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
+export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
@@ -352,8 +354,31 @@ export type DiscoveredMCPResource = Resource & {
 function createMcpClient(name: string): Client {
   return new Client(
     { name, version: '0.0.1' },
-    { versionNegotiation: { mode: 'auto' } },
+    {
+      versionNegotiation: { mode: 'auto' },
+      capabilities: {
+        extensions: {
+          [MCP_APPS_EXTENSION_ID]: {
+            mimeTypes: [MCP_APP_RESOURCE_MIME_TYPE],
+          },
+        },
+      },
+    },
   );
+}
+
+export function getMcpAppResourceUri(tool: {
+  _meta?: Record<string, unknown>;
+}): string | undefined {
+  const ui = tool._meta?.['ui'];
+  const nested =
+    typeof ui === 'object' && ui !== null && !Array.isArray(ui)
+      ? (ui as Record<string, unknown>)['resourceUri']
+      : undefined;
+  const value = nested ?? tool._meta?.['ui/resourceUri'];
+  return typeof value === 'string' && value.startsWith('ui://')
+    ? value
+    : undefined;
 }
 
 /**
@@ -1367,11 +1392,19 @@ export async function discoverTools(
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
     // that are not preserved by mcpToTool's functionDeclarations conversion.
     const annotationsMap = new Map<string, McpToolAnnotations>();
+    const appResourceUriMap = new Map<string, string>();
+    const serverExtensions = mcpClient.getServerCapabilities?.()?.extensions;
+    const supportsMcpApps =
+      serverExtensions?.[MCP_APPS_EXTENSION_ID] !== undefined;
     try {
       const listToolsResult = await mcpClient.listTools();
       for (const mcpTool of listToolsResult.tools) {
         if (mcpTool.annotations) {
           annotationsMap.set(mcpTool.name, mcpTool.annotations);
+        }
+        if (supportsMcpApps) {
+          const resourceUri = getMcpAppResourceUri(mcpTool);
+          if (resourceUri) appResourceUriMap.set(mcpTool.name, resourceUri);
         }
       }
     } catch {
@@ -1425,6 +1458,7 @@ export async function discoverTools(
             annotationsMap.get(funcDecl.name!),
             mcpServerConfig.alwaysLoadTools === true,
             invocationContextClients.has(mcpClient),
+            appResourceUriMap.get(funcDecl.name!),
           ),
         );
       } catch (error) {

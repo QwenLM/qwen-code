@@ -159,6 +159,7 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
+import { McpAppHostContext } from './mcpAppHostContext';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -9968,8 +9969,9 @@ export function App({
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        {/* prettier-ignore */}
-        <WebShellPortalRootContext.Provider value={portalRoot}>
+        <McpAppHostContext.Provider value={workspace.baseUrl}>
+          {/* prettier-ignore */}
+          <WebShellPortalRootContext.Provider value={portalRoot}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -11806,6 +11808,7 @@ export function App({
           </div>
         </div>
         </WebShellPortalRootContext.Provider>
+        </McpAppHostContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );
