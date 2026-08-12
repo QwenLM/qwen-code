@@ -72,11 +72,18 @@ jobs:
         env:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           INPUT_VERSION: '${{ inputs.version }}'
+          IS_DRAFT: '${{ inputs.draft }}'
+          IS_DRY_RUN: '${{ inputs.dry_run }}'
+          IS_PRERELEASE: '${{ inputs.prerelease }}'
         run: |
           set -euo pipefail
           version="${INPUT_VERSION#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Desktop version must be valid SemVer: $INPUT_VERSION"
+            exit 1
+          fi
+          if [ "$IS_DRY_RUN" = 'false' ] && [ "$IS_DRAFT" = 'false' ] && [ "$IS_PRERELEASE" = 'false' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Published stable Desktop versions must use X.Y.Z: $INPUT_VERSION"
             exit 1
           fi
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
@@ -614,3 +621,21 @@ jobs:
             echo "Tag: $RELEASE_TAG"
             echo "Release: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-oss:
+    name: 'Mirror stable Desktop release to Aliyun OSS'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    uses: './.github/workflows/sync-desktop-to-oss.yml'
+    with:
+      version: '${{ needs.prepare.outputs.version }}'
+      source: 'artifact'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+      ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
