@@ -339,7 +339,7 @@ async function findTab(args: Args): Promise<unknown> {
 async function evaluate(args: Args): Promise<unknown> {
   const code = requiredString(args, 'code', 'evaluate');
   return onCurrentTab(args, async (send) => {
-    const result = record(
+    let result = record(
       await send('Runtime.evaluate', {
         expression: code,
         returnByValue: true,
@@ -348,7 +348,22 @@ async function evaluate(args: Args): Promise<unknown> {
       }),
     );
     throwOnCdpException('evaluate', result);
-    const remote = record(result['result']);
+    let remote = record(result['result']);
+    if (
+      remote['subtype'] === 'promise' &&
+      typeof remote['objectId'] === 'string'
+    ) {
+      result = record(
+        await send('Runtime.callFunctionOn', {
+          objectId: remote['objectId'],
+          functionDeclaration: 'function() { return this; }',
+          returnByValue: true,
+          awaitPromise: true,
+        }),
+      );
+      throwOnCdpException('evaluate', result);
+      remote = record(result['result']);
+    }
     return { type: remote['type'], value: remote['value'] };
   });
 }

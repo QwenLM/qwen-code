@@ -205,6 +205,40 @@ describe('WebBridgeService', () => {
     });
   });
 
+  it('keeps the current tab when a new-tab navigation goes stale', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 17 })
+      .mockRejectedValueOnce(new Error('No tab with id: 23'))
+      .mockResolvedValueOnce({});
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'research',
+    });
+    await expect(
+      service.execute({
+        action: 'navigate',
+        args: { url: 'https://example.test/next', newTab: true },
+        session: 'research',
+      }),
+    ).rejects.toThrow('No tab with id: 23');
+    await service.execute({
+      action: 'snapshot',
+      args: {},
+      session: 'research',
+    });
+
+    expect(call).toHaveBeenLastCalledWith('snapshot', {
+      _session: 'research',
+      _tabId: 17,
+      _tabIds: [17],
+    });
+  });
+
   it('never includes a borrowed tab in close_session ownership', async () => {
     const registry = new WebBridgeRegistry();
     const call = vi

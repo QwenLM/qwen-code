@@ -151,6 +151,7 @@ export class WebBridgeService {
     } catch (error) {
       if (
         command.action === 'navigate' &&
+        command.args['newTab'] !== true &&
         state.currentTabId !== undefined &&
         error instanceof Error &&
         STALE_TAB_ERROR.test(error.message)
@@ -277,9 +278,7 @@ export class WebBridgeService {
         : result['format'] === 'jpeg'
           ? 'jpg'
           : 'png';
-    const directory = await mkdtemp(
-      path.join(tmpdir(), 'qwen-webbridge-'),
-    );
+    const directory = await mkdtemp(path.join(tmpdir(), 'qwen-webbridge-'));
     const filePath = path.join(
       directory,
       `${artifactName(result['pageTitle'])}-${Date.now()}.${extension}`,

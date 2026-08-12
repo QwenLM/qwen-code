@@ -87,6 +87,7 @@ export class WebBridgeRegistry {
     return () => {
       if (unregistered) return;
       unregistered = true;
+      if (this.endpoints.get(endpoint.connectionId) !== endpoint) return;
       this.endpoints.delete(endpoint.connectionId);
       if (this.active === endpoint) {
         this.active = [...this.endpoints.values()].at(-1);

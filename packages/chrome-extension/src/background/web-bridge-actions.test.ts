@@ -453,6 +453,54 @@ describe('WebBridge actions', () => {
     });
   });
 
+  it('awaits implicit promise results in evaluate', async () => {
+    cdp.send
+      .mockResolvedValueOnce({
+        result: {
+          type: 'object',
+          subtype: 'promise',
+          objectId: 'promise-1',
+        },
+      })
+      .mockResolvedValueOnce({ result: { type: 'number', value: 42 } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('evaluate', {
+        code: 'Promise.resolve(42)',
+        _tabId: 17,
+      }),
+    ).resolves.toEqual({ type: 'number', value: 42 });
+    expect(cdp.send).toHaveBeenLastCalledWith('Runtime.callFunctionOn', {
+      objectId: 'promise-1',
+      functionDeclaration: 'function() { return this; }',
+      returnByValue: true,
+      awaitPromise: true,
+    });
+  });
+
+  it('surfaces implicit promise rejections in evaluate', async () => {
+    cdp.send
+      .mockResolvedValueOnce({
+        result: {
+          type: 'object',
+          subtype: 'promise',
+          objectId: 'promise-1',
+        },
+      })
+      .mockResolvedValueOnce({
+        exceptionDetails: { text: 'boom' },
+      });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('evaluate', {
+        code: 'Promise.reject(new Error("boom"))',
+        _tabId: 17,
+      }),
+    ).rejects.toThrow('evaluate: boom');
+  });
+
   it('fills textarea values through the textarea setter', async () => {
     document.body.innerHTML = '<textarea id="notes"></textarea>';
     cdp.send.mockImplementation(

@@ -4,8 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import net from 'node:net';
+
 export const cdpEndpoint = (env = process.env) =>
   env.WS || `ws://127.0.0.1:${env.PORT || 4170}/cdp`;
+
+export const assertPortFree = (portToCheck) =>
+  new Promise((resolveCheck, reject) => {
+    const socket = net.createConnection({
+      host: '127.0.0.1',
+      port: portToCheck,
+    });
+    socket.once('connect', () => {
+      socket.destroy();
+      reject(new Error(`Port ${portToCheck} is already in use`));
+    });
+    socket.once('error', () => resolveCheck());
+    socket.setTimeout(1_000, () => {
+      socket.destroy();
+      resolveCheck();
+    });
+  });
 
 export const parseSelectedPageUrl = (pages) => {
   const selected =

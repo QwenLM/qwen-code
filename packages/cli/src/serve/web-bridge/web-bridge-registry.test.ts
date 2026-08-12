@@ -83,6 +83,31 @@ describe('WebBridgeRegistry', () => {
     expect(oldSend).toHaveBeenCalledOnce();
   });
 
+  it('ignores stale unregister callbacks for replaced connections', async () => {
+    const registry = new WebBridgeRegistry(1_000);
+    const unregisterOld = registry.register({
+      connectionId: 'extension',
+      send() {},
+    });
+    let requestId = '';
+    registry.register({
+      connectionId: 'extension',
+      send(frame) {
+        requestId = frame.requestId;
+      },
+    });
+
+    const pending = registry.call('snapshot', {});
+    unregisterOld();
+    registry.routeInbound('extension', {
+      type: 'webbridge_result',
+      responseToRequestId: requestId,
+      payload: { data: 'new result' },
+    });
+
+    await expect(pending).resolves.toBe('new result');
+  });
+
   it('times out calls and removes their pending state', async () => {
     vi.useFakeTimers();
     try {

@@ -10,7 +10,11 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { stopChild, waitForJson } from './acceptance-helpers.mjs';
+import {
+  assertPortFree,
+  stopChild,
+  waitForJson,
+} from './acceptance-helpers.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../../../..');
@@ -132,6 +136,10 @@ let chromeProcess;
 let daemonOutput = () => '';
 let chromeOutput = () => '';
 try {
+  await assertPortFree(port);
+  await assertPortFree(fixturePort);
+  await assertPortFree(debugPort);
+
   fixtureServer = spawnChild(process.execPath, [fixture], {
     env: { ...process.env, FIXTURE_PORT: String(fixturePort) },
   });
