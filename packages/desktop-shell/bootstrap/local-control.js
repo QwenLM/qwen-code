@@ -47,9 +47,7 @@ const messages = {
   },
 };
 
-const language = navigator.language.toLowerCase().startsWith('zh')
-  ? 'zh-CN'
-  : 'en';
+const language = navigator.language.toLowerCase() === 'zh-cn' ? 'zh-CN' : 'en';
 const t = (key) => messages[language][key];
 
 document.documentElement.lang = language;
