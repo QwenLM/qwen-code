@@ -2958,7 +2958,8 @@ export class CoreToolScheduler {
                 // pmForcedAsk fallback isn't an audit-worthy event.
                 if (
                   isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable'
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write'
                 ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
                   autoModeFallbackMessage = outcome.message;
@@ -6191,7 +6192,8 @@ export class CoreToolScheduler {
             case 'fallback':
               if (
                 isDenialFallbackReason(outcome.reason) ||
-                outcome.reason === 'classifier_unavailable'
+                outcome.reason === 'classifier_unavailable' ||
+                outcome.reason === 'external_write'
               ) {
                 this.autoModeFallbackCallIds.add(pendingTool.request.callId);
                 if (outcome.message) {

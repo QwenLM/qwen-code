@@ -455,8 +455,8 @@ function stripRawRedirectTargetToken(token: string): string {
  *
  * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
  * internally calls `fs.realpathSync`. A symlink whose target is outside the
- * workspace correctly fails this check and falls through to the classifier
- * — fail-safe by implementation.
+ * workspace correctly fails this check and falls through to the L5.2.6
+ * external_write manual fallback — fail-safe by implementation.
  *
  * Caller should only consult this when L4 evaluation returned `'default'`.
  */
