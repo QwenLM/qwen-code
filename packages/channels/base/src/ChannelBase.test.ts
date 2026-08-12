@@ -12342,6 +12342,73 @@ describe('ChannelBase', () => {
       expect(bridge.discardSession).toHaveBeenCalledWith(retiredId);
     });
 
+    it("announces rotation in the rotated route's thread", async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      const threadMessages: Array<{
+        chatId: string;
+        threadId: string | undefined;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: 'first', threadId: 'topic-1' }));
+      await ch.handleInbound(envelope({ text: 'second', threadId: 'topic-1' }));
+
+      expect(
+        threadMessages.some(
+          (m) => m.threadId === 'topic-1' && m.text.includes('rotated'),
+        ),
+      ).toBe(true);
+    });
+
+    it('purges pending permissions of the rotated session', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      const retiredId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-rotated',
+        sessionId: retiredId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-req-rotated',
+            kind: 'shell',
+            title: 'Run req-rotated',
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Allow once',
+            },
+          ],
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          ch.sent.some((m) => m.text.includes('Permission required')),
+        ).toBe(true),
+      );
+
+      // Rotate: the retirement purges the stale permission, so a late
+      // approval must not reach the bridge against the discarded session.
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: '/approve req-rotated' }));
+
+      expect(
+        (bridge as unknown as { respondToPermission: ReturnType<typeof vi.fn> })
+          .respondToPermission,
+      ).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+    });
+
     it('defers rotation while the outgoing turn is still running', async () => {
       const ch = createChannel({ sessionRotation: { maxTurns: 1 } });
       let settleFirst!: (value: string) => void;

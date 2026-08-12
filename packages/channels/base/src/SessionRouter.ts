@@ -80,6 +80,8 @@ export class SessionRouter {
     (sessionId: string, target: SessionTarget | undefined) => void
   >();
   private persistPath: string | undefined;
+  private persistSuspended = false;
+  private persistRequestedWhileSuspended = false;
   private readonly recoveryMode: SessionRecoveryMode;
 
   constructor(
@@ -414,6 +416,16 @@ export class SessionRouter {
           return sessionId;
         } catch (error) {
           if (creating.invalidationError) {
+            // A rotation or reload can hand the key to a successor operation
+            // while this waiter is parked; route against the successor
+            // instead of failing the message. Without a successor the
+            // invalidation was a deliberate rejection (e.g. removeSession),
+            // which stays terminal.
+            if (this.creatingSessions.has(key) || this.toSession.has(key)) {
+              failedWaits++;
+              if (failedWaits > 3) throw creating.invalidationError;
+              continue;
+            }
             throw creating.invalidationError;
           }
           if (this.creatingSessions.get(key) === creating) {
@@ -839,82 +851,98 @@ export class SessionRouter {
       this.deleteByKey(key);
     }
 
-    // Reserve every persisted key up front so inbound messages during restart
-    // wait for restore instead of returning stale IDs or creating duplicates.
-    for (const key of Object.keys(entries)) {
-      this.deleteByKey(key);
-      const reservation = this.createSessionReservation();
-      reservation.promise.catch(() => undefined);
-      const operation = this.createSessionOperation(
-        key,
-        entries[key]!.target,
-        () => reservation.promise,
-      );
-      operation.promise.catch(() => undefined);
-      this.creatingSessions.set(key, operation);
-      reservations.set(key, { reservation, operation });
-    }
-
-    const loadWindow = this.beginSessionLoad();
+    // Released waiters route (and persist) while this loop still restores
+    // later keys; suspend persistence so a store holding only the restored
+    // prefix cannot become durable. The flush after the loop writes the
+    // whole store instead.
+    this.persistSuspended = true;
     try {
-      for (const [key, entry] of Object.entries(entries)) {
-        const reserved = reservations.get(key);
-        if (!reserved) continue;
-        const { reservation, operation } = reserved;
-        try {
-          this.assertOperationCurrent(operation);
-          const options = this.sessionOptions(entry.target.channelName);
-          const sessionId = await this.bridge.loadSession(
-            entry.sessionId,
-            entry.cwd,
-            options,
-            operation,
-          );
+      // Reserve every persisted key up front so inbound messages during restart
+      // wait for restore instead of returning stale IDs or creating duplicates.
+      for (const key of Object.keys(entries)) {
+        this.deleteByKey(key);
+        const reservation = this.createSessionReservation();
+        reservation.promise.catch(() => undefined);
+        const operation = this.createSessionOperation(
+          key,
+          entries[key]!.target,
+          () => reservation.promise,
+        );
+        operation.promise.catch(() => undefined);
+        this.creatingSessions.set(key, operation);
+        reservations.set(key, { reservation, operation });
+      }
+
+      const loadWindow = this.beginSessionLoad();
+      try {
+        for (const [key, entry] of Object.entries(entries)) {
+          const reserved = reservations.get(key);
+          if (!reserved) continue;
+          const { reservation, operation } = reserved;
           try {
             this.assertOperationCurrent(operation);
-          } catch (error) {
-            this.scheduleDiscardInvalidatedSession(sessionId, operation);
-            throw error;
-          }
-          if (typeof sessionId !== 'string' || sessionId.length === 0) {
-            throw new Error('Invalid restored session ID');
-          }
-          if (loadWindow.delete(sessionId)) {
-            throw new Error('Restored session died before routing completed');
-          }
-          this.toSession.set(key, sessionId);
-          this.toTarget.set(sessionId, entry.target);
-          this.toCwd.set(sessionId, entry.cwd);
-          this.restoreRotationState(sessionId, entry);
-          reservation.resolve(sessionId);
-          if (sessionId !== entry.sessionId) {
+            const options = this.sessionOptions(entry.target.channelName);
+            const sessionId = await this.bridge.loadSession(
+              entry.sessionId,
+              entry.cwd,
+              options,
+              operation,
+            );
+            try {
+              this.assertOperationCurrent(operation);
+            } catch (error) {
+              this.scheduleDiscardInvalidatedSession(sessionId, operation);
+              throw error;
+            }
+            if (typeof sessionId !== 'string' || sessionId.length === 0) {
+              throw new Error('Invalid restored session ID');
+            }
+            if (loadWindow.delete(sessionId)) {
+              throw new Error('Restored session died before routing completed');
+            }
+            this.toSession.set(key, sessionId);
+            this.toTarget.set(sessionId, entry.target);
+            this.toCwd.set(sessionId, entry.cwd);
+            this.restoreRotationState(sessionId, entry);
+            reservation.resolve(sessionId);
+            if (sessionId !== entry.sessionId) {
+              changed = true;
+            }
+            restored++;
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err);
+            process.stderr.write(
+              `[SessionRouter] Failed to restore session ${sanitizeLogText(entry.sessionId, 128)} for key ${sanitizeLogText(key, 256)}: ${sanitizeLogText(reason, 512)}\n`,
+            );
+            reservation.reject(
+              new Error('Session restore failed', { cause: err }),
+            );
+            // Session can't be loaded — will create fresh on next message
+            failed++;
             changed = true;
+          } finally {
+            if (this.creatingSessions.get(key) === operation) {
+              this.creatingSessions.delete(key);
+            }
+            this.releaseRouteToken(key, operation);
           }
-          restored++;
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          process.stderr.write(
-            `[SessionRouter] Failed to restore session ${sanitizeLogText(entry.sessionId, 128)} for key ${sanitizeLogText(key, 256)}: ${sanitizeLogText(reason, 512)}\n`,
-          );
-          reservation.reject(
-            new Error('Session restore failed', { cause: err }),
-          );
-          // Session can't be loaded — will create fresh on next message
-          failed++;
-          changed = true;
-        } finally {
-          if (this.creatingSessions.get(key) === operation) {
-            this.creatingSessions.delete(key);
-          }
-          this.releaseRouteToken(key, operation);
         }
+      } finally {
+        this.endSessionLoad(loadWindow);
       }
     } finally {
-      this.endSessionLoad(loadWindow);
+      this.persistSuspended = false;
     }
 
-    // Update persist file to only include successfully restored sessions
-    if (changed && restoreGeneration === this.lifecycleGeneration) {
+    const flushRequested = this.persistRequestedWhileSuspended;
+    this.persistRequestedWhileSuspended = false;
+    // Update persist file to only include successfully restored sessions.
+    // A persist requested while suspended counts: the mid-restore write was
+    // skipped to keep a truncated store from becoming durable.
+    if (
+      (changed || flushRequested) &&
+      restoreGeneration === this.lifecycleGeneration
+    ) {
       this.persist();
     }
 
@@ -1049,6 +1077,12 @@ export class SessionRouter {
 
   private persist(): void {
     if (!this.persistPath) return;
+    if (this.persistSuspended) {
+      // Mid-restore the store holds only the restored prefix; let
+      // restoreSessions() flush once the store is whole again.
+      this.persistRequestedWhileSuspended = true;
+      return;
+    }
 
     const data: Record<string, PersistedEntry> = {};
     for (const [key, sessionId] of this.toSession) {

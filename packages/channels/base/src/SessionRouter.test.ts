@@ -78,6 +78,11 @@ function rotationCounters(router: SessionRouter): {
   };
 }
 
+function routingLeases(router: SessionRouter): Map<string, number> {
+  return (router as unknown as { sessionRoutingLeases: Map<string, number> })
+    .sessionRoutingLeases;
+}
+
 function invalidationMetadataSize(router: SessionRouter): number {
   const state = router as unknown as {
     routeGenerations?: Map<string, unknown>;
@@ -1560,7 +1565,13 @@ describe('SessionRouter', () => {
       expect(bridge.discardSession).toHaveBeenCalledTimes(1);
       expect(bridge.discardSession).toHaveBeenCalledWith(first);
 
+      // Release one of the two leases: with one still outstanding the
+      // rotation must keep deferring.
       router.releaseRoutingLease(second);
+      const held = await router.resolve('ch', 'alice', 'chat1');
+      expect(held).toBe(second);
+
+      router.releaseRoutingLease(held);
       router.releaseRoutingLease(second);
       expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(second);
       await drainMicrotasks();
@@ -1709,6 +1720,124 @@ describe('SessionRouter', () => {
       expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(sessionId);
       expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(sessionId);
       expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(sessionId);
+    });
+
+    it('routes every waiter when an at-bound restore rotates under them', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 3,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      let releaseRestore!: (sessionId: string) => void;
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          releaseRestore = resolve;
+        }),
+      );
+
+      // Two messages park on the same restore reservation. The restored
+      // session is already at its bound, so the first waiter rotates it —
+      // destroying the route token the second waiter's reservation still
+      // references. The second must follow the successor, not fail with
+      // the invalidation.
+      const restoring = router.restoreSessions();
+      const first = router.resolve('ch', 'alice', 'chat1');
+      const second = router.resolve('ch', 'alice', 'chat1');
+      releaseRestore('old-session');
+      await restoring;
+
+      const firstId = await first;
+      const secondId = await second;
+      router.releaseRoutingLease(firstId);
+      router.releaseRoutingLease(secondId);
+      expect(firstId).not.toBe('old-session');
+      expect(secondId).toBe(firstId);
+      expect(bridge.newSession).toHaveBeenCalledTimes(1);
+      await drainMicrotasks();
+      expect(bridge.discardSession).toHaveBeenCalledWith('old-session');
+    });
+
+    it('never persists a truncated store while an eager restore is mid-flight', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-alice',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 3,
+          },
+          'ch:bob:chat2': {
+            sessionId: 'old-bob',
+            target: {
+              channelName: 'ch',
+              senderId: 'bob',
+              chatId: 'chat2',
+            },
+            cwd: '/tmp',
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      const loadResolvers: Array<(sessionId: string) => void> = [];
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            loadResolvers.push(resolve);
+          }),
+      );
+
+      const restoring = router.restoreSessions();
+      await Promise.resolve();
+      // The message parks on alice's reservation and is released while
+      // bob's key is still unrestored; its rotation then persists.
+      const waiter = router.resolve('ch', 'alice', 'chat1');
+      loadResolvers[0]!('old-alice');
+
+      // The waiter settles (rotating the at-bound session and persisting)
+      // before bob's restore is released: this is the truncation window.
+      const sessionId = await waiter;
+      router.releaseRoutingLease(sessionId);
+      expect(sessionId).not.toBe('old-alice');
+
+      loadResolvers[1]!('old-bob');
+      await restoring;
+
+      // Every write must hold the whole store: a truncated prefix becoming
+      // durable silently loses bob's route on the next restart.
+      for (const call of mockWriteFileSync.mock.calls) {
+        const written = JSON.parse(String(call[1])) as Record<
+          string,
+          { sessionId: string }
+        >;
+        expect(written['ch:bob:chat2']?.sessionId).toBe('old-bob');
+      }
+      const persisted = JSON.parse(readFileSync(persistPath, 'utf-8'));
+      expect(persisted['ch:bob:chat2'].sessionId).toBe('old-bob');
+      expect(persisted['ch:alice:chat1'].sessionId).toBe(sessionId);
     });
 
     it('clears a bound when the channel re-registers without one', async () => {
@@ -1972,6 +2101,127 @@ describe('SessionRouter', () => {
 
       expect(rotationCounters(router).toTurns.size).toBe(0);
       expect(rotationCounters(router).toStartedAt.size).toBe(0);
+    });
+
+    it('never uncounts a session below its seed turn', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 2 });
+
+      const first = await router.resolve('ch', 'alice', 'chat1');
+      router.releaseRoutingLease(first);
+      // The first firing is dropped before it prompts (a skipped loop
+      // firing): the uncount must not eat the seed turn creation paid for,
+      // or the bound would consume a slot nothing ever used.
+      router.uncountTurn('ch', first);
+      expect(rotationCounters(router).toTurns.get(first)).toBe(1);
+
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
+    });
+
+    it('reclaims routing leases when a session is removed by ID', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      const sessionId = await router.resolve('ch', 'alice', 'chat1');
+      expect(routingLeases(router).get(sessionId)).toBe(1);
+
+      router.removeSessionId(sessionId);
+
+      expect(routingLeases(router).has(sessionId)).toBe(false);
+    });
+
+    it('enforces both bounds when they are configured together', async () => {
+      vi.useFakeTimers();
+      try {
+        const router = new SessionRouter(bridge, '/tmp');
+        router.setChannelRotation('ch', { maxTurns: 10, maxAgeHours: 1 });
+
+        const first = await routed(router, 'ch', 'alice', 'chat1');
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(first);
+
+        // Only 2 of 10 turns used, but the age bound passes: the age
+        // rotation must still fire on a channel that also sets maxTurns.
+        vi.advanceTimersByTime(61 * 60 * 1000);
+        const aged = await routed(router, 'ch', 'alice', 'chat1');
+        expect(aged).not.toBe(first);
+
+        // Symmetrically, the turns bound fires while the successor is
+        // still age-fresh.
+        router.setChannelRotation('ch', { maxTurns: 2, maxAgeHours: 24 });
+        expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(aged);
+        expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(aged);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('carries rotation counters over an ID-changing eager restore', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-router-'));
+      tempDirs.push(dir);
+      const persistPath = join(dir, 'routes.json');
+      writeFileSync(
+        persistPath,
+        JSON.stringify({
+          'ch:alice:chat1': {
+            sessionId: 'old-session',
+            target: {
+              channelName: 'ch',
+              senderId: 'alice',
+              chatId: 'chat1',
+            },
+            cwd: '/tmp',
+            turns: 2,
+          },
+        }),
+      );
+      const router = new SessionRouter(bridge, '/tmp', 'user', persistPath);
+      router.setChannelRotation('ch', { maxTurns: 3 });
+      (bridge.loadSession as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'replacement-session',
+      );
+
+      await router.restoreSessions();
+
+      // The counters follow the id loadSession resolved to, not the
+      // persisted id: carried turns (2) plus this message reach the bound.
+      expect(await routed(router, 'ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(
+        'replacement-session',
+      );
+      expect(rotationCounters(router).toTurns.has('old-session')).toBe(false);
+    });
+
+    it('keeps rotating when discarding the retired session throws', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 1 });
+      (
+        bridge.discardSession as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(() => {
+        throw new Error('connection down');
+      });
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
+      await drainMicrotasks();
+      expect(bridge.discardSession).toHaveBeenCalledWith(first);
+    });
+
+    it('attaches a catch handler to the fire-and-forget rotation discard', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+      router.setChannelRotation('ch', { maxTurns: 1 });
+      const attachCatch = vi.fn();
+      (bridge.discardSession as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+        catch: attachCatch,
+      });
+
+      const first = await routed(router, 'ch', 'alice', 'chat1');
+      expect(await routed(router, 'ch', 'alice', 'chat1')).not.toBe(first);
+
+      // Without the catch handler a rejected close RPC becomes an unhandled
+      // rejection, taking the channel process down after the retirement
+      // already landed.
+      expect(attachCatch).toHaveBeenCalledOnce();
     });
   });
   describe('clearAll', () => {
