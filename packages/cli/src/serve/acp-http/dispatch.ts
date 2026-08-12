@@ -1986,20 +1986,33 @@ export class AcpDispatcher {
           if ('error' in parsedSource) {
             throw new AcpParamError(parsedSource.error);
           }
-          const result = await listWorkspaceSessionsForResponse(
-            this.bridge,
-            workspaceCwd,
-            {
-              cursor,
-              size: metaSize,
-              archiveState,
-              view,
-              group,
-              parentSessionId,
-              ...parsedSource,
-            },
-            { runtimeBaseDir: this.sessionRuntimeBaseDir },
-          );
+          let result: Awaited<
+            ReturnType<typeof listWorkspaceSessionsForResponse>
+          >;
+          try {
+            conn.abortSignal.throwIfAborted();
+            result = await listWorkspaceSessionsForResponse(
+              this.bridge,
+              workspaceCwd,
+              {
+                cursor,
+                size: metaSize,
+                archiveState,
+                view,
+                group,
+                parentSessionId,
+                ...parsedSource,
+              },
+              {
+                runtimeBaseDir: this.sessionRuntimeBaseDir,
+                signal: conn.abortSignal,
+              },
+            );
+            conn.abortSignal.throwIfAborted();
+          } catch (error) {
+            if (conn.abortSignal.aborted) return;
+            throw error;
+          }
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
               sessionId: s.sessionId,
