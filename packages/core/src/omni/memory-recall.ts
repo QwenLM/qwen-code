@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  MediaMemoryService,
   MediaMemoryRecallService,
   type MediaMemoryNextPolicyAction,
   type MediaMemoryRecallAdvisor,
 } from '../services/media-memory/index.js';
+import { formatResourceHandleText } from './disclosure.js';
 import { resolveMediaPolicyModelAccess } from './policy/model-access.js';
 import { OmniObjectStore } from './storage.js';
 import type { MediaChannel } from '../services/media-memory/index.js';
@@ -102,4 +105,48 @@ export function createMediaMemoryRecallService(
     config.getOmniMediaResourceRegistry(),
     { advise: buildMediaMemoryRecallAdvisor(config) },
   );
+}
+
+/**
+ * Re-anchor a remembered file into this session (design M §9.2.1).
+ *
+ * A handle is only minted at delivery, and delivery needs the bytes — so a
+ * file memory knows about but that is gone from disk had no way back into
+ * a session, and its transcripts and keyframes were stranded. The same
+ * friction hits an audit that does not want to re-deliver a 2.4 GB film
+ * just to ask what work was recorded: without a handle, recall rejects
+ * everything, and the natural next move (passing the filename as a
+ * resourceId) is correctly refused.
+ *
+ * The user's own `@`-reference is the authorization here — the same
+ * authorization a normal delivery carries — so this mints a handle from
+ * the RECORDED identity without needing the bytes. Returns undefined when
+ * memory is off or has never seen this locator.
+ */
+export function reanchorRememberedMedia(
+  config: Config,
+  absolutePath: string,
+): Promise<{ resourceId: string; annotation: string } | undefined> {
+  const memoryConfig = config.getOmniMemoryConfig?.();
+  if (!memoryConfig) return Promise.resolve(undefined);
+  const registry = config.getOmniMediaResourceRegistry?.();
+  if (!registry) return Promise.resolve(undefined);
+  const store = new OmniObjectStore(config.storage.getQwenDir());
+  return new MediaMemoryService(store.getOmniRootDir())
+    .findBindingByFileRef(absolutePath)
+    .then((found) => {
+      if (!found) return undefined;
+      const { resourceId } = registry.bind({
+        ...found.binding,
+        fileRef: absolutePath,
+        mediaType: found.mediaType,
+      });
+      return {
+        resourceId,
+        annotation: formatResourceHandleText(
+          path.basename(absolutePath),
+          resourceId,
+        ),
+      };
+    });
 }

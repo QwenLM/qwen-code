@@ -284,6 +284,13 @@ export async function resolveAtCommandQuery({
   // store) after it. Only active when omni delivery is on; otherwise URL
   // tokens keep today's fall-through behavior (left as text).
   const urlMediaRefs: Array<{ originalAtPath: string; url: string }> = [];
+  /** `@`-referenced media whose bytes are gone but whose memory survives:
+   * re-anchored to a session handle so recall stays reachable. */
+  const rememberedMediaRefs: Array<{
+    originalAtPath: string;
+    pathName: string;
+    annotation: string;
+  }> = [];
 
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
@@ -473,9 +480,43 @@ export async function resolveAtCommandQuery({
       }
     }
     if (!resolvedSuccessfully && sawNotFound) {
-      onDebugMessage(
-        `Path ${pathName} not found. Path ${pathName} will be skipped.`,
-      );
+      // The bytes are gone, but media memory may still hold everything
+      // that was ever derived from them (transcripts, keyframes, the
+      // processing history). A handle is normally minted only at delivery,
+      // which needs the bytes — so that knowledge used to be unreachable
+      // for good. The user's own `@`-reference is the same authorization a
+      // delivery carries, so re-anchor from the recorded identity and hand
+      // the model a handle it can recall with (design M §9.2.1).
+      let reanchored = false;
+      if (config.isOmniEnabled?.()) {
+        const { reanchorRememberedMedia } = await import(
+          '@qwen-code/qwen-code-core'
+        );
+        for (const dir of config.getWorkspaceContext().getDirectories()) {
+          const anchor = await reanchorRememberedMedia(
+            config,
+            path.resolve(dir, pathName),
+          );
+          if (!anchor) continue;
+          rememberedMediaRefs.push({
+            originalAtPath,
+            pathName,
+            annotation: anchor.annotation,
+          });
+          atPathToResolvedSpecMap.set(originalAtPath, pathName);
+          onDebugMessage(
+            `Path ${pathName} is gone but remembered; re-anchored as ` +
+              `${anchor.resourceId} (bytes unavailable).`,
+          );
+          reanchored = true;
+          break;
+        }
+      }
+      if (!reanchored) {
+        onDebugMessage(
+          `Path ${pathName} not found. Path ${pathName} will be skipped.`,
+        );
+      }
     }
   }
 
@@ -1116,18 +1157,30 @@ export async function resolveAtCommandQuery({
   // its content block via the "--- Content from ... ---" delimiter labels (and
   // the verbatim `@server:uri` / `@path` left in the prompt text), not by
   // positional alignment, so grouping is safe.
+  // Re-anchored media: a handle annotation plus an explicit note that the
+  // bytes are gone, so the model recalls instead of trying to read.
+  const rememberedMediaParts: Part[] = rememberedMediaRefs.flatMap((ref) => [
+    { text: ref.annotation },
+    {
+      text:
+        `【媒体缺失】${ref.pathName}：文件已不在磁盘上，无法投递画面/音频。` +
+        `其处理记忆仍可用——用上面的句柄调用 omni_recall_media_memory 取回。`,
+    },
+  ]);
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
     ...urlMediaParts,
+    ...rememberedMediaParts,
   ];
   const allLabels = [
     ...scopedMentionLabels,
     ...contentLabelsForDisplay,
     ...resourceLabels,
     ...urlMediaLabels,
+    ...rememberedMediaRefs.map((ref) => `${ref.pathName} (记忆)`),
   ];
 
   return {

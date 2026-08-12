@@ -15,7 +15,10 @@ import {
   MediaMemoryService,
   MediaResourceRegistry,
 } from '../services/media-memory/index.js';
-import { buildMediaMemoryRecallAdvisor } from './memory-recall.js';
+import {
+  buildMediaMemoryRecallAdvisor,
+  reanchorRememberedMedia,
+} from './memory-recall.js';
 import { OmniRecallMediaMemoryTool } from './recall-media-memory-tool.js';
 
 describe('OmniRecallMediaMemoryTool', () => {
@@ -138,6 +141,86 @@ describe('OmniRecallMediaMemoryTool', () => {
     const invocation = tool.build({ resourceIds: ['media-1-ab'], query: 'q' });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error?.type).toBe('execution_failed');
+  });
+});
+
+describe('reanchorRememberedMedia', () => {
+  let tmpDir: string;
+  let registry: MediaResourceRegistry;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-reanchor-'));
+    registry = new MediaResourceRegistry();
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  const cfg = (overrides?: Record<string, unknown>): Config =>
+    ({
+      storage: { getQwenDir: () => tmpDir },
+      getOmniMemoryConfig: () => DEFAULT_OMNI_MEMORY_CONFIG,
+      getOmniMediaResourceRegistry: () => registry,
+      ...overrides,
+    }) as unknown as Config;
+
+  /** Record a file, then delete its bytes. */
+  async function rememberThenDelete(): Promise<string> {
+    const filePath = path.join(tmpDir, 'gone.mkv');
+    await fs.writeFile(filePath, 'bytes');
+    const memory = new MediaMemoryService(path.join(tmpDir, 'omni'));
+    await memory.recordFileRecognized({
+      fileRef: filePath,
+      sha256: 'f'.repeat(64),
+      mediaType: 'video',
+      metadata: { durationMs: 1000 },
+      sizeBytes: 5,
+      mimeType: 'video/x-matroska',
+      origin: 'user',
+      source: { protocol: 'local', locator: 'gone.mkv' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+    await fs.rm(filePath);
+    return filePath;
+  }
+
+  it('mints a handle for a remembered file whose bytes are gone', async () => {
+    const filePath = await rememberThenDelete();
+
+    const anchored = await reanchorRememberedMedia(cfg(), filePath);
+
+    expect(anchored).toBeDefined();
+    // The handle resolves like any delivered one, so recall accepts it —
+    // which is the whole point: the memory of a deleted file stays
+    // reachable instead of being stranded forever.
+    const binding = registry.resolve(anchored!.resourceId);
+    expect(binding).toMatchObject({ fileRef: filePath, mediaType: 'video' });
+    expect(anchored!.annotation).toContain('【媒体资源】gone.mkv：');
+    expect(anchored!.annotation).toContain(anchored!.resourceId);
+    // Never the real path — only the basename the user already typed.
+    expect(anchored!.annotation).not.toContain(tmpDir);
+  });
+
+  it('returns undefined for a path memory has never seen', async () => {
+    await rememberThenDelete();
+    await expect(
+      reanchorRememberedMedia(cfg(), path.join(tmpDir, 'stranger.mkv')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('returns undefined when memory is not configured', async () => {
+    const filePath = await rememberThenDelete();
+    await expect(
+      reanchorRememberedMedia(
+        cfg({ getOmniMemoryConfig: () => undefined }),
+        filePath,
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 

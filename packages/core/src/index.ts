@@ -695,6 +695,7 @@ export { processToolResultOmniMedia } from './omni/tool-result-media.js';
 export {
   buildMediaMemoryRecallAdvisor,
   createMediaMemoryRecallService,
+  reanchorRememberedMedia,
 } from './omni/memory-recall.js';
 export {
   runOmniMemorySideQuery,

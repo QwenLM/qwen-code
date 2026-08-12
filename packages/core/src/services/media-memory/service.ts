@@ -363,6 +363,48 @@ export class MediaMemoryService {
   }
 
   /**
+   * Read-side lookup by LOCATOR, for the harness only (design M §9.2.1:
+   * path/hash lookup is a harness capability; the model is confined to
+   * session handles). Returns the CURRENT version of the File recorded at
+   * this locator, whether or not the bytes are still on disk — which is
+   * the point: it lets a remembered-but-missing file be re-anchored into a
+   * session so its memory stays reachable.
+   */
+  async findBindingByFileRef(fileRef: string): Promise<
+    | {
+        binding: MediaMemoryBinding;
+        mediaType: OmniModality;
+        sha256: string;
+      }
+    | undefined
+  > {
+    try {
+      return await this.store.read(undefined, (snapshot) => {
+        for (const file of Object.values(snapshot.files)) {
+          if (file.fileRef !== fileRef) continue;
+          const version = snapshot.versions[file.currentVersionId];
+          if (!version) return undefined;
+          return {
+            binding: {
+              fileId: file.fileId,
+              fileVersionId: version.fileVersionId,
+              rootFileId: file.rootFileId,
+            },
+            mediaType: version.mediaType,
+            sha256: version.sha256,
+          };
+        }
+        return undefined;
+      });
+    } catch (err) {
+      debugLogger.debug(
+        `findBindingByFileRef failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Read-side lookup for callers that hold bytes but no identity (the
    * reactive degradation ladder re-recognizes a stored object without
    * knowing which memory version it is). Returns the binding of the

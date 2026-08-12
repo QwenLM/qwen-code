@@ -620,6 +620,34 @@ describe('MediaMemoryRecallService — nextPolicyActions', () => {
   });
 });
 
+describe('MediaMemoryRecallService — truncation visibility', () => {
+  it('says how many matched when the budget cut the list short', async () => {
+    const source = await recognizeMovie();
+    await commitDegrade(source);
+    await commitTranscript(source);
+    const resourceId = bindSource(source);
+
+    const full = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+    });
+    // An exhaustive page carries no counter, so a reader seeing the field
+    // absent knows it is looking at everything.
+    expect(full.matchedEntries).toBeUndefined();
+    expect(full.entries.length).toBeGreaterThan(1);
+
+    const page = await recallService().recall({
+      resourceIds: [resourceId],
+      query: 'q',
+      limit: 1,
+    });
+    expect(page.entries).toHaveLength(1);
+    // A real audit concluded "no keyframes were ever extracted" from a
+    // truncated page; the counter is what makes that mistake impossible.
+    expect(page.matchedEntries).toBe(full.entries.length);
+  });
+});
+
 describe('MediaMemoryRecallService — sideQuery manifest and selection (§9.3)', () => {
   it('summarizes candidates without full text or local paths', async () => {
     const source = await recognizeMovie();

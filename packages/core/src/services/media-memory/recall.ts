@@ -108,6 +108,15 @@ export interface MediaMemoryRecallResult {
   entries: MediaMemoryRecallEntry[];
   gaps: MediaMemoryRecallGap[];
   nextPolicyActions?: MediaMemoryNextPolicyAction[];
+  /**
+   * Total entries that matched, present ONLY when the entry budget cut the
+   * list short. Without it a truncated page is indistinguishable from an
+   * exhaustive one: a real audit read 6 clips under `limit: 12` and
+   * concluded "no keyframes were ever extracted" while the store held 72
+   * of them. The reader was being honest about what it saw — it simply had
+   * no way to know it was looking at a page.
+   */
+  matchedEntries?: number;
 }
 
 /** One candidate-manifest row for the sideQuery selector (M §9.3):
@@ -712,12 +721,16 @@ export class MediaMemoryRecallService {
           ? 'partial'
           : 'hit';
 
+    // Only when the budget actually cut something: an exhaustive page stays
+    // as small as it was before this field existed (§9.4 minimal return).
+    const matched = collected.candidates.size;
     return {
       status,
       files: [...files.values()],
       entries: resultEntries,
       gaps: resultGaps,
       ...(nextPolicyActions.length > 0 ? { nextPolicyActions } : {}),
+      ...(matched > resultEntries.length ? { matchedEntries: matched } : {}),
     };
   }
 
