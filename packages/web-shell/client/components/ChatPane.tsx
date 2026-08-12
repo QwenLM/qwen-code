@@ -76,6 +76,7 @@ import {
   skillDescriptionKey,
 } from '../constants/localCommands';
 import { mergeCommands } from '../hooks/daemonSessionMappers';
+import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
@@ -194,6 +195,8 @@ export interface ChatPaneProps {
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
+  /** Whether this pane owns Session Catalog turn-completion reconciliation. */
+  reportCatalogTurnCompletion?: boolean;
   hidden?: boolean;
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
@@ -226,6 +229,7 @@ export function ChatPane({
   restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
+  reportCatalogTurnCompletion = true,
   hidden = false,
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
@@ -238,6 +242,9 @@ export function ChatPane({
   const connection = useConnection();
   const actions = useActions();
   const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
   const transcriptHistory = useTranscriptHistory();
@@ -314,6 +321,54 @@ export function ChatPane({
   }, [artifacts, connection.sessionId, onPaneArtifactsChange]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
+  const catalogOwnerCwd =
+    connection.workspaceCwd &&
+    workspaceCwd &&
+    connection.workspaceCwd !== workspaceCwd
+      ? undefined
+      : (connection.workspaceCwd ?? workspaceCwd);
+  const previousCatalogStreamingStateRef = useRef(streamingState);
+  const catalogStreamingSessionIdRef = useRef<string | undefined>(
+    streamingState !== 'idle' ? connection.sessionId : undefined,
+  );
+  const catalogStreamingWorkspaceCwdRef = useRef<string | undefined>(
+    streamingState !== 'idle' ? catalogOwnerCwd : undefined,
+  );
+  useEffect(() => {
+    const previous = previousCatalogStreamingStateRef.current;
+    previousCatalogStreamingStateRef.current = streamingState;
+    if (
+      streamingState !== 'idle' &&
+      (previous === 'idle' ||
+        catalogStreamingSessionIdRef.current === undefined)
+    ) {
+      catalogStreamingSessionIdRef.current = connection.sessionId;
+      catalogStreamingWorkspaceCwdRef.current = catalogOwnerCwd;
+    } else if (
+      streamingState !== 'idle' &&
+      connection.sessionId === catalogStreamingSessionIdRef.current &&
+      catalogStreamingWorkspaceCwdRef.current === undefined
+    ) {
+      catalogStreamingWorkspaceCwdRef.current = catalogOwnerCwd;
+    }
+    if (
+      previous !== 'idle' &&
+      streamingState === 'idle' &&
+      connection.sessionId &&
+      connection.sessionId === catalogStreamingSessionIdRef.current &&
+      catalogOwnerCwd &&
+      catalogOwnerCwd === catalogStreamingWorkspaceCwdRef.current &&
+      reportCatalogTurnCompletion
+    ) {
+      sessionCatalogController.turnCompleted(catalogOwnerCwd);
+    }
+  }, [
+    catalogOwnerCwd,
+    connection.sessionId,
+    reportCatalogTurnCompletion,
+    sessionCatalogController,
+    streamingState,
+  ]);
   const firstPromptAdmittedRef = useRef(false);
   const [unknownPromptAdmission, setUnknownPromptAdmission] =
     useState<UnknownPromptAdmission | null>(null);
@@ -483,6 +538,7 @@ export function ChatPane({
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
@@ -555,6 +611,12 @@ export function ChatPane({
             },
             onAdmitted: () => {
               if (admissionOwnerRef.current !== admissionOwner) return;
+              if (connection.sessionId && catalogOwnerCwd) {
+                sessionCatalogController.promptAdmitted(
+                  catalogOwnerCwd,
+                  connection.sessionId,
+                );
+              }
               admitted = true;
               notifyFirstPromptAdmitted();
               clearFollowup();
@@ -569,6 +631,11 @@ export function ChatPane({
               reportError(error, 'Failed to send prompt');
               return;
             }
+            if (catalogOwnerCwd) {
+              sessionCatalogController.promptAdmissionUncertain(
+                catalogOwnerCwd,
+              );
+            }
             setUnknownPromptAdmission({
               owner: admissionOwner,
               commitAccepted,
@@ -582,20 +649,25 @@ export function ChatPane({
           });
         return false;
       }
-      if (!trimmed && !inputAnnotations) {
-        return enqueuePrompt(trimmed, images);
+      const queued =
+        !trimmed && !inputAnnotations
+          ? enqueuePrompt(trimmed, images)
+          : enqueuePrompt(
+              trimmed,
+              images,
+              undefined,
+              inputAnnotations,
+              notifyFirstPromptAdmitted,
+            );
+      if (queued !== false && catalogOwnerCwd) {
+        sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
       }
-      return enqueuePrompt(
-        trimmed,
-        images,
-        undefined,
-        inputAnnotations,
-        notifyFirstPromptAdmitted,
-      );
+      return queued;
     },
     [
       actions,
       admissionPayloadLocked,
+      catalogOwnerCwd,
       clearFollowup,
       connection.sessionId,
       connection.status,
@@ -604,6 +676,7 @@ export function ChatPane({
       onImageIngestionNotice,
       reportError,
       restartSseOnPrompt,
+      sessionCatalogController,
       t,
     ],
   );
@@ -641,6 +714,21 @@ export function ChatPane({
       });
     },
     [connection.sessionId, onRightPanelOpen],
+  );
+
+  const handleImagePreview = useCallback(
+    (src: string, alt?: string) => {
+      if (!connection.sessionId) return;
+      handleRightPanelOpen({
+        id: 'image',
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        turnId: connection.sessionId,
+        src,
+        ...(alt ? { alt } : {}),
+      });
+    },
+    [connection.sessionId, handleRightPanelOpen, t],
   );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
@@ -907,6 +995,7 @@ export function ChatPane({
                   : undefined
               }
               onTurnOutputOpen={handleRightPanelOpen}
+              onImagePreview={handleImagePreview}
               onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
@@ -1004,6 +1093,7 @@ export function ChatPane({
           onDismissFollowup={onDismissFollowup}
           onImageIngestionNotice={onImageIngestionNotice}
           sessionId={connection.sessionId}
+          onImagePreview={handleImagePreview}
           atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
           animatePlaceholder={false}

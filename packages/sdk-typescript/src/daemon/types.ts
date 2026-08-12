@@ -3945,7 +3945,8 @@ export type DaemonExtensionOriginSource =
   | 'QwenCode'
   | 'Claude'
   | 'Gemini'
-  | 'Qoder';
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface DaemonExtensionCapabilities {
   mcpServerCount: number;
