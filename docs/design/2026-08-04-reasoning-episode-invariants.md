@@ -24,8 +24,10 @@ status: 'draft'
 ## Problem
 
 qwen-code's shared internal chat history representation, `Content[]`/`Part[]`
-(from `@google/genai`), is used across every content generator: Gemini,
-Anthropic (`USE_ANTHROPIC`, incl. DeepSeek's Anthropic-compatible backend), Gemini (`USE_GEMINI`/`USE_VERTEX_AI`), OpenAI-compatible (`USE_OPENAI`), and Qwen/DashScope (`QWEN_OAUTH`). Reasoning/thinking output
+(from `@google/genai`), is used across every content generator: Anthropic
+(`USE_ANTHROPIC`, incl. DeepSeek's Anthropic-compatible backend), Gemini
+(`USE_GEMINI`/`USE_VERTEX_AI`), OpenAI-compatible (`USE_OPENAI`), and
+Qwen/DashScope (`QWEN_OAUTH`). Reasoning/thinking output
 rides on exactly two fields on a `Part`: `thought: boolean` and
 `thoughtSignature?: string`. Providers disagree sharply on how strict the
 replay contract for these fields is:
@@ -110,10 +112,10 @@ inventory below:
 | 5   | Anthropic converter request-building pipeline                                           | [`converter.ts:262-335`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L262-L335)                                                                                                                                                                            | **Yes, per-request** — this is the last line of defense against every upstream gap, but is **disabled for native Anthropic base URLs** (see below)                                           |
 | 6   | Chat compaction                                                                         | [`chatCompressionService.ts`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/chatCompressionService.ts), [`postCompactAttachments.ts:772-854`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/postCompactAttachments.ts#L772-L854) | **Partial — a real, previously-undocumented gap.** See below                                                                                                                                 |
 | 7   | History-editing utilities (`setHistory`, `truncateHistory`, `stripThoughtsFromHistory`) | [`geminiChat.ts:4253-4287`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4253-L4287)                                                                                                                                                                                                | `setHistory`/`truncateHistory` **inherit** whatever they're given; `stripThoughtsFromHistory` is safe by wholesale elimination                                                               |
-| 8   | Rewind (two independent implementations, contradictory policies)                        | `AppContainer.tsx` (interactive) vs. [`Session.ts:2243-2244`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/cli/src/acp-integration/session/Session.ts#L2243-L2244) (ACP/VSCode)                                                                                                                                  | **Contested — see "A currently-live contradiction" below**                                                                                                                                   |
-| 9   | Tool scheduler call/result pairing                                                      | `core/coreToolScheduler.ts`, `useGeminiStream.ts`                                                                                                                                                                                                                                                                                                              | **Yes, by not touching the field**                                                                                                                                                           |
-| 10  | Managed-memory microcompaction                                                          | `services/microcompaction/microcompact.ts`                                                                                                                                                                                                                                                                                                                     | **Yes, by not touching the field** — operates on `functionResponse` payloads only                                                                                                            |
-| 11  | Fork/subagent history seeding, ACP history replay, background-agent transcript recovery | `agents/runtime/`, `background-agent-resume.ts`, `packages/cli/src/acp-integration/session/history-replay-page.ts`                                                                                                                                                                                                                                             | **Uncertain — flagged, not traced to the same depth**                                                                                                                                        |
+| 8   | Rewind (two independent implementations, contradictory policies)                        | `packages/cli/src/ui/AppContainer.tsx` (interactive) vs. [`Session.ts:2243-2244`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/cli/src/acp-integration/session/Session.ts#L2243-L2244) (ACP/VSCode)                                                                                                              | **Contested — see "A currently-live contradiction" below**                                                                                                                                   |
+| 9   | Tool scheduler call/result pairing                                                      | `packages/core/src/core/coreToolScheduler.ts`, `packages/cli/src/ui/hooks/useGeminiStream.ts`                                                                                                                                                                                                                                                                  | **Yes, by not touching the field**                                                                                                                                                           |
+| 10  | Managed-memory microcompaction                                                          | `packages/core/src/services/microcompaction/microcompact.ts`                                                                                                                                                                                                                                                                                                   | **Yes, by not touching the field** — operates on `functionResponse` payloads only                                                                                                            |
+| 11  | Fork/subagent history seeding, ACP history replay, background-agent transcript recovery | `packages/core/src/agents/runtime/`, `packages/core/src/agents/background-agent-resume.ts`, `packages/cli/src/acp-integration/session/history-replay-page.ts`                                                                                                                                                                                                  | **Uncertain — flagged, not traced to the same depth**                                                                                                                                        |
 
 ### Site 1 — Live per-stream consolidation
 
@@ -137,9 +139,9 @@ call, gated on that stream's own `hasToolCall`. Deliberately **trailing-only,
 not whole-array**: a stream's own truncation can only ever leave the dangling
 episode as the trailing element, so restricting to "trailing" is what
 distinguishes "truncated mid-episode" from DeepSeek's legitimate
-unsigned-thinking-before-tool*use shape. This same array reference is what
+unsigned-thinking-before-`tool_use` shape. This same array reference is what
 [`recordAssistantTurn`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L4963)
-persists to JSONL, so the strip happens \_before* the write for this
+persists to JSONL, so the strip happens **before** the write for this
 particular record shape. **Invariant holds.**
 
 **Known, documented, accepted residual risk**: a non-compliant proxy that
@@ -153,10 +155,10 @@ trade-off, stated in the code's own comments, not an oversight.
 This is the site PR #8260's final commit closed for the **live** path — and
 the site whose on-disk counterpart is this doc's most significant finding.
 
-The MAX*TOKENS recovery loop only proceeds when the truncated turn has **no**
-`functionCall` of its own — exactly the precondition under which Site 1's
-`hasToolCall` was `false` and never fired for that specific record. If the
-recovery \_continuation* then calls a tool, [`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5139)
+The `MAX_TOKENS` recovery loop only proceeds when the truncated turn has
+**no** `functionCall` of its own — exactly the precondition under which Site
+1's `hasToolCall` was `false` and never fired for that specific record. If
+the recovery **continuation** then calls a tool, [`coalesceRecoveryPairs`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/geminiChat.ts#L5097-L5139)
 re-runs the same trailing-only check on the truncated turn's parts
 **immediately before** merging in the continuation:
 
@@ -196,8 +198,12 @@ from it.
 Full trace, all four reviewers' independent verdicts, and the corrected
 mechanism are in [`2026-08-04-resume-jsonl-reasoning-divergence.md`](./2026-08-04-resume-jsonl-reasoning-divergence.md).
 Summary for this inventory: `buildApiHistoryFromConversation` and
-`appendApiHistoryRecord` load every JSONL record's `Content` verbatim, with
-zero `thought`/`thoughtSignature` awareness anywhere in the resume path. The
+`appendApiHistoryRecord` load every JSONL record's `Content` verbatim. The
+only `thought`-aware seam in the resume path is
+`buildApiHistoryFromConversation`'s `stripThoughtsFromHistory` option
+([`sessionService.ts:2119`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/services/sessionService.ts#L2119)),
+which defaults to `false` and has no production caller — so no
+dangling-thought consolidation runs on resume in practice. The
 synthetic `OUTPUT_RECOVERY_MESSAGE` user turn is never persisted to disk at
 all (grep-confirmed: the only `chatRecordingService` calls in `geminiChat.ts`
 are `recordChatCompression` and `recordAssistantTurn` — no user-message
@@ -225,7 +231,7 @@ The converter's guard,
 [`dropUnsignedThinkingFromAssistantMessages`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/converter.ts#L1148-L1217),
 is the only provider-side defense against every upstream mutation-site gap in
 this document. It is gated by `dropUnsignedAssistantThinking`, computed at
-[`anthropicContentGenerator.ts:736-741`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/anthropicContentGenerator.ts#L736-L741):
+[`anthropicContentGenerator.ts:736-740`](https://github.com/QwenLM/qwen-code/blob/f907a0f5c13cf5de1ad5c442b5ecefa6dceedb8e/packages/core/src/core/anthropicContentGenerator/anthropicContentGenerator.ts#L736-L740):
 
 ```ts
 const dropUnsignedAssistantThinking =
