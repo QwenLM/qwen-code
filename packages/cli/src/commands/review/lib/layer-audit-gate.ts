@@ -144,10 +144,12 @@ export function layerAuditGate(
     return { unreviewed: [] };
   }
 
-  // Typed, not inferred: a future reshape of `repositoryContextOf` that renamed
-  // or dropped `domains` would otherwise silently disable the gate on every
-  // modeled-system diff, caught only at runtime. The annotation makes it a
-  // compile error.
+  // Typed, not inferred: the annotation pins the declared type regardless of how
+  // the assignment's control flow is later restructured (or if
+  // `repositoryContextOf` starts returning `any`), so `context.domains` stays
+  // checked against `RepositoryContext` at compile time. (An evolving `let`
+  // already narrows to the return type today, so this is belt-and-braces, not the
+  // sole guard.)
   let context: RepositoryContext | null;
   try {
     context = repositoryContextOf(plan as { repositoryContext?: unknown });

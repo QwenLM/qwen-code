@@ -183,12 +183,44 @@ describe('parseLayerReceipts', () => {
       '<a title="Layer walked: toctou">t</a>', // tag attribute value
       '[t](/u "Layer walked: toctou")', // link title
       '[x\nLayer walked: toctou]: /url', // link-reference continuation
+      '![Layer walked: toctou](/u)', // image alt — an attribute, never prose
+      'Layer walked: `toctou` — styled id', // id inside a code span, dropped
+      // A dropped inline node BREAKS the line, so a marker cannot stitch across
+      // it into an id GitHub renders as one token. Both render two things, not a
+      // receipt: "Layer walked: xtoctou" and "Layer walked: ⟨img⟩toctou".
+      'Layer walked: `x`toctou', // code span splits marker from id
+      'Layer walked: ![a](/u)toctou', // image splits marker from id
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
     // A link's VISIBLE text is prose and still counts.
     expect([
       ...parseLayerReceipts('[Layer walked: toctou](/u) — real'),
     ]).toEqual(['toctou']);
+    // A code span BEFORE a whole marker leaves the marker as visible prose
+    // ("x Layer walked: toctou"), so it stays a real receipt — the break only
+    // stops fragments STITCHING, it does not invent a quotation.
+    expect([...parseLayerReceipts('`x` Layer walked: toctou')]).toEqual([
+      'toctou',
+    ]);
+  });
+
+  it('credits a marker rendered as VISIBLE prose in any block, not just a paragraph', () => {
+    // The source-line scanner this replaced anchored on the raw line and so was
+    // blind to a marker GitHub renders as visible prose inside a heading, a table
+    // cell, or via an HTML entity. Reading the rendered token stream corrects
+    // that: each of these IS a real, visible receipt, so it counts. (Corroboration
+    // — identity + territory read — is the separate gate against parroted ones.)
+    const visible = [
+      '## Layer walked: toctou', // ATX heading text
+      '| Layer walked: toctou | x |\n| --- | --- |', // table cell
+      'Layer walked: &#x74;octou', // entity id, decoded to `toctou` by the render
+    ];
+    for (const q of visible)
+      expect([...parseLayerReceipts(q)]).toEqual(['toctou']);
+    // The interior of a multi-line HTML open tag is raw markup, never prose.
+    expect(
+      parseLayerReceipts('<a\n    Layer walked: toctou\n    >x</a>').size,
+    ).toBe(0);
   });
 
   it('requires the colon — a colon-less shape is not a receipt', () => {
@@ -294,6 +326,20 @@ describe('inferLayersFromProse', () => {
       '> export -f is imported by a child shell',
     ].join('\n');
     expect(inferLayersFromProse(quoted).size).toBe(0);
+  });
+
+  it('shares the receipt parser quotation view — an inline-code signal is dropped', () => {
+    // Moving to the token authority made an inline code span quoted for this
+    // estimate too. The only difference between these two is the backticks, so a
+    // signal named in a code span infers nothing where the bare token infers a
+    // layer. That can UNDER-count a layer the auditor did name — but that only
+    // owes MORE (fail-safe), acceptable for a non-authoritative guess.
+    expect(
+      inferLayersFromProse('the guard mishandles set -a expansion').size,
+    ).toBeGreaterThan(0);
+    expect(
+      inferLayersFromProse('the guard mishandles `set -a` expansion').size,
+    ).toBe(0);
   });
 });
 

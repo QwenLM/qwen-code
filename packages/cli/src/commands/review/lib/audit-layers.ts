@@ -239,15 +239,24 @@ function* usedLines(finalText: string): Generator<string> {
     if (t.type === 'blockquote_open') blockquoteDepth++;
     else if (t.type === 'blockquote_close') blockquoteDepth--;
     else if (t.type === 'inline' && blockquoteDepth === 0) {
-      // The visible prose of this inline: text and line breaks only. `code_inline`
-      // (a code span) and `html_inline` (raw tags, comments, attributes) are
-      // quoted or invisible; a link/image title and alt live in attributes, never
-      // in a text child, so they drop out for free. A link/image's VISIBLE text IS
-      // a text child and is kept — it renders as prose.
+      // The visible prose of this inline. `text` is prose; `code_inline` (a code
+      // span), `html_inline` (raw tags, comments, attributes) and an `image` (its
+      // alt/title live in attributes, never in a text child) are quoted or
+      // non-prose and BREAK the line — a dropped node must not let the text on
+      // either side stitch into a marker GitHub never renders as one receipt
+      // (`` `x` Layer walked: X `` renders two things, not a receipt). Emphasis
+      // and link open/close nodes are deliberately NOT breaks: their visible text
+      // children flow through as prose (a link's visible text is a real receipt).
       let prose = '';
       for (const c of t.children ?? []) {
         if (c.type === 'text') prose += c.content;
-        else if (c.type === 'softbreak' || c.type === 'hardbreak')
+        else if (
+          c.type === 'softbreak' ||
+          c.type === 'hardbreak' ||
+          c.type === 'code_inline' ||
+          c.type === 'html_inline' ||
+          c.type === 'image'
+        )
           prose += '\n';
       }
       yield* prose.split('\n');
@@ -290,9 +299,12 @@ export function inferLayersFromProse(
   finalText: string,
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
 ): Set<string> {
-  // Over the USED lines only — the estimate must not credit a layer from a
-  // signal that lives in quoted code or a blockquote, the same invariant the
-  // structured parser enforces.
+  // Over the USED lines only, sharing the receipt parser's quotation view: a
+  // signal in a fenced/indented block, a blockquote, OR an inline code span is
+  // dropped. For a receipt that is exactly right (a quoted marker is not a
+  // receipt); for this estimate it can UNDER-count a layer an auditor named in
+  // backticks (`` `set -a` ``), but that only infers FEWER layers → owes more →
+  // the over-cap (fail-safe) direction, acceptable for a non-authoritative guess.
   const lower = [...usedLines(finalText)].join('\n').toLowerCase();
   const ids = new Set<string>();
   for (const layer of taxonomy) {
