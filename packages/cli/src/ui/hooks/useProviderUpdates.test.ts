@@ -279,6 +279,10 @@ describe('useProviderUpdates', () => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
 
+    expect(
+      result.current.providerUpdateRequest!.entries[0]!.diff,
+    ).not.toHaveProperty('fallbackModel');
+
     await result.current.providerUpdateRequest!.onConfirm('update');
 
     await waitFor(() => {
@@ -604,6 +608,12 @@ describe('useProviderUpdates', () => {
         type: 'info',
         text: 'Coding Plan configuration updated successfully.',
       },
+      expect.any(Number),
+    );
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Model switched to'),
+      }),
       expect.any(Number),
     );
   });
