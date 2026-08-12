@@ -2013,6 +2013,14 @@ it -C ${outsideRepo} reset --hard`,
     () => `git() { :; }; unset -f git; git -C ${plainOutsidePath} reset --hard`,
     () =>
       `alias git='echo hi'; unalias git; git -C ${plainOutsidePath} reset --hard`,
+    // `env -i`/`-`/`--ignore-environment` wipe the exported function before
+    // bash starts, so even bash resolves the real git.
+    () =>
+      `git() { :; }; export -f git; env -i bash -c "git -C ${plainOutsidePath} reset --hard"`,
+    () =>
+      `git() { :; }; export -f git; env - bash -c "git -C ${plainOutsidePath} reset --hard"`,
+    () =>
+      `git() { :; }; export -f git; env --ignore-environment bash -c "git -C ${plainOutsidePath} reset --hard"`,
   ])(
     'does not let a stale/incompatible shadow mask a relocation %#',
     async (b) => {
@@ -2036,6 +2044,10 @@ it -C ${outsideRepo} reset --hard`,
       `alias git='echo hi'; git -C ${plainOutsidePath} reset --hard`,
       // Removing a different name leaves the git shadow intact.
       `git() { :; }; unset -f other; git -C ${plainOutsidePath} reset --hard`,
+      // `env -i` clears the function, but a read-only relocation is still fine.
+      `git() { :; }; export -f git; env -i bash -c "git -C ${plainOutsidePath} rev-parse HEAD"`,
+      // `env` without a clearing flag keeps the bash-imported shadow live.
+      `git() { :; }; export -f git; env FOO=bar bash -c "git -C ${plainOutsidePath} reset --hard"`,
     ]) {
       await expect(guard(request(command))).resolves.toEqual({ allowed: true });
     }

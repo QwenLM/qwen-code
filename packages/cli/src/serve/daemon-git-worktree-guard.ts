@@ -163,6 +163,11 @@ const ENV_KNOWN_FLAG_ONLY = new Set([
   '--debug',
 ]);
 
+// The subset of the flag-only options that start the child from an empty
+// environment. `-` is GNU env's shorthand for `-i`. Bundled forms (`-iv`) are
+// not exact members and already fail closed as unrecognized options.
+const ENV_CLEARS_ENVIRONMENT = new Set(['-', '-i', '--ignore-environment']);
+
 // Union of core shell-utils/shell.ts value-taking sudo options.
 const SUDO_VALUE_FLAGS = new Set([
   '-C',
@@ -274,6 +279,9 @@ interface GitEnvRelocation {
 interface PrefixState {
   readonly relocations: GitEnvRelocation[];
   unresolved: boolean;
+  // `env -i` / `--ignore-environment` wipe the inherited environment, so a
+  // later shell child receives none of the parent's `export -f` functions.
+  clearsEnvironment?: boolean;
 }
 
 type GuardDenial = { allowed: false; reason: string };
@@ -647,6 +655,9 @@ function consumeEnvWrapper(
       break;
     }
     if (ENV_KNOWN_FLAG_ONLY.has(token.text)) {
+      if (ENV_CLEARS_ENVIRONMENT.has(token.text)) {
+        state.clearsEnvironment = true;
+      }
       index++;
       continue;
     }
@@ -1168,7 +1179,10 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         payload: scan.payload,
         state,
         propagatesCwd: false,
-        importsExportedFunctions: program === 'bash',
+        // Only bash imports `export -f` functions, and only when it inherits
+        // the environment carrying them — `env -i bash -c` wipes them first.
+        importsExportedFunctions:
+          program === 'bash' && !state.clearsEnvironment,
       };
     }
     if (program === 'nohup' || program === 'exec') {
@@ -2198,7 +2212,9 @@ async function evaluateCommandWithCwd(
         } else {
           for (const token of run.slice(1)) {
             if (token.text.startsWith('-')) continue;
-            if (isFunctions || removalProgram === 'unalias') {
+            // `unalias` always removes an alias; `unset` removes a function
+            // only with `-f` — both captured by `isFunctions`.
+            if (isFunctions) {
               definedBodies.delete(token.text);
               gitShapedNames.delete(token.text);
               exportedFunctions.delete(token.text);
