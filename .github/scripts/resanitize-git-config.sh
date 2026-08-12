@@ -23,9 +23,17 @@ set -uo pipefail
 # tests pin every copy byte-identical — edit them together.
 
 if [ -e .git ]; then
-  # Worktree-scoped config first, then the local allowlist sweep — same
-  # ordering rationale as the inlined step (config.worktree can carry
-  # core.hooksPath and is invisible to `git config --local`).
+  # Repo-scope redirect files first. `.git/commondir` (the file twin of
+  # GIT_COMMON_DIR) repoints local config, refs AND objects — a plant makes
+  # the very --local sweep below act on the ATTACKER's config, and lets the
+  # PAT push deliver attacker content; `.git/shallow` (twin of
+  # GIT_SHALLOW_FILE) narrows the object graph. A normal actions/checkout is
+  # not a linked worktree, so neither file legitimately exists here —
+  # removing them cannot break a real checkout, only defuse a plant. Then
+  # config.worktree (can carry core.hooksPath, invisible to `git config
+  # --local`), then the local allowlist sweep.
+  GIT_DIR_PATH="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+  rm -f "${GIT_DIR_PATH}/commondir" "${GIT_DIR_PATH}/shallow" 2>/dev/null || true
   rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
   git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
   git config --local --name-only --list 2>/dev/null \

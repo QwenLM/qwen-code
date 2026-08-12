@@ -7052,33 +7052,93 @@ exit 1
       // gates do), so a concurrent job's ~/.gitconfig rewrite and an
       // env-planted GIT_SSL_NO_VERIFY/GIT_EXEC_PATH/GIT_DIR all miss.
       expect(step).toContain('export GIT_CONFIG_COUNT=0');
-      expect(step).toContain(
-        'export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-pat-gitconfig"',
-      );
       expect(step).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      // Unpredictable throwaway (mktemp), not a fixed literal a same-user
+      // watcher could re-plant into after the seed.
+      expect(step).toContain(
+        'export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"',
+      );
+      // PATH is pinned to the staged trusted value and the preload channels
+      // dropped BEFORE anything runs — else a swapped git/sha256sum/bash
+      // defeats the digest gate itself; the full env-channel closure covers
+      // the file-scope redirects (GLOBAL/SYSTEM), the exec/transport knobs,
+      // and every repo-redirect twin (DIR/WORK_TREE/COMMON_DIR/object dirs).
+      expect(step).toContain('export PATH="${TRUSTED_PATH}"');
+      expect(step).toMatch(/unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH/);
       for (const v of [
         'GIT_SSL_NO_VERIFY',
+        'GIT_SSL_CAINFO',
         'GIT_EXEC_PATH',
         'GIT_DIR',
         'GIT_WORK_TREE',
+        'GIT_COMMON_DIR',
+        'GIT_OBJECT_DIRECTORY',
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+        'GIT_SHALLOW_FILE',
+        'GIT_ALLOW_PROTOCOL',
         'GIT_CONFIG_PARAMETERS',
+        'GIT_PROXY_COMMAND',
         'GIT_SSH_COMMAND',
         'GIT_ASKPASS',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
       ]) {
-        expect(step).toMatch(new RegExp(`unset[\\s\\S]*\\b${v}\\b`));
+        expect(step).toMatch(new RegExp(`unset[\\s\\S]*?\\b${v}\\b`));
       }
     }
-    // The two PAT hermetic preambles are byte-identical (only their comment
-    // twin-names differ, stripped here): a hardening applied to one push
-    // site but not the other re-opens the class on the stale side.
+    // The three PAT hermetic preambles (both pushes AND Prepare) are
+    // identical (only their comment twin-names differ, stripped here): a
+    // hardening applied to one PAT git site but not the others re-opens the
+    // class on the stale side. Anchored from `export PATH` so the whole
+    // preamble — PATH pin, LD/env strip, mktemp redirect — is compared.
     const patBlockOf = (step) =>
       step
         .match(
-          /unset GIT_CONFIG_PARAMETERS[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+          /export PATH="\$\{TRUSTED_PATH\}"\n\s*unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \\[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
         )?.[0]
         .replace(/\s+/g, ' ');
     expect(patBlockOf(publishPrStep)).toBeTruthy();
     expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
+    expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
+    // Each PAT step carries the trusted-PATH env wiring.
+    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+      expect(step).toContain(
+        "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+      );
+    }
+    // The staging steps record the trusted PATH before any branch code runs.
+    expect(workflow.match(/trusted_path=\$\{PATH\}/g) ?? []).toHaveLength(2);
+    // The fork fetch and salvage fetch cannot recurse into a planted
+    // submodule and execute an ext:: URL with the PAT (env-level
+    // GIT_ALLOW_PROTOCOL is stripped; these pin the config level).
+    expect(pushAndReportStep).toContain(
+      '-c fetch.recurseSubmodules=false -c protocol.ext.allow=never',
+    );
+    // The push refuses a HEAD that is not the gate's verified head — closes a
+    // repo redirect (planted .git/commondir / GIT_DIR) that would push an
+    // attacker tree.
+    expect(pushAndReportStep).toMatch(
+      /HEAD_NOW="\$\(git rev-parse HEAD\)"[\s\S]{0,400}!= "\$\{VERIFIED_HEAD\}"[\s\S]{0,200}refusing to push/,
+    );
+    // The gate runner is digest-verified before BOTH gate passes (the branch
+    // runs its own build/test between them), with PATH pinned first.
+    expect(
+      workflow.match(
+        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/verify_runner_sha256=\$\(sha256sum /g) ?? [],
+    ).toHaveLength(1);
+    // resanitize defuses the repo-redirect FILES (.git/commondir/shallow).
+    const resanitizeScript = readFileSync(
+      '.github/scripts/resanitize-git-config.sh',
+      'utf8',
+    );
+    expect(resanitizeScript).toContain(
+      'rm -f "${GIT_DIR_PATH}/commondir" "${GIT_DIR_PATH}/shallow"',
+    );
     // Both staging steps stage the script and record its digest.
     expect(
       workflow.match(
@@ -7097,9 +7157,11 @@ exit 1
     // Count equality pins a future push site to ship with both or fail.
     const helperSites =
       workflow.match(/-c credential\."https:\/\/github\.com"\.helper=/g) ?? [];
+    // Tolerant of the intermediate `-c` transport/protocol flags git_auth
+    // also carries between the sslVerify pin and the helper reset.
     const resetSites =
       workflow.match(
-        /-c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
+        /-c http\.sslVerify=true (?:-c [^\n]*?)?-c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
       ) ?? [];
     expect(helperSites).toHaveLength(3);
     expect(resetSites).toHaveLength(helperSites.length);

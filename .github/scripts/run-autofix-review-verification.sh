@@ -31,8 +31,10 @@ set -eo pipefail
 # earlier step can inject any of them through $GITHUB_ENV. Strip them, then
 # redirect the file scopes. Keep this env+redirect block equal to the
 # issue-fix gate's copy (the contract test pins them).
-unset GIT_CONFIG_PARAMETERS GIT_SSL_NO_VERIFY GIT_SSL_CAINFO \
-  GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE \
+unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+  GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+  GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
   GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
 export GIT_CONFIG_COUNT=0
 export GIT_TERMINAL_PROMPT=0
