@@ -77,6 +77,7 @@ async function testBootstrapWorkspaceVisibility() {
             resolveBootstrapState = resolve;
           });
         }
+        if (command === 'open_logs') throw new Error('no file handler');
         assert.equal(command, 'restart_runtime');
         return new Promise(() => {});
       },
@@ -104,6 +105,12 @@ async function testBootstrapWorkspaceVisibility() {
 
   listeners['runtime-failed']({ payload: 'runtime failed' });
   assert.equal(body.dataset.state, 'error');
+  assert.equal(element('#workspace').hidden, false);
+  assert.equal(
+    element('#workspace').textContent,
+    '/Users/example/Projects/qwen-code',
+  );
+  await element('#logs').listeners.click();
   assert.equal(element('#workspace').hidden, false);
   assert.equal(
     element('#workspace').textContent,

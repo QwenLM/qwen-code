@@ -32,7 +32,7 @@ function setStatus(kind, heading, message, failure = '') {
   retry.hidden = kind !== 'error';
   choose.hidden = kind === 'starting';
   choose.disabled = kind === 'starting';
-  setWorkspace();
+  setWorkspace(kind === 'error' ? currentWorkspace : '');
 }
 
 async function chooseWorkspace() {
