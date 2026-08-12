@@ -71,6 +71,39 @@ const argsPreview = (args: string) => {
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 };
 
+const toolDisplayName = (name: string) =>
+  name
+    .split(/[_-]/)
+    .filter(Boolean)
+    .map((s) => s[0].toUpperCase() + s.slice(1))
+    .join('');
+
+function toolDescription(name: string, args: string): string {
+  let a: Record<string, unknown> = {};
+  try {
+    a = JSON.parse(args);
+  } catch {
+    return '';
+  }
+  const path = (a['file_path'] ?? a['path'] ?? a['filePath']) as
+    | string
+    | undefined;
+  const cmd = (a['command'] ?? a['cmd']) as string | undefined;
+  const base = (p?: string) => (p ? nodePath.basename(p) : '');
+  switch (name) {
+    case 'write_file':
+      return path ? `Writing to ${base(path)}` : '';
+    case 'read_file':
+      return path ? `Reading ${base(path)}` : '';
+    case 'list_directory':
+      return path ? `Listing ${path}` : 'Listing .';
+    case 'run_shell_command':
+      return cmd ? argsPreview(cmd) : '';
+    default:
+      return '';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // components
 // ---------------------------------------------------------------------------
@@ -121,9 +154,11 @@ function ToolCard(props: {
         backgroundColor={hover ? C.hover : undefined}
       >
         <text fg={iconColor}>{icon} </text>
-        <text fg={item.done ? C.dim : C.text}>
-          {item.title}
-          {suffix}
+        <text fg={C.text} attributes={1}>
+          {toolDisplayName(item.title)}
+        </text>
+        <text fg={C.dim}>
+          {` ${toolDescription(item.title, item.args ?? '')}${suffix}`}
         </text>
         {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
       </box>
@@ -452,6 +487,19 @@ function App({
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | undefined>(
     () => config?.getApprovalMode(),
   );
+  // Propagate the UI approval mode into the core config so the scheduler
+  // actually honours it (YOLO/AUTO auto-execute; DEFAULT asks). Without this
+  // the core kept the persisted mode and tools were skipped.
+  useEffect(() => {
+    if (!approvalMode || !config) return;
+    try {
+      (
+        config as { setApprovalMode?: (m: ApprovalMode) => void }
+      ).setApprovalMode?.(approvalMode);
+    } catch {
+      /* elevated-mode guard */
+    }
+  }, [approvalMode, config]);
   // A slash command is running (dispatcher.setIsProcessing parity); gates Esc
   // to dispatcher.cancel() and concurrent command submission.
   const [commandProcessing, setCommandProcessing] = useState(false);
@@ -906,10 +954,10 @@ function App({
                   paddingLeft={1}
                   marginTop={1}
                 >
-                  <text fg={C.green} attributes={1}>
+                  <text fg={C.accent} attributes={1}>
                     {'> '}
                   </text>
-                  <text fg={C.text} attributes={1}>
+                  <text fg={C.accent} attributes={1}>
                     {item.text}
                   </text>
                 </box>
