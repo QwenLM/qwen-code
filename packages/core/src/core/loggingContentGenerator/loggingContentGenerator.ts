@@ -49,6 +49,7 @@ import {
   getErrorMessage,
   getErrorStatus,
   getErrorType,
+  isAbortError,
 } from '../../utils/errors.js';
 import {
   startLLMRequestSpan,
@@ -262,7 +263,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     error: unknown,
     model: string,
     prompt_id: string,
+    abortSignal?: AbortSignal,
   ): void {
+    // A user cancel is not an API error, so skip the api_error event entirely —
+    // the span already records the cancellation through its aborted status, so
+    // the signal isn't lost. Without this gate a user cancel is emitted as a
+    // `qwen-code.api_error` event with error_type `APIUserAbortError`, which is
+    // exactly what #8356 reported; `isAbortError` gating the debug log alone
+    // does not cover this separate telemetry path.
+    if (abortSignal?.aborted && isAbortError(error)) {
+      return;
+    }
     try {
       this._logApiError(responseId, durationMs, error, model, prompt_id);
     } catch (loggingError) {
@@ -402,7 +413,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         config: this.config,
       });
       await context.with(spanContext, async () => {
-        this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
+        this.safelyLogApiError(
+          '',
+          durationMs,
+          error,
+          req.model,
+          userPromptId,
+          req.config?.abortSignal,
+        );
         try {
           await this.safelyLogOpenAIInteraction(
             await session.resolve(req),
@@ -490,7 +508,14 @@ export class LoggingContentGenerator implements ContentGenerator {
       const durationMs = Date.now() - startTime;
       const observedFinishReasons = exchange.controller.finalize(false);
       context.with(spanContext, () =>
-        this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
+        this.safelyLogApiError(
+          '',
+          durationMs,
+          error,
+          req.model,
+          userPromptId,
+          req.config?.abortSignal,
+        ),
       );
       const aborted = req.config?.abortSignal?.aborted ?? false;
       endLLMRequestSpan(llmSpan, {
@@ -802,6 +827,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             error,
             firstModelVersion || model,
             userPromptId,
+            abortSignal,
           ),
         );
         const openaiRequest = await openaiRequestPromise;

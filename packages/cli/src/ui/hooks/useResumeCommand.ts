@@ -19,6 +19,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -96,7 +97,10 @@ export function useResumeCommand(
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
-          text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          text: buildBackgroundWorkBlockedMessage(
+            config,
+            BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          ),
         };
         addItem(blockedMessage, Date.now());
         closeResumeDialog();

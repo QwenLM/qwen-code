@@ -51,14 +51,15 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
-import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
+import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../../serve/live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../../serve/live/live-speak-to-user.js';
 import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,
 } from './history-replay-page.js';
+import { createRepeatedToolFailureGuardState } from './repeated-tool-failure-guard.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
@@ -71,6 +72,7 @@ const startToolSpanSpy = vi.hoisted(() => vi.fn());
 const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
+const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
 const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
 // Records every LoopTickResolver construction's deps so a test can assert what
@@ -113,6 +115,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     logLoopDetected: (...args: Parameters<typeof actual.logLoopDetected>) => {
       logLoopDetectedSpy(...args);
       return actual.logLoopDetected(...args);
+    },
+    logRepeatedToolFailureGuard: (
+      ...args: Parameters<typeof actual.logRepeatedToolFailureGuard>
+    ) => {
+      logRepeatedToolFailureGuardSpy(...args);
+      return actual.logRepeatedToolFailureGuard(...args);
     },
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
@@ -380,10 +388,12 @@ describe('Session', () => {
   let session: Session;
   let currentModel: string;
   let currentAuthType: AuthType;
+  let originalProcessGuardMode: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
@@ -394,6 +404,7 @@ describe('Session', () => {
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    flush: ReturnType<typeof vi.fn>;
   };
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
@@ -438,6 +449,18 @@ describe('Session', () => {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
   };
+  let mockGoalRuntime: {
+    getSnapshot: ReturnType<typeof vi.fn>;
+    getRecoveryCause: ReturnType<typeof vi.fn>;
+    subscribe: ReturnType<typeof vi.fn>;
+    beginTurn: ReturnType<typeof vi.fn>;
+    releaseTurn: ReturnType<typeof vi.fn>;
+    permitForTurn: ReturnType<typeof vi.fn>;
+    getVerifierFeedback: ReturnType<typeof vi.fn>;
+    finishTurn: ReturnType<typeof vi.fn>;
+    dispatch: ReturnType<typeof vi.fn>;
+  };
+  let boundGoalHost: core.GoalTurnHost | undefined;
 
   function mockConfirmingTool(
     name: string,
@@ -525,10 +548,14 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    originalProcessGuardMode =
+      process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
+    process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] = 'shadow';
     startToolSpanSpy.mockClear();
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
+    logRepeatedToolFailureGuardSpy.mockReset();
     runVisionBridgeSpy.mockReset();
     bridgeToolResultImagesSpy.mockReset();
     bridgeToolResultImagesSpy.mockImplementation(
@@ -609,6 +636,7 @@ describe('Session', () => {
 
     mockChatRecordingService = {
       recordUserMessage: vi.fn(),
+      recordGoalRuntimeMessage: vi.fn(),
       recordMidTurnUserMessage: vi.fn(),
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
@@ -619,7 +647,28 @@ describe('Session', () => {
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      flush: vi.fn().mockResolvedValue(undefined),
     };
+    mockGoalRuntime = {
+      getSnapshot: vi.fn().mockReturnValue({
+        v: 2,
+        activity: 'idle',
+        goal: null,
+      }),
+      getRecoveryCause: vi.fn().mockReturnValue(undefined),
+      subscribe: vi.fn().mockReturnValue(() => {}),
+      beginTurn: vi.fn(),
+      releaseTurn: vi.fn().mockResolvedValue(false),
+      permitForTurn: vi.fn(),
+      getVerifierFeedback: vi.fn(),
+      finishTurn: vi.fn().mockResolvedValue(undefined),
+      // Present so settlement branches that pause the goal are assertable;
+      // without it a pause throws inside #settleGoalTurn and is swallowed.
+      dispatch: vi.fn().mockResolvedValue({
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      }),
+    };
+    boundGoalHost = undefined;
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
       getSnapshots: vi.fn().mockReturnValue([]),
@@ -702,6 +751,14 @@ describe('Session', () => {
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
+      bindGoalTurnHost: vi.fn().mockImplementation((host) => {
+        boundGoalHost = host;
+        return () => {
+          if (boundGoalHost === host) boundGoalHost = undefined;
+        };
+      }),
       getBackgroundTaskRegistry: vi
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
@@ -754,6 +811,12 @@ describe('Session', () => {
   });
 
   afterEach(() => {
+    if (originalProcessGuardMode === undefined) {
+      delete process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
+    } else {
+      process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] =
+        originalProcessGuardMode;
+    }
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
     // Clear session reference to allow garbage collection
@@ -5281,6 +5344,26 @@ describe('Session', () => {
       );
     });
 
+    it('records daemon prompt display text separately from model context', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'internal channel instructions\n\nhello' },
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'internal channel instructions\n\nhello',
+        undefined,
+        { displayText: 'hello', hookContext: '' },
+      );
+    });
+
     it('degrades an oversized inline image to a text placeholder before sending to the model', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];
@@ -7910,6 +7993,452 @@ describe('Session', () => {
       });
     });
 
+    describe('repeated tool execution failure guard', () => {
+      const guardModeEnv = 'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
+      let originalGuardMode: string | undefined;
+
+      const recreateSessionWithGuardMode = (
+        mode: 'off' | 'shadow' | 'warn' | 'enforce',
+      ) => {
+        originalGuardMode = process.env[guardModeEnv];
+        process.env[guardModeEnv] = mode;
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+      };
+
+      const restoreGuardMode = () => {
+        if (originalGuardMode === undefined) {
+          delete process.env[guardModeEnv];
+        } else {
+          process.env[guardModeEnv] = originalGuardMode;
+        }
+      };
+
+      const failureBatch = (batch: number, count: number): FunctionCall[] =>
+        Array.from({ length: count }, (_, index) => ({
+          id: `failure_${batch}_${index}`,
+          name: 'failing_tool',
+          args: { attempt: `${batch}_${index}` },
+        }));
+
+      const streamForBatch = (batch: number, count: number) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: { functionCalls: failureBatch(batch, count) },
+          },
+        ]);
+
+      const installFailingTool = () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'failed',
+          returnDisplay: 'failed',
+          error: {
+            message: 'execution failed',
+            type: core.ToolErrorType.EXECUTION_FAILED,
+          },
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'failing_tool',
+          kind: core.Kind.Execute,
+          displayName: 'Failing Tool',
+          description: 'Fails during execution',
+          build: vi.fn().mockReturnValue({
+            params: {},
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Failing Tool'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        return execute;
+      };
+
+      const sentText = () =>
+        vi
+          .mocked(mockChat.sendMessageStream)
+          .mock.calls.flatMap(([, request]) =>
+            (request as { message: Part[] }).message
+              .map((part) => part.text)
+              .filter((text): text is string => text !== undefined),
+          );
+
+      const queueMatchingFailureStreak = () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(streamForBatch(1, 4))
+          .mockResolvedValueOnce(streamForBatch(2, 4))
+          .mockResolvedValueOnce(streamForBatch(3, 1))
+          .mockResolvedValueOnce(createEmptyStream());
+      };
+
+      it('defaults an invalid operator mode to shadow and records a warning', () => {
+        debugLoggerWarnSpy.mockClear();
+        const previous = process.env[guardModeEnv];
+        process.env[guardModeEnv] = 'invalid-mode';
+        try {
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+
+          expect(
+            (
+              session as unknown as {
+                repeatedToolFailureGuardMode: string;
+              }
+            ).repeatedToolFailureGuardMode,
+          ).toBe('shadow');
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            expect.stringContaining('has an invalid value'),
+          );
+        } finally {
+          if (previous === undefined) delete process.env[guardModeEnv];
+          else process.env[guardModeEnv] = previous;
+        }
+      });
+
+      it('observes would-stop behavior in shadow mode without changing the turn', async () => {
+        recreateSessionWithGuardMode('shadow');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(
+            sentText().filter((text) =>
+              text.includes('Do not repeat the same approach'),
+            ),
+          ).toHaveLength(0);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('keeps the pre-guard drain payload when the mode is off', async () => {
+        recreateSessionWithGuardMode('off');
+        try {
+          installFailingTool();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 1))
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'run once' }],
+          });
+
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            { sessionId: 'test-session-id' },
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('forces channel-routed prompts off even when enforcement is configured', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'channel task' }],
+              _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(sentText()).not.toContainEqual(
+            expect.stringContaining('Do not repeat the same approach'),
+          );
+          const drainCalls = vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.filter(
+              ([method]) => method === 'craft/drainMidTurnQueue',
+            );
+          expect(drainCalls).not.toContainEqual([
+            'craft/drainMidTurnQueue',
+            expect.objectContaining({ todoStopGuardWatchQueuedPrompt: true }),
+          ]);
+          expect(logRepeatedToolFailureGuardSpy).not.toHaveBeenCalled();
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('fails open when the ACP host cannot provide reliable input state', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          mockClient.extMethod = vi.fn().mockRejectedValue({
+            code: -32601,
+            message: 'Method not found',
+          });
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(mockClient.extMethod).toHaveBeenCalledTimes(1);
+          expect(
+            logRepeatedToolFailureGuardSpy.mock.calls.some(
+              ([event]) => event.reset_reason === 'unreliable_input',
+            ),
+          ).toBe(true);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('resets the streak when the host reports a queued prompt', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          let drainCount = 0;
+          mockClient.extMethod = vi.fn().mockImplementation(async () => ({
+            messages: [],
+            hasQueuedPrompt: ++drainCount === 2,
+          }));
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(
+            logRepeatedToolFailureGuardSpy.mock.calls.some(
+              ([event]) => event.reset_reason === 'queued_prompt',
+            ),
+          ).toBe(true);
+          expect(sentText()).not.toContainEqual(
+            expect.stringContaining('Do not repeat the same approach'),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('injects one corrective reminder in warn mode and keeps running', async () => {
+        recreateSessionWithGuardMode('warn');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          const correctiveSend = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[2][1] as { message: Part[] };
+          expect(correctiveSend.message).toContainEqual(
+            expect.objectContaining({
+              text: expect.stringContaining('Do not repeat the same approach'),
+            }),
+          );
+          expect(
+            sentText().filter((text) =>
+              text.includes('Do not repeat the same approach'),
+            ),
+          ).toHaveLength(1);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('stops after the post-reminder matching batch in enforce mode', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+              prompt_id: 'test-session-id########1',
+            }),
+            { recordToQwenLogger: false },
+          );
+          const telemetryPromptIds =
+            logRepeatedToolFailureGuardSpy.mock.calls.map(
+              ([event]) => event.prompt_id,
+            );
+          expect(new Set(telemetryPromptIds).size).toBe(1);
+          expect(telemetryPromptIds[0]).toBe('test-session-id########1');
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'failure_3_0',
+                }),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining('Automatic continuation stopped'),
+              }),
+            ]),
+          });
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              sessionId: 'test-session-id',
+              update: expect.objectContaining({
+                sessionUpdate: 'agent_message_chunk',
+                content: expect.objectContaining({
+                  type: 'text',
+                  text: expect.stringContaining(
+                    'Automatic continuation stopped',
+                  ),
+                }),
+              }),
+            }),
+          );
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('lets a user cancellation during the final drain win over enforcement', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          let drainCount = 0;
+          const reminder =
+            '<system-reminder>unfinished todo: inspect the failure</system-reminder>';
+          vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation(
+            (_promptId, force = false) =>
+              !force && drainCount === 3 ? reminder : undefined,
+          );
+          mockClient.extMethod = vi.fn().mockImplementation(async () => {
+            drainCount++;
+            if (drainCount === 3) {
+              void session.cancelPendingPrompt();
+            }
+            return { messages: [], hasQueuedPrompt: false };
+          });
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'cancelled' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(logLoopDetectedSpy).not.toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          );
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: expect.arrayContaining([{ text: reminder }]),
+          });
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('returns cancelled when cancellation arrives while the stop message is emitted', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          installFailingTool();
+          vi.mocked(mockClient.sessionUpdate).mockImplementation(
+            async ({ update }) => {
+              if (
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text.includes('Automatic continuation stopped')
+              ) {
+                await session.cancelPendingPrompt();
+              }
+            },
+          );
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'cancelled' });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        } finally {
+          restoreGuardMode();
+        }
+      });
+    });
+
     describe('shell heartbeat forwarding', () => {
       const runShellToolCall = async (
         execute: ReturnType<typeof vi.fn>,
@@ -8848,7 +9377,10 @@ describe('Session', () => {
 
         expect(mockClient.extMethod).toHaveBeenCalledWith(
           'craft/drainMidTurnQueue',
-          { sessionId: 'test-session-id' },
+          {
+            sessionId: 'test-session-id',
+            todoStopGuardWatchQueuedPrompt: true,
+          },
         );
         const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
         const midTurnPart = {
@@ -13277,204 +13809,1409 @@ describe('Session', () => {
         });
       });
 
-      it('keeps goal terminal observer after ACP /goal set', async () => {
+      it('emits canonical Goal state for an ACP /goal status query', async () => {
+        const snapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
+          type: 'goal_control',
+          operation: { kind: 'status' },
+          response: { snapshot },
         });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/goal' }],
+        });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: snapshot,
+            },
+          },
+        });
+      });
+
+      it('publishes a mutating ACP /goal result only through the runtime subscription', async () => {
+        const snapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+        const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
+          snapshot: core.GoalSnapshotV2,
+          cause?: core.GoalStateCause,
+        ) => void;
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          listener(snapshot, 'create');
+          return {
+            type: 'goal_control',
+            operation: { kind: 'set', objective: 'check weather' },
+            response: { snapshot },
+            cause: 'create',
+          };
+        });
 
         await session.prompt({
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: '/goal check weather' }],
         });
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        });
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalState: snapshot,
+              goalStatus: {
+                kind: 'set',
+                condition: 'check weather',
+                iterations: 0,
+                setAt: 1234,
+                durationMs: 0,
+              },
+            },
+          },
+        });
+      });
 
-        core.notifyGoalTerminal('test-session-id', {
-          kind: 'achieved',
-          condition: 'check weather',
-          iterations: 1,
-          durationMs: 5000,
-          lastReason: 'Weather checked.',
+      // Goal recovery runs from the Config constructor, before this Session
+      // exists to subscribe, and replay streams the pre-migration records —
+      // so the client's newest goal card is the legacy `set` one and it
+      // shows a phantom running goal. Republishing after replay is what
+      // delivers the `migrated -> paused` projection.
+      it('republishes the recovered Goal state after replay with its recovery cause', async () => {
+        const snapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-migrated',
+            revision: 1,
+            objective: 'ship the thing',
+            status: 'paused',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue(snapshot);
+        mockGoalRuntime.getRecoveryCause.mockReturnValue('migrated');
+
+        await session.publishRecoveredGoalState([]);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: expect.objectContaining({
+              goalState: snapshot,
+              goalStatus: expect.objectContaining({
+                kind: 'paused',
+                condition: 'ship the thing',
+              }),
+            }),
+          },
+        });
+      });
+
+      it('publishes nothing when no Goal was recovered', async () => {
+        mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+        await session.publishRecoveredGoalState([]);
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      });
+
+      // R3-6's second trigger: `recoverGoalFromRecords` returns
+      // `'unsupported'`, `restore()` latches `recoveryError`, and the replay
+      // still emitted the active legacy `set` card. Nothing in-session
+      // corrects that — a degraded `/goal` answers without a cause, so no
+      // client card-derivation reads it. The trailing `cleared` card the
+      // removed `supersedeUnrestorableGoal` emitted is what does.
+      it('supersedes an active legacy goal card when recovery is unavailable', async () => {
+        vi.mocked(mockConfig.getGoalRuntimeReady).mockRejectedValueOnce(
+          new core.GoalPersistenceUnavailableError('unsupported record'),
+        );
+
+        await session.publishRecoveredGoalState([
+          {
+            uuid: 'legacy-goal',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: new Date(0).toISOString(),
+            type: 'system',
+            subtype: 'slash_command',
+            cwd: '/tmp',
+            version: 'test',
+            systemPayload: {
+              phase: 'result',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind: 'set',
+                  condition: 'ship the thing',
+                  iterations: 2,
+                  setAt: 1234,
+                },
+              ],
+            },
+          } as unknown as core.ChatRecord,
+        ]);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+              }),
+            },
+          },
+        });
+      });
+
+      it('stays quiet when recovery is unavailable and no goal was active', async () => {
+        vi.mocked(mockConfig.getGoalRuntimeReady).mockRejectedValueOnce(
+          new core.GoalPersistenceUnavailableError('unsupported record'),
+        );
+        await session.publishRecoveredGoalState([]);
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      });
+
+      // The bulk load-replay path collects its page into the `LOAD_REPLAY`
+      // envelope and the bridge seeds it onto the event bus only after
+      // `session/load` returns. Streaming the recovered card from inside
+      // that call would put it *before* the replayed legacy `set` card —
+      // the wrong end — so this path renders instead of sending.
+      describe('renderRecoveredGoalUpdates', () => {
+        const migratedSnapshot: core.GoalSnapshotV2 = {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-migrated',
+            revision: 1,
+            objective: 'ship the thing',
+            status: 'paused',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+
+        it('returns the recovered Goal card instead of streaming it', async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue(migratedSnapshot);
+          mockGoalRuntime.getRecoveryCause.mockReturnValue('migrated');
+
+          const updates = await session.renderRecoveredGoalUpdates([]);
+
+          expect(updates).toEqual([
+            {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: expect.objectContaining({
+                goalState: migratedSnapshot,
+                goalStatus: expect.objectContaining({
+                  kind: 'paused',
+                  condition: 'ship the thing',
+                }),
+              }),
+            },
+          ]);
+          // The whole point: nothing may reach the client early.
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
         });
 
-        await vi.waitFor(() => {
-          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-            sessionId: 'test-session-id',
-            update: {
+        // Without this the runtime subscription re-publishes the same
+        // (cause, snapshot) once the session goes live and the client
+        // renders the recovered card twice — once from the envelope, once
+        // from the stream.
+        it('marks the rendered card as delivered so a live publish cannot duplicate it', async () => {
+          mockGoalRuntime.getSnapshot.mockReturnValue(migratedSnapshot);
+          mockGoalRuntime.getRecoveryCause.mockReturnValue('migrated');
+
+          const updates = await session.renderRecoveredGoalUpdates([]);
+          expect(updates).toHaveLength(1);
+
+          await session.publishRecoveredGoalState([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        it('returns nothing when no Goal was recovered', async () => {
+          mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+          expect(await session.renderRecoveredGoalUpdates([])).toEqual([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        it('returns the superseding cleared card when recovery is unavailable', async () => {
+          vi.mocked(mockConfig.getGoalRuntimeReady).mockRejectedValueOnce(
+            new core.GoalPersistenceUnavailableError('unsupported record'),
+          );
+
+          const updates = await session.renderRecoveredGoalUpdates([
+            {
+              uuid: 'legacy-goal',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date(0).toISOString(),
+              type: 'system',
+              subtype: 'slash_command',
+              cwd: '/tmp',
+              version: 'test',
+              systemPayload: {
+                phase: 'result',
+                outputHistoryItems: [
+                  {
+                    type: 'goal_status',
+                    kind: 'set',
+                    condition: 'ship the thing',
+                    iterations: 2,
+                    setAt: 1234,
+                  },
+                ],
+              },
+            } as unknown as core.ChatRecord,
+          ]);
+
+          expect(updates).toEqual([
+            {
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: '' },
               _meta: {
-                goalTerminal: {
-                  kind: 'achieved',
-                  condition: 'check weather',
-                  iterations: 1,
-                  durationMs: 5000,
-                  lastReason: 'Weather checked.',
-                },
+                goalStatus: expect.objectContaining({
+                  kind: 'cleared',
+                  condition: 'ship the thing',
+                }),
               },
             },
-          });
+          ]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
         });
-      });
 
-      const recordedGoalCards = () =>
-        mockChatRecordingService.recordSlashCommand.mock.calls
-          .map((call) => call[0] as { outputHistoryItems?: unknown[] })
-          .flatMap((payload) => payload.outputHistoryItems ?? [])
-          .filter(
-            (item) =>
-              (item as { type?: string }).type === MessageType.GOAL_STATUS,
+        it('returns nothing when recovery is unavailable and no goal was active', async () => {
+          vi.mocked(mockConfig.getGoalRuntimeReady).mockRejectedValueOnce(
+            new core.GoalPersistenceUnavailableError('unsupported record'),
           );
-
-      it('persists a cleared card, so resume cannot revive a goal the user dropped', () => {
-        // The `sessionGoalClear` ext method reaches the transcript through this
-        // method. Without the record, the last persisted card stays `set` and
-        // the next resume re-registers a goal the user explicitly cleared.
-        session.emitGoalStatus({
-          kind: 'cleared',
-          condition: 'check weather',
-          iterations: 2,
-          durationMs: 5000,
+          expect(await session.renderRecoveredGoalUpdates([])).toEqual([]);
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
         });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'cleared',
-            condition: 'check weather',
-            iterations: 2,
-            durationMs: 5000,
-          },
-        ]);
       });
 
-      it('persists the cleared card when /goal clear arrives as a prompt', async () => {
-        // The web shell clears via the `sessionGoalClear` ext method, but an ACP
-        // client (Zed) can send `/goal clear` as a prompt. That returns a
-        // `message` result, whose `outputHistoryItems` still carry the cleared
-        // card — `#emitGoalStatusItems` runs before the switch — so the card is
-        // persisted on this path too.
+      // `/clear` makes Config dispose the Goal runtime and build a new one
+      // under this same long-lived Session, so the constructor's subscription
+      // is left on the abandoned instance and no `_meta.goalState` update
+      // would ever be delivered again.
+      it('re-subscribes to the replacement Goal runtime after a session switch', async () => {
+        const replacementRuntime = {
+          ...mockGoalRuntime,
+          subscribe: vi.fn().mockReturnValue(() => {}),
+        };
+        let capturedHooks:
+          | { startNewSession?: (sessionId: string) => void }
+          | undefined;
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'message',
-          messageType: 'info',
-          content: 'Goal cleared: check weather',
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'cleared',
-              condition: 'check weather',
-              iterations: 2,
-              durationMs: 5000,
-            },
-          ],
-        });
+        ).mockImplementationOnce(
+          async (_query, _abort, _config, _settings, hooks) => {
+            capturedHooks = hooks;
+            vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(
+              replacementRuntime as unknown as core.GoalRuntime,
+            );
+            hooks?.startNewSession?.('new-session-id');
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Conversation cleared.',
+            };
+          },
+        );
 
         await session.prompt({
           sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal clear' }],
+          prompt: [{ type: 'text', text: '/clear' }],
         });
 
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'cleared',
-            condition: 'check weather',
-            iterations: 2,
-            durationMs: 5000,
-          },
-        ]);
+        expect(capturedHooks?.startNewSession).toBeInstanceOf(Function);
+        expect(replacementRuntime.subscribe).toHaveBeenCalledTimes(1);
+
+        const goal = {
+          goalId: 'goal-2',
+          revision: 1,
+          objective: 'check weather',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        };
+        const listener = replacementRuntime.subscribe.mock.calls[0]?.[0] as (
+          snapshot: core.GoalSnapshotV2,
+          cause?: core.GoalStateCause,
+        ) => void;
+        vi.mocked(mockClient.sessionUpdate).mockClear();
+        listener({ v: 2, activity: 'running', goal }, 'create');
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+        });
+        expect(
+          vi.mocked(mockClient.sessionUpdate).mock.calls[0]?.[0].update._meta?.[
+            'goalState'
+          ],
+        ).toMatchObject({ goal: { goalId: 'goal-2' } });
       });
 
-      it('persists the goal card so a resumed session can restore the hook', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
+      it('preserves canonical Goal state publication order', async () => {
+        const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
+          snapshot: core.GoalSnapshotV2,
+          cause?: core.GoalStateCause,
+        ) => void;
+        let releaseFirst!: () => void;
+        const publishedActivities: string[] = [];
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async (params) => {
+            publishedActivities.push(
+              params.update._meta?.['goalState']?.activity ?? 'missing',
+            );
+            if (publishedActivities.length === 1) {
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            }
+          },
+        );
+        const goal = {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'check weather',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        };
+
+        listener({ v: 2, activity: 'idle', goal }, 'create');
+        listener({ v: 2, activity: 'running', goal }, 'turn_finished');
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
         });
+        releaseFirst();
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+        });
+        expect(publishedActivities).toEqual(['idle', 'running']);
+      });
+
+      it('runs a host-scheduled Goal turn with the canonical permit', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-1',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-1' ? permit : undefined,
+        );
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValue(createEmptyStream());
 
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'set',
-            condition: 'check weather',
-            setAt: 1234,
-          },
-        ]);
-      });
-
-      it('persists the terminal goal card so resume does not revive a finished goal', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
-        });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        core.notifyGoalTerminal('test-session-id', {
-          kind: 'achieved',
-          condition: 'check weather',
-          iterations: 1,
-          durationMs: 5000,
-          lastReason: 'Weather checked.',
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
         });
 
         await vi.waitFor(() => {
-          expect(recordedGoalCards()).toContainEqual({
-            type: MessageType.GOAL_STATUS,
-            kind: 'achieved',
-            condition: 'check weather',
-            iterations: 1,
-            durationMs: 5000,
-            lastReason: 'Weather checked.',
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          currentModel,
+          expect.objectContaining({
+            message: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Continue working on the active Goal.',
+                ),
+              }),
+            ]),
+          }),
+          expect.any(String),
+          permit,
+        );
+        expect(
+          mockChatRecordingService.recordGoalRuntimeMessage,
+        ).toHaveBeenCalledWith(expect.any(Array), permit);
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
+        // `prompt()` rejects ahead of the try whose finally settles the turn
+        // when `assertCanStartTurn` throws — a session that began closing
+        // mid-await, or a writer lease that went away. The turn is already
+        // shifted off `goalQueue` by then, so unless the drain's own catch
+        // settles it the runtime keeps `currentPermit` and stays 'running'
+        // forever: no continuation is ever scheduled again, and every later
+        // prompt hangs in `claimGoalTurn` behind the leaked permit.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-admission-rejects',
+        };
+        const turnKey = 'goal-runtime:turn-admission-rejects';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(
+          new Error('Session write ownership could not be verified.'),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        // `releaseTurn`, not `finishTurn`: the turn never reached the model,
+        // so it is not an iteration the Goal made progress on.
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+      });
+
+      it('pauses without counting a Goal turn cancelled before the model request', async () => {
+        // `modelStarted` decides whether settlement records an iteration.
+        // A user cancel still pauses the Goal before that point; releasing
+        // the permit would mint another continuation and ignore the cancel.
+        // Flagging it at the top of the turn made everything between there
+        // and the send — prompt assembly, transcript writes, the abort check
+        // itself — count as model work, so a cancel landing in that window
+        // paused the Goal and charged it a turn it never took.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-cancelled-early',
+        };
+        const turnKey = 'goal-runtime:turn-cancelled-early';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        // The runtime transcript write is the last awaited step before the
+        // turn reaches the model, which makes it the exact window this
+        // finding is about.
+        mockChatRecordingService.recordGoalRuntimeMessage.mockImplementation(
+          () => {
+            void session.cancelPendingPrompt();
+          },
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
           });
         });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalledWith(turnKey);
+      });
+
+      it('releases a claimed Goal permit when the prompt is cancelled in the claim window', async () => {
+        // `claimGoalTurn` refuses an already-aborted signal, but the abort
+        // can land in the microtask gap between it resolving with a permit
+        // and the aborted check below it. The release there used to be
+        // gated on `!goalTurn`, so on exactly that path the permit stayed
+        // with a turn that returns `cancelled` without running — the runtime
+        // never leaves `running` and every later Goal turn blocks on it.
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn-claimed',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key.startsWith('goal-user:') ? userPermit : undefined,
+        );
+        // Called synchronously with the freshly claimed permit — the one
+        // seam that lands inside the window rather than around it.
+        mockGoalRuntime.getVerifierFeedback.mockImplementation(() => {
+          void session.cancelPendingPrompt();
+          return undefined;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+
+        expect(result.stopReason).toBe('cancelled');
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('cleans up prompt admission when claiming a Goal permit fails', async () => {
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation(() => {
+          throw new Error('goal runtime disposed');
+        });
+        mockGoalRuntime.releaseTurn.mockRejectedValueOnce(
+          new Error('goal runtime disposed'),
+        );
+        const admission = new AbortController();
+        const removeEventListener = vi.spyOn(
+          admission.signal,
+          'removeEventListener',
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'user input' }],
+            },
+            undefined,
+            admission.signal,
+          ),
+        ).rejects.toThrow('goal runtime disposed');
+
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(removeEventListener).toHaveBeenCalledWith(
+          'abort',
+          expect.any(Function),
+        );
+        await expect(session.cancelPendingPrompt()).rejects.toThrow(
+          'Not currently generating',
+        );
+      });
+
+      it('settles a completed Goal turn even when the transcript flush fails', async () => {
+        // `ChatRecordingService` latches a write failure permanently — a
+        // taken-over transcript lease, for one — so every later `flush()`
+        // re-throws it. Letting that abort settlement leaks the runtime's
+        // current permit: `activity` stays 'running', `queueContinuation`
+        // never flushes, and every later prompt hangs in `claimGoalTurn`.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-flush-fails',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-flush-fails' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        mockChatRecordingService.flush.mockRejectedValue(
+          new Error('session writer lost'),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockChatRecordingService.flush).toHaveBeenCalled();
+      });
+
+      it('releases the permit when the prompt rejects before the model starts', async () => {
+        // `prompt()` can reject before reaching the try whose finally settles
+        // the turn. The turn is already off `goalQueue` by then, so failing to
+        // settle here would strand the runtime's permit: `activity` stays
+        // 'running' forever and every later goal prompt hangs behind it.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-rejected',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-rejected' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(
+          new Error('Session is closing'),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+            'goal-runtime:turn-rejected',
+          );
+        });
+        // The model never ran, so this is a release, not a completed turn.
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('drains a queued Goal turn after a background notification settles', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-after-notification',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+        let releaseNotification!: () => void;
+        const notificationGate = new Promise<void>((resolve) => {
+          releaseNotification = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            (async function* () {
+              await notificationGate;
+              yield* [];
+            })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        const notificationCallback = mockBackgroundTaskRegistry
+          .setNotificationCallback.mock.calls[0]?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+        notificationCallback(
+          'Background task completed.',
+          'background result',
+          { agentId: 'agent-1', status: 'completed' },
+        );
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await Promise.resolve();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+        releaseNotification();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          permit,
+        );
+      });
+
+      it('pauses a Goal turn queued behind a cancelled notification', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-cancelled-behind-notification',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+        let releaseNotification!: () => void;
+        const notificationGate = new Promise<void>((resolve) => {
+          releaseNotification = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            (async function* () {
+              await notificationGate;
+              yield* [];
+            })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        const notificationCallback = mockBackgroundTaskRegistry
+          .setNotificationCallback.mock.calls[0]?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string },
+        ) => void;
+
+        notificationCallback(
+          'Background task completed.',
+          'background result',
+          { agentId: 'agent-1', status: 'completed' },
+        );
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await Promise.resolve();
+
+        await session.cancelPendingPrompt();
+        releaseNotification();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+          action: 'pause',
+          expectedGoalId: permit.goalId,
+          expectedRevision: permit.revision,
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+      });
+
+      it('admits an ordinary ACP prompt into the active Goal turn', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn-1',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.beginTurn.mockReturnValue(permit);
+        mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockGoalRuntime.beginTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          permit,
+        );
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'hello',
+          permit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+
+      it('gives a new user prompt priority over an automatic Goal turn', async () => {
+        session.dispose();
+        const automaticPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'automatic-turn',
+        };
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn',
+        };
+        let currentTurnKey = 'goal-runtime:automatic-turn';
+        let queuedTurnKey: string | undefined;
+        const listeners: Array<() => void> = [];
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.subscribe.mockImplementation((listener: () => void) => {
+          listeners.push(listener);
+          return () => {
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+          };
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === currentTurnKey
+            ? currentTurnKey.startsWith('goal-runtime:')
+              ? automaticPermit
+              : userPermit
+            : undefined,
+        );
+        mockGoalRuntime.beginTurn.mockImplementation((turnKey: string) => {
+          queuedTurnKey = turnKey;
+          return undefined;
+        });
+        mockGoalRuntime.finishTurn.mockImplementation(async (permit) => {
+          if (permit.turnId === automaticPermit.turnId) {
+            currentTurnKey = queuedTurnKey!;
+            queuedTurnKey = undefined;
+            for (const listener of [...listeners]) listener();
+          }
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (_model, request: { config: { abortSignal: AbortSignal } }) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* createEmptyStream();
+              })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit: automaticPermit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+
+        expect(mockGoalRuntime.beginTurn).toHaveBeenCalledWith(
+          expect.stringMatching(/^goal-user:/),
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          userPermit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
+          automaticPermit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+      });
+
+      it('hands off a preempted Goal turn whose stream throws on abort', async () => {
+        // Same user action as the test above, but the preempted stream
+        // rejects out of the model network await instead of ending cleanly --
+        // which is what geminiChat actually does. Where the abort lands is
+        // pure timing, so both spellings have to settle the same way: a
+        // handoff via finishTurn, never a pause. Pausing here would persist
+        // the goal as paused and silently stop the autonomous loop.
+        session.dispose();
+        const automaticPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'automatic-turn',
+        };
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn',
+        };
+        let currentTurnKey = 'goal-runtime:automatic-turn';
+        let queuedTurnKey: string | undefined;
+        const listeners: Array<() => void> = [];
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.subscribe.mockImplementation((listener: () => void) => {
+          listeners.push(listener);
+          return () => {
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+          };
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === currentTurnKey
+            ? currentTurnKey.startsWith('goal-runtime:')
+              ? automaticPermit
+              : userPermit
+            : undefined,
+        );
+        mockGoalRuntime.beginTurn.mockImplementation((turnKey: string) => {
+          queuedTurnKey = turnKey;
+          return undefined;
+        });
+        mockGoalRuntime.finishTurn.mockImplementation(async (permit) => {
+          if (permit.turnId === automaticPermit.turnId) {
+            currentTurnKey = queuedTurnKey!;
+            queuedTurnKey = undefined;
+            for (const listener of [...listeners]) listener();
+          }
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (
+              _model,
+              request: { config: { abortSignal: AbortSignal } },
+            ) => {
+              if (!request.config.abortSignal.aborted) {
+                await new Promise<void>((resolve) =>
+                  request.config.abortSignal.addEventListener(
+                    'abort',
+                    () => resolve(),
+                    { once: true },
+                  ),
+                );
+              }
+              // The one difference from the sibling test: the abort lands
+              // inside the model network await, so geminiChat rejects instead
+              // of handing back a stream that ends cleanly.
+              throw Object.assign(new Error('The operation was aborted'), {
+                name: 'AbortError',
+              });
+            },
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit: automaticPermit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
+          automaticPermit,
+        );
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'pause' }),
+        );
+      });
+
+      it('does not strand a prompt behind a Goal continuation the drain cannot start', async () => {
+        // `/goal set` activates the goal midway through its own prompt, so
+        // the runtime mints a continuation while `#drainGoalQueue` is still
+        // gated on that prompt. A second prompt arriving before the first
+        // unwinds reserves a turn key behind the continuation's permit --
+        // and the drain cannot start the continuation until this prompt
+        // finishes, while this prompt cannot start until the continuation
+        // gives the permit back. Neither side moves without dropping the
+        // un-started continuation.
+        session.dispose();
+        const continuationPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'continuation-turn',
+        };
+        const userPermit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'user-turn',
+        };
+        const activeGoal = {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'check weather',
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1234,
+          updatedAt: 1234,
+        };
+        let goalActive = false;
+        let currentTurnKey: string | undefined;
+        let queuedTurnKey: string | undefined;
+        mockGoalRuntime.getSnapshot.mockImplementation(() => ({
+          v: 2,
+          activity: currentTurnKey ? 'running' : 'idle',
+          goal: goalActive ? activeGoal : null,
+        }));
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) => {
+          if (turnKey !== currentTurnKey) return undefined;
+          return turnKey.startsWith('goal-runtime:')
+            ? continuationPermit
+            : userPermit;
+        });
+        mockGoalRuntime.beginTurn.mockImplementation((turnKey: string) => {
+          if (!goalActive) return undefined;
+          if (currentTurnKey) {
+            queuedTurnKey ??= turnKey;
+            return undefined;
+          }
+          currentTurnKey = turnKey;
+          return turnKey.startsWith('goal-runtime:')
+            ? continuationPermit
+            : userPermit;
+        });
+        // Releasing promotes the waiting reservation rather than minting a
+        // fresh continuation -- the runtime behaviour this fix relies on.
+        mockGoalRuntime.releaseTurn.mockImplementation(
+          async (turnKey: string) => {
+            if (turnKey !== currentTurnKey) return false;
+            currentTurnKey = queuedTurnKey;
+            queuedTurnKey = undefined;
+            return true;
+          },
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            async (_model, request: { config: { abortSignal: AbortSignal } }) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* createEmptyStream();
+              })(),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        const activating = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'set a goal to check weather' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        // The dispatch commits mid-prompt: the goal goes active and the
+        // runtime hands the session a continuation it cannot drain yet.
+        goalActive = true;
+        currentTurnKey = 'goal-runtime:continuation-turn';
+        await boundGoalHost!.startGoalTurn({
+          permit: continuationPermit,
+          continuationContext: 'check weather',
+        });
+        await Promise.resolve();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+
+        const second = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'user input' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        await Promise.all([activating, second]);
+
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          'goal-runtime:continuation-turn',
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          userPermit,
+        );
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+      });
+
+      it('releases a Goal turn whose settlement cannot be persisted', async () => {
+        // `ChatRecordingService` latches a write failure permanently, so the
+        // journal writes inside `finishTurn` re-throw it forever. Letting
+        // that escape would leave the runtime's permit set and `running`, so
+        // no continuation is ever scheduled again and every later prompt
+        // hangs in `claimGoalTurn`.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-latched',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-latched' ? permit : undefined,
+        );
+        mockGoalRuntime.finishTurn.mockRejectedValue(
+          new Error('transcript write failed'),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+            'goal-runtime:turn-latched',
+          );
+        });
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
       });
     });
 
@@ -16892,6 +18629,74 @@ describe('Session', () => {
           });
         });
 
+        it('pauses the canonical Goal runtime when the blocking cap fires', async () => {
+          // `abortGoalForStopHookCap` only reads the legacy
+          // `activeGoalStore`, which has no writer for daemon sessions --
+          // so on its own the cap stops nothing here: the goal stays active,
+          // the runtime mints the next continuation, and a Stop hook that
+          // always blocks loops the session forever.
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 3,
+            turnId: 'user-turn',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 3,
+              objective: 'check weather',
+              status: 'active',
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          });
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(1);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(result).toEqual({ stopReason: 'end_turn' });
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 3,
+          });
+        });
+
         it('fires MessageDisplay with cumulative text and a single is_final during Stop hook continuation', async () => {
           // The Stop-hook continuation loop (Session.ts ~line 2282) creates
           // its own MessageDisplayDispatcher, independent of the main prompt
@@ -18598,6 +20403,17 @@ describe('Session', () => {
         stopAfterPermissionCancel: boolean;
         loopDetected?: boolean;
         repeatedDuplicateProviderToolCall?: boolean;
+        repeatedToolFailureBatch?: {
+          complete: boolean;
+          observations: Array<{
+            callId: string;
+            policyToolName?: string;
+            terminalStatus: 'success' | 'error' | 'cancelled';
+            executionStatus?: core.ToolExecutionStatus | 'unknown';
+            executionErrorType?: core.ToolErrorType;
+            providerDuplicate?: boolean;
+          }>;
+        };
       }>;
     };
 
@@ -19267,6 +21083,18 @@ describe('Session', () => {
           errorType: core.ToolErrorType.EXECUTION_TIMEOUT,
         }),
       );
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'structured_timeout_call',
+            policyToolName: 'timeout_tool',
+            terminalStatus: 'error',
+            executionStatus: 'error',
+            executionErrorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+          }),
+        ],
+      });
       expect(messageBus.request).toHaveBeenCalledWith(
         expect.objectContaining({
           eventName: 'PostToolUseFailure',
@@ -19383,6 +21211,18 @@ describe('Session', () => {
           errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
         }),
       );
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'postprocess_success_call',
+            policyToolName: 'postprocess_tool',
+            terminalStatus: 'error',
+            executionStatus: 'success',
+            executionErrorType: undefined,
+          }),
+        ],
+      });
     });
 
     it('preserves a structured postprocessing error type after successful execution', async () => {
@@ -19609,6 +21449,18 @@ describe('Session', () => {
           errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
         }),
       );
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'postprocess_error_call',
+            policyToolName: 'timeout_tool',
+            terminalStatus: 'error',
+            executionStatus: 'error',
+            executionErrorType: core.ToolErrorType.EXECUTION_TIMEOUT,
+          }),
+        ],
+      });
     });
 
     it.each([
@@ -20522,6 +22374,45 @@ describe('Session', () => {
       expect(refreshMemoryInstructionSpy).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['retry', { 'qwen.daemon.retry': true }, false],
+      ['continue', { 'qwen.daemon.continueLastTurn': true }, true],
+    ])(
+      'preserves context-file refresh intent across an ACP %s turn',
+      async (_label, meta, seedInterruptedHistory) => {
+        await markAcpContextRefreshIntent();
+        refreshMemoryInstructionSpy.mockClear();
+        if (seedInterruptedHistory) {
+          vi.mocked(mockChat.getHistory).mockReturnValue([
+            { role: 'user', parts: [{ text: 'unanswered question' }] },
+          ]);
+        }
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'continue remembered fact write' }],
+          _meta: meta,
+        } as Parameters<typeof session.prompt>[0]);
+
+        // Pin that the continuation turn reached the model: one send from the
+        // marking turn and one from the continuation. Without this, a future
+        // recovery-plan classifier change could make the turn return before
+        // the intent-clearing gate while this test stays green.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+
+        allowAcpWriteFile();
+        await runAcpWriteFile(
+          '/repo/QWEN.md',
+          'prompt-preserved-context-write',
+        );
+
+        expect(refreshMemoryInstructionSpy).toHaveBeenCalledWith(mockConfig, {
+          logContext:
+            'ACP session test-session-id context-file memory tool batch',
+        });
+      },
+    );
+
     it('does not refresh context-file instructions for ordinary ACP QWEN.md writes', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'wrote context',
@@ -20876,12 +22767,14 @@ describe('Session', () => {
       vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
         outcome: { outcome: 'cancelled' },
       });
-      const toolLoopState = {
+      const toolLoopState: DaemonToolLoopState = {
         totalToolCalls: 0,
         invalidToolParamErrors: new Map<string, number>(),
         toolCallKeyCounts: new Map<string, number>(),
         maxToolCallKeyRepeat: 0,
         loopDetected: false,
+        repeatedToolFailureMode: 'off',
+        repeatedToolFailureState: createRepeatedToolFailureGuardState(),
       };
 
       const result = await (
@@ -21615,12 +23508,14 @@ describe('Session', () => {
           canUpdateOutput: false,
           isOutputMarkdown: true,
         });
-        const toolLoopState = {
+        const toolLoopState: DaemonToolLoopState = {
           totalToolCalls: 0,
           invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
           loopDetected: false,
+          repeatedToolFailureMode: 'off',
+          repeatedToolFailureState: createRepeatedToolFailureGuardState(),
         };
 
         const result = await (
@@ -21709,7 +23604,7 @@ describe('Session', () => {
           canUpdateOutput: false,
           isOutputMarkdown: true,
         });
-        const toolLoopState = {
+        const toolLoopState: DaemonToolLoopState = {
           totalToolCalls: 0,
           // Two prior invalid-param errors: the first failure in this batch
           // trips the threshold of three while the sibling shares the
@@ -21718,6 +23613,8 @@ describe('Session', () => {
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
           loopDetected: false,
+          repeatedToolFailureMode: 'off',
+          repeatedToolFailureState: createRepeatedToolFailureGuardState(),
         };
 
         const result = await (
@@ -22652,6 +24549,16 @@ describe('Session', () => {
       const { parts } = result;
       expect(parts).toHaveLength(1);
       expect(result.stopAfterPermissionCancel).toBe(false);
+      expect(result.repeatedToolFailureBatch).toEqual({
+        complete: true,
+        observations: [
+          expect.objectContaining({
+            callId: 'shell_1__qwen_dup_2',
+            providerDuplicate: true,
+            executionStatus: 'not_started',
+          }),
+        ],
+      });
       expect(parts[0].functionResponse?.id).toBe('shell_1__qwen_dup_2');
       expect(parts[0].functionResponse?.response).toEqual({
         error: expect.stringContaining(

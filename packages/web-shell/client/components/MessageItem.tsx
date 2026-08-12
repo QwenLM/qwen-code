@@ -1,10 +1,11 @@
-import { memo, type ReactElement } from 'react';
+import { memo, useContext, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import { CompactModeContext } from '../App';
 import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -28,6 +29,8 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   workspaceCwd?: string;
   isLatest?: boolean;
   showRetryHint?: boolean;
@@ -46,6 +49,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onImagePreview,
   workspaceCwd,
   isLatest = false,
   showRetryHint = false,
@@ -60,6 +64,7 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  const compactMode = useContext(CompactModeContext);
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -71,6 +76,7 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            onImagePreview={onImagePreview}
           />
         );
       case 'assistant':
@@ -223,6 +229,7 @@ export const MessageItem = memo(function MessageItem({
     <MessageTimestamp
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
+      toolGroupSpacing={message.role === 'tool_group' && compactMode}
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle={t('common.copy')}
     >
@@ -264,6 +271,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;

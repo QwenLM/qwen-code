@@ -15,6 +15,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonSessionIdProtocolError,
   WorkspaceDaemonClient,
   DaemonSessionClient,
   asKnownDaemonEvent,
@@ -403,6 +404,11 @@ export type {
 export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
+export type {
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
 
 export type {
