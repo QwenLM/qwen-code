@@ -1460,7 +1460,6 @@ const EN: Messages = {
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
-  'compact.hint': 'Press Ctrl+O to show full tool output',
   'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
@@ -1962,6 +1961,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
   'goal.check': 'Goal check',
   'goal.cleared': 'Goal cleared',
@@ -2490,9 +2490,9 @@ const EN: Messages = {
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
-    `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `Running ${v?.count ?? 0} tools: ${v?.name ?? 'tool'}`
+      : `Running ${v?.name ?? 'tool'}`,
   'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
@@ -4237,7 +4237,6 @@ const ZH: Messages = {
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
-  'compact.hint': '按 Ctrl+O 显示完整工具输出',
   'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
@@ -4694,6 +4693,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
   'goal.check': '目标检查',
   'goal.cleared': '目标已清除',
@@ -5187,9 +5187,9 @@ const ZH: Messages = {
   'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
-    `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `正在执行 ${v?.count ?? 0} 个工具：${v?.name ?? '工具'}`
+      : `正在执行 ${v?.name ?? '工具'}`,
   'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
