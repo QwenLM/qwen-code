@@ -4685,7 +4685,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -4969,6 +4969,16 @@ jobs:
               # line, and jq scan() matches across newlines. The backslashes
               # render away in markdown, so the visible text is unchanged.
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
+              # Gate-authored advisories (e.g. "test coverage shrank") render
+              # AFTER the agent's summary: the summary carries the agent's
+              # justification, the advisory carries the machine measurement a
+              # maintainer checks it against. Escaped like every other
+              # embedded file — the advisory quotes file paths from the
+              # branch, which are model-influenced content.
+              if [[ -s "${WORKDIR}/gate-advisories.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/gate-advisories.md"
+              fi
               if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
                 echo
                 sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"

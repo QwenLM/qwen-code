@@ -326,6 +326,124 @@ if [[ ! -s "${WORKDIR}/address-summary.md" ]]; then
   exit 1
 fi
 
+# --- Content-based validity checks -------------------------------------------
+# Feedback validity is judged by CONTENT, never by AUTHOR: a maintainer's
+# comment, the review bot's finding, and a model-drafted suggestion pasted by
+# a human all drive the agent the same way, so the gate checks what the round
+# DID, not who asked for it. Two deterministic checks below (sensitive-area
+# footprint here, the bite check after the package tests) plus one advisory
+# (test deletion). All three read only git state and run before/around the
+# existing deterministic re-checks.
+
+# Sensitive-area footprint: a review round must not EXPAND into CI or
+# verification machinery the PR itself was never about — a single review
+# comment (any author) must not be able to alter the loop's own guardrails.
+# Judged by AREA CLASS, not file: a PR whose own pre-round diff already
+# touches a class (an infra PR under takeover) keeps full freedom there;
+# a round reaching into a class the PR never touched is rejected. Retryable:
+# the repair pass can revert the offending files in a follow-up commit.
+# `scripts` sections of workspace manifests are their own class because the
+# gate's every command resolves through them (`npm run build/typecheck/
+# lint/test`) — a scripts edit can hollow out the gate while every check
+# "passes". Only root and first-level `packages/*/package.json` count:
+# fixture manifests deeper in a src tree are ordinary test data.
+sensitive_class_of() {
+  # Prints the class name for a path, or nothing. Kept as one function so
+  # the round scan and the PR-footprint scan cannot drift.
+  local f="${1}"
+  case "${f}" in
+    .github/*) echo 'ci-workflows' ;;
+    .husky/*) echo 'git-hooks' ;;
+    *) case "$(basename "${f}")" in
+      eslint.config.*) echo 'lint-config' ;;
+      vitest.config.*) echo 'test-config' ;;
+      tsconfig.json | tsconfig.*.json) echo 'ts-config' ;;
+    esac ;;
+  esac
+}
+manifest_scripts_changed() {
+  # True when the scripts section of a root/workspace manifest differs
+  # between the two refs. Missing file on either side reads as {}.
+  local f="${1}" from="${2}" to="${3}" a b
+  a="$(git show "${from}:${f}" 2> /dev/null | jq -cS '.scripts // {}' 2> /dev/null)" || a='{}'
+  b="$(git show "${to}:${f}" 2> /dev/null | jq -cS '.scripts // {}' 2> /dev/null)" || b='{}'
+  [[ "${a}" != "${b}" ]]
+}
+ROUND_RANGE="origin/${BRANCH}...${BRANCH}"
+PR_RANGE="origin/main...origin/${BRANCH}"
+ROUND_CLASSES=''
+while IFS= read -r f; do
+  [[ -n "${f}" ]] || continue
+  c="$(sensitive_class_of "${f}")"
+  if [[ -z "${c}" ]]; then
+    case "${f}" in
+      package.json | packages/*/package.json)
+        [[ "${f}" == packages/*/*/* ]] && continue
+        # A manifest the round ADDED (a new workspace) is the round's own
+        # new surface, not a rewrite of commands the gate already ran —
+        # only scripts edits to a manifest that existed pre-round count.
+        git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null || continue
+        manifest_scripts_changed "${f}" "origin/${BRANCH}" "${BRANCH}" &&
+          c='manifest-scripts' ;;
+    esac
+  fi
+  [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
+done < <(git diff --name-only "${ROUND_RANGE}")
+if [[ -n "${ROUND_CLASSES}" ]]; then
+  PR_CLASSES=''
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    c="$(sensitive_class_of "${f}")"
+    if [[ -z "${c}" ]]; then
+      case "${f}" in
+        package.json | packages/*/package.json)
+          [[ "${f}" == packages/*/*/* ]] && continue
+          manifest_scripts_changed "${f}" 'origin/main' "origin/${BRANCH}" &&
+            c='manifest-scripts' ;;
+      esac
+    fi
+    [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
+  done < <(git diff --name-only "${PR_RANGE}")
+  VIOLATIONS="$(while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    cls="${line%% *}"
+    grep -qx "${cls}" <<< "${PR_CLASSES}" || printf '%s\n' "${line}"
+  done <<< "${ROUND_CLASSES}")"
+  if [[ -n "${VIOLATIONS}" ]]; then
+    {
+      echo 'This round modified CI/verification machinery in area(s) the PR itself never touched:'
+      printf '%s\n' "${VIOLATIONS}"
+      echo 'Review feedback alone — from ANY author — cannot authorize changes to the loop'"'"'s own guardrails. Revert these files; if the feedback genuinely requires them, escalate it to a maintainer as an open question instead of implementing it.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round expands into CI/verification machinery outside the PR footprint'
+  fi
+fi
+
+# Test-deletion advisory: deleting or shrinking tests is sometimes right
+# (the pinned behavior was wrong, or coverage is duplicated) and the agent
+# is required to justify it in its summary — but the SURFACING must not be
+# the agent's own prose. The gate writes its own advisory into the round
+# report so a maintainer always sees exactly which tests disappeared,
+# whoever suggested it.
+TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)integration-tests/**')
+DELETED_TESTS="$(git diff --name-only --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}")"
+NET_TEST_LINES="$(git diff --numstat "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
+  awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }')"
+rm -f "${WORKDIR}/gate-advisories.md"
+if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
+  {
+    echo '⚖️ **Gate advisory — test coverage shrank this round** (machine-measured, not agent-authored): '"net ${NET_TEST_LINES} test lines."
+    if [[ -n "${DELETED_TESTS}" ]]; then
+      echo
+      echo 'Deleted test files:'
+      while IFS= read -r f; do [[ -n "${f}" ]] && echo "- \`${f}\`"; done <<< "${DELETED_TESTS}"
+    fi
+    echo
+    echo 'The justification must be in the round summary above; a deletion is only sound when the pinned behavior itself was wrong (evidence shown) or the coverage demonstrably survives elsewhere. · 本轮测试覆盖净减少（门自动测量，非 agent 文本）；删除是否成立请对照上方轮次摘要中的理由——仅当被钉住的行为本身有误（需给出证据）或覆盖确有替代时才合理。'
+  } > "${WORKDIR}/gate-advisories.md"
+  echo '⚖️ test coverage shrank this round — advisory written for the report' | tee -a "${GATE_LOG}"
+fi
+
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
 run_check 'build failed on the agent-committed fix' npm run build
 # Typecheck consumes core's dist (sdk-typescript resolves
@@ -376,6 +494,111 @@ else
     run_check_no_ab "tests failed in ${p}" \
       npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
   done
+fi
+
+# Bite check: a round that changes source AND tests claims (implicitly or
+# explicitly) that behavior needed changing — most often "I fixed the defect
+# a finding described, and this test pins the fix". The claim is checkable
+# without trusting anyone's prose: run this round's changed tests against
+# the PRE-ROUND tree (origin/<branch> sources + the round's test files).
+# If EVERY changed test also passes there, the tests demonstrate nothing —
+# the classic shape of a plausible-but-false finding implemented as a "fix"
+# whose regression test was green all along. Reject, not retryable: the
+# 18-minute repair pass cannot make a nonexistent defect reproduce; the next
+# full round re-reads the feedback with this evidence in LAST_REJECTION and
+# can decline or escalate the finding instead.
+# Scope guards (all fail OPEN — only the clean "ran and all passed" verdict
+# rejects):
+#   - Runnable unit tests only: *.test.* / *.spec.* files. Snapshots and
+#     integration-tests/ are not directly runnable here.
+#   - Single-package rounds only: on the detached pre-round tree, gitignored
+#     dist/ still carries the ROUND's build, so a cross-package fix leaks
+#     into the baseline through dist-resolved imports and would read as
+#     "no bite" — the same dist confound that A/B-exempts typecheck above.
+#     Same-package imports resolve through vitest src aliases and relative
+#     paths, which the detach does revert.
+#   - A test that fails on the pre-round tree for ANY reason (assertion,
+#     collection, import of a round-added symbol) counts as biting; the
+#     check's power is the all-green case, which no honest defect fix
+#     produces.
+BITE_RUNNER="${BITE_RUNNER:-bite_runner_default}"
+bite_runner_default() {
+  # $1 = workspace dir, rest = test paths relative to the workspace.
+  local ws="${1}"
+  shift
+  npm run test --workspace "${ws}" --if-present -- "$@"
+}
+mapfile -t BITE_FILES < <(git diff --name-only --diff-filter=AM "${ROUND_RANGE}" \
+  -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' | grep -v '__snapshots__' || true)
+BITE_SRC="$(git diff --name-only "${ROUND_RANGE}" \
+  -- ':(exclude,glob)**/*.test.*' ':(exclude,glob)**/*.spec.*' \
+  ':(exclude,glob)**/__snapshots__/**' ':(exclude,glob)**/test-utils/**' \
+  ':(exclude,glob)integration-tests/**' ':(exclude,glob)**/*.md')"
+if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
+  BITE_PKGS="$(printf '%s\n' "${BITE_FILES[@]}" "${BITE_SRC}" |
+    bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
+  if [[ "$(wc -l <<< "${BITE_PKGS}")" -ne 1 || -z "${BITE_PKGS}" ]]; then
+    echo "🦷 bite check skipped: round spans multiple/no workspaces (dist confound)" \
+      | tee -a "${GATE_LOG}"
+  else
+    echo "🦷 bite check: running this round's changed tests on the pre-round tree" \
+      | tee -a "${GATE_LOG}"
+    git restore -- . 2>> "${GATE_LOG}" || true
+    if git checkout --quiet --detach "origin/${BRANCH}" 2>> "${GATE_LOG}"; then
+      BITE_BIT='false'
+      BITE_RAN='false'
+      if git checkout --quiet "${BRANCH}" -- "${BITE_FILES[@]}" 2>> "${GATE_LOG}"; then
+        BITE_ARGS=()
+        for f in "${BITE_FILES[@]}"; do
+          BITE_ARGS+=("${f#"${BITE_PKGS}"/}")
+        done
+        BITE_RAN='true'
+        if ! "${BITE_RUNNER}" "${BITE_PKGS}" "${BITE_ARGS[@]}" \
+          > "${GATE_LOG}.bite" 2>&1; then
+          BITE_BIT='true'
+        fi
+      else
+        echo "🦷 bite check skipped: could not overlay the round's tests" \
+          | tee -a "${GATE_LOG}"
+      fi
+      git checkout --quiet --force "${BRANCH}" 2>> "${GATE_LOG}" || {
+        # Same crash contract as the baseline A/B: the tree is no longer the
+        # one under verification, and a plain outcome=failed would advance
+        # the watermark on a verdict the gate never reached. Leave outcome
+        # unset so the next scan retries on a fresh checkout.
+        echo "❌ could not restore the verification tree after the bite check"
+        {
+          echo '**could not restore the verification tree after the bite check**'
+          echo
+          echo '````'
+          tail -c 3000 "${GATE_LOG}" 2> /dev/null
+          echo '````'
+        } > "${WORKDIR}/gate-rejection.md" || true
+        exit 1
+      }
+      git reset --quiet 2>> "${GATE_LOG}" || true
+      if [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then
+        {
+          echo 'Every test this round added or changed ALSO PASSES on the pre-round tree (the branch as pushed, with only your test files overlaid). A defect fix must come with a test that fails before the fix and passes after it — an all-green result here means the claimed defect does not reproduce, no matter who reported it.'
+          echo
+          echo 'If the finding does not reproduce, do not implement it: decline it (for a disproved finding) or escalate it as an open question, attaching this measurement as the evidence.'
+          echo
+          echo 'Changed tests measured:'
+          printf -- '- %s\n' "${BITE_FILES[@]}"
+          echo '````'
+          tail -c 1200 "${GATE_LOG}.bite" 2> /dev/null
+          echo '````'
+        } >> "${GATE_LOG}"
+        reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'
+      elif [[ "${BITE_BIT}" == 'true' ]]; then
+        echo "🦷 bite confirmed: at least one changed test fails on the pre-round tree" \
+          | tee -a "${GATE_LOG}"
+      fi
+    else
+      echo "🦷 bite check skipped: could not detach to the pre-round tree" \
+        | tee -a "${GATE_LOG}"
+    fi
+  fi
 fi
 assert_verification_tree
 echo "verified_head=${VERIFICATION_HEAD}" >> "${GITHUB_OUTPUT}"

@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
@@ -8066,6 +8066,307 @@ exit 1
     }
   });
 
+  // Shared fixture for the content-based validity checks: a repo whose
+  // origin/main..origin/feat span is the PR's own diff and whose
+  // origin/feat..feat commit is the round under verification.
+  const validityFixture = (build) => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-validity-'));
+    const git = (...args) =>
+      execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    const write = (rel, content) => {
+      mkdirSync(join(dir, dirname(rel)), { recursive: true });
+      writeFileSync(join(dir, rel), content);
+    };
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@test');
+    git('config', 'user.name', 'test');
+    build.base({ git, write, dir });
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    git('update-ref', 'refs/remotes/origin/main', 'main');
+    git('checkout', '-qb', 'feat');
+    build.pr({ git, write, dir });
+    git('add', '-A');
+    git('commit', '-qm', 'pr', '--allow-empty');
+    git('update-ref', 'refs/remotes/origin/feat', 'feat');
+    build.round({ git, write, dir });
+    git('add', '-A');
+    git('commit', '-qm', 'round', '--allow-empty');
+    return { dir, git };
+  };
+
+  it('rejects a round that expands into CI machinery outside the PR footprint', () => {
+    const block = reviewVerificationRunner.match(
+      /(sensitive_class_of\(\) \{[\s\S]*?reject_fix 'round expands into CI\/verification machinery outside the PR footprint'\n {2}fi\nfi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (build) => {
+      const { dir } = validityFixture(build);
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            `cd "$1"`,
+            'BRANCH=feat',
+            'GATE_LOG="$(mktemp)"',
+            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+            block,
+            'echo PASSED',
+          ].join('\n'),
+          'bash',
+          dir,
+        ],
+        { encoding: 'utf8' },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return `${res.stdout}\n${res.stderr}`;
+    };
+    // A round reaching into .github/ on a PR that never touched CI: rejected.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.ts', 'a\n'),
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('.github/workflows/x.yml', 'on: push\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // The SAME edit on an infra PR whose own diff already touches that area
+    // class (takeover on a workflow PR): allowed.
+    expect(
+      run({
+        base: ({ write }) => write('.github/workflows/x.yml', 'on: push\n'),
+        pr: ({ write }) => write('.github/workflows/x.yml', 'on: pull\n'),
+        round: ({ write }) => write('.github/workflows/y.yml', 'on: push\n'),
+      }),
+    ).toContain('PASSED');
+    // Workspace manifest: a dependency edit passes, a scripts edit is the
+    // gate's own command surface and is rejected; a fixture manifest deeper
+    // in a src tree is ordinary test data.
+    const manifests = {
+      base: ({ write }) => {
+        write('package.json', '{"scripts":{"lint":"eslint ."},"x":1}\n');
+        write('src/a.ts', 'a\n');
+      },
+      pr: ({ write }) => write('src/a.ts', 'b\n'),
+    };
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"eslint ."},"x":2}\n'),
+      }),
+    ).toContain('PASSED');
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"true"},"x":1}\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write('src/fixtures/pkg/package.json', '{"scripts":{"t":"x"}}\n'),
+      }),
+    ).toContain('PASSED');
+    // A manifest the round ADDS (a new workspace) is the round's own new
+    // surface, not a rewrite of commands the gate already ran.
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write(
+            'packages/newpkg/package.json',
+            '{"scripts":{"test":"vitest run"}}\n',
+          ),
+      }),
+    ).toContain('PASSED');
+  });
+
+  it('writes a gate-authored advisory when a round shrinks test coverage', () => {
+    const block = reviewVerificationRunner.match(
+      /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (build) => {
+      const { dir } = validityFixture(build);
+      const workdir = mkdtempSync(join(tmpdir(), 'autofix-validity-wd-'));
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'cd "$1"',
+            'BRANCH=feat',
+            'WORKDIR="$2"',
+            'GATE_LOG="$(mktemp)"',
+            'ROUND_RANGE="origin/feat...feat"',
+            block,
+            'echo DONE',
+          ].join('\n'),
+          'bash',
+          dir,
+          workdir,
+        ],
+        { encoding: 'utf8' },
+      );
+      const advisoryPath = join(workdir, 'gate-advisories.md');
+      const advisory = existsSync(advisoryPath)
+        ? readFileSync(advisoryPath, 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true });
+      expect(`${res.stdout}\n${res.stderr}`).toContain('DONE');
+      return advisory;
+    };
+    const manyLines = Array.from({ length: 40 }, (_, i) => `t${i}`).join('\n');
+    // Deleting a test file is surfaced by name.
+    const deleted = run({
+      base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+      pr: () => {},
+      round: ({ dir }) => rmSync(join(dir, 'src', 'a.test.ts')),
+    });
+    expect(deleted).toContain('src/a.test.ts');
+    expect(deleted).toContain('Gate advisory');
+    // A net shrink past the threshold is surfaced even with no deleted file…
+    expect(
+      run({
+        base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+        pr: () => {},
+        round: ({ write }) => write('src/a.test.ts', 't0\n'),
+      }),
+    ).toContain('Gate advisory');
+    // …while a small trim stays silent.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+        pr: () => {},
+        round: ({ write }) =>
+          write(
+            'src/a.test.ts',
+            `${Array.from({ length: 35 }, (_, i) => `t${i}`).join('\n')}\n`,
+          ),
+      }),
+    ).toBe('');
+  });
+
+  it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
+    const block = reviewVerificationRunner.match(
+      /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (build, { runnerExit, resolverLines }) => {
+      const { dir, git } = validityFixture(build);
+      const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
+      // Stub owning-package resolver and bite runner — the block treats the
+      // runner as an opaque command, so its exit code IS the fixture.
+      writeFileSync(
+        join(tools, 'resolve-owning-packages.sh'),
+        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
+      );
+      writeFileSync(
+        join(tools, 'bite-runner'),
+        `#!/usr/bin/env bash\necho "bite-runner: $*" >&2\nexit ${runnerExit}\n`,
+      );
+      chmodSync(join(tools, 'bite-runner'), 0o755);
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'cd "$1"',
+            'BRANCH=feat',
+            'WORKDIR="$2"',
+            'RUNNER_TEMP="$2"',
+            'GATE_LOG="$2/gate.log"',
+            ': > "$GATE_LOG"',
+            'ROUND_RANGE="origin/feat...feat"',
+            'BITE_RUNNER="$2/bite-runner"',
+            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+            block,
+            'echo SURVIVED',
+          ].join('\n'),
+          'bash',
+          dir,
+          tools,
+        ],
+        { encoding: 'utf8' },
+      );
+      const status = git('status', '--porcelain');
+      const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(tools, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status, head };
+    };
+    const srcAndTest = {
+      base: ({ write }) => {
+        write('packages/cli/src/a.ts', 'a\n');
+        write('packages/cli/src/a.test.ts', 't\n');
+      },
+      pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
+      round: ({ write }) => {
+        write('packages/cli/src/a.ts', 'c\n');
+        write('packages/cli/src/a.test.ts', 't2\n');
+      },
+    };
+    // All changed tests green on the pre-round tree => the claimed defect
+    // does not reproduce => non-retryable rejection.
+    const rejected = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+    });
+    expect(rejected.out).toContain('REJECT:bite check');
+    // Any failure on the pre-round tree = the tests bite => round proceeds,
+    // and the verification tree is restored to the branch, clean.
+    const bit = run(srcAndTest, {
+      runnerExit: 1,
+      resolverLines: ['packages/cli'],
+    });
+    expect(bit.out).toContain('bite confirmed');
+    expect(bit.out).toContain('SURVIVED');
+    expect(bit.status).toBe('');
+    expect(bit.head).toBe('feat');
+    // A cross-package round skips (dist confound), it never rejects.
+    const skipped = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli', 'packages/core'],
+    });
+    expect(skipped.out).toContain('bite check skipped');
+    expect(skipped.out).toContain('SURVIVED');
+    // A test-only round (no source change) is coverage addition, not a
+    // defect claim — no bite requirement.
+    const coverageOnly = run(
+      {
+        base: ({ write }) => {
+          write('packages/cli/src/a.ts', 'a\n');
+          write('packages/cli/src/a.test.ts', 't\n');
+        },
+        pr: () => {},
+        round: ({ write }) => write('packages/cli/src/a.test.ts', 't-more\n'),
+      },
+      { runnerExit: 0, resolverLines: ['packages/cli'] },
+    );
+    expect(coverageOnly.out).toContain('SURVIVED');
+    expect(coverageOnly.out).not.toContain('REJECT:');
+
+    // Contract pins: the rejection is non-retryable (a repair pass cannot
+    // make a nonexistent defect reproduce), and the report step embeds the
+    // gate-authored advisory file, which is also uploaded as an artifact.
+    expect(reviewVerificationRunner).toContain(
+      "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
+    );
+    expect(pushAndReportStep).toContain('gate-advisories.md');
+    expect(reviewAddressJob).toContain('gate-advisories.md agent-api-error');
+    const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+    expect(skill).toContain('Verification is SOURCE-BLIND');
+    expect(skill).toContain('changed tests against the pre-round branch');
+    expect(skill).toContain("outside the PR's own");
+  });
+
   it('still runs review verification reporting when the agent step fails', () => {
     expect(verificationGateSteps).toHaveLength(2);
     const reviewVerificationGateStep = verificationGateSteps[1];
@@ -8398,9 +8699,10 @@ exit 1
     // Token-breaking neutralization at ALL EIGHT agent-derived publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
     // gate-rejection body, the comment-reply body whose content is agent
-    // stdout that can echo external comment text, and the two
-    // deferred-feedback report sections, which render untrusted
-    // review-comment paths into a bot-authored comment), and it
+    // stdout that can echo external comment text, the two
+    // deferred-feedback report sections, and the gate-advisories section,
+    // which render untrusted review-comment/branch paths into a
+    // bot-authored comment), and it
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
@@ -8409,7 +8711,7 @@ exit 1
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(8);
+    expect(escapeSites).toHaveLength(9);
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }
