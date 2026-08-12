@@ -143,11 +143,14 @@ function setup(options: {
           : [],
     })),
     setChannelEnabled: vi.fn(async ({ name }, enabled) => {
-      names = enabled
-        ? names.includes(name)
-          ? names
-          : [...names, name]
-        : names.filter((item) => item !== name);
+      if (enabled) {
+        if (names.includes(name)) return { changed: false };
+        names = [...names, name];
+        return { changed: true };
+      }
+      if (!names.includes(name)) return { changed: false };
+      names = names.filter((item) => item !== name);
+      return { changed: true };
     }),
     reload: vi.fn(async () => ({
       enabled: true,
@@ -661,6 +664,46 @@ describe('createChannelManagementService', () => {
     const result = await service.stop('bot');
 
     expect(result.instance.name).toBe('bot');
+  });
+
+  it('rejects an unconfirmable stop while the workspace worker is starting (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // A crash-restarting mode-`all` worker has not committed real channel
+    // names yet: the disable cannot be confirmed (changed: false) and the
+    // snapshot still lacks `requestedChannels`.
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_starting',
+    });
+
+    // The stopped record must not be persisted on a stop reported as
+    // successful — the relaunching worker could overwrite it.
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
+  it('still records an idempotent stop when no worker is starting (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+
+    await service.stop('bot');
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
   it('updates persisted startup selection without mutating runtime state', async () => {

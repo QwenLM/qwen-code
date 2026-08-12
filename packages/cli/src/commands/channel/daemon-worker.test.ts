@@ -1413,6 +1413,40 @@ describe('runChannelDaemonWorker', () => {
     await handle.close();
   });
 
+  it('falls back to the recorded states when prune fails (#8975)', async () => {
+    const sdk = createSdk();
+    const ready = vi.fn();
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+    mockChannelStateStorePrune.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    mockChannelStateStoreReadAll.mockReturnValueOnce({ feishu: 'stopped' });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+      sendReady: ready,
+    });
+
+    // Startup proceeds and the fallback read drives the restore filter.
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] "feishu" skipped (stopped before restart)',
+    );
+    expect(mockParseConfiguredChannels).toHaveBeenCalledWith(
+      expect.any(Object),
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+    expect(ready).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      pid: process.pid,
+    });
+    await handle.close();
+  });
+
   it('force-starts explicitly selected channels even when stopped (#8975)', async () => {
     const sdk = createSdk();
     mockChannelStateStoreReadAll.mockReturnValueOnce({ telegram: 'stopped' });

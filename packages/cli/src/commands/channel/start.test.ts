@@ -83,6 +83,7 @@ const mockSelectActiveChannels = vi.hoisted(
 const mockChannelRuntimeStatePath = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home/channels/channel-state.json'),
 );
+const mockAdoptLegacyChannelState = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockFindCliEntryPath = vi.hoisted(() => vi.fn());
@@ -187,6 +188,7 @@ vi.mock('./pidfile.js', () => ({
 }));
 
 vi.mock('./channel-state-store.js', () => ({
+  adoptLegacyChannelState: mockAdoptLegacyChannelState,
   ChannelStateStore: mockChannelStateStore,
   channelRuntimeStatePath: mockChannelRuntimeStatePath,
   selectActiveChannels: mockSelectActiveChannels,
@@ -1509,7 +1511,9 @@ describe('startCommand.handler', () => {
           '[Channel] "feishu" skipped (stopped before restart)',
         );
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-          '[Channel] All configured channels are stopped; serving with 0 channels.',
+          expect.stringContaining(
+            '[Channel] All configured channels are stopped; serving with 0 channels.',
+          ),
         );
         expect(mockCreateChannel).not.toHaveBeenCalled();
         // Startup no longer exits when every channel is stopped.
@@ -1526,6 +1530,82 @@ describe('startCommand.handler', () => {
         processOnSpy.mockRestore();
         exitSpy.mockRestore();
       }
+    });
+
+    it("holds a ref'd keep-alive timer so the zero-channel service survives (#8975)", async () => {
+      mockLoadSettings.mockReturnValue({ merged: { channels: {} } });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+      const processOnSpy = vi
+        .spyOn(process, 'on')
+        .mockImplementation(() => process);
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+
+      try {
+        void invokeStartHandler({});
+        await new Promise((resolve) => setImmediate(resolve));
+
+        // Signal listeners plus a pending promise cannot keep the Node event
+        // loop alive; a ref'd timer must hold it open or the zero-channel
+        // service exits on its own and leaves a dangling pidfile.
+        const keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
+        expect(keepAlive).toBeDefined();
+        expect(keepAlive!.hasRef()).toBe(true);
+
+        const sigterm = processOnSpy.mock.calls.find(
+          ([eventName]) => eventName === 'SIGTERM',
+        )?.[1] as (() => void) | undefined;
+        expect(sigterm).toBeDefined();
+        expect(() => sigterm!()).toThrow('process.exit: 0');
+        // Shutdown releases the handle it installed.
+        expect(clearIntervalSpy).toHaveBeenCalledWith(keepAlive);
+      } finally {
+        clearIntervalSpy.mockRestore();
+        setIntervalSpy.mockRestore();
+        processOnSpy.mockRestore();
+        exitSpy.mockRestore();
+      }
+    });
+
+    it('falls back to the recorded states when prune fails (#8975)', async () => {
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStorePrune.mockImplementationOnce(() => {
+        throw new Error('EACCES');
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({ feishu: 'stopped' });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        // Default connect rejection ends startAll at the connectedCount check.
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      // The fallback read still drives the restore filter.
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '[Channel] "feishu" skipped (stopped before restart)',
+      );
+      expect(mockCreateChannel).toHaveBeenCalledTimes(1);
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
     });
 
     it('skips stopped channels but still starts the rest', async () => {
@@ -1583,6 +1663,7 @@ describe('startCommand.handler', () => {
 
       // The connect loop batches into a single setMany; the store is scoped
       // to the workspace the service starts from (#8975).
+      expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
       expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
       expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
         ['telegram'],

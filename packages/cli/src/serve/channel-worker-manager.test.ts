@@ -980,24 +980,26 @@ describe('createChannelWorkerManager', () => {
     });
   });
 
-  it('falls back to connected channels when requestedChannels is not committed yet (#8975)', async () => {
+  it('records no phantom names when a stop lands in the mode-all starting window (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
     await test.manager.setSelection({ mode: 'all' });
-    // A mode-`all` worker only reports names in its ready message; during the
-    // starting window only the connected set is known.
+    // The actually-reachable uncommitted state for a mode-`all` worker (e.g.
+    // a supervisor crash restart): only the `['all']` launch placeholder is
+    // present, no `requestedChannels`. A stop in that window has no real
+    // names to persist and must not record the phantom `all` entry.
     vi.mocked(group.snapshots).mockReturnValue([
       workerSnapshot({
         state: 'starting',
         requestedChannels: undefined,
-        channels: ['telegram'],
+        channels: ['all'],
       }),
     ]);
 
-    await expect(test.manager.stopSelection()).resolves.toMatchObject({
-      changed: true,
-      stoppedChannels: [{ workspaceCwd: PRIMARY, names: ['telegram'] }],
-    });
+    const result = await test.manager.stopSelection();
+
+    expect(result).toMatchObject({ changed: true });
+    expect(result.stoppedChannels).toBeUndefined();
   });
 
   it('groups torn-down channels per workspace on stop (#8975)', async () => {

@@ -1043,6 +1043,60 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('carries committed channel names across a mode-all crash restart (#8975)', async () => {
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const secondChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10] },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await started;
+
+    firstChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // During the restart's starting window the snapshot must reflect the
+    // real channels committed before the crash — not the `['all']` launch
+    // placeholder — so stops recorded in this window name real channels.
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+
+    secondChild.emit('message', {
+      type: 'ready',
+      pid: 22222,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await Promise.resolve();
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'running',
+      pid: 22222,
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await supervisor.stop();
+  });
+
   it('uses escalating restart delays from the restart policy', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);

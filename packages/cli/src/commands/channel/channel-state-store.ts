@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import {
   atomicWriteFileSync,
@@ -26,8 +33,9 @@ interface ChannelStateFile {
  * State file used by the standalone `qwen channel` commands. Standalone
  * channel configuration is loaded per workspace, so the state is scoped the
  * same way: pass the workspace the service was started from. Without a
- * workspace (e.g. a pidfile written by an older release) the legacy global
- * file is used so recorded stops are not lost on upgrade.
+ * workspace (e.g. a pidfile written by an older release) the write falls
+ * back to the legacy global file; `adoptLegacyChannelState` seeds the
+ * workspace state file from it on the next start so those stops are honored.
  */
 export function channelRuntimeStatePath(workspaceCwd?: string): string {
   if (!workspaceCwd) {
@@ -46,8 +54,53 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
   );
 }
 
+/**
+ * One-time migration for stops recorded by an older release, which wrote the
+ * legacy global file when the pidfile carried no workspace. The standalone
+ * read path is always workspace-scoped, so without this seed the recorded
+ * stops would be silently lost on upgrade and the channels resurrected by
+ * the next `--channel all` start (#8975). Runs only when the workspace file
+ * does not exist yet; best-effort — any failure just drops the one-time
+ * legacy record.
+ */
+export function adoptLegacyChannelState(workspaceCwd: string): void {
+  const targetPath = channelRuntimeStatePath(workspaceCwd);
+  if (existsSync(targetPath)) return;
+  const legacyPath = channelRuntimeStatePath();
+  if (!existsSync(legacyPath)) return;
+  try {
+    mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+    copyFileSync(legacyPath, targetPath);
+    unlinkSync(legacyPath);
+  } catch {
+    // Best-effort migration; a failure only loses the one-time legacy stops.
+  }
+}
+
 function isChannelRuntimeState(value: unknown): value is ChannelRuntimeState {
   return value === 'active' || value === 'stopped';
+}
+
+/**
+ * Default warning sink for the store: provably non-fatal. A failing
+ * `process.stderr.write` (e.g. ENOSPC on a redirected log — the same disk
+ * condition that fails the state write) does not throw; Node emits an
+ * asynchronous `'error'` event on `process.stderr` that terminates the
+ * process with exit 1 past any surrounding try/catch. Store warnings are
+ * incidental diagnostics and must not defeat the store's never-fails
+ * contract, so guard the async channel while nothing else listens (#8975).
+ */
+function writeStoreWarning(message: string): void {
+  if (process.stderr.listenerCount('error') === 0) {
+    process.stderr.on('error', () => {
+      // The stderr target is gone; this diagnostic is already lost.
+    });
+  }
+  try {
+    writeStderrLine(message);
+  } catch {
+    // stderr is gone; there is nowhere to report this.
+  }
 }
 
 /**
@@ -64,7 +117,7 @@ export class ChannelStateStore {
     private readonly filePath: string,
     opts: { onWarning?: (message: string) => void } = {},
   ) {
-    this.warn = opts.onWarning ?? writeStderrLine;
+    this.warn = opts.onWarning ?? writeStoreWarning;
   }
 
   readAll(): Record<string, ChannelRuntimeState> {

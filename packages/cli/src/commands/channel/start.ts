@@ -24,6 +24,7 @@ import type {
   ChannelBaseOptions,
 } from '@qwen-code/channel-base';
 import {
+  adoptLegacyChannelState,
   ChannelStateStore,
   channelRuntimeStatePath,
   selectActiveChannels,
@@ -315,7 +316,12 @@ function checkDuplicateInstance(): void {
     writeStderrLine(
       `Error: Channel service is already running (PID ${existing.pid}, started ${existing.startedAt}).`,
     );
-    writeStderrLine('Use "qwen channel stop" to stop it first.');
+    writeStderrLine(
+      'A standalone service hosts the channels it was started with; exit it (Ctrl+C, or "qwen channel stop") before starting a different channel set.',
+    );
+    writeStderrLine(
+      'Note: "qwen channel stop" records the running channels as stopped, so a later "qwen channel start" skips them until each is started again by name.',
+    );
     process.exit(1);
   }
 }
@@ -331,7 +337,12 @@ async function serveWithoutChannels(
 ): Promise<void> {
   writeStdoutLine(message);
   writeServiceInfoOrExit([], () => {}, workspaceCwd);
+  // Signal listeners and a pending promise do not keep the Node event loop
+  // alive, so without a ref'd handle the zero-channel process would exit on
+  // its own and leave a dangling pidfile (#8975).
+  const keepAlive = setInterval(() => {}, 2_147_483_647);
   const shutdown = () => {
+    clearInterval(keepAlive);
     writeStdoutLine('\n[Channel] Shutting down...');
     removeServiceInfo();
     process.exit(0);
@@ -497,7 +508,10 @@ async function startAll(
 
   // Restore semantics (#8975): skip channels explicitly stopped before the
   // last restart; channels without recorded state are treated as active.
-  // State is scoped to this workspace, matching the config load above.
+  // State is scoped to this workspace, matching the config load above. A
+  // legacy global file written by an older release is adopted first so its
+  // recorded stops are not lost on upgrade.
+  adoptLegacyChannelState(workspaceCwd);
   const stateStore = new ChannelStateStore(
     channelRuntimeStatePath(workspaceCwd),
   );
@@ -516,7 +530,7 @@ async function startAll(
   );
   if (selectedNames.length === 0) {
     await serveWithoutChannels(
-      '[Channel] All configured channels are stopped; serving with 0 channels.',
+      '[Channel] All configured channels are stopped; serving with 0 channels. Exit this process, then restart individual channels with "qwen channel start <name>".',
       workspaceCwd,
     );
     return;

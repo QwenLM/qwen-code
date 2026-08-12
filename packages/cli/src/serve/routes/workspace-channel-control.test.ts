@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -114,6 +115,11 @@ describe('DELETE /workspace/channel', () => {
     expect(response.status).toBe(200);
     expect(stopChannelWorker).toHaveBeenCalledTimes(1);
     // Requested (not just connected) channels are recorded, per workspace.
+    // The daemon (not standalone) state path segment is pinned, so swapping
+    // in the standalone helper cannot ship green (#8975).
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      expect.stringContaining(path.join('channels', 'daemon')),
+    );
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       expect.stringContaining('channel-state.json'),
     );
@@ -145,6 +151,9 @@ describe('DELETE /workspace/channel', () => {
       (instance) => instance.path,
     );
     expect(paths[0]).not.toEqual(paths[1]);
+    // Both recorded under the daemon state-path segment (#8975).
+    expect(paths[0]).toContain(path.join('channels', 'daemon'));
+    expect(paths[1]).toContain(path.join('channels', 'daemon'));
     expect(paths[0]).toContain('channel-state.json');
     expect(paths[1]).toContain('channel-state.json');
     expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(

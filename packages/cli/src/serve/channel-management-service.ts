@@ -146,7 +146,7 @@ export interface ChannelManagementWorkerManager {
   setChannelEnabled(
     owner: ChannelWorkerRequiredOwner,
     enabled: boolean,
-  ): Promise<unknown>;
+  ): Promise<{ changed: boolean }>;
   reloadWorkspace(
     workspaceCwd: string,
     name: string,
@@ -225,6 +225,19 @@ export function createChannelManagementService(
       .committedChannelNames()
       .filter((name) =>
         workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd),
+      );
+
+  // A worker without a committed ready report (no `requestedChannels`) is
+  // still starting; a mode-`all` worker in that window may connect any
+  // configured channel, so per-channel stops cannot be confirmed (#8975).
+  const workspaceWorkerStarting = (): boolean =>
+    opts.manager
+      .state()
+      .workers.some(
+        (worker) =>
+          canonicalizeWorkspace(worker.workspaceCwd) ===
+            canonicalizeWorkspace(opts.workspaceCwd) &&
+          worker.requestedChannels === undefined,
       );
 
   const assertOwnedRuntime = (name: string): void => {
@@ -518,10 +531,21 @@ export function createChannelManagementService(
         );
       }
       assertWorkspaceConfig(persisted.channels[name]!);
-      await opts.manager.setChannelEnabled(
+      const result = await opts.manager.setChannelEnabled(
         { name, workspaceCwd: opts.workspaceCwd },
         false,
       );
+      if (!result.changed && workspaceWorkerStarting()) {
+        // A mode-`all` worker mid crash-restart has not committed real
+        // channel names yet, so the disable could not be confirmed: the
+        // relaunching worker may connect this channel and overwrite the
+        // `stopped` record. Reject loudly instead of reporting a success
+        // that does not hold (#8975).
+        throw new ChannelManagementError(
+          'channel_worker_starting',
+          `Channel "${name}" cannot be stopped while its workspace worker is still starting; retry once the worker reports ready.`,
+        );
+      }
       // An explicit stop must persist, so a later `--channel all` restart
       // does not bring this channel back (#8975).
       new ChannelStateStore(

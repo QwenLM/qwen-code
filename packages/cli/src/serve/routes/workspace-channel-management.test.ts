@@ -457,6 +457,23 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('channel_pairing_approval_not_found');
   });
 
+  it('returns 409 when a stop cannot be confirmed while the worker starts (#8975)', async () => {
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.stop).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Channel "bot" cannot be stopped while starting.'),
+        { code: 'channel_worker_starting' },
+      ),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('channel_worker_starting');
+  });
+
   it('rejects requests with an invalid client ID', async () => {
     const { app, primaryService } = mount();
     const invalidClient = (test: request.Test) =>

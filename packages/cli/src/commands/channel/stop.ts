@@ -120,6 +120,9 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       writeStdoutLine('Service killed.');
     }
 
+    writeStdoutLine(
+      'Stopped channels stay stopped until started again by name: qwen channel start <name>.',
+    );
     process.exit(0);
   },
 };

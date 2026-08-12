@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
@@ -16,6 +23,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 import {
+  adoptLegacyChannelState,
   ChannelStateStore,
   channelRuntimeStatePath,
   selectActiveChannels,
@@ -46,6 +54,61 @@ describe('channelRuntimeStatePath', () => {
     expect(channelRuntimeStatePath('/workspace/a')).not.toBe(
       channelRuntimeStatePath('/workspace/b'),
     );
+  });
+});
+
+describe('adoptLegacyChannelState (#8975)', () => {
+  const workspace = '/workspace/legacy';
+  const legacyPath = channelRuntimeStatePath();
+  const workspacePath = channelRuntimeStatePath(workspace);
+  const channelsDir = join(tmpdir(), 'qwen-state-home', 'channels');
+
+  beforeEach(() => {
+    rmSync(channelsDir, { recursive: true, force: true });
+    mkdirSync(channelsDir, { recursive: true });
+  });
+
+  it('seeds the workspace file from the legacy global file and removes it', () => {
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+    });
+    writeFileSync(channelRuntimeStatePath(), legacyBody, 'utf-8');
+
+    adoptLegacyChannelState(workspace);
+
+    expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
+    expect(existsSync(legacyPath)).toBe(false);
+  });
+
+  it('keeps an existing workspace file untouched', () => {
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { feishu: 'stopped' } }),
+      'utf-8',
+    );
+    mkdirSync(join(workspacePath, '..'), { recursive: true });
+    writeFileSync(
+      workspacePath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
+    // The legacy file is left alone once the workspace file exists.
+    expect(existsSync(legacyPath)).toBe(true);
+  });
+
+  it('does nothing when no legacy file exists', () => {
+    adoptLegacyChannelState(workspace);
+    expect(existsSync(workspacePath)).toBe(false);
   });
 });
 
@@ -193,6 +256,51 @@ describe('ChannelStateStore', () => {
       expect(onWarning).toHaveBeenCalledWith(
         expect.stringContaining('failed to persist channel state'),
       );
+    });
+  });
+
+  describe('default warning path (#8975)', () => {
+    it('survives a failing stderr target when warning without an onWarning override', async () => {
+      writeFileSync(filePath, '{not json', 'utf-8');
+      // A failing stderr target (e.g. ENOSPC on a redirected log) does not
+      // throw synchronously — Node delivers the failure as an async 'error'
+      // event on process.stderr, which kills the process unless something
+      // listens. The default sink must guard that channel.
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => {
+          setImmediate(() => {
+            process.stderr.emit('error', new Error('ENOSPC'));
+          });
+          return true;
+        }) as typeof process.stderr.write);
+
+      try {
+        // No onWarning override: exercises the default stderr sink.
+        expect(new ChannelStateStore(filePath).readAll()).toEqual({});
+        // Let the async 'error' event fire; without the guard it would
+        // surface as an uncaught exception and fail this test.
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        writeSpy.mockRestore();
+      }
+    });
+
+    it('still writes warnings to stderr on the default path', () => {
+      writeFileSync(filePath, '{not json', 'utf-8');
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
+
+      try {
+        new ChannelStateStore(filePath).readAll();
+        expect(writeSpy).toHaveBeenCalledWith(
+          expect.stringContaining('could not read channel state file'),
+        );
+      } finally {
+        writeSpy.mockRestore();
+      }
     });
   });
 

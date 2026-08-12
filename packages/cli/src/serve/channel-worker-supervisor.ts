@@ -788,7 +788,14 @@ export function createChannelWorkerSupervisor(
       ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
     });
     const redaction = workerLogRedactionOptions(opts.daemonToken, env);
-    const requestedChannels = requestedChannelNames(opts.selection);
+    // A mode-`all` worker only reports real names in its ready report, so a
+    // crash restart would otherwise rebuild the snapshot with just the
+    // `['all']` placeholder; carry the last committed names across the
+    // relaunch so stops and status in the starting window see real channels
+    // (#8975).
+    const requestedChannels =
+      requestedChannelNames(opts.selection) ??
+      (kind === 'restart' ? snapshot.requestedChannels : undefined);
     const startedAt = new Date().toISOString();
     snapshot = {
       enabled: true,

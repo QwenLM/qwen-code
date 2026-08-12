@@ -164,6 +164,32 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
   });
 
+  it('persists the stopped record before signalling the service (#8975)', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram', 'feishu'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    // The ordering is load-bearing: if the service is signalled first,
+    // anything interrupting the stop between signal and persist leaves it
+    // dead without a `stopped` record, and the next `--channel all` start
+    // resurrects the channels the user explicitly stopped.
+    const persistedAt =
+      mockChannelStateStoreSetMany.mock.invocationCallOrder[0];
+    const signalledAt = mockSignalService.mock.invocationCallOrder[0];
+    expect(persistedAt).toBeDefined();
+    expect(signalledAt).toBeDefined();
+    expect(persistedAt!).toBeLessThan(signalledAt!);
+  });
+
   it('scopes the stop record to the workspace from the pidfile (#8975)', async () => {
     mockReadServiceInfo.mockReturnValue({
       owner: 'channel',

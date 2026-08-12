@@ -24,6 +24,7 @@ import type {
   ChannelStartupAttemptFailure,
   ChannelWorkerSnapshot,
 } from './channel-worker-supervisor.js';
+import { isAllChannelSelectionName } from './channel-selection.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
@@ -232,15 +233,19 @@ function errorMessage(error: unknown): string {
  * Collect the channel names a stop tears down, grouped by workspace.
  * `requestedChannels` is authoritative once a worker commits a ready report;
  * until then (mode-`all` workers starting up) fall back to the connected
- * set. Runs inside the manager lane, so an in-flight start has already
- * committed and reported ready by the time a queued stop executes.
+ * set. The mode-`all` launch placeholder (`['all']`) is filtered so a stop
+ * landing in the startup window never persists a phantom `all: stopped`
+ * entry (#8975). Runs inside the manager lane, so an in-flight start has
+ * already committed and reported ready by the time a queued stop executes.
  */
 function stoppedChannelsByWorkspace(
   workers: readonly ChannelWorkerGroupSnapshot[],
 ): Array<{ workspaceCwd: string; names: string[] }> {
   const byWorkspace = new Map<string, Set<string>>();
   for (const worker of workers) {
-    const names = worker.requestedChannels ?? worker.channels;
+    const names = (worker.requestedChannels ?? worker.channels).filter(
+      (name) => !isAllChannelSelectionName(name),
+    );
     if (names.length === 0) continue;
     const workspaceCwd = canonicalizeWorkspace(worker.workspaceCwd);
     let collected = byWorkspace.get(workspaceCwd);
@@ -508,6 +513,9 @@ export function createChannelWorkerManager(
     const names = new Set<string>();
     for (const worker of group?.snapshots() ?? []) {
       for (const name of worker.requestedChannels ?? worker.channels) {
+        // The mode-`all` launch placeholder is not a real channel; leaking it
+        // here breaks enabled checks, stop recording and status (#8975).
+        if (isAllChannelSelectionName(name)) continue;
         names.add(name);
       }
     }
