@@ -511,14 +511,14 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
           # run's log captures the spike, and dump the full state on failure.
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
           RC=$?
           set -e
           kill "$SAMPLER_PID" 2>/dev/null || true
-          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; fi
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
 
       # Release guard for the Chrome extension: build, package, and scan real
@@ -821,14 +821,14 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
           # run's log captures the spike, and dump the full state on failure.
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
           RC=$?
           set -e
           kill "$SAMPLER_PID" 2>/dev/null || true
-          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; fi
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
@@ -939,14 +939,14 @@ jobs:
           # healthy afterwards — a transient spike, likely /tmp inodes or a
           # tmpfs cap. Sample /tmp space+inodes every 10s so the failing
           # run's log captures the spike, and dump the full state on failure.
-          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)]" 2>/dev/null; sleep 10; done ) &
+          ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) space[$(df -h /tmp 2>/dev/null | tail -1)] inodes[$(df -i /tmp 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
           npm run test:ci
           RC=$?
           set -e
           kill "$SAMPLER_PID" 2>/dev/null || true
-          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; fi
+          if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
 
   post_coverage_comment:
