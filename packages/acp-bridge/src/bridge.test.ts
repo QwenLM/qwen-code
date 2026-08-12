@@ -3887,24 +3887,35 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('keeps terminal overlays retained by a successful transcript rewind', async () => {
+  it('uses the child active transcript after a successful rewind', async () => {
+    let rewound = false;
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
           promptImpl: () => ({ stopReason: 'end_turn' }),
-          extMethodImpl: (method) => {
+          extMethodImpl: (method, params) => {
             if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
-              return { v: 1, sessionId: SESS_A, turnResult: null };
+              const promptId = params['promptId'] as string | undefined;
+              return {
+                v: 1,
+                sessionId: SESS_A,
+                turnResult:
+                  rewound && promptId !== 'prompt-before-rewind-c'
+                    ? {
+                        promptId,
+                        state: 'completed',
+                        stopReason: 'end_turn',
+                        endedAt: 1,
+                      }
+                    : null,
+              };
             }
             if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+              rewound = true;
               return {
                 targetTurnIndex: 2,
                 filesChanged: [],
                 filesFailed: [],
-                retainedTurnResultPromptIds: [
-                  'prompt-before-rewind-a',
-                  'prompt-before-rewind-b',
-                ],
               };
             }
             return {};
@@ -12588,7 +12599,7 @@ describe('createAcpSessionBridge', () => {
     });
 
     it.each(['close', 'kill'] as const)(
-      'keeps the session live and retries queued persistence before %s',
+      'keeps the session live and retries newly cancelled persistence before %s',
       async (operation) => {
         let persistAvailable = false;
         const activePrompt = deferred<PromptResponse>();
@@ -12631,12 +12642,11 @@ describe('createAcpSessionBridge', () => {
         );
         p2.catch(() => {});
 
-        const teardown =
+        await expect(
           operation === 'close'
             ? bridge.closeSession(session.sessionId)
-            : bridge.killSession(session.sessionId);
-        await expect(teardown).rejects.toThrow();
-
+            : bridge.killSession(session.sessionId),
+        ).rejects.toThrow();
         expect(bridge.sessionCount).toBe(1);
         expect(handle.killed).toBe(false);
         expect(
@@ -12666,6 +12676,73 @@ describe('createAcpSessionBridge', () => {
               method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
           ),
         ).toHaveLength(2);
+        expect(bridge.sessionCount).toBe(0);
+        await bridge.shutdown();
+      },
+    );
+
+    it.each(['close', 'kill'] as const)(
+      'does not leave the session unclosable after queued persistence permanently fails before %s',
+      async (operation) => {
+        const activePrompt = deferred<PromptResponse>();
+        const handle = makeChannel({
+          promptImpl: () => activePrompt.promise,
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+              throw new Error('writer permanently unavailable');
+            }
+            return method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const p1 = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'active' }],
+          },
+          undefined,
+          { promptId: 'prompt-a' },
+        );
+        await vi.waitFor(() =>
+          expect(handle.agent.promptCalls).toHaveLength(1),
+        );
+        const p2 = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'queued deadline' }],
+          },
+          undefined,
+          { promptId: 'prompt-b', deadlineMs: 10 },
+        );
+
+        await vi.waitFor(async () => {
+          await expect(
+            bridge.getSessionTurnStatus(
+              session.sessionId,
+              undefined,
+              'prompt-b',
+            ),
+          ).resolves.toMatchObject({
+            state: 'error',
+            error: { code: 'prompt_deadline_exceeded' },
+          });
+        });
+        activePrompt.resolve({ stopReason: 'end_turn' });
+        await expect(p1).resolves.toEqual({ stopReason: 'end_turn' });
+        await expect(p2).rejects.toThrow(/deadline/i);
+
+        await expect(
+          operation === 'close'
+            ? bridge.closeSession(session.sessionId)
+            : bridge.killSession(session.sessionId),
+        ).resolves.toBe(operation === 'close' ? undefined : true);
         expect(bridge.sessionCount).toBe(0);
         await bridge.shutdown();
       },

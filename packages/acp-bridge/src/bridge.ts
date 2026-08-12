@@ -1940,14 +1940,19 @@ async function cancelQueuedPromptsBeforeTeardown(
   }
   const attempts = strictTerminalPersistences.get(entry);
   if (!attempts) return;
-  await Promise.all(
-    [...attempts.entries()].map(([promptId, current]) =>
+  const newlyCancelled = new Set(queued.map(({ promptId }) => promptId));
+  const required: Array<Promise<void>> = [];
+  const previous: Array<Promise<void>> = [];
+  for (const [promptId, current] of attempts) {
+    const persistence =
       current.state === 'pending'
         ? current.promise
         : startStrictTerminalPersistence(entry, promptId, current.turnResult)
-            .promise,
-    ),
-  );
+            .promise;
+    (newlyCancelled.has(promptId) ? required : previous).push(persistence);
+  }
+  await Promise.allSettled(previous);
+  await Promise.all(required);
 }
 
 function hasControlCharacter(value: string): boolean {
@@ -10547,23 +10552,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
-      const retainedTurnResultPromptIds =
-        response['retainedTurnResultPromptIds'];
-      if (
-        Array.isArray(retainedTurnResultPromptIds) &&
-        retainedTurnResultPromptIds.every(
-          (promptId): promptId is string => typeof promptId === 'string',
-        )
-      ) {
-        const retained = new Set(retainedTurnResultPromptIds);
-        for (const promptId of entry.terminalTurnStatuses.keys()) {
-          if (!retained.has(promptId)) {
-            entry.terminalTurnStatuses.delete(promptId);
-          }
-        }
-      } else {
-        entry.terminalTurnStatuses.clear();
-      }
+      // The child transcript reader owns rewind branch membership. Drop the
+      // bridge's ephemeral overlays so subsequent polls use that active branch.
+      entry.terminalTurnStatuses.clear();
       const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
       const filesChanged = (response['filesChanged'] as string[]) ?? [];
       const filesFailed = (response['filesFailed'] as string[]) ?? [];

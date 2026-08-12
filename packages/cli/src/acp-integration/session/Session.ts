@@ -176,7 +176,6 @@ import {
   approxBase64Bytes,
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
-  isTurnResultRecordPayload,
   normalizeTurnResultError,
   runWithRuntimeContentGenerator,
   getInvocationContext,
@@ -920,7 +919,6 @@ function extractTurnPromptText(content: ContentBlock[]): string {
 
 type InFlightTurnRecording = {
   promptId: string;
-  turnIndex?: number;
   originatorClientId?: string;
   startedAt?: number;
   promptText: string;
@@ -1545,7 +1543,6 @@ export class Session implements SessionContext {
    * the transcript at turn end; `null` when no pollable turn is streaming.
    */
   #turnRecording: InFlightTurnRecording | null = null;
-  readonly #turnResultTurnIndexes = new Map<string, number>();
   /**
    * Tracks the completion of the current prompt so that the next prompt
    * can await it.  This prevents a new prompt from reading chat history
@@ -2764,22 +2761,7 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
-    this.#turnResultTurnIndexes.clear();
-    let turnIndex = -1;
     for (const record of records) {
-      if (isUserPromptRecord(record)) {
-        turnIndex += 1;
-      }
-      if (
-        record.type === 'system' &&
-        record.subtype === 'turn_result' &&
-        isTurnResultRecordPayload(record.systemPayload)
-      ) {
-        this.#turnResultTurnIndexes.set(
-          record.systemPayload.promptId,
-          Math.max(0, turnIndex),
-        );
-      }
       if (record.subtype !== 'notification') continue;
       const backgroundTask = (
         record.systemPayload as
@@ -2880,28 +2862,7 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
     }
 
-    for (const [promptId, turnIndex] of this.#turnResultTurnIndexes) {
-      if (turnIndex >= targetTurnIndex) {
-        this.#turnResultTurnIndexes.delete(promptId);
-      }
-    }
-
     return { targetTurnIndex, apiTruncateIndex };
-  }
-
-  getRetainedTurnResultPromptIds(): string[] {
-    return [...this.#turnResultTurnIndexes.keys()];
-  }
-
-  isTurnResultPromptIdRetained(promptId: string): boolean {
-    return this.#turnResultTurnIndexes.has(promptId);
-  }
-
-  registerExternalTurnResultPromptId(promptId: string): void {
-    this.#turnResultTurnIndexes.set(
-      promptId,
-      Math.max(0, this.getRewindableUserTurnCount() - 1),
-    );
   }
 
   captureHistorySnapshot(): Content[] {
@@ -3256,7 +3217,6 @@ export class Session implements SessionContext {
         channelDeliveryCapture,
         invocationContext,
         modelPrompt,
-        turnRecording,
       );
       const terminalError = getTerminalPromptAbortError(pendingSend.signal);
       settlement =
@@ -3524,7 +3484,6 @@ export class Session implements SessionContext {
     channelDeliveryCapture?: ChannelDeliveryCapture,
     invocationContext?: InvocationContextV1,
     modelPrompt?: string,
-    turnRecording?: InFlightTurnRecording | null,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -3547,7 +3506,6 @@ export class Session implements SessionContext {
           pendingSend,
           channelDeliveryCapture,
           modelPrompt,
-          turnRecording,
         ),
       ),
     );
@@ -3558,7 +3516,6 @@ export class Session implements SessionContext {
     pendingSend: AbortController,
     channelDeliveryCapture?: ChannelDeliveryCapture,
     modelPrompt?: string,
-    turnRecording?: InFlightTurnRecording | null,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -3649,14 +3606,6 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
-            if (turnRecording) {
-              const rewindableTurnCount = this.getRewindableUserTurnCount();
-              turnRecording.turnIndex =
-                isContinue || isRetry
-                  ? Math.max(0, rewindableTurnCount - 1)
-                  : rewindableTurnCount;
-            }
-
             if (isContinue) {
               const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
                 sessionId: this.sessionId,
@@ -5343,10 +5292,6 @@ export class Session implements SessionContext {
     const { text, truncated } = truncateTurnText(
       extractTurnPromptText(params.prompt),
     );
-    const metadata = params._meta as Record<string, unknown> | undefined;
-    const continuesCurrentTurn =
-      metadata?.[DAEMON_RETRY_META_KEY] === true ||
-      metadata?.[DAEMON_CONTINUE_META_KEY] === true;
     return {
       promptId: invocationContext.promptId,
       ...(invocationContext.originatorClientId !== undefined
@@ -5354,11 +5299,6 @@ export class Session implements SessionContext {
         : {}),
       promptText: text,
       promptTextTruncated: truncated,
-      ...(continuesCurrentTurn
-        ? {
-            turnIndex: Math.max(0, this.getRewindableUserTurnCount() - 1),
-          }
-        : {}),
       resultSegments: new Map(),
       resultCapturedChars: 0,
       resultSegmentsTruncated: false,
@@ -5469,10 +5409,6 @@ export class Session implements SessionContext {
     if (recording === null) {
       return;
     }
-    this.#turnResultTurnIndexes.set(
-      recording.promptId,
-      recording.turnIndex ?? this.getRewindableUserTurnCount(),
-    );
     const selectedSegments = [...recording.resultSegments.values()].map(
       (segment) => ({
         text: segment.rewrittenText ?? segment.rawText,
