@@ -191,6 +191,7 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -3952,6 +3953,11 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const promptDisplayText =
+              typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
+              'string'
+                ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+                : undefined;
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
                 ? params.prompt
@@ -4057,7 +4063,12 @@ export class Session implements SessionContext {
             } else {
               // record user message for session management
               const recorder = this.config.getChatRecordingService();
-              if (goalTurn) {
+              if (promptDisplayText !== undefined) {
+                recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                  displayText: promptDisplayText,
+                  hookContext: '',
+                });
+              } else if (goalTurn) {
                 recorder?.recordUserMessage(promptText, goalTurn.permit);
               } else {
                 recorder?.recordUserMessage(promptText);
