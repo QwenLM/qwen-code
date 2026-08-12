@@ -216,6 +216,7 @@ function testUpdaterMirrorConfiguration() {
     main,
     /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
   );
+  assert.equal((main.match(/check_for_update\(&app\)/g) ?? []).length, 2);
 }
 
 function testBootstrapBridgeConfiguration() {

@@ -41,7 +41,6 @@ on:
         type: 'boolean'
 
 permissions:
-  actions: 'read'
   contents: 'read'
 
 concurrency:
@@ -73,11 +72,18 @@ jobs:
         env:
           ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}'
           INPUT_VERSION: '${{ inputs.version }}'
+          IS_DRAFT: '${{ inputs.draft }}'
+          IS_DRY_RUN: '${{ inputs.dry_run }}'
+          IS_PRERELEASE: '${{ inputs.prerelease }}'
         run: |
           set -euo pipefail
           version="${INPUT_VERSION#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Desktop version must be valid SemVer: $INPUT_VERSION"
+            exit 1
+          fi
+          if [ "$IS_DRY_RUN" = 'false' ] && [ "$IS_DRAFT" = 'false' ] && [ "$IS_PRERELEASE" = 'false' ] && [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Published stable Desktop versions must use X.Y.Z: $INPUT_VERSION"
             exit 1
           fi
           if [ "$ELECTRON_BRIDGE" = 'true' ]; then
@@ -623,6 +629,9 @@ jobs:
       - 'prepare'
       - 'build'
       - 'publish'
+    permissions:
+      actions: 'read'
+      contents: 'read'
     uses: './.github/workflows/sync-desktop-to-oss.yml'
     with:
       version: '${{ needs.prepare.outputs.version }}'

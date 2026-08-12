@@ -178,7 +178,8 @@ jobs:
           done < "$directory/SHA256SUMS.txt"
           (cd "$directory" && sha256sum -c SHA256SUMS.txt)
 
-      - name: 'Confirm latest manifest matches GitHub stable feed'
+      - name: 'Check whether release matches GitHub stable feed'
+        id: 'latest'
         env:
           GH_TOKEN: '${{ github.token }}'
         run: |
@@ -188,9 +189,15 @@ jobs:
           gh release download 'desktop-latest' --dir "$directory" --pattern 'desktop-latest.json'
           expected="$(jq -r '.version' dist/desktop/desktop-latest.json)"
           actual="$(jq -r '.version' "$directory/desktop-latest.json")"
-          test "$actual" = "$expected" || { echo "::error::GitHub stable feed is $actual, expected $expected"; exit 1; }
+          if [ "$actual" = "$expected" ]; then
+            echo 'matches=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matches=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub stable feed is $actual; mirrored version $expected will not replace the OSS latest feed."
+          fi
 
       - name: 'Publish latest manifest to Aliyun OSS'
+        if: "${{ steps.latest.outputs.matches == 'true' }}"
         env:
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
         run: |
@@ -201,6 +208,7 @@ jobs:
             dist/desktop/desktop-latest.json
 
       - name: 'Verify latest manifest on Aliyun OSS'
+        if: "${{ steps.latest.outputs.matches == 'true' }}"
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
         run: |
@@ -211,6 +219,7 @@ jobs:
       - name: 'Publish mirror summary'
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          IS_LATEST: '${{ steps.latest.outputs.matches }}'
           VERSION: '${{ steps.release.outputs.version }}'
         run: |
           {
@@ -218,6 +227,9 @@ jobs:
             echo
             echo "Version: $VERSION"
             echo "Assets: ${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}/"
+            if [ "$IS_LATEST" != 'true' ]; then
+              echo 'Latest feed: unchanged (the mirrored version is not the current GitHub stable release)'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Cleanup Aliyun OSS credentials'
