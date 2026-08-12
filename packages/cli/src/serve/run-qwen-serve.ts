@@ -1172,6 +1172,7 @@ async function loadServeRuntimeModules() {
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
+    daemonAcpNdJsonLimits: spawnChannelModule.DAEMON_ACP_NDJSON_LIMITS,
     ProcessRegistry: processRegistryModule.ProcessRegistry,
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
@@ -2116,14 +2117,25 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  const baseEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...(optsIn.memoryProjectScope !== undefined
-      ? {
-          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
-        }
-      : {}),
-  };
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const launchMemoryProjectScopeValue =
+    baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
+    ? launchMemoryProjectScopeValue
+    : undefined;
+  const memoryProjectScopeValue =
+    optsIn.memoryProjectScope ?? launchMemoryProjectScope ?? 'workspace';
+  const memoryProjectScopeSource =
+    optsIn.memoryProjectScope !== undefined
+      ? 'option'
+      : launchMemoryProjectScope !== undefined
+        ? 'environment'
+        : 'default';
+  const resolvedMemoryProjectScope =
+    memoryProjectScopeValue.trim().toLowerCase() === 'workspace'
+      ? 'workspace'
+      : 'git-root';
+  baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = memoryProjectScopeValue;
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
   // keep loader vars — dev-mode ACP children and channel workers need the
@@ -2685,6 +2697,11 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  daemonLog.info('project memory scope resolved', {
+    projectMemoryScope: resolvedMemoryProjectScope,
+    projectMemoryScopeSource: memoryProjectScopeSource,
+    projectMemoryScopeRaw: memoryProjectScopeValue,
+  });
   // Per-workspace .env loads keep running after boot (skill status, voice
   // capability checks, settings reloads); boot stderr is long gone by then,
   // so fresh loader-key rejections must land in the durable daemon log or
@@ -3744,6 +3761,7 @@ async function runQwenServeImpl(
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
       childHeapPolicy,
+      pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -4453,6 +4471,7 @@ async function runQwenServeImpl(
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4997,6 +5016,7 @@ async function runQwenServeImpl(
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {

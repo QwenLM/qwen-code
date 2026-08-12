@@ -121,15 +121,15 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
-    path: '/session/:id/subagents/:toolCallId',
+    path: '/session/:id/subagents/:subagentRef',
     attribution: 'handler_resolved',
-    route: 'GET /session/:id/subagents/:toolCallId',
+    route: 'GET /session/:id/subagents/:subagentRef',
   },
   {
     method: 'POST',
-    path: '/session/:id/subagents/:toolCallId/cancel',
+    path: '/session/:id/subagents/:subagentRef/cancel',
     attribution: 'handler_resolved',
-    route: 'POST /session/:id/subagents/:toolCallId/cancel',
+    route: 'POST /session/:id/subagents/:subagentRef/cancel',
   },
   {
     method: 'GET',
@@ -274,6 +274,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/mid-turn-messages/:messageId',
     attribution: 'handler_resolved',
     route: 'DELETE /session/:id/mid-turn-messages/:messageId',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/mid-turn-messages',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/mid-turn-messages',
   },
   {
     method: 'GET',

@@ -635,12 +635,10 @@ describe('serve rate limit env parsing', () => {
       webShellMounted: false,
     });
 
-    await startServeHandlerWithArgs(
-      '--no-web --memory-project-scope workspace',
-    );
+    await startServeHandlerWithArgs('--no-web --memory-project-scope git-root');
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ memoryProjectScope: 'workspace' }),
+      expect.objectContaining({ memoryProjectScope: 'git-root' }),
     );
   });
 

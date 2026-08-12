@@ -272,7 +272,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         choices: MEMORY_PROJECT_SCOPES,
         description:
           'Choose how project memory is partitioned. ' +
-          '"git-root" preserves the legacy shared scope; "workspace" keeps each daemon workspace isolated. ' +
+          'Defaults to "workspace" so each daemon workspace stays isolated; "git-root" preserves the legacy shared scope. ' +
           'Overrides QWEN_CODE_MEMORY_PROJECT_SCOPE when provided.',
       })
       .option('max-connections', {

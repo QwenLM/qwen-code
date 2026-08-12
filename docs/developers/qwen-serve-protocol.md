@@ -67,10 +67,14 @@ with status `400`.
 `SessionNotFoundError` for an unknown session id returns:
 
 ```json
-{ "error": "No session with id \"<sid>\"", "sessionId": "<sid>" }
+{
+  "error": "No session with id \"<sid>\"",
+  "sessionId": "<sid>",
+  "code": "session_not_found"
+}
 ```
 
-with status `404`.
+with status `404`. A concurrent close uses `code: "session_closing"`.
 
 `WorkspaceMismatchError` for a `POST /session` whose `cwd` doesn't canonicalize to a registered workspace returns `400` with:
 
@@ -2394,15 +2398,19 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, and `DELETE /session/:id/artifacts/:artifactId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, and `DELETE /session/:id/artifacts/:artifactId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
 
 ### Mid-turn messages
 
-`POST /session/:id/mid-turn-message` accepts `{ "message": "..." }` while a turn is active. A successful admission returns `{ "accepted": true, "messageId": "<uuid>" }`; an idle session or full mid-turn queue returns `{ "accepted": false }`, and the client should retain the message for ordinary next-turn submission. When the message is drained into the running turn, `mid_turn_message_injected` includes aligned `messages` and `messageIds` arrays plus the originating client id.
+`POST /session/:id/mid-turn-message` accepts `{ "message": "...", "messageId": "<optional-message-id>" }`. A successful admission returns `{ "accepted": true, "messageId": "<id>" }` and transfers ownership to the daemon: the message is drained into the active turn or promoted into the normal prompt FIFO when the session becomes idle. Clients using `session_mid_turn_message_query` send a stable `messageId`; repeating it is idempotent while it remains queued, pending, or in the bounded reconciliation rings. A full queue rejects a new request without taking ownership. New clients connected to an older daemon detect the missing capability and retain their legacy local fallback.
 
-When `session_mid_turn_message_mutation` is advertised, the originating client may call `DELETE /session/:id/mid-turn-messages/:messageId`. It returns `{ "removed": true }` only while that message is still waiting in the daemon queue. `{ "removed": false }` means it was not found, belonged to another client, or had already been drained.
+`GET /session/:id/mid-turn-messages` returns the session-wide daemon-owned queue plus bounded `settledMessageIds` and `promotedMessageIds` rings. Settled ids were injected or explicitly deleted; promoted ids entered the normal prompt FIFO. An id in either ring must not be resent.
+
+When a queued message is drained into the active turn, the daemon publishes `mid_turn_message_injected` carrying aligned `messages` and `messageIds` arrays (and the running turn's `promptId` when known). It is a transient dedupe signal, not a transcript item: clients settle completion callbacks registered under those message ids and drop any local pending rows for them. Older daemons additionally carry `originatorClientId` in the payload. A missed echo is recovered from the settled ring via the query above.
+
+When `session_mid_turn_message_mutation` is advertised, an attached session client may call `DELETE /session/:id/mid-turn-messages/:messageId`. It removes the message from either the mid-turn queue or its promoted pending-prompt state; removing a promoted message that is already running aborts that turn, matching ordinary pending-prompt removal. Daemon-owned queue additions and removals publish the existing `pending_prompt_added` and `pending_prompt_completed` session events so attached clients refresh both authoritative queue snapshots. `{ "removed": false }` means the message was already injected, completed, or not found.
 
 ### `POST /session/:id/prompt`
 
@@ -2481,7 +2489,7 @@ curl -X DELETE http://127.0.0.1:4170/session/$SID
 # → 204 No Content
 ```
 
-Idempotent: returns `404` for unknown sessions (same `SessionNotFoundError` shape as other routes).
+Idempotent: returns `404` for unknown sessions. The error envelope uses `code: "session_not_found"`; a concurrent close may return `code: "session_closing"`, which clients may treat as the same successful terminal state for this route.
 
 > **`session_closed` event.** SSE subscribers receive a terminal `session_closed` event with `{ sessionId, reason: 'client_close', closedBy?: '<clientId>' }` before the stream ends. SDK reducers treat this identically to `session_died` (sets `alive: false`, clears `pendingPermissions`).
 

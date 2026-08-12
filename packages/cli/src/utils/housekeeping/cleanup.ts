@@ -42,6 +42,11 @@ export interface OpenAILogCleanupOptions {
   cutoffDate: Date;
   /** Resolved OpenAI log directory (see resolveOpenAILogDir in core). */
   logDir: string;
+  signal?: AbortSignal;
+}
+
+export interface OpenAILogCleanupResult extends CleanupResult {
+  completed: boolean;
 }
 
 // cleanupPeriodDays = 0 means "minimum retention", not "delete everything
@@ -143,8 +148,17 @@ const OPENAI_LOG_FILE_PATTERN =
 // default location lives inside the user's project checkout.
 export async function cleanupOldOpenAILogs(
   opts: OpenAILogCleanupOptions,
-): Promise<CleanupResult> {
-  const result: CleanupResult = { removed: 0, errors: 0 };
+): Promise<OpenAILogCleanupResult> {
+  const result: OpenAILogCleanupResult = {
+    removed: 0,
+    errors: 0,
+    completed: true,
+  };
+
+  if (opts.signal?.aborted) {
+    result.completed = false;
+    return result;
+  }
 
   let dir;
   try {
@@ -159,6 +173,11 @@ export async function cleanupOldOpenAILogs(
   let batch: Array<Promise<void>> = [];
 
   for await (const entry of dir) {
+    if (opts.signal?.aborted) {
+      result.completed = false;
+      break;
+    }
+
     const filenameDate = entry.isFile()
       ? OPENAI_LOG_FILE_PATTERN.exec(entry.name)?.[1]
       : undefined;
