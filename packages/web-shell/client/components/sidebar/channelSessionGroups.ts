@@ -10,6 +10,8 @@ export interface ChannelSessionGroup {
   sessions: DaemonSessionSummary[];
 }
 
+const FALLBACK_GROUP_ID = 'channel-type-fallback';
+
 export function groupSessionsByChannelType(
   sessions: readonly DaemonSessionSummary[],
   catalog: DaemonChannelTypeCatalog,
@@ -34,7 +36,7 @@ export function groupSessionsByChannelType(
       typeof configuredType === 'string'
         ? configuredType.trim() || undefined
         : undefined;
-    const id = type ? `channel-type:${type}` : 'channel-type-fallback';
+    const id = type ? `channel-type:${type}` : FALLBACK_GROUP_ID;
     const existing = groups.get(id);
     if (existing) {
       existing.sessions.push(session);
@@ -47,5 +49,11 @@ export function groupSessionsByChannelType(
     });
   }
 
-  return [...groups.values()];
+  const ordered = [...groups.values()];
+  const fallback = groups.get(FALLBACK_GROUP_ID);
+  // Keep the unresolved "Other channels" section after every named platform
+  // instead of letting first-seen session order wedge it between two of them.
+  return fallback === undefined
+    ? ordered
+    : [...ordered.filter((group) => group !== fallback), fallback];
 }

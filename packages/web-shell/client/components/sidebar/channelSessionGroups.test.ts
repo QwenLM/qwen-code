@@ -30,6 +30,10 @@ function instance(name: string, type: string): DaemonChannelInstanceSnapshot {
   };
 }
 
+function groupIds(groups: ReturnType<typeof groupSessionsByChannelType>) {
+  return groups.map((group) => group.id);
+}
+
 describe('groupSessionsByChannelType', () => {
   it('combines channel instances of the same type in first-seen order', () => {
     const groups = groupSessionsByChannelType(
@@ -91,15 +95,40 @@ describe('groupSessionsByChannelType', () => {
       })),
     ).toEqual([
       {
-        id: 'channel-type-fallback',
-        label: 'Other channels',
-        sessions: ['orphan-constructor', 'orphan-proto'],
-      },
-      {
         id: 'channel-type:dingtalk',
         label: 'DingTalk',
         sessions: ['d1'],
       },
+      {
+        id: 'channel-type-fallback',
+        label: 'Other channels',
+        sessions: ['orphan-constructor', 'orphan-proto'],
+      },
+    ]);
+  });
+
+  it('pins the fallback group after every resolved platform section', () => {
+    // The fallback section is emitted in session iteration order unless pinned,
+    // so an orphan seen before any platform session would otherwise render
+    // between two real platform sections.
+    const groups = groupSessionsByChannelType(
+      [
+        session('legacy', 'retired-instance'),
+        session('f1', 'feishu'),
+        session('d1', 'ding-one'),
+      ],
+      catalog,
+      {
+        feishu: instance('feishu', 'feishu'),
+        'ding-one': instance('ding-one', 'dingtalk'),
+      },
+      'Other channels',
+    );
+
+    expect(groupIds(groups)).toEqual([
+      'channel-type:feishu',
+      'channel-type:dingtalk',
+      'channel-type-fallback',
     ]);
   });
 
