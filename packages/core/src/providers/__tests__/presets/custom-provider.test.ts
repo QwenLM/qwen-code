@@ -5,13 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { buildInstallPlan, shouldShowStep } from '../../provider-config.js';
 import {
-  AuthType,
   CUSTOM_API_KEY_ENV_PREFIX,
-  buildInstallPlan,
-  shouldShowStep,
-} from '@qwen-code/qwen-code-core';
-import {
   customProvider,
   generateCustomEnvKey,
 } from '../../presets/custom-provider.js';

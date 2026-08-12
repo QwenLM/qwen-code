@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { GenerateContentParameters } from '@google/genai';
+import type {
+  GenerateContentParameters,
+  FunctionResponsePart,
+} from '@google/genai';
 import {
   ResponsesStreamState,
   convertResponsesEventToGemini,
@@ -32,6 +35,47 @@ describe('convertResponsesEventToGemini', () => {
     };
     const resp = convertResponsesEventToGemini(event, 'gpt-5', state);
     expect(resp?.candidates?.[0]?.content?.parts).toEqual([{ text: 'hello' }]);
+  });
+
+  it('emits refusal deltas as text chunks so a refusal is surfaced, not dropped', () => {
+    // A model refusal streams as response.refusal.delta frames. Without a
+    // handler every frame hits `default: return null`, the final chunk is
+    // empty, and geminiChat throws InvalidStreamError('...empty response
+    // text.') and retries the full prompt 4 times before showing a misleading
+    // error. Each delta must surface as a text part (mirroring
+    // output_text.delta); the terminal refusal.done frame returns null.
+    const state = new ResponsesStreamState();
+    const first = convertResponsesEventToGemini(
+      {
+        event: 'response.refusal.delta',
+        data: { output_index: 0, delta: 'I cannot help' },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(first?.candidates?.[0]?.content?.parts).toEqual([
+      { text: 'I cannot help' },
+    ]);
+    const second = convertResponsesEventToGemini(
+      {
+        event: 'response.refusal.delta',
+        data: { output_index: 0, delta: ' with that.' },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(second?.candidates?.[0]?.content?.parts).toEqual([
+      { text: ' with that.' },
+    ]);
+    const done = convertResponsesEventToGemini(
+      {
+        event: 'response.refusal.done',
+        data: { output_index: 0, refusal: 'I cannot help with that.' },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(done).toBeNull();
   });
 
   it('emits a thought:true chunk for reasoning_summary_text.delta', () => {
@@ -401,6 +445,187 @@ describe('convertResponsesEventToGemini', () => {
     ).toEqual({});
   });
 
+  it("recovers the done item's authoritative arguments when the delta buffer parses to a non-object", () => {
+    // A polluted delta buffer that parses *cleanly* to a non-object (here an
+    // array) never enters the catch branch, so the done item's authoritative
+    // `arguments` string was previously discarded and the tool dispatched
+    // with {}. The non-object guard must fall back to fc.arguments the same
+    // way the catch branch does.
+    const state = new ResponsesStreamState();
+    convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.added',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 0, delta: '["a","b"]' },
+      },
+      'gpt-5',
+      state,
+    );
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'read_file',
+            arguments: '{"path":"a.ts"}',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(resp?.candidates?.[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: 'call_1',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+        },
+      },
+    ]);
+  });
+
+  it('demuxes interleaved function-call deltas across two output_index values (parallel tool calls)', () => {
+    // Parallel tool calls interleave output_item.added / arguments.delta /
+    // output_item.done across output_index 0 and 1. The per-output_index
+    // buffer keying must keep each call's args separate; a wrong-key lookup
+    // would dispatch one call with the other's arguments.
+    const state = new ResponsesStreamState();
+    convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.added',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_0',
+            call_id: 'call_0',
+            name: 'read_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.added',
+        data: {
+          output_index: 1,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'write_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 0, delta: '{"path":' },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 1, delta: '{"file":' },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 0, delta: '"a.ts"}' },
+      },
+      'gpt-5',
+      state,
+    );
+    convertResponsesEventToGemini(
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { output_index: 1, delta: '"b.ts"}' },
+      },
+      'gpt-5',
+      state,
+    );
+    const doneZero = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 0,
+          item: {
+            type: 'function_call',
+            id: 'fc_0',
+            call_id: 'call_0',
+            name: 'read_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    const doneOne = convertResponsesEventToGemini(
+      {
+        event: 'response.output_item.done',
+        data: {
+          output_index: 1,
+          item: {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: 'call_1',
+            name: 'write_file',
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(doneZero?.candidates?.[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: 'call_0',
+          name: 'read_file',
+          args: { path: 'a.ts' },
+        },
+      },
+    ]);
+    expect(doneOne?.candidates?.[0]?.content?.parts).toEqual([
+      {
+        functionCall: {
+          id: 'call_1',
+          name: 'write_file',
+          args: { file: 'b.ts' },
+        },
+      },
+    ]);
+  });
+
   describe('reasoning item completion (thoughtSignature round-trip)', () => {
     it('emits a signature-only thought chunk when encrypted_content is present', () => {
       const state = new ResponsesStreamState();
@@ -537,6 +762,38 @@ describe('convertResponsesEventToGemini', () => {
       getGenAiUsageProvenance(resp?.usageMetadata ?? undefined)
         ?.cachedInputTokensReported,
     ).toBe(false);
+  });
+
+  it('records cache provenance as reported when cached_tokens is present but zero (absent vs zero)', () => {
+    // A provider reporting cached_tokens: 0 (an ordinary cache miss) must be
+    // recorded as "measured zero", not "not measured". The implementation
+    // uses `typeof ... === 'number'`; a truthiness rewrite would misreport
+    // every cache-miss turn. cachedContentTokenCount is 0 in both cases, so
+    // provenance is the only distinguishing signal.
+    const state = new ResponsesStreamState();
+    const resp = convertResponsesEventToGemini(
+      {
+        event: 'response.completed',
+        data: {
+          response: {
+            id: 'resp_1',
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              total_tokens: 15,
+              input_tokens_details: { cached_tokens: 0 },
+            },
+          },
+        },
+      },
+      'gpt-5',
+      state,
+    );
+    expect(resp?.usageMetadata?.cachedContentTokenCount).toBe(0);
+    expect(
+      getGenAiUsageProvenance(resp?.usageMetadata ?? undefined)
+        ?.cachedInputTokensReported,
+    ).toBe(true);
   });
 
   it('throws on response.failed', () => {
@@ -732,6 +989,30 @@ describe('convertGeminiContentsToResponsesInput', () => {
               text: 'because X',
               thought: true,
               thoughtSignature: 'not-json-and-not-ours',
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      { type: 'message', role: 'assistant', content: 'because X' },
+    ]);
+  });
+
+  it('falls back to a plain assistant message when thoughtSignature is valid JSON but the wrong shape', () => {
+    // A JSON-parseable foreign signature (cross-provider / migrated / hand-
+    // edited history) with no encrypted_content must hit the shape guard and
+    // fall back, not produce a reasoning item with encrypted_content:undefined
+    // that JSON serialization silently drops.
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'model',
+          parts: [
+            {
+              text: 'because X',
+              thought: true,
+              thoughtSignature: JSON.stringify({ id: 'rs_1' }),
             },
           ],
         },
@@ -1044,6 +1325,44 @@ describe('convertGeminiContentsToResponsesInput', () => {
     ]);
   });
 
+  it('appends functionResponse.parts text entries to the tool output (compaction-slimmer placeholders)', () => {
+    // compactionInputSlimming replaces stripped media in functionResponse.parts
+    // with text placeholder parts. Those must be appended to the string-only
+    // function_call_output.output (output += text), not dropped or used to
+    // overwrite the tool's textual output — otherwise the slimmed tool result
+    // loses any trace that an image was ever returned.
+    const { input } = convertGeminiContentsToResponsesInput(
+      request([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                response: { output: 'see image' },
+                // The compaction slimmer injects text placeholder parts at
+                // runtime; FunctionResponsePart is typed inlineData/fileData
+                // only, so cast to mirror what production actually produces.
+                parts: [
+                  {
+                    text: '[image: image/png]',
+                  } as unknown as FunctionResponsePart,
+                ],
+              },
+            },
+          ],
+        },
+      ]),
+    );
+    expect(input).toEqual([
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: 'see image\n[image: image/png]',
+      } satisfies ResponsesApiFunctionCallOutputItem,
+    ]);
+  });
+
   it('unwraps a { error } tool response envelope to the bare string', () => {
     const { input } = convertGeminiContentsToResponsesInput(
       request([
@@ -1074,6 +1393,19 @@ describe('convertGeminiContentsToResponsesInput', () => {
       model: 'gpt-5',
       contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
       config: { systemInstruction: { parts: [{ text: 'be helpful' }] } },
+    });
+    expect(instructions).toBe('be helpful');
+  });
+
+  it('extracts a string-form systemInstruction into instructions', () => {
+    // Production overwhelmingly passes a string (assembleSystemPrompt returns
+    // a string; every side query passes strings). Dropping the string branch
+    // would silently yield instructions:undefined — the main session's system
+    // prompt and every side-query would run with no system prompt at all.
+    const { instructions } = convertGeminiContentsToResponsesInput({
+      model: 'gpt-5',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      config: { systemInstruction: 'be helpful' },
     });
     expect(instructions).toBe('be helpful');
   });
@@ -1151,6 +1483,10 @@ describe('convertGeminiToolsToResponsesTools', () => {
   });
 
   it('converts every declaration across multiple Tool entries (not just the first)', () => {
+    // Two separate Tool entries, one declaration each: a refactor that only
+    // processes the first Tool entry (e.g. tools.slice(0, 1)) would silently
+    // drop write_file. A single Tool entry holding both declarations would
+    // not exercise that path.
     const tools = convertGeminiToolsToResponsesTools({
       model: 'gpt-5',
       contents: [],
@@ -1162,6 +1498,10 @@ describe('convertGeminiToolsToResponsesTools', () => {
                 name: 'read_file',
                 parametersJsonSchema: { type: 'object', properties: {} },
               },
+            ],
+          },
+          {
+            functionDeclarations: [
               {
                 name: 'write_file',
                 parametersJsonSchema: { type: 'object', properties: {} },
@@ -1172,6 +1512,46 @@ describe('convertGeminiToolsToResponsesTools', () => {
       },
     });
     expect(tools?.map((t) => t.name)).toEqual(['read_file', 'write_file']);
+  });
+
+  it('prefers parametersJsonSchema over parameters when both are present (matches Chat/Anthropic wires)', () => {
+    // @google/genai allows both fields at once. The sibling Chat/Anthropic
+    // wires prefer parametersJsonSchema; this wire must not invert that or the
+    // same declaration produces a different, potentially lossier schema here.
+    const tools = convertGeminiToolsToResponsesTools({
+      model: 'gpt-5',
+      contents: [],
+      config: {
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: 'read_file',
+                parametersJsonSchema: {
+                  type: 'object',
+                  properties: { path: { type: 'string' } },
+                },
+                // A distinct (Gemini Type-enum) schema that must NOT win.
+                parameters: {
+                  type: 'OBJECT',
+                  properties: { other: { type: 'STRING' } },
+                } as unknown as Record<string, unknown>,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(tools).toEqual([
+      {
+        type: 'function',
+        name: 'read_file',
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+        },
+      },
+    ]);
   });
 
   it('returns undefined (not tools: []) when declarations are present but empty', () => {
@@ -1267,15 +1647,25 @@ describe('normalizeResponsesParameters', () => {
     expect(normalizeResponsesParameters(schema)).toEqual(schema);
   });
 
-  it('does not mutate the caller-provided schema object in place', () => {
-    // Tool declarations are shared across requests; an in-place mutation would
-    // corrupt the caller's object. The normalizer must return a fresh tree.
-    const schema = { type: 'object' };
+  it('does not mutate the caller-provided schema object in place, including nested nodes', () => {
+    // Tool declarations are shared across requests (BaseTool.schema returns the
+    // same object reference each call, read by the Chat/Anthropic wires and
+    // client-side validateToolParams); an in-place mutation would permanently
+    // corrupt them. A nested fixture is required so the recursion branch is
+    // covered — a root-clone-only mutant that patches children in place would
+    // pass a bare `{ type: 'object' }` fixture.
+    const schema = {
+      type: 'object',
+      properties: { nested: { type: 'object' } },
+    };
     const snapshot = structuredClone(schema);
     const result = normalizeResponsesParameters(schema);
     expect(schema).toEqual(snapshot);
     expect(result).not.toBe(schema);
-    expect(result).toEqual({ type: 'object', properties: {} });
+    expect(result).toEqual({
+      type: 'object',
+      properties: { nested: { type: 'object', properties: {} } },
+    });
   });
 
   it('passes through undefined', () => {

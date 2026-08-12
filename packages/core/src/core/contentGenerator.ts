@@ -580,6 +580,8 @@ export async function createContentGenerator(
         throw wrapProviderLoadError(error, authType);
       }
     },
-    authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI,
+    authType === AuthType.USE_GEMINI ||
+      authType === AuthType.USE_VERTEX_AI ||
+      authType === AuthType.USE_OPENAI_RESPONSES,
   );
 }

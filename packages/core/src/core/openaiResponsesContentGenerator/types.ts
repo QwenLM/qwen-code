@@ -139,7 +139,14 @@ export interface ResponsesApiOutputTextPart {
   text: string;
 }
 
-export type ResponsesApiOutputContentPart = ResponsesApiOutputTextPart;
+export interface ResponsesApiOutputRefusalPart {
+  type: 'refusal';
+  refusal: string;
+}
+
+export type ResponsesApiOutputContentPart =
+  | ResponsesApiOutputTextPart
+  | ResponsesApiOutputRefusalPart;
 
 export interface ResponsesApiOutputFunctionCall {
   type: 'function_call';
@@ -204,6 +211,8 @@ export type ResponsesSSEEventType =
   | 'response.content_part.done'
   | 'response.output_text.delta'
   | 'response.output_text.done'
+  | 'response.refusal.delta'
+  | 'response.refusal.done'
   | 'response.function_call_arguments.delta'
   | 'response.function_call_arguments.done'
   | 'response.reasoning_summary_part.added'
