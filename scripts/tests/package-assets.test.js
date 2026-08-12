@@ -744,6 +744,47 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'package-lock.json',
+      JSON.stringify({
+        packages: {
+          'node_modules/sharp': {
+            version: '0.0.0-root-fixture',
+          },
+        },
+      }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.0.0-root-fixture',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.optionalDependencies.sharp).toBe(
+      '0.0.0-root-fixture',
+    );
+  });
+
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
@@ -1103,6 +1144,21 @@ describe('package asset scripts', () => {
       rootDir,
       'packages/cli/src/i18n/locales/en.json',
       '{"hello":"world"}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.0.0-core-fixture',
+          },
+        },
+        null,
+        2,
+      ),
     );
     writeFile(
       rootDir,

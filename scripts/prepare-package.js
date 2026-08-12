@@ -271,14 +271,35 @@ function writeDistPackageJson(rootDir, distDir) {
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
-  const lockfile = JSON.parse(
-    fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
+  let lockfile;
+  try {
+    lockfile = JSON.parse(
+      fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
+    );
+  } catch (error) {
+    throw new Error(
+      `Cannot read package-lock.json: ${error.message}`,
+    );
+  }
+  const coreManifest = JSON.parse(
+    fs.readFileSync(
+      path.join(rootDir, 'packages', 'core', 'package.json'),
+      'utf-8',
+    ),
   );
   const sharpVersion =
     lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
     lockfile.packages?.['node_modules/sharp']?.version;
-  if (!sharpVersion) {
-    throw new Error('sharp version is not locked in package-lock.json');
+  const declared = coreManifest.dependencies?.sharp;
+  if (
+    !sharpVersion ||
+    ![sharpVersion, `^${sharpVersion}`].includes(declared)
+  ) {
+    throw new Error(
+      `sharp version is not locked in package-lock.json ` +
+        `(resolved ${sharpVersion ?? 'none'}, ` +
+        `packages/core declares ${declared ?? 'none'})`,
+    );
   }
 
   const distPackageJson = {
@@ -331,6 +352,11 @@ function writeDistPackageJson(rootDir, distDir) {
       // is sufficient: its own optionalDependencies pull in the matching @img
       // platform binary for every OS/arch npm installs onto, so the platform
       // packages are not pinned here (pinning them drifts on a sharp bump).
+      // The version is exact-pinned like all other native optional deps in this
+      // manifest — a project-wide convention that keeps the published tarball
+      // reproducible. Sharp's recurring CVE stream means users must wait for a
+      // CLI release to pick up libvips fixes; nightly releases keep the
+      // turnaround short.
       sharp: sharpVersion,
     },
     engines: rootPackageJson.engines,
