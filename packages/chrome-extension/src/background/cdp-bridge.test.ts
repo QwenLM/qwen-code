@@ -278,7 +278,7 @@ describe('CDP bridge', () => {
     await first;
   });
 
-  it('detaches before releasing a timed-out direct command', async () => {
+  it('releases a timed-out direct command before detach finishes', async () => {
     const chromeHarness = installChromeHarness({
       deferDetach: true,
       deferSendCommand: true,
@@ -303,13 +303,13 @@ describe('CDP bridge', () => {
       { tabId: 7 },
       expect.any(Function),
     );
-    chromeHarness.finishSendCommand();
     await Promise.resolve();
-    expect(settled).toBe(false);
+    expect(settled).toBe(true);
     await expect(
       bridge.withDirectBrowserAction(async () => undefined),
-    ).rejects.toThrow('WebBridge action is already in progress');
+    ).rejects.toThrow('CDP tunnel is releasing the browser');
 
+    chromeHarness.finishSendCommand();
     chromeHarness.finishDetach();
     await expect(pending).rejects.toThrow(
       'WebBridge action timed out after 55s',

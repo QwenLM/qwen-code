@@ -170,12 +170,16 @@ async function navigate(args: Args): Promise<unknown> {
       }
       if (
         reloadFrom !== undefined &&
-        nextReloadLoader === undefined &&
         frameId === reloadFrom.frameId &&
         loaderId !== reloadFrom.loaderId
       ) {
         nextReloadLoader = { frameId, loaderId };
-        resolveNextReloadLoader(nextReloadLoader);
+        if (expectedLifecycle === undefined) {
+          resolveNextReloadLoader(nextReloadLoader);
+        } else {
+          expectedLifecycle = JSON.stringify([frameId, loaderId]);
+          if (loadedLifecycles.has(expectedLifecycle)) resolveLoaded();
+        }
       }
       if (!directNavigationStarted || frameId === undefined) return;
       latestDirectLoader = { frameId, loaderId };
@@ -221,6 +225,7 @@ async function navigate(args: Args): Promise<unknown> {
           navigationFailure,
           pageLoadTimeout(),
         ]);
+        target = nextReloadLoader ?? target;
       } else {
         refsByTab.delete(currentTabId);
         directNavigationStarted = true;
@@ -457,8 +462,16 @@ async function mouseClick(args: Args): Promise<unknown> {
     if (!numberArray(content) || content.length < 8) {
       throw new Error('mouse_click: element has no layout box');
     }
-    const x = (content[0] + content[2] + content[4] + content[6]) / 4;
-    const y = (content[1] + content[3] + content[5] + content[7]) / 4;
+    const xs = [content[0], content[2], content[4], content[6]];
+    const ys = [content[1], content[3], content[5], content[7]];
+    if (
+      Math.max(...xs) - Math.min(...xs) <= 0 ||
+      Math.max(...ys) - Math.min(...ys) <= 0
+    ) {
+      throw new Error('mouse_click: element has zero-size box');
+    }
+    const x = xs.reduce((sum, value) => sum + value, 0) / 4;
+    const y = ys.reduce((sum, value) => sum + value, 0) / 4;
     await send('Input.dispatchMouseEvent', {
       type: 'mouseMoved',
       x,
@@ -482,15 +495,20 @@ async function mouseClick(args: Args): Promise<unknown> {
       buttons: 0,
       clickCount: 1,
     });
-    const metadata = record(
-      await send('Runtime.callFunctionOn', {
-        objectId,
-        functionDeclaration:
-          "function() { return { tag: this.tagName, text: (this.textContent || '').slice(0, 100) }; }",
-        returnByValue: true,
-      }),
-    );
-    const value = record(record(metadata['result'])['value']);
+    let value: JsonRecord = {};
+    try {
+      const metadata = record(
+        await send('Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration:
+            "function() { return { tag: this.tagName, text: (this.textContent || '').slice(0, 100) }; }",
+          returnByValue: true,
+        }),
+      );
+      value = record(record(metadata['result'])['value']);
+    } catch {
+      // The click may have navigated and invalidated the execution context.
+    }
     return {
       success: true,
       x: Math.round(x),

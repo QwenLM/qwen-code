@@ -305,12 +305,15 @@ async function runDirectBrowserOperation<T>(
   directOperationActive = true;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    timeout = setTimeout(() => {
+    const timedOut = new Promise<never>((_resolve, reject) => {
       const error = new Error('WebBridge action timed out after 55s');
       error.name = 'WebBridgeTimeoutError';
-      void detachCdpBridge(error);
-    }, DIRECT_OPERATION_TIMEOUT_MS);
-    return await operation();
+      timeout = setTimeout(() => {
+        void detachCdpBridge(error);
+        reject(error);
+      }, DIRECT_OPERATION_TIMEOUT_MS);
+    });
+    return await Promise.race([operation(), timedOut]);
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     directOperationActive = false;

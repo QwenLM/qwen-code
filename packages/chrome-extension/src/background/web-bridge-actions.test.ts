@@ -376,6 +376,53 @@ describe('WebBridge actions', () => {
     });
   });
 
+  it('follows a redirect loader after a same-URL reload starts', async () => {
+    cdp.send.mockImplementation(async (method: string) =>
+      method === 'Page.getFrameTree'
+        ? {
+            frameTree: {
+              frame: { id: 'frame-1', loaderId: 'loader-old' },
+            },
+          }
+        : {},
+    );
+    const { executeWebBridgeAction } = await loadActions();
+    const pending = executeWebBridgeAction('navigate', {
+      url: 'https://example.test',
+      _tabId: 17,
+    });
+
+    await vi.waitFor(() => expect(cdp.listeners[0]).toBeDefined());
+    const listener = cdp.listeners[0];
+    if (!listener) throw new Error('lifecycle listener was not installed');
+    listener(
+      'Page.frameNavigated',
+      { frame: { id: 'frame-1', loaderId: 'loader-reload' } },
+      17,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    listener(
+      'Page.frameNavigated',
+      { frame: { id: 'frame-1', loaderId: 'loader-redirect' } },
+      17,
+    );
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'loader-reload' },
+      17,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    listener(
+      'Page.lifecycleEvent',
+      { name: 'load', frameId: 'frame-1', loaderId: 'loader-redirect' },
+      17,
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      url: 'https://example.test',
+    });
+  });
+
   it('rejects a reload that commits a Chrome error page', async () => {
     cdp.send.mockImplementation(async (method: string) =>
       method === 'Page.getFrameTree'
@@ -595,6 +642,46 @@ describe('WebBridge actions', () => {
       'Input.dispatchMouseEvent',
       expect.objectContaining({ type: 'mousePressed', x: 20, y: 30 }),
     );
+  });
+
+  it('keeps a delivered mouse click successful if navigation clears metadata', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ result: { objectId: 'button-1' } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        model: { content: [10, 20, 30, 20, 30, 40, 10, 40] },
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(
+        new Error('Cannot find context with specified id'),
+      );
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('mouse_click', {
+        selector: '#submit',
+        _tabId: 17,
+      }),
+    ).resolves.toMatchObject({ success: true, x: 20, y: 30 });
+  });
+
+  it('rejects mouse clicks on zero-size elements', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ result: { objectId: 'button-1' } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        model: { content: [10, 20, 10, 20, 10, 20, 10, 20] },
+      });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('mouse_click', {
+        selector: '#submit',
+        _tabId: 17,
+      }),
+    ).rejects.toThrow('mouse_click: element has zero-size box');
   });
 
   it('maps Mod to Meta on macOS and sends key down/up events', async () => {
