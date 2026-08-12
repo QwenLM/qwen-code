@@ -77,6 +77,69 @@ describe('DwsClient', () => {
     });
   });
 
+  it('resolves the current open DingTalk ID by exact user ID', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({
+          result: [
+            {
+              orgEmployeeModel: {
+                userId: 'user-1',
+                orgUserName: 'DataWorksAgent',
+              },
+            },
+          ],
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({
+          result: [
+            {
+              name: 'DataWorksAgent',
+              userId: 'another-user',
+              openDingTalkId: 'open-another-user',
+            },
+            {
+              name: 'DataWorksAgent',
+              userId: 'user-1',
+              openDingTalkId: 'open-user-1',
+            },
+          ],
+        }),
+        stderr: '',
+      });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'qoderwork' },
+      runner,
+    );
+
+    await expect(client.resolveCurrentOpenDingTalkId('user-1')).resolves.toBe(
+      'open-user-1',
+    );
+    expect(runner).toHaveBeenNthCalledWith(1, '/opt/dws', [
+      '--profile',
+      'qoderwork',
+      'contact',
+      'user',
+      'get-self',
+      '--format',
+      'json',
+    ]);
+    expect(runner).toHaveBeenNthCalledWith(2, '/opt/dws', [
+      '--profile',
+      'qoderwork',
+      'contact',
+      'user',
+      'search',
+      '--query',
+      'DataWorksAgent',
+      '--format',
+      'json',
+    ]);
+  });
+
   it('subscribes to @ messages and normalizes compact events', async () => {
     let onLine!: (line: string) => void | Promise<void>;
     const eventStarter = vi.fn<DwsEventProcessStarter>(
@@ -179,65 +242,6 @@ describe('DwsClient', () => {
       senderId: 'open-alice',
       senderName: 'Alice',
     });
-  });
-
-  it('verifies a human IM sender from the canonical message record', async () => {
-    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
-      stdout: json({
-        complete: true,
-        messages: [
-          {
-            messageId: 'message-1',
-            senderId: 'open-alice',
-            senderType: 'user',
-          },
-        ],
-        notFoundMessageIds: [],
-      }),
-      stderr: '',
-    });
-    const client = new DwsClient(
-      { executable: '/opt/dws', profile: 'corp:user' },
-      runner,
-    );
-
-    await expect(
-      client.isUserImMessage('message-1', 'open-alice'),
-    ).resolves.toBe(true);
-    expect(runner).toHaveBeenCalledWith('/opt/dws', [
-      '--profile',
-      'corp:user',
-      'chat',
-      '+messages-mget',
-      '--msg-ids',
-      'message-1',
-      '--no-reactions',
-      '--format',
-      'json',
-    ]);
-  });
-
-  it('rejects an application IM sender whose message is not a user message', async () => {
-    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
-      stdout: json({
-        complete: false,
-        messages: [],
-        notFoundMessageIds: ['message-1'],
-        failures: [
-          {
-            messageId: 'message-1',
-            stage: 'mget',
-            error: 'message unavailable',
-          },
-        ],
-      }),
-      stderr: '',
-    });
-    const client = new DwsClient({ executable: '/opt/dws' }, runner);
-
-    await expect(client.isUserImMessage('message-1', 'open-app')).resolves.toBe(
-      false,
-    );
   });
 
   it('parses the NDJSON envelope emitted by the default event format', () => {

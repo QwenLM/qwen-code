@@ -17,6 +17,27 @@ const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_COMMENT_PAGES = 100;
 const MAX_WIKI_PAGES = 100;
 const MAX_WIKI_NODES = 10_000;
+const USER_ID_KEYS = [
+  'userId',
+  'user_id',
+  'userid',
+  'uid',
+  'staffId',
+  'staff_id',
+  'orgUserId',
+] as const;
+const OPEN_DINGTALK_ID_KEYS = [
+  'openDingTalkId',
+  'openDingtalkId',
+  'open_dingtalk_id',
+] as const;
+const USER_NAME_KEYS = [
+  'name',
+  'userName',
+  'user_name',
+  'nick',
+  'orgUserName',
+] as const;
 
 export interface DwsIdentity {
   userId?: string;
@@ -59,7 +80,10 @@ export interface DwsImMessage {
 
 export interface DwsClientLike {
   assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity>;
-  isUserImMessage(messageId: string, senderId: string): Promise<boolean>;
+  resolveCurrentOpenDingTalkId(
+    userId: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined>;
   subscribeToIm(
     source: DwsImSource,
     onMessage: (message: DwsImMessage) => void | Promise<void>,
@@ -194,6 +218,30 @@ function findScalar(
   for (const candidate of Object.values(value)) {
     const found = findScalar(candidate, keys);
     if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function findIdentityScalar(
+  value: unknown,
+  userId: string,
+  keys: readonly string[],
+): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findIdentityScalar(item, userId, keys);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  if (firstString(value, USER_ID_KEYS) === userId) {
+    const found = firstString(value, keys);
+    if (found) return found;
+  }
+  for (const candidate of Object.values(value)) {
+    const found = findIdentityScalar(candidate, userId, keys);
+    if (found) return found;
   }
   return undefined;
 }
@@ -462,14 +510,8 @@ export class DwsClient implements DwsClientLike {
         'DWS is not authenticated. Run `dws auth login` for the selected profile.',
       );
     }
-    const userId = findScalar(
-      response,
-      new Set(['userId', 'user_id', 'uid', 'staffId', 'staff_id']),
-    );
-    const openDingTalkId = findScalar(
-      response,
-      new Set(['openDingTalkId', 'open_dingtalk_id']),
-    );
+    const userId = findScalar(response, new Set(USER_ID_KEYS));
+    const openDingTalkId = findScalar(response, new Set(OPEN_DINGTALK_ID_KEYS));
     return {
       userId:
         typeof userId === 'string' || typeof userId === 'number'
@@ -480,6 +522,26 @@ export class DwsClient implements DwsClientLike {
           ? String(openDingTalkId)
           : undefined,
     };
+  }
+
+  async resolveCurrentOpenDingTalkId(
+    userId: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    const self = await this.run(['contact', 'user', 'get-self'], signal);
+    const openDingTalkId = findIdentityScalar(
+      self,
+      userId,
+      OPEN_DINGTALK_ID_KEYS,
+    );
+    if (openDingTalkId) return openDingTalkId;
+    const userName = findIdentityScalar(self, userId, USER_NAME_KEYS);
+    if (!userName) return undefined;
+    const matches = await this.run(
+      ['contact', 'user', 'search', '--query', userName],
+      signal,
+    );
+    return findIdentityScalar(matches, userId, OPEN_DINGTALK_ID_KEYS);
   }
 
   async subscribeToIm(
@@ -504,47 +566,6 @@ export class DwsClient implements DwsClientLike {
       async (line) => onMessage(parseDwsImEvent(line)),
       onError,
     );
-  }
-
-  async isUserImMessage(messageId: string, senderId: string): Promise<boolean> {
-    const response = await this.run([
-      'chat',
-      '+messages-mget',
-      '--msg-ids',
-      messageId,
-      '--no-reactions',
-    ]);
-    if (!isRecord(response) || !Array.isArray(response['messages'])) {
-      throw new Error('DWS message verification returned an invalid response.');
-    }
-    const message = response['messages'].find(
-      (item) =>
-        isRecord(item) &&
-        firstString(item, ['messageId', 'message_id', 'openMessageId']) ===
-          messageId,
-    );
-    if (isRecord(message)) {
-      const actualSender = firstString(message, [
-        'senderId',
-        'sender_id',
-        'senderOpenDingTalkId',
-        'sender_open_dingtalk_id',
-      ]);
-      const senderType = firstString(message, [
-        'senderType',
-        'sender_type',
-      ])?.toLowerCase();
-      return (
-        actualSender === senderId &&
-        !['app', 'application', 'bot', 'robot', 'system'].includes(
-          senderType ?? '',
-        )
-      );
-    }
-    if (stringList(response['notFoundMessageIds']).includes(messageId)) {
-      return false;
-    }
-    throw new Error('DWS could not verify the incoming message sender.');
   }
 
   async sendImMessage(

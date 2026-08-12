@@ -279,7 +279,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly imStates: ImSubscriptionState[];
   private readonly ownUserIds = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
-  private readonly verifiedUserSenders = new Map<string, Promise<boolean>>();
   private readonly initializedDocumentSet: Set<string>;
   private readonly documentStateById: Map<string, PersistedDocumentState>;
   private pollAbortController = new AbortController();
@@ -461,6 +460,24 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (generation !== this.lifecycleGeneration) {
       throw new Error('DWS channel connection was cancelled.');
     }
+    const hasEchoingImSources = this.imStates.some(
+      (state) => state.source.kind !== 'at',
+    );
+    let openDingTalkId = identity.openDingTalkId;
+    if (hasEchoingImSources && !openDingTalkId && identity.userId) {
+      openDingTalkId = await this.client.resolveCurrentOpenDingTalkId(
+        identity.userId,
+        this.pollAbortController.signal,
+      );
+      if (generation !== this.lifecycleGeneration) {
+        throw new Error('DWS channel connection was cancelled.');
+      }
+    }
+    if (hasEchoingImSources && !openDingTalkId) {
+      throw new Error(
+        'DWS authenticated identity is missing the openDingTalkId required to prevent message self loops.',
+      );
+    }
     if (
       (this.documentIds.length > 0 || this.wikiSpaceIds.length > 0) &&
       !identity.userId
@@ -471,8 +488,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     this.ownUserIds.clear();
     if (identity.userId) this.ownUserIds.add(identity.userId);
-    if (identity.openDingTalkId) {
-      this.ownUserIds.add(identity.openDingTalkId);
+    if (openDingTalkId) {
+      this.ownUserIds.add(openDingTalkId);
     }
     this.connected = true;
     try {
@@ -788,12 +805,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.saveCursor();
       return;
     }
-    if (!(await this.isUserImSender(message))) {
-      this.markProcessedMessage(key);
-      this.saveCursor();
-      return;
-    }
-
     const target: DwsImTarget =
       source.kind === 'direct'
         ? { kind: 'direct', openDingTalkId: message.senderId }
@@ -828,22 +839,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     await this.handleInbound(envelope);
     this.markProcessedMessage(key);
     this.saveCursor();
-  }
-
-  private async isUserImSender(message: DwsImMessage): Promise<boolean> {
-    let check = this.verifiedUserSenders.get(message.senderId);
-    if (!check) {
-      check = this.client.isUserImMessage(message.messageId, message.senderId);
-      this.verifiedUserSenders.set(message.senderId, check);
-    }
-    try {
-      return await check;
-    } catch (error) {
-      if (this.verifiedUserSenders.get(message.senderId) === check) {
-        this.verifiedUserSenders.delete(message.senderId);
-      }
-      throw error;
-    }
   }
 
   private async pollDocument(

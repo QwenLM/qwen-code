@@ -123,7 +123,9 @@ class FakeDwsClient implements DwsClientLike {
   wikiDocuments = new Map<string, string[]>([['wiki-1', ['doc-1']]]);
   streams: FakeStream[] = [];
   assertAuthenticated = vi.fn(async () => Promise.resolve(this.identity));
-  isUserImMessage = vi.fn(async () => Promise.resolve(true));
+  resolveCurrentOpenDingTalkId = vi.fn(async () =>
+    Promise.resolve('open-self'),
+  );
   sendImMessage = vi
     .fn<(target: DwsImTarget, content: string, key: string) => Promise<void>>()
     .mockResolvedValue(undefined);
@@ -325,6 +327,34 @@ describe('DwsChannel', () => {
     ).rejects.toThrow('user ID');
   });
 
+  it('requires the current open DingTalk ID when direct messages are enabled', async () => {
+    const client = new FakeDwsClient();
+    client.identity = { userId: 'user-self' };
+    client.resolveCurrentOpenDingTalkId.mockResolvedValue(undefined);
+
+    await expect(readyChannel(client, makeConfig())).rejects.toThrow(
+      'openDingTalkId',
+    );
+    expect(client.streams).toHaveLength(0);
+  });
+
+  it('requires the current open DingTalk ID for ambient group messages', async () => {
+    const client = new FakeDwsClient();
+    client.identity = { userId: 'user-self' };
+    client.resolveCurrentOpenDingTalkId.mockResolvedValue(undefined);
+
+    await expect(
+      readyChannel(
+        client,
+        makeConfig({
+          dmPolicy: 'disabled',
+          groups: { 'cid-ambient': { requireMention: false } },
+        }),
+      ),
+    ).rejects.toThrow('openDingTalkId');
+    expect(client.streams).toHaveLength(0);
+  });
+
   it('cancels a connection that finishes authenticating after disconnect', async () => {
     const client = new FakeDwsClient();
     let resolveIdentity!: (identity: DwsIdentity) => void;
@@ -480,9 +510,9 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('silently drops application messages before sender pairing', async () => {
+  it('drops messages sent by the current DWS identity before pairing', async () => {
     const client = new FakeDwsClient();
-    client.isUserImMessage.mockResolvedValue(false);
+    client.identity = { userId: 'user-self' };
     const { channel, bridge } = await readyPolicyChannel(
       client,
       makeConfig({ senderPolicy: 'pairing' }),
@@ -490,57 +520,23 @@ describe('DwsChannel', () => {
 
     await client.emit(
       1,
-      message('user_im_message_receive_o2o_all', 'app-message', 'automated', {
-        senderId: 'open-application',
-        senderName: 'Application',
-      }),
+      message(
+        'user_im_message_receive_o2o_all',
+        'self-message',
+        'Your pairing code is ABC12345',
+        { senderId: 'open-self', senderName: 'DataWorksAgent' },
+      ),
     );
 
-    expect(client.isUserImMessage).toHaveBeenCalledWith(
-      'app-message',
-      'open-application',
-    );
     expect(bridge.prompt).not.toHaveBeenCalled();
     expect(client.sendImMessage).not.toHaveBeenCalled();
+    expect(client.resolveCurrentOpenDingTalkId).toHaveBeenCalledWith(
+      'user-self',
+      expect.any(AbortSignal),
+    );
     await expect(channel.sendMessage('cid-1', 'reply')).rejects.toThrow(
       'no DWS message target',
     );
-  });
-
-  it('coalesces sender verification during an application message burst', async () => {
-    const client = new FakeDwsClient();
-    let resolveCheck!: (isUser: boolean) => void;
-    client.isUserImMessage.mockImplementation(
-      async () =>
-        new Promise<boolean>((resolve) => {
-          resolveCheck = resolve;
-        }),
-    );
-    const { bridge } = await readyPolicyChannel(
-      client,
-      makeConfig({ senderPolicy: 'pairing' }),
-    );
-
-    const messages = Array.from({ length: 20 }, (_, index) =>
-      client.emit(
-        1,
-        message(
-          'user_im_message_receive_o2o_all',
-          `app-message-${index}`,
-          'automated',
-          { senderId: 'open-application', senderName: 'Application' },
-        ),
-      ),
-    );
-    await vi.waitFor(() =>
-      expect(client.isUserImMessage).toHaveBeenCalledOnce(),
-    );
-    resolveCheck(false);
-    await Promise.all(messages);
-
-    expect(client.isUserImMessage).toHaveBeenCalledOnce();
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
   it('dispatches ambient messages from an explicit non-mention group', async () => {
