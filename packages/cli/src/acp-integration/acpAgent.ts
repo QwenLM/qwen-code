@@ -93,6 +93,8 @@ import {
   isTurnResultRecordPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  applyReasoningEffort,
+  REASONING_EFFORT_TIERS,
   extractDaemonTraceContext,
   withDaemonSpan,
   type AgentParams,
@@ -110,6 +112,7 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
+  type ReasoningEffort,
   type ResumedSessionData,
   type SendSdkMcpMessage,
   type SessionArtifactEventRecordPayload,
@@ -379,6 +382,14 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const ACP_REASONING_EFFORT_DEFAULT = 'default';
+const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
@@ -5482,6 +5493,25 @@ class QwenAgent implements Agent {
           },
           { persistDefault: false },
         );
+        break;
+      }
+      case 'reasoning_effort': {
+        const effort =
+          value === ACP_REASONING_EFFORT_DEFAULT
+            ? undefined
+            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+          );
+        }
+        if (!applyReasoningEffort(session.getConfig(), effort)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Reasoning effort cannot be applied while thinking is disabled',
+          );
+        }
         break;
       }
       default:
@@ -12475,7 +12505,30 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    return [modeConfigOption, modelConfigOption];
+    const reasoningEffortConfigOption: SessionConfigOption = {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      description: 'How hard reasoning-capable models should think',
+      category: 'thought_level',
+      type: 'select' as const,
+      currentValue:
+        config.getReasoningEffort?.() ?? ACP_REASONING_EFFORT_DEFAULT,
+      options: [
+        {
+          value: ACP_REASONING_EFFORT_DEFAULT,
+          name: 'Default',
+          description: 'Use the model or provider default',
+        },
+        ...REASONING_EFFORT_TIERS.map((effort) => ({
+          value: effort,
+          name: ACP_REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
+        })),
+      ],
+    };
+
+    return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
   }
 
   private buildSelectableModelOptions(config: Config) {

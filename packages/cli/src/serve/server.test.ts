@@ -9079,18 +9079,20 @@ describe('createServeApp', () => {
           interruption: 'interrupted_prompt',
         }),
       });
+      const daemonLog = fakeDaemonLog();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, daemonLog },
       );
 
       const res = await request(app)
         .post('/session/s-1/continue')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('X-Qwen-Client-Id', 'client-xyz');
+        .set('X-Qwen-Client-Id', 'client-xyz')
+        .send({ prompt: 'must not appear in logs' });
 
       expect(res.status).toBe(200);
       // The originator + a generated promptId must reach the bridge so the
@@ -9099,7 +9101,47 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
       });
-      expect(typeof bridge.continueSessionContexts[0]?.promptId).toBe('string');
+      const promptId = bridge.continueSessionContexts[0]?.promptId;
+      expect(typeof promptId).toBe('string');
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.filter(
+            ([message]) => message === 'continuation enqueued',
+          ),
+      ).toEqual([
+        [
+          'continuation enqueued',
+          { sessionId: 's-1', promptId, clientId: 'client-xyz' },
+        ],
+      ]);
+      expect(
+        JSON.stringify(vi.mocked(daemonLog.info).mock.calls),
+      ).not.toContain('must not appear in logs');
+    });
+
+    it('does not log a continuation that was not accepted', async () => {
+      const bridge = fakeBridge();
+      const daemonLog = fakeDaemonLog();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, daemonLog },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/continue')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false, interruption: 'none' });
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.some(([message]) => message === 'continuation enqueued'),
+      ).toBe(false);
     });
 
     it('maps session continue bridge errors', async () => {
@@ -9108,11 +9150,12 @@ describe('createServeApp', () => {
           throw new SessionNotFoundError(sessionId);
         },
       });
+      const daemonLog = fakeDaemonLog();
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, daemonLog },
       );
 
       const res = await request(app)
@@ -9122,6 +9165,11 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+      expect(
+        vi
+          .mocked(daemonLog.info)
+          .mock.calls.some(([message]) => message === 'continuation enqueued'),
+      ).toBe(false);
     });
   });
 
@@ -12817,9 +12865,10 @@ describe('createServeApp', () => {
       parentSessionId?: string;
       sourceType?: string;
       sourceId?: string;
+      runtimeBaseDir?: string;
     }): Promise<void> {
       const chatsDir = path.join(
-        new Storage(input.cwd).getProjectDir(),
+        new Storage(input.cwd, input.runtimeBaseDir).getProjectDir(),
         'chats',
         ...(input.state === 'archived' ? ['archive'] : []),
       );
@@ -13563,6 +13612,554 @@ describe('createServeApp', () => {
       expect(filtered.status).toBe(200);
       expect(filtered.body.sessions).toEqual([
         expect.objectContaining({ sessionId: olderPinnedId, groupId }),
+      ]);
+    });
+
+    it('single-flights persisted catalogs across query variants and refreshes live state', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+        sourceType: 'web_shell',
+      });
+      let clientCount = 1;
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            displayName: `live-${clientCount}`,
+            clientCount,
+            hasActivePrompt: clientCount > 1,
+          },
+        ],
+      });
+      const listSessionsSpy = vi.spyOn(
+        SessionService.prototype,
+        'listSessions',
+      );
+      const readSidecar = vi.fn(async () => ({
+        slug: 'catalog-worktree',
+        worktreePath: `${WS_BOUND}/.qwen/worktrees/catalog-worktree`,
+        worktreeBranch: 'worktree-catalog-worktree',
+        originalCwd: WS_BOUND,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      }));
+      mockWt.readSidecar = readSidecar;
+
+      try {
+        const readOptions = { runtimeBaseDir: runtimeDir };
+        const [all, pinned, sourced] = await Promise.all([
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { view: 'organized', group: 'all' },
+            readOptions,
+          ),
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { view: 'organized', group: 'pinned' },
+            readOptions,
+          ),
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { sourceType: 'web_shell' },
+            readOptions,
+          ),
+        ]);
+
+        expect(all.sessions).toEqual([
+          expect.objectContaining({ sessionId, clientCount: 1 }),
+        ]);
+        expect(pinned.sessions).toEqual([]);
+        expect(sourced.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            clientCount: 1,
+            worktree: expect.objectContaining({ slug: 'catalog-worktree' }),
+          }),
+        ]);
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+        expect(readSidecar).toHaveBeenCalledTimes(1);
+
+        sourced.sessions[0]!.worktree!.slug = 'request-local-change';
+        await new qwenCore.SessionOrganizationService(
+          WS_BOUND,
+        ).updateSessionOrganization(sessionId, { isPinned: true });
+        clientCount = 2;
+        const warm = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { view: 'organized', group: 'all' },
+          readOptions,
+        );
+        expect(warm.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            displayName: 'live-2',
+            clientCount: 2,
+            hasActivePrompt: true,
+            isPinned: true,
+            worktree: expect.objectContaining({ slug: 'catalog-worktree' }),
+          }),
+        ]);
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+        expect(readSidecar).toHaveBeenCalledTimes(1);
+      } finally {
+        listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
+      }
+    });
+
+    it('invalidates a warm catalog on metadata update while keeping persistence asynchronous', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440015';
+      const createdAt = '2026-05-17T12:00:00.000Z';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: createdAt,
+        prompt: 'persisted title',
+        mtime: new Date(createdAt),
+      });
+      let liveTitle = 'persisted title';
+      const liveSummary = (): BridgeSessionSummary => ({
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt,
+        displayName: liveTitle,
+        clientCount: 1,
+        hasActivePrompt: false,
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [liveSummary()],
+        summaryImpl: () => liveSummary(),
+        updateMetadataImpl: (_id, metadata) => {
+          liveTitle = metadata.displayName ?? liveTitle;
+          return { displayName: liveTitle };
+        },
+      });
+      const listSessionsSpy = vi.spyOn(
+        SessionService.prototype,
+        'listSessions',
+      );
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND, token: 'secret' },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const list = () =>
+        request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
+      try {
+        expect((await list()).body.sessions).toEqual([
+          expect.objectContaining({
+            sessionId,
+            displayName: 'persisted title',
+          }),
+        ]);
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+
+        const updated = await request(app)
+          .patch(`/session/${sessionId}/metadata`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ displayName: 'live title' });
+        expect(updated.status).toBe(200);
+
+        const persistedOnly = await listWorkspaceSessionsForResponse(
+          bridge,
+          WS_BOUND,
+          { view: 'organized' },
+          { mergeLive: false, runtimeBaseDir: runtimeDir },
+        );
+        expect(persistedOnly.sessions[0]?.displayName).toBe('persisted title');
+        expect(listSessionsSpy).toHaveBeenCalledTimes(2);
+
+        expect((await list()).body.sessions).toEqual([
+          expect.objectContaining({ sessionId, displayName: 'live title' }),
+        ]);
+        expect(listSessionsSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('loads every catalog page once for five concurrent query variants', async () => {
+      const makeItem = (sessionId: string, minute: number): SessionListItem => {
+        const timestamp = new Date(
+          Date.UTC(2026, 4, 17, 12, minute),
+        ).toISOString();
+        return {
+          sessionId,
+          cwd: WS_BOUND,
+          startTime: timestamp,
+          mtime: Date.parse(timestamp),
+          prompt: sessionId,
+          filePath: `/tmp/${sessionId}.jsonl`,
+        };
+      };
+      const first = makeItem('catalog-page-1', 0);
+      const second = makeItem('catalog-page-2', 1);
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) =>
+          options.cursor === undefined
+            ? { items: [first], nextCursor: 1, hasMore: true }
+            : { items: [second], nextCursor: undefined, hasMore: false },
+        );
+      const readSidecar = vi.fn(async () => null);
+      mockWt.readSidecar = readSidecar;
+
+      try {
+        const bridge = fakeBridge();
+        const readOptions = { runtimeBaseDir: runtimeDir };
+        const results = await Promise.all([
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { view: 'organized', group: 'all' },
+            readOptions,
+          ),
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { view: 'organized', group: 'pinned' },
+            readOptions,
+          ),
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { sourceType: 'default' },
+            readOptions,
+          ),
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { parentSessionId: 'missing-parent' },
+            readOptions,
+          ),
+          listWorkspaceSessionsForResponse(
+            bridge,
+            WS_BOUND,
+            { view: 'organized', group: 'all', size: 1 },
+            readOptions,
+          ),
+        ]);
+
+        expect(results[0]?.sessions).toHaveLength(2);
+        expect(results[1]?.sessions).toHaveLength(0);
+        expect(results[2]?.sessions).toHaveLength(2);
+        expect(results[3]?.sessions).toHaveLength(0);
+        expect(results[4]?.sessions).toHaveLength(1);
+        expect(listSessionsSpy).toHaveBeenCalledTimes(2);
+        expect(readSidecar).toHaveBeenCalledTimes(2);
+      } finally {
+        listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
+      }
+    });
+
+    it('isolates cached catalogs by runtime root for the same workspace', async () => {
+      const otherRuntimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-sessions-secondary-'),
+      );
+      const primaryId = '550e8400-e29b-41d4-a716-446655440011';
+      const secondaryId = '550e8400-e29b-41d4-a716-446655440012';
+      try {
+        await writeStoredSession({
+          sessionId: primaryId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          prompt: 'primary',
+          mtime: new Date('2026-05-17T12:00:00.000Z'),
+          runtimeBaseDir: runtimeDir,
+        });
+        await writeStoredSession({
+          sessionId: secondaryId,
+          cwd: WS_BOUND,
+          timestamp: '2026-05-17T12:01:00.000Z',
+          prompt: 'secondary',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+          runtimeBaseDir: otherRuntimeDir,
+        });
+
+        const [primary, secondary] = await Promise.all([
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { view: 'organized' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { view: 'organized' },
+            { runtimeBaseDir: otherRuntimeDir },
+          ),
+        ]);
+        expect(primary.sessions.map((session) => session.sessionId)).toEqual([
+          primaryId,
+        ]);
+        expect(secondary.sessions.map((session) => session.sessionId)).toEqual([
+          secondaryId,
+        ]);
+      } finally {
+        await fsp.rm(otherRuntimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('records leader and waiter cache status before a persisted catalog scan fails', async () => {
+      const error = new Error('catalog failed');
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockRejectedValueOnce(error)
+        .mockResolvedValue({
+          items: [],
+          nextCursor: undefined,
+          hasMore: false,
+        });
+      const setAttribute = vi.fn();
+      const getSpanSpy = vi.spyOn(trace, 'getSpan').mockReturnValue({
+        setAttribute,
+      } as unknown as Span);
+      try {
+        const requests = [
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { sourceType: 'default' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { parentSessionId: 'missing-parent' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+        ];
+        expect(await Promise.allSettled(requests)).toEqual([
+          { status: 'rejected', reason: error },
+          { status: 'rejected', reason: error },
+        ]);
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.cache_status',
+          'scan',
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.cache_status',
+          'single_flight',
+        );
+
+        await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { sourceType: 'default' },
+          { runtimeBaseDir: runtimeDir },
+        );
+        await listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { parentSessionId: 'missing-parent' },
+          { runtimeBaseDir: runtimeDir },
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.cache_status',
+          'cache_hit',
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.cache_age_ms',
+          expect.any(Number),
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.archive_state',
+          'active',
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.query_kind',
+          'metadata',
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.persisted_sessions',
+          0,
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.scan_pages',
+          1,
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.truncated',
+          false,
+        );
+        expect(setAttribute).toHaveBeenCalledWith(
+          'qwen-code.daemon.session_list.scan_duration_ms',
+          expect.any(Number),
+        );
+      } finally {
+        getSpanSpy.mockRestore();
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('refreshes after TTL when a file changes after the scan already read it', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440014';
+      const timestamp = '2026-05-17T12:00:00.000Z';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp,
+        prompt: 'before concurrent write',
+        mtime: new Date(timestamp),
+      });
+      let markSidecarStarted!: () => void;
+      let releaseSidecar!: () => void;
+      const sidecarStarted = new Promise<void>((resolve) => {
+        markSidecarStarted = resolve;
+      });
+      const sidecarReleased = new Promise<void>((resolve) => {
+        releaseSidecar = resolve;
+      });
+      let sidecarSlug = 'before-sidecar-write';
+      mockWt.readSidecar = async () => {
+        const scannedSlug = sidecarSlug;
+        markSidecarStarted();
+        await sidecarReleased;
+        return {
+          slug: scannedSlug,
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/${scannedSlug}`,
+          worktreeBranch: `worktree-${scannedSlug}`,
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        };
+      };
+
+      try {
+        const options = { view: 'organized' as const };
+        const readOptions = { runtimeBaseDir: runtimeDir };
+        const coldPromise = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          options,
+          readOptions,
+        );
+        await sidecarStarted;
+        await writeStoredSession({
+          sessionId,
+          cwd: WS_BOUND,
+          timestamp,
+          prompt: 'after concurrent write',
+          mtime: new Date('2026-05-17T12:01:00.000Z'),
+        });
+        sidecarSlug = 'after-sidecar-write';
+        releaseSidecar();
+
+        expect((await coldPromise).sessions[0]).toMatchObject({
+          displayName: 'before concurrent write',
+          worktree: { slug: 'before-sidecar-write' },
+        });
+        expect(
+          (
+            await listWorkspaceSessionsForResponse(
+              fakeBridge(),
+              WS_BOUND,
+              options,
+              readOptions,
+            )
+          ).sessions[0],
+        ).toMatchObject({
+          displayName: 'before concurrent write',
+          worktree: { slug: 'before-sidecar-write' },
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 2_050));
+        expect(
+          (
+            await listWorkspaceSessionsForResponse(
+              fakeBridge(),
+              WS_BOUND,
+              options,
+              readOptions,
+            )
+          ).sessions[0],
+        ).toMatchObject({
+          displayName: 'after concurrent write',
+          worktree: { slug: 'after-sidecar-write' },
+        });
+      } finally {
+        releaseSidecar();
+        mockWt.readSidecar = undefined;
+      }
+    });
+
+    it('invalidates the active catalog when a live session closes', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440013';
+      const createdAt = '2026-05-17T12:00:00.000Z';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: createdAt,
+        prompt: 'before close',
+        mtime: new Date(createdAt),
+      });
+      let live = true;
+      const liveSummary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt,
+        displayName: 'before close',
+        clientCount: 1,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({
+        listImpl: () => (live ? [liveSummary] : []),
+        summaryImpl: (id) => {
+          if (live && id === sessionId) return liveSummary;
+          throw new SessionNotFoundError(id);
+        },
+        closeImpl: async () => {
+          await writeStoredSession({
+            sessionId,
+            cwd: WS_BOUND,
+            timestamp: createdAt,
+            prompt: 'after close',
+            mtime: new Date('2026-05-17T12:01:00.000Z'),
+          });
+          live = false;
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const list = () =>
+        request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect((await list()).body.sessions).toEqual([
+        expect.objectContaining({ sessionId, displayName: 'before close' }),
+      ]);
+      const closed = await request(app)
+        .delete(`/session/${sessionId}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(closed.status).toBe(204);
+      expect((await list()).body.sessions).toEqual([
+        expect.objectContaining({ sessionId, displayName: 'after close' }),
       ]);
     });
 
@@ -20935,6 +21532,145 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(sessionFilePath(sid, 'archived')),
       ).resolves.toBeUndefined();
+    });
+
+    it('invalidates active and archived catalogs across archive, unarchive, and delete', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const list = (archiveState: 'active' | 'archived') =>
+        request(app)
+          .get(
+            `/workspace/${encodeURIComponent(wsDir)}/sessions?view=organized&archiveState=${archiveState}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect((await list('active')).body.sessions).toHaveLength(1);
+      expect((await list('archived')).body.sessions).toHaveLength(0);
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(archived.status).toBe(200);
+      expect((await list('active')).body.sessions).toHaveLength(0);
+      expect((await list('archived')).body.sessions).toEqual([
+        expect.objectContaining({ sessionId: sid, isArchived: true }),
+      ]);
+
+      const unarchived = await request(app)
+        .post('/sessions/unarchive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(unarchived.status).toBe(200);
+      expect((await list('active')).body.sessions).toEqual([
+        expect.objectContaining({ sessionId: sid, isArchived: false }),
+      ]);
+      expect((await list('archived')).body.sessions).toHaveLength(0);
+
+      const reArchived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(reArchived.status).toBe(200);
+      expect((await list('active')).body.sessions).toHaveLength(0);
+      expect((await list('archived')).body.sessions).toEqual([
+        expect.objectContaining({ sessionId: sid, isArchived: true }),
+      ]);
+
+      const deleted = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(deleted.status).toBe(200);
+      expect((await list('active')).body.sessions).toHaveLength(0);
+      expect((await list('archived')).body.sessions).toHaveLength(0);
+    });
+
+    it('invalidates catalogs only after an archive mutation settles', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeed';
+      await writeSession(sid);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          closeStarted();
+          await closeReleasedPromise;
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createArchiveApp(bridge);
+      const list = (archiveState: 'active' | 'archived') =>
+        request(app)
+          .get(
+            `/workspace/${encodeURIComponent(wsDir)}/sessions?view=organized&archiveState=${archiveState}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      await list('active');
+      await list('archived');
+      const archivePromise = request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] })
+        .then((response) => response);
+      try {
+        await closeStartedPromise;
+        expect((await list('active')).body.sessions).toHaveLength(1);
+        expect((await list('archived')).body.sessions).toHaveLength(0);
+
+        releaseClose();
+        await expect(archivePromise).resolves.toMatchObject({ status: 200 });
+        expect((await list('active')).body.sessions).toHaveLength(0);
+        expect((await list('archived')).body.sessions).toEqual([
+          expect.objectContaining({ sessionId: sid, isArchived: true }),
+        ]);
+      } finally {
+        releaseClose();
+        await Promise.allSettled([archivePromise]);
+      }
+    });
+
+    it('invalidates both catalogs after a partial archive result', async () => {
+      const app = createArchiveApp();
+      const listSessionsSpy = vi.spyOn(
+        SessionService.prototype,
+        'listSessions',
+      );
+      const list = (archiveState: 'active' | 'archived') =>
+        request(app)
+          .get(
+            `/workspace/${encodeURIComponent(wsDir)}/sessions?view=organized&archiveState=${archiveState}`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+      try {
+        await list('active');
+        await list('archived');
+        listSessionsSpy.mockClear();
+
+        const result = await request(app)
+          .post('/sessions/archive')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: ['missing-session'] });
+        expect(result.status).toBe(200);
+        expect(result.body.notFound).toEqual(['missing-session']);
+
+        await list('active');
+        await list('archived');
+        expect(listSessionsSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
     });
 
     it('logs archive result counts and session ids to stderr', async () => {
