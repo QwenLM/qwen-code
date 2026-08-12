@@ -37,26 +37,26 @@ export interface ResolvedWorktreePin {
  * Resolve and validate a caller-owned worktree path (e.g. the PR-review
  * worktree `/review`'s `fetch-pr` provisions).
  *
- * Two checks stop a bad path from aiming the agent somewhere it should not be:
- *
- * - It must resolve INSIDE the repository (canonical comparison), because
- *   pinning rebinds the child's `WorkspaceContext` wholesale.
- * - It must be a REGISTERED linked worktree of this repository, enforced by
- *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
- *   point back at it, and it must not be the primary working tree. That
- *   rejects arbitrary directories, sibling `git init`s, plain sub-directories
- *   (including a stale registry record whose directory was recreated), other
- *   repositories' worktrees, and a directory carrying a copied `.git` file.
+ * Git's worktree registry stops a bad path from aiming the agent somewhere
+ * it should not be: the path must be a REGISTERED linked worktree of this
+ * repository, enforced by `isRegisteredLinkedWorktree` — git's own registry
+ * entry for the path must point back at it, and it must not be the primary
+ * working tree. That rejects arbitrary directories, sibling `git init`s,
+ * plain sub-directories (including a stale registry record whose directory
+ * was recreated), other repositories' worktrees, a directory carrying a
+ * copied `.git` file, and the main working tree itself. A registered
+ * worktree may live anywhere on disk — the registry entry naming this
+ * repository is the boundary, not directory containment.
  *
  * `getRegisteredWorktreeBranch` is consulted only for a best-effort branch
  * label; it is deliberately NOT a gate, since it returns null for a legitimate
  * detached-HEAD worktree.
  *
  * The pin path is resolved ONCE and that single resolution is threaded
- * through both gates and returned as `path`: re-resolving inside the gates —
- * or returning the lexical spelling for the child to bind while the gates saw
+ * through the gate and returned as `path`: re-resolving inside the gate —
+ * or returning the lexical spelling for the child to bind while the gate saw
  * the canonical one — lets a symlink re-pointed after validation land the
- * child somewhere neither gate checked.
+ * child somewhere the gate never checked.
  *
  * @param label how to name the offending parameter in error text — `working_dir`
  *   for the tool, `workingDir` for the workflow opt.
@@ -90,58 +90,15 @@ export async function resolveExternalWorktreeDir(
   // Anchor at the repository's MAIN working tree. From inside a linked
   // worktree (the normal state for /review-style pipelines)
   // `--show-toplevel` answers with the worktree's own root, which would
-  // spuriously refuse registered sibling worktrees and mislabel the
-  // repository in the refusal below. The toplevel answer is the fallback
-  // when the worktree list cannot be read; either anchor also keeps the
-  // common-dir comparison inside getRegisteredWorktreeBranch against the
-  // repository, not a monorepo subdirectory the parent launched from.
+  // mislabel the repository in refusals and scope the branch-label lookup
+  // to the wrong tree. The toplevel answer is the fallback when the worktree
+  // list cannot be read; either anchor also keeps the common-dir comparison
+  // inside getRegisteredWorktreeBranch against the repository, not a monorepo
+  // subdirectory the parent launched from.
   const mainTreePath = await probe.getMainWorktreePath();
   const repoRoot = mainTreePath ?? (await probe.getRepoTopLevel()) ?? parentCwd;
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
-
-  // Containment. A registered worktree may live anywhere on disk, but pinning
-  // rebinds the child's WorkspaceContext wholesale, so a model-supplied path
-  // must not silently move the file tools' boundary outside the repository.
-  // (`isolation: 'worktree'` has this property implicitly — it always
-  // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
-  // paths so a symlink cannot straddle the boundary — but canonicalise BOTH
-  // sides or NEITHER: when only one realpath succeeds (typically the pin
-  // target is absent), comparing a canonical root against the verbatim
-  // spelling manufactures a refusal that names a root the caller never typed
-  // and hides the real cause. The verbatim comparison lets the path reach the
-  // registration gate, whose message names the absence accurately.
-  const realRepoRoot = await fs.realpath(repoRoot).catch(() => null);
-  const realResolved = await fs.realpath(resolvedPath).catch(() => null);
-  const canonical = realRepoRoot !== null && realResolved !== null;
-  const containRoot = canonical ? realRepoRoot : repoRoot;
-  const relToRepo = path.relative(
-    containRoot,
-    canonical ? realResolved : resolvedPath,
-  );
-  if (
-    relToRepo === '..' ||
-    relToRepo.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relToRepo)
-  ) {
-    // When the main-tree anchor was unavailable the containment check ran
-    // against the CURRENT worktree's root, which from inside a linked
-    // worktree over-refuses legitimate sibling pins and hands the caller
-    // guidance that cannot be satisfied — say so instead of asserting a
-    // containment problem that does not exist.
-    const degradedAnchor =
-      mainTreePath === null
-        ? ` The repository's main working tree could not be determined ` +
-          `(\`git worktree list\` unreadable or its path malformed), so ` +
-          `containment was checked against the current worktree root.`
-        : '';
-    return {
-      error:
-        `${label} "${resolvedPath}" resolves outside this repository ` +
-        `(${containRoot}).${degradedAnchor} Pass a worktree that lives ` +
-        `inside the repository.`,
-    };
-  }
 
   // The single authoritative gate: the path must be a REGISTERED linked
   // worktree of this repository — git's own registry entry for it points back
@@ -149,8 +106,9 @@ export async function resolveExternalWorktreeDir(
   // check rejects the main tree, a plain sub-directory (including a stale
   // registry record whose directory was recreated), a worktree belonging to
   // another repo, and a hand-crafted directory carrying a copied `.git` file.
-  // Thread the single resolution (see the doc block).
-  const pinnedPath = realResolved ?? resolvedPath;
+  // Thread the single resolution (see the doc block): canonicalise so the
+  // gate checks — and the child binds — the exact directory object.
+  const pinnedPath = await fs.realpath(resolvedPath).catch(() => resolvedPath);
   if (!(await wtService.isRegisteredLinkedWorktree(pinnedPath))) {
     // Fails closed (returns false) on a git error too, so the cause is either
     // "not a registered linked worktree" (main tree / unregistered) or "its
@@ -165,11 +123,11 @@ export async function resolveExternalWorktreeDir(
     };
   }
   // Best-effort branch label only — never a gate. A detached-HEAD worktree
-  // (`git worktree add --detach`, or a checkout of a bare commit) is a
-  // legitimate configuration with no branch, and `getRegisteredWorktreeBranch`
-  // returns null for it. `branch` is unused for caller-owned worktrees anyway
-  // (cleanup short-circuits on `externallyManaged`); it is carried only for
-  // parity with the isolation path.
+  // (`git worktree add --detach`, or a checkout of a bare commit) is
+  // legitimate with no branch, and `getRegisteredWorktreeBranch` returns null
+  // for it. `branch` is unused for caller-owned worktrees anyway (cleanup
+  // short-circuits on `externallyManaged`); it is carried only for parity
+  // with the isolation path.
   const info = await wtService.getRegisteredWorktreeBranch(pinnedPath);
   return {
     path: pinnedPath,

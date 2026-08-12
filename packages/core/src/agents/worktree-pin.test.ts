@@ -61,15 +61,10 @@ describe('resolveExternalWorktreeDir', () => {
     });
   });
 
-  it('accepts an in-repository worktree whose name starts with two dots', async () => {
-    const result = await resolveExternalWorktreeDir(config, '..hidden-wt');
-    expect(result).toMatchObject({ path: '/repo/..hidden-wt' });
-  });
-
   // From inside a linked worktree `--show-toplevel` answers with the
-  // worktree's own root. Containment must still anchor at the main working
-  // tree, or a registered sibling worktree — the documented review-pipeline
-  // setup — is spuriously refused.
+  // worktree's own root; the resolver anchors at the main working tree so
+  // the registry gate and labels stay scoped to the repository. A registered
+  // sibling worktree is the documented review-pipeline setup.
   it('accepts a sibling worktree when the parent runs inside a linked worktree', async () => {
     svc.getRepoTopLevel.mockResolvedValue('/repo/.qwen/tmp/review-pr-1');
     const insideWorktree = {
@@ -84,43 +79,21 @@ describe('resolveExternalWorktreeDir', () => {
     });
   });
 
-  // The containment comparison canonicalises both sides, so a symlink cannot
-  // straddle the repository boundary. Real temp dirs (not stubs) force the
-  // fs.realpath calls to actually run — with plain-string stubs both reject
-  // and the .catch() fallbacks degrade the check to string comparison.
-  it('refuses an in-repo symlink that canonicalizes outside the repository', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-pin-'));
-    try {
-      const repoDir = path.join(root, 'repo');
-      const outsideTarget = path.join(root, 'outside', 'wt');
-      await fs.mkdir(repoDir, { recursive: true });
-      await fs.mkdir(outsideTarget, { recursive: true });
-      await fs.symlink(outsideTarget, path.join(repoDir, 'link-wt'));
-      svc.getMainWorktreePath.mockResolvedValue(repoDir);
-      const localConfig = {
-        getTargetDir: () => repoDir,
-      } as unknown as Config;
-      const result = await resolveExternalWorktreeDir(localConfig, 'link-wt');
-      expect(result).toEqual({
-        error: expect.stringContaining('resolves outside this repository'),
-      });
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
-  // Pinning replaces the child's WorkspaceContext wholesale, so a path that
-  // escapes the repository would silently move the boundary of every file,
-  // shell and search tool the agent has.
-  it('refuses a path outside the repository', async () => {
-    const result = await resolveExternalWorktreeDir(config, '/elsewhere/tree');
+  // The gate is the repository's worktree registry, not directory
+  // containment: a registered linked worktree may live anywhere on disk
+  // (leader-owned teammate worktrees rely on that).
+  it('accepts a registered worktree outside the repository directory', async () => {
+    const result = await resolveExternalWorktreeDir(config, '/elsewhere/wt');
     expect(result).toEqual({
-      error: expect.stringContaining('resolves outside this repository'),
+      path: '/elsewhere/wt',
+      branch: 'pr-7',
+      slug: 'wt',
+      repoRoot: '/repo',
     });
   });
 
   // The authoritative gate: an unregistered directory is not isolation, it is
-  // a directory that happens to exist.
+  // a directory that happens to exist — inside OR outside the repository.
   it('refuses a directory git does not know as a linked worktree', async () => {
     svc.isRegisteredLinkedWorktree.mockResolvedValue(false);
     const result = await resolveExternalWorktreeDir(config, 'plain-subdir');
@@ -168,11 +141,9 @@ describe('resolveExternalWorktreeDir', () => {
     expect((asOpt as { error: string }).error).toMatch(/^workingDir "/);
   });
 
-  // Canonicalise both sides or NEITHER: under a symlinked repo ancestor, an
-  // ABSENT pin target used to compare the canonical root against the
-  // verbatim spelling — manufacturing "resolves outside this repository
-  // (/canonical/root)" and hiding the real cause. The verbatim comparison
-  // lets the path reach the registration gate, which names the absence.
+  // An ABSENT pin target under a symlinked root must reach the registration
+  // gate, whose message names the absence — realpath fails for the target and
+  // the single-resolution threading falls back to the lexical spelling.
   it('reports an absent target via the registration gate under a symlinked root', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-pin-'));
     try {
@@ -196,30 +167,7 @@ describe('resolveExternalWorktreeDir', () => {
     }
   });
 
-  // When the main-tree anchor is unavailable (worktree list unreadable or
-  // malformed), containment degrades to the CURRENT worktree's root, which
-  // from inside a linked worktree over-refuses legitimate sibling pins. The
-  // refusal must say so instead of asserting a containment problem the
-  // caller then retries against.
-  it('names the degraded anchor when the main worktree is undeterminable', async () => {
-    svc.getMainWorktreePath.mockResolvedValue(null);
-    svc.getRepoTopLevel.mockResolvedValue('/repo/.qwen/tmp/review-pr-1');
-    const insideWorktree = {
-      getTargetDir: () => '/repo/.qwen/tmp/review-pr-1',
-    } as unknown as Config;
-
-    const result = await resolveExternalWorktreeDir(
-      insideWorktree,
-      '../review-pr-2',
-    );
-    expect(result).toEqual({
-      error: expect.stringContaining(
-        'main working tree could not be determined',
-      ),
-    });
-  });
-
-  // Resolve once and thread the single resolution: the gates must see — and
+  // Resolve once and thread the single resolution: the gate must see — and
   // the result must bind — the exact directory object that was validated,
   // not a lexical spelling a re-pointed symlink could swap out afterwards.
   it('threads the canonical resolution through the gates and the result', async () => {

@@ -818,7 +818,7 @@ async function runOverridePath(
     // Validated by AgentTool's own `working_dir` resolver so a script-supplied
     // path cannot move the subagent's workspace boundary somewhere the
     // equivalent `agent` tool call would have refused — the directory must be
-    // a registered linked worktree living inside this repository.
+    // a registered linked worktree of this repository.
     const resolved = await resolveExternalWorktreeDir(
       config,
       opts.workingDir,
