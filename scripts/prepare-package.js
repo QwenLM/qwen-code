@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -277,9 +278,7 @@ function writeDistPackageJson(rootDir, distDir) {
       fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
     );
   } catch (error) {
-    throw new Error(
-      `Cannot read package-lock.json: ${error.message}`,
-    );
+    throw new Error(`Cannot read package-lock.json: ${error.message}`);
   }
   const coreManifest = JSON.parse(
     fs.readFileSync(
@@ -291,10 +290,7 @@ function writeDistPackageJson(rootDir, distDir) {
     lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
     lockfile.packages?.['node_modules/sharp']?.version;
   const declared = coreManifest.dependencies?.sharp;
-  if (
-    !sharpVersion ||
-    ![sharpVersion, `^${sharpVersion}`].includes(declared)
-  ) {
+  if (!sharpVersion || !declared || !semver.satisfies(sharpVersion, declared)) {
     throw new Error(
       `sharp version is not locked in package-lock.json ` +
         `(resolved ${sharpVersion ?? 'none'}, ` +

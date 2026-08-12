@@ -723,9 +723,7 @@ describe('package asset scripts', () => {
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
 
-    expect(distPackageJson.optionalDependencies.sharp).toBe(
-      '0.0.0-core-fixture',
-    );
+    expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.4');
     expect(
       existsSync(
         path.join(
@@ -752,7 +750,7 @@ describe('package asset scripts', () => {
       JSON.stringify({
         packages: {
           'node_modules/sharp': {
-            version: '0.0.0-root-fixture',
+            version: '0.35.3',
           },
         },
       }),
@@ -765,7 +763,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code-core',
           version: '0.17.0',
           dependencies: {
-            sharp: '^0.0.0-root-fixture',
+            sharp: '^0.35.0',
           },
         },
         null,
@@ -780,9 +778,22 @@ describe('package asset scripts', () => {
     const distPackageJson = JSON.parse(
       readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
     );
-    expect(distPackageJson.optionalDependencies.sharp).toBe(
-      '0.0.0-root-fixture',
+    expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.3');
+  });
+
+  it('rejects a locked sharp version outside the core declaration', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify({ dependencies: { sharp: '^0.34.0' } }),
     );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1128,10 +1139,10 @@ describe('package asset scripts', () => {
         {
           packages: {
             'node_modules/sharp': {
-              version: '0.0.0-root-fixture',
+              version: '0.35.3',
             },
             'packages/core/node_modules/sharp': {
-              version: '0.0.0-core-fixture',
+              version: '0.35.4',
             },
           },
         },
@@ -1153,7 +1164,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code-core',
           version: '0.17.0',
           dependencies: {
-            sharp: '^0.0.0-core-fixture',
+            sharp: '^0.35.0',
           },
         },
         null,
