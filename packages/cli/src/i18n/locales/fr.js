@@ -2321,6 +2321,7 @@ export default {
     'Les modifications du gestionnaire de compétences automatiques sont désactivées en mode sécurisé.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
+  'Kept model as {{model}}': 'Modèle conservé : {{model}}',
 
   // /unskill command
   'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':

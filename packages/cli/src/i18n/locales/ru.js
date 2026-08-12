@@ -2291,6 +2291,7 @@ export default {
     'Изменения куратора автоматических навыков отключены в безопасном режиме.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Kept model as {{model}}': 'Оставлена модель {{model}}',
 
   // /unskill command
   'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':

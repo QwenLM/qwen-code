@@ -56,7 +56,7 @@ daemon bind beyond loopback in the open.
 
 ```mermaid
 flowchart LR
-    REQ[Request] --> SO["strip same-origin Origin<br/>(demo page support)"]
+    REQ[Request] --> SO["strip same-origin Origin<br/>(Web Shell support)"]
     SO --> CORS{"--allow-origin?"}
     CORS -->|yes| AO["allowOriginCors<br/>(allowlist match)"]
     CORS -->|no| DC["denyBrowserOriginCors<br/>(reject all Origin)"]
@@ -100,7 +100,7 @@ Non-loopback binds bypass this middleware (operator chose the surface area; bear
 
 Reject any request with an `Origin` header. CLI/SDK never set Origin; only browsers do. Returns deterministic `403 { error: 'Request denied by CORS policy' }` rather than the 500 HTML the `cors` package's error-callback would produce.
 
-Exception: the demo page's same-origin XHRs are handled by a separate middleware (in `server.ts`) that strips `Origin` when it matches the daemon's own address.
+Exception: the Web Shell's same-origin XHRs on a **loopback** bind are handled by a separate middleware (in `server/self-origin.ts`) that strips `Origin` when it matches one of the loopback self-origins (`127.0.0.1`, `localhost`, `[::1]`, `host.docker.internal`). On non-loopback binds the shell's XHRs carry an unmatched `Origin` and need `--allow-origin` for the daemon origin.
 
 ### `allowOriginCors` (`--allow-origin` mode)
 
@@ -298,7 +298,7 @@ sequenceDiagram
 
 - **`--require-auth` shadows feature preflight.** Unauthenticated clients cannot discover the `require_auth` tag; their discovery surface is the 401 body itself.
 - **Mutation gate body-parser ordering**: `mutationGate({strict: true})` 401 responses fire **after** `express.json()` parses the body. Worst case on a saturated loopback listener: `--max-connections × express.json({limit: '10mb'})` ≈ 2.5 GB transient. Loopback-only attack surface, intentionally accepted.
-- **Same-origin Origin stripping** in `server.ts` happens _before_ `denyBrowserOriginCors`. If a future change moves the strip elsewhere, the demo page breaks.
+- **Same-origin Origin stripping** in `server.ts` happens _before_ `denyBrowserOriginCors`. If a future change moves the strip elsewhere, the Web Shell breaks.
 - **Token comparison is over the SHA-256 digest**, not the raw token. Reduces timing leakage by collapsing variable-length token compares to a fixed-size digest compare.
 - The daemon does **not** carry mTLS, request signing, or pair-token proof-of-possession today. `--rate-limit` provides HTTP rate limiting by client-id / IP key; it is not client identity authentication.
 

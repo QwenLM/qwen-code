@@ -2827,6 +2827,7 @@ export default {
     'Auto-skill curator changes are disabled in safe mode.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+  'Kept model as {{model}}': 'Kept model as {{model}}',
 
   // /unskill command
   'Unload a loaded skill body from context, freeing its tokens for the rest of the session (costs one prompt-cache re-fill). The skill stays available and reloads in full on its next invocation.':

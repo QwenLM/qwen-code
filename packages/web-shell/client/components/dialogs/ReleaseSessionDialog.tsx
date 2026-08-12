@@ -33,7 +33,10 @@ export function ReleaseSessionDialog({
     loading,
     error: sessionsError,
     releaseSession,
-  } = useScopedSessions(workspaceCwd, { autoLoad: true });
+  } = useScopedSessions(workspaceCwd, {
+    autoLoad: true,
+    maxAgeMs: 1_000,
+  });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
   // -1 = no highlight; see ResumeDialog for the rationale.

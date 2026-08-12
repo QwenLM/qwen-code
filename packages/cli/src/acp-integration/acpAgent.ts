@@ -77,8 +77,6 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
-  getActiveGoal,
-  unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
@@ -92,8 +90,13 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  applyReasoningEffort,
+  REASONING_EFFORT_TIERS,
   extractDaemonTraceContext,
   withDaemonSpan,
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+  type GoalSnapshotV2,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -109,6 +112,7 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
+  type ReasoningEffort,
   type ResumedSessionData,
   type SendSdkMcpMessage,
   type SessionArtifactEventRecordPayload,
@@ -248,6 +252,7 @@ import {
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -326,6 +331,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   DAEMON_MODEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_META_KEY,
@@ -355,10 +361,6 @@ import {
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
-import {
-  collectGoalStatusItemsFromRecords,
-  restoreGoalFromHistory,
-} from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   executeGeneration,
@@ -375,6 +377,14 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const ACP_REASONING_EFFORT_DEFAULT = 'default';
+const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
@@ -4179,11 +4189,6 @@ class QwenAgent implements Agent {
       }
     }
     try {
-      unregisterGoalHook(session.getConfig(), sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    try {
       this.mcpPool?.releaseSession(sessionId);
     } catch (error) {
       cleanupErrors.push(error);
@@ -5023,7 +5028,6 @@ class QwenAgent implements Agent {
                     records: replayPage.records,
                     gaps: sessionData?.historyGaps,
                     cumulativeUsage: replayUsage,
-                    supersedeUnrestorableGoal: true,
                     logger: debugLogger,
                   });
                   replayUpdates = replay.updates;
@@ -5031,6 +5035,27 @@ class QwenAgent implements Agent {
                     createdSession.cumulativeUsage,
                     replayUsage,
                   );
+                  // Strictly after the replay page, mirroring the streamed
+                  // path in `createAndStoreSession`: the page re-emits the
+                  // pre-migration `set` card, so the authoritative state has
+                  // to be the newest goal card or the client keeps showing a
+                  // phantom running goal. It rides *inside* the envelope
+                  // because this path hands its updates to the client rather
+                  // than streaming them — see
+                  // `Session.renderRecoveredGoalUpdates`. Never fatal: a
+                  // session that cannot publish its goal state must still
+                  // open.
+                  try {
+                    replayUpdates = replayUpdates.concat(
+                      await createdSession.renderRecoveredGoalUpdates(records),
+                    );
+                  } catch (error) {
+                    debugLogger.debug(
+                      `Failed to render recovered Goal state: ${
+                        error instanceof Error ? error.message : String(error)
+                      }`,
+                    );
+                  }
                   if (replay.replayError !== undefined) {
                     replayEnvelope = {
                       v: LOAD_REPLAY_VERSION,
@@ -5057,7 +5082,6 @@ class QwenAgent implements Agent {
                 config,
                 createdSession,
               );
-              this.#restoreGoalOnResume(config, createdSession);
             },
           }),
         );
@@ -5197,12 +5221,28 @@ class QwenAgent implements Agent {
               ),
               replayHistory: false,
               beforeStartPostReplayServices: async (createdSession) => {
+                // `replayHistory: false` skips the publication in
+                // `createAndStoreSession`, so without this a resumed session
+                // never tells the client what the recovered goal actually is.
+                // Safe to stream here, unlike the bulk load path: resume
+                // replays nothing, so there is no envelope this card could
+                // sort ahead of. Never fatal.
+                try {
+                  await createdSession.publishRecoveredGoalState(
+                    config.getResumedSessionData()?.conversation.messages,
+                  );
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to publish recovered Goal state: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
                 await this.#restoreWorktreeOnResume(config, createdSession);
                 await this.#restoreBackgroundAgentsOnResume(
                   config,
                   createdSession,
                 );
-                this.#restoreGoalOnResume(config, createdSession);
               },
             },
           ),
@@ -5265,63 +5305,6 @@ class QwenAgent implements Agent {
     await config.loadPausedBackgroundAgents(config.getSessionId());
     session.pendingRecoveredAgentsNotice =
       config.consumePendingRecoveredAgentsNotice();
-  }
-
-  /**
-   * Re-registers the `/goal` Stop hook when a resumed transcript ends on an
-   * unsatisfied goal — the daemon counterpart of the TUI's resume restore.
-   * Without this the goal loop silently dies whenever a session is reloaded or
-   * `qwen serve` restarts, even though the transcript still shows it as active.
-   *
-   * The `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
-   * used here — the daemon's terminal card goes out over the wire, not into an
-   * Ink history. But restore reaches `unregisterGoalHook` on every path,
-   * including the one where there was nothing to restore, and that clears the
-   * observer the `Session` constructor installed. So it is put back afterwards,
-   * unconditionally: without it a restored goal that later achieves or fails
-   * emits no terminal update and persists no terminal card, and the next reload
-   * revives a goal that already finished.
-   *
-   * Best-effort: a failed restore must not block session load.
-   */
-  #restoreGoalOnResume(config: Config, session: Session): void {
-    try {
-      const records = config.getResumedSessionData()?.conversation.messages;
-      if (!records?.length) return;
-      const restored = restoreGoalFromHistory(
-        collectGoalStatusItemsFromRecords(records),
-        config,
-      );
-      if (restored.restored) {
-        debugLogger.info(
-          `ACP goal restored sessionId=${config.getSessionId()} condition=${restored.condition}`,
-        );
-      } else if (
-        restored.blockedBy &&
-        restored.blockedBy !== 'condition-invalid'
-      ) {
-        // The transcript still holds an active goal card. `HistoryReplayer`
-        // supersedes it with a `cleared` card so the client does not show a
-        // goal that nothing is driving; say why on stderr.
-        //
-        // `condition-invalid` is excluded: `restoreGoalFromHistory` already
-        // wrote a line for it (it is the only caller that knows the condition
-        // is malformed). Logging here too would double-report the one case,
-        // while the env gates below report once.
-        writeStderrLineSafe(
-          `qwen: not restoring the active goal for session ${config.getSessionId()} (${restored.blockedBy}).`,
-        );
-      }
-    } catch (error) {
-      // Not debugLogger: it no-ops unless a debug session is active, and a
-      // failed restore is invisible from the outside — the transcript still
-      // shows the goal as active while no hook drives it.
-      writeStderrLineSafe(
-        `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
-      );
-    } finally {
-      session.installGoalTerminalObserver();
-    }
   }
 
   async unstable_listSessions(
@@ -5425,6 +5408,25 @@ class QwenAgent implements Agent {
         );
         break;
       }
+      case 'reasoning_effort': {
+        const effort =
+          value === ACP_REASONING_EFFORT_DEFAULT
+            ? undefined
+            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+          );
+        }
+        if (!applyReasoningEffort(session.getConfig(), effort)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Reasoning effort cannot be applied while thinking is disabled',
+          );
+        }
+        break;
+      }
       default:
         throw RequestError.invalidParams(
           undefined,
@@ -5450,9 +5452,20 @@ class QwenAgent implements Agent {
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
+    const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    // The user-facing display projection is caller-controlled metadata; honor
+    // it only for trusted parents (the daemon bridge re-injects the trusted
+    // channel-worker value here). A plain delete would drop that re-injection.
+    if (
+      this.privateParentState === 'trusted' &&
+      typeof suppliedPromptDisplayText === 'string'
+    ) {
+      meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
     } else {
@@ -10480,21 +10493,40 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const cleared = unregisterGoalHook(config, sessionId);
-        if (cleared) {
-          session.emitGoalStatus({
-            kind: 'cleared',
-            condition: cleared.condition,
-            iterations: cleared.iterations,
-            durationMs: Date.now() - cleared.setAt,
-          });
+        let runtime;
+        try {
+          runtime = await config.getGoalRuntimeReady();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // No persistence means no goal to clear. Answering honestly beats
+          // failing the request: `general.chatRecording: false` is a config
+          // choice, and a sticky `recoveryError` from a malformed transcript
+          // record would otherwise break clear for this session forever.
+          debugLogger.info(
+            `sessionGoalClear sessionId=${sessionId} cleared=false (goal persistence unavailable)`,
+          );
+          return {
+            cleared: false,
+            condition: undefined,
+            snapshot: emptyGoalSnapshot(),
+          };
         }
+        const before = runtime.getSnapshot();
+        const goal = before.goal;
+        const response = goal
+          ? await runtime.dispatch({
+              action: 'clear',
+              expectedGoalId: goal.goalId,
+              expectedRevision: goal.revision,
+            })
+          : { snapshot: before };
         debugLogger.info(
-          `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
+          `sessionGoalClear sessionId=${sessionId} cleared=${!!goal} objective=${goal?.objective ?? '(none)'}`,
         );
         return {
-          cleared: !!cleared,
-          condition: cleared?.condition,
+          cleared: !!goal,
+          condition: goal?.objective,
+          snapshot: response.snapshot,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
@@ -10505,21 +10537,31 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        // Throws when the session is not live. That is the honest answer: the
-        // goal store is in-memory, so a goal only exists — and only advances —
-        // while its session is resident.
-        this.sessionOrThrow(sessionId);
-        const active = getActiveGoal(sessionId);
+        const session = this.sessionOrThrow(sessionId);
+        let snapshot: GoalSnapshotV2;
+        try {
+          snapshot = (
+            await session.getConfig().getGoalRuntimeReady()
+          ).getSnapshot();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // A session that cannot persist goals has no goal, which is a
+          // perfectly describable state. Rejecting instead would make
+          // `GET /goals` drop this session on every poll and report it as
+          // unreachable, which reads as a wedged child rather than a config.
+          snapshot = emptyGoalSnapshot();
+        }
+        const activeGoal =
+          snapshot.goal?.status === 'active' ? snapshot.goal : null;
         return {
-          // Projected field by field: `ActiveGoal` also carries `hookId` and
-          // `tokensAtStart`, which are this process's business.
-          active: active
+          snapshot,
+          active: activeGoal
             ? {
-                condition: active.condition,
-                iterations: active.iterations,
-                setAt: active.setAt,
-                ...(active.lastReason !== undefined
-                  ? { lastReason: active.lastReason }
+                condition: activeGoal.objective,
+                iterations: activeGoal.turnCount,
+                setAt: activeGoal.createdAt,
+                ...(activeGoal.lastReason !== undefined
+                  ? { lastReason: activeGoal.lastReason }
                   : {}),
               }
             : null,
@@ -12002,6 +12044,7 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
+    startNonInteractiveOpenAILogHousekeeping(config, settings);
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
@@ -12133,6 +12176,23 @@ class QwenAgent implements Agent {
           sessionData.conversation.messages,
           sessionData.historyGaps,
         );
+        // Strictly after replay: Goal recovery ran in the Config constructor,
+        // before this Session existed to subscribe, and replay streams the
+        // pre-migration records. Without this the client's newest goal card
+        // is the legacy `set` one and it shows a phantom running goal until
+        // the next reload. Never fatal — a session that cannot publish its
+        // goal state must still open.
+        try {
+          await session.publishRecoveredGoalState(
+            sessionData.conversation.messages,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Failed to publish recovered Goal state: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
 
       await options.beforeStartPostReplayServices?.(session);
@@ -12262,7 +12322,30 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    return [modeConfigOption, modelConfigOption];
+    const reasoningEffortConfigOption: SessionConfigOption = {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      description: 'How hard reasoning-capable models should think',
+      category: 'thought_level',
+      type: 'select' as const,
+      currentValue:
+        config.getReasoningEffort?.() ?? ACP_REASONING_EFFORT_DEFAULT,
+      options: [
+        {
+          value: ACP_REASONING_EFFORT_DEFAULT,
+          name: 'Default',
+          description: 'Use the model or provider default',
+        },
+        ...REASONING_EFFORT_TIERS.map((effort) => ({
+          value: effort,
+          name: ACP_REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
+        })),
+      ],
+    };
+
+    return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
   }
 
   private buildSelectableModelOptions(config: Config) {

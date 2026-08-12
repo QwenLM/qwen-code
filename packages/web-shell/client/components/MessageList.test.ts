@@ -13,6 +13,7 @@ import {
   getTurnIdByDisplayIndex,
   groupParallelAgents,
   pinActiveParallelAgentsToTurnEnd,
+  shouldAdjustVirtualScrollPosition,
   shouldUseVirtualScroll,
   VIRTUAL_SCROLL_THRESHOLD,
   type DisplayItem,
@@ -1028,6 +1029,13 @@ describe('shouldUseVirtualScroll', () => {
   });
 });
 
+describe('shouldAdjustVirtualScrollPosition', () => {
+  it('adjusts only for rows fully above the viewport', () => {
+    expect(shouldAdjustVirtualScrollPosition(900, 1_000)).toBe(true);
+    expect(shouldAdjustVirtualScrollPosition(1_100, 1_000)).toBe(false);
+  });
+});
+
 describe('findDisplayItemIndex', () => {
   it('finds a row by message id', () => {
     const items = groupParallelAgents([
@@ -1919,6 +1927,42 @@ describe('applyTurnCollapse', () => {
       hiddenCount: 1,
       toolCallCount: 2,
     });
+  });
+
+  it('collapses a failed turn after a newer turn starts', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 's1',
+        role: 'system',
+        content: 'The turn failed.',
+        variant: 'error',
+        source: 'turn_error',
+      },
+      makeUserMessage('u2'),
+      makeMultiToolGroup('g2'),
+      makeAssistantMessage('a2'),
+    ]);
+
+    const out = collapseItems(items);
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(true);
+  });
+
+  it('collapses a turn with no final answer after a newer turn starts', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('interim'),
+      makeMultiToolGroup('g2'),
+      makeUserMessage('u2'),
+      makeAssistantMessage('a2'),
+    ]);
+
+    const out = collapseItems(items);
+
+    expect(collapseOf(out, 'u1')?.collapsed).toBe(true);
   });
 
   it('folds thinking separately from the final answer', () => {
