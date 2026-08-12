@@ -66,6 +66,7 @@ import {
 import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -437,6 +438,27 @@ export function registerSessionRoutes(
     sessionShellCommandEnabled,
     virtualSubagentSessions,
   } = deps;
+  const invalidateSessionLists = (
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+  ): void => {
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+      workspaceCwd: runtime.workspaceCwd,
+      archiveStates,
+    });
+  };
+  const runWithSessionListInvalidation = async <T>(
+    runtime: WorkspaceRuntime,
+    archiveStates: readonly SessionArchiveState[],
+    mutation: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await mutation();
+    } finally {
+      invalidateSessionLists(runtime, archiveStates);
+    }
+  };
   const requestedSessionIdAdmission =
     deps.requestedSessionIdAdmission ??
     createRequestedSessionIdAdmission({
@@ -3229,12 +3251,18 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const promptId = crypto.randomUUID();
-        res.status(200).json(
-          await runtime.bridge.continueSession(sessionId, {
-            ...(clientId !== undefined ? { clientId } : {}),
+        const result = await runtime.bridge.continueSession(sessionId, {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId,
+        });
+        if (daemonLog && result.accepted) {
+          daemonLog.info('continuation enqueued', {
+            sessionId,
             promptId,
-          }),
-        );
+            clientId,
+          });
+        }
+        res.status(200).json(result);
       },
     ),
   );
@@ -3650,10 +3678,12 @@ export function registerSessionRoutes(
     try {
       // ACP session/close can fall back to a shared gate because it has
       // connection-local promptAbort state; REST close does not.
-      await archiveCoordinator.runExclusiveMany([sessionId], async () =>
-        runtime.bridge.closeSession(
-          sessionId,
-          clientId !== undefined ? { clientId } : undefined,
+      await runWithSessionListInvalidation(runtime, ['active'], () =>
+        archiveCoordinator.runExclusiveMany([sessionId], async () =>
+          runtime.bridge.closeSession(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          ),
         ),
       );
       clearBranchSessionEntry(sessionId);
@@ -3675,18 +3705,23 @@ export function registerSessionRoutes(
     try {
       const runtime = workspaceRegistry.primary;
       const service = createWorkspaceRuntimeSessionService(runtime);
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        deleteDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          bridge,
-          coordinator: archiveCoordinator,
-          onError: ({ phase, sessionId, error }) => {
-            writeStderrLine(
-              `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
-            );
-          },
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            deleteDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              bridge,
+              coordinator: archiveCoordinator,
+              onError: ({ phase, sessionId, error }) => {
+                writeStderrLine(
+                  `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+                );
+              },
+            }),
+          ),
       );
       for (const removedId of result.removed) {
         clearBranchSessionEntry(removedId);
@@ -3708,13 +3743,18 @@ export function registerSessionRoutes(
     });
 
     try {
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        archiveDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          bridge,
-          coordinator: archiveCoordinator,
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            archiveDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              bridge,
+              coordinator: archiveCoordinator,
+            }),
+          ),
       );
       res.status(200).json({
         archived: result.archived,
@@ -3737,12 +3777,17 @@ export function registerSessionRoutes(
     });
 
     try {
-      const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-        unarchiveDaemonSessions({
-          sessionIds: uniqueIds,
-          service,
-          coordinator: archiveCoordinator,
-        }),
+      const result = await runWithSessionListInvalidation(
+        runtime,
+        ['active', 'archived'],
+        () =>
+          runWithWorkspaceRuntimeStorage(runtime, () =>
+            unarchiveDaemonSessions({
+              sessionIds: uniqueIds,
+              service,
+              coordinator: archiveCoordinator,
+            }),
+          ),
       );
       res.status(200).json({
         unarchived: result.unarchived,
@@ -3769,18 +3814,23 @@ export function registerSessionRoutes(
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const service = createWorkspaceRuntimeSessionService(runtime);
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          deleteDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            bridge: runtime.bridge,
-            coordinator: archiveCoordinator,
-            onError: ({ phase, sessionId, error }) => {
-              writeStderrLine(
-                `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
-              );
-            },
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              deleteDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                bridge: runtime.bridge,
+                coordinator: archiveCoordinator,
+                onError: ({ phase, sessionId, error }) => {
+                  writeStderrLine(
+                    `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+                  );
+                },
+              }),
+            ),
         );
         for (const removedId of result.removed) {
           clearBranchSessionEntry(removedId);
@@ -3806,13 +3856,18 @@ export function registerSessionRoutes(
         onWarning: logSessionArchiveWarning,
       });
       try {
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          archiveDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            bridge: runtime.bridge,
-            coordinator: archiveCoordinator,
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              archiveDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                bridge: runtime.bridge,
+                coordinator: archiveCoordinator,
+              }),
+            ),
         );
         res.status(200).json({
           archived: result.archived,
@@ -3839,12 +3894,17 @@ export function registerSessionRoutes(
         onWarning: logSessionArchiveWarning,
       });
       try {
-        const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
-          unarchiveDaemonSessions({
-            sessionIds: uniqueIds,
-            service,
-            coordinator: archiveCoordinator,
-          }),
+        const result = await runWithSessionListInvalidation(
+          runtime,
+          ['active', 'archived'],
+          () =>
+            runWithWorkspaceRuntimeStorage(runtime, () =>
+              unarchiveDaemonSessions({
+                sessionIds: uniqueIds,
+                service,
+                coordinator: archiveCoordinator,
+              }),
+            ),
         );
         res.status(200).json({
           unarchived: result.unarchived,
@@ -3883,11 +3943,16 @@ export function registerSessionRoutes(
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
             : undefined;
-        const effective = runtime.bridge.updateSessionMetadata(
-          sessionId,
-          { displayName },
-          clientId !== undefined ? { clientId } : undefined,
-        );
+        let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
+        try {
+          effective = runtime.bridge.updateSessionMetadata(
+            sessionId,
+            { displayName },
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        } finally {
+          invalidateSessionLists(runtime, ['active']);
+        }
         res.status(200).json({ sessionId, ...effective });
       },
     ),
@@ -4341,6 +4406,7 @@ export function registerSessionRoutes(
           ? await runWorkspaceInspectionWithLogPolicy(runtime, () =>
               listWorkspaceSessionsForResponse(runtime.bridge, key, options, {
                 mergeLive: !readOnlySecondary,
+                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
               }),
             )
           : listLiveWorkspaceSessionsForResponse(runtime.bridge, key, options);
@@ -4542,16 +4608,14 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId? }`: `false` when the session is idle (or the
-  // per-session queue is full), so the browser keeps the message in its own
-  // queue and sends it as a normal next-turn prompt. Synchronous — the bridge
-  // only pushes onto an in-memory queue.
+  // Returns `{ accepted, messageId? }`. Accepted requests are owned by the
+  // daemon; rejected requests were not admitted. Synchronous — the bridge only
+  // mutates its in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
-  // only the global 10 MB body limit applies. Not a UX limit — a rejected
-  // message stays in the browser's own queue and is sent as the (uncapped)
-  // next-turn prompt — it only bounds how much a single mid-turn push can pin in
-  // the in-memory queue (the queue DEPTH is bounded in `enqueueMidTurnMessage`).
+  // only the global 10 MB body limit applies. It bounds how much a single
+  // mid-turn push can pin in memory; queue depth is bounded separately in
+  // `enqueueMidTurnMessage`.
   const MID_TURN_MESSAGE_MAX_LENGTH = 16 * 1024;
   app.post(
     '/session/:id/mid-turn-message',
@@ -4561,6 +4625,7 @@ export function registerSessionRoutes(
       (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const message = body['message'];
+        const messageId = body['messageId'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
         // stores the trimmed string, so checking the raw length would reject input
         // whose real content fits but is padded with whitespace.
@@ -4577,6 +4642,18 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          messageId !== undefined &&
+          (typeof messageId !== 'string' ||
+            messageId.length === 0 ||
+            messageId.length > 128)
+        ) {
+          res.status(400).json({
+            error:
+              '`messageId` must be a non-empty string of at most 128 characters',
+          });
+          return;
+        }
         // Forward the client id so the bridge authorizes it against the session
         // (like `/prompt` and `/btw`) — a token-holding client bound to another
         // session must not push into this one — and records it as the message's
@@ -4587,6 +4664,7 @@ export function registerSessionRoutes(
           sessionId,
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
+          typeof messageId === 'string' ? messageId : undefined,
         );
         res.status(200).json(result);
       },
@@ -4617,6 +4695,29 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  // Session-owned mid-turn snapshot: messages still waiting plus bounded
+  // terminal id rings. Query-capable clients project it after refresh,
+  // session switches, or missed events. Older daemons lack this route and
+  // retain the legacy client-side fallback.
+  app.get('/session/:id/mid-turn-messages', (req, res) => {
+    const route = 'GET /session/:id/mid-turn-messages';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const runtime = resolveLiveSessionRuntime(sessionId, res, route);
+    if (!runtime) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const snapshot = runtime.bridge.getMidTurnMessages(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(snapshot);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
 
   // Pending prompt queue: list and remove.
   app.get('/session/:id/pending-prompts', (req, res) => {

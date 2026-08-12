@@ -55,6 +55,7 @@ export {
   type ReadMeta,
   type ReadTextOptions,
   type RequestContext,
+  type SameHostToolTextWriteRequest,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
   type WriteMode,
