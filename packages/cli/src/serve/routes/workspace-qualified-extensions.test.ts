@@ -595,11 +595,23 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('accepts a batch at the 100-extension limit', async () => {
+  it('applies a batch at the 100-extension limit in one commit', async () => {
     const h = await makeHarness();
-    mockExtensionManager();
+    const template = mockExtensionManager();
     const extensionIds = Array.from({ length: 100 }, (_, index) =>
       index.toString(16).padStart(64, '0'),
+    );
+    const extensions = extensionIds.map(
+      (id, index) =>
+        ({
+          ...template,
+          id,
+          name: `demo-${index}`,
+          config: { ...template.config, name: `demo-${index}` },
+        }) as Extension,
+    );
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      extensions,
     );
     try {
       const started = await auth(
@@ -609,13 +621,41 @@ describe('extension management v2 REST', () => {
       );
 
       expect(started.status).toBe(202);
-      await expect(
-        pollOperation(h.app, started.body.operationId),
-      ).resolves.toMatchObject({
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
         operation: 'set_default_activation_batch',
         status: 'succeeded',
-        result: { updated: false, results: [] },
+        result: {
+          status: 'updated',
+          errors: [],
+          refreshed: 2,
+          failed: 0,
+        },
       });
+      expect(completed.result.results).toHaveLength(100);
+      expect(
+        completed.result.results.map(
+          (result: { extensionId: string }) => result.extensionId,
+        ),
+      ).toEqual(extensionIds);
+      expect(
+        completed.result.results.every(
+          (result: { defaultActivation: string }) =>
+            result.defaultActivation === 'enabled',
+        ),
+      ).toBe(true);
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).toHaveBeenCalledWith(extensionIds, 'enabled', expect.any(Function));
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
