@@ -311,6 +311,13 @@ function evaluate(
 }
 
 const isEnglish = (testCase: EvalCase) => testCase.category === 'english';
+const isCjk = (testCase: EvalCase) =>
+  testCase.category === 'chinese' ||
+  testCase.category === 'japanese' ||
+  testCase.category === 'korean';
+/** Queries that mix scripts, including the full-width NFKC cases. */
+const isMixed = (testCase: EvalCase) =>
+  testCase.category === 'mixed' || testCase.category === 'nfkc';
 
 function formatPercent(value: number | null): string {
   return value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`;
@@ -382,13 +389,8 @@ describe('auto-memory recall evaluation', () => {
     const rows = [
       ['overall', () => true],
       ['english', isEnglish],
-      [
-        'cjk',
-        (testCase: EvalCase) =>
-          testCase.category === 'chinese' ||
-          testCase.category === 'japanese' ||
-          testCase.category === 'korean',
-      ],
+      ['cjk', isCjk],
+      ['mixed', isMixed],
     ] as const;
 
     const lines = [
