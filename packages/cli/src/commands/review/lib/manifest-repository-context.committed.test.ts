@@ -196,9 +196,10 @@ describe('committed review context manifest', () => {
   });
 
   it('keeps nested bundled-skill material out of automatic related context', () => {
-    const context = provideForRepo([
-      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
-    ]);
+    const changedPath =
+      'packages/core/src/skills/bundled/dataviz/synthetic-change.txt';
+    expect(existsSync(join(repoRoot, changedPath))).toBe(false);
+    const context = provideForRepo([changedPath]);
 
     expect(context).not.toBeNull();
     expect(context?.domains).toContain('core-skills');
