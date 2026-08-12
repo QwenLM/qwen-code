@@ -3093,7 +3093,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
-            error: message,
             errorStatus: resolveConnectionErrorStatus(
               errorStatus,
               current.errorStatus,
@@ -3124,6 +3123,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
+          error: undefined,
         }));
         await delay(delayMs, abort.signal);
       }
