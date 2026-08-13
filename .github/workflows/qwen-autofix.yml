@@ -4094,13 +4094,19 @@ jobs:
           # at the fork head — the measurement would compare the branch
           # against itself (0/0 forever). Unmeasurable: skip the brake
           # (fail open), like the no-merge-base case.
+          # Unmeasurable is a STATE, not a zero: substituting 0 nets would
+          # anchor a bogus 0/0 baseline (or, against an existing anchor,
+          # manufacture phantom growth). NET_MEASURED gates the whole brake:
+          # no anchor, no marker, no engagement.
+          NET_MEASURED='true'
+          NET_TOTAL=0
+          NET_TEST=0
           if [[ "${BRANCH}" == 'main' ]]; then
             echo "📏 growth measurement skipped: fork head branch is named 'main' (origin/main was re-pointed at checkout)"
-            NET_TOTAL=0
-            NET_TEST=0
+            NET_MEASURED='false'
           else
-            NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TOTAL=0
-            NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_TEST=0
+            NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_MEASURED='false'
+            NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_MEASURED='false'
           fi
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           # The marker's window field is spelled `key=`, NOT `win=`, on
@@ -4130,7 +4136,10 @@ jobs:
             | map(select($baseupd == "" or (.at > $baseupd))) | sort_by(.at)
             | .[0] // empty | "\(.src) \(.test)"' "${WORKDIR}/ic.json")"
           GROWTH_BASE_NEW='false'
-          if [[ "${GROWTH_BASELINE}" =~ ^(-?[0-9]+)\ (-?[0-9]+)$ ]]; then
+          if [[ "${NET_MEASURED}" != 'true' ]]; then
+            BASE_SRC=0
+            BASE_TEST=0
+          elif [[ "${GROWTH_BASELINE}" =~ ^(-?[0-9]+)\ (-?[0-9]+)$ ]]; then
             BASE_SRC="${BASH_REMATCH[1]}"
             BASE_TEST="${BASH_REMATCH[2]}"
           else
@@ -4140,6 +4149,7 @@ jobs:
           fi
           GROWTH_SRC=$(( NET_SRC - BASE_SRC ))
           GROWTH_TEST=$(( NET_TEST - BASE_TEST ))
+          [[ "${NET_MEASURED}" != 'true' ]] && { GROWTH_SRC=0; GROWTH_TEST=0; }
           {
             echo "growth_base_new=${GROWTH_BASE_NEW}"
             echo "growth_base_src=${BASE_SRC}"

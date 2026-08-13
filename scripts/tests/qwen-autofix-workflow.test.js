@@ -6117,6 +6117,26 @@ exit 1
         { encoding: 'utf8', cwd: dir },
       );
       expect(orphan).toBe('0 0 0');
+      // Unmeasured is a STATE: no bogus anchor may be written.
+      const orphanFlag = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s' "$NET_MEASURED"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphanFlag).toBe('false');
+      // A fork head literally named 'main' skips measurement out loud.
+      const forkMain = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nBRANCH=main\n${measureBlock}\nprintf '\\n%s %s' "$NET_MEASURED" "$NET_TOTAL"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(forkMain.split('\n').pop()).toBe('false 0');
       expect(measureBlock).toContain(
         "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
       );
@@ -6301,7 +6321,7 @@ exit 1
         'bash',
         [
           '-c',
-          `GROWTH_BASELINE='${baseline}'\nNET_SRC=${netSrc}\nNET_TEST=${netTest}\n${wiringBlock}\nprintf '%s %s %s %s %s' "$GROWTH_BASE_NEW" "$BASE_SRC" "$BASE_TEST" "$GROWTH_SRC" "$GROWTH_TEST"`,
+          `GROWTH_BASELINE='${baseline}'\nNET_MEASURED=true\nNET_SRC=${netSrc}\nNET_TEST=${netTest}\n${wiringBlock}\nprintf '%s %s %s %s %s' "$GROWTH_BASE_NEW" "$BASE_SRC" "$BASE_TEST" "$GROWTH_SRC" "$GROWTH_TEST"`,
         ],
         { encoding: 'utf8' },
       );
