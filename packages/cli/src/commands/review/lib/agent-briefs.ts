@@ -365,7 +365,7 @@ Not your dimension: whether the change is at the right depth (3b owns altitude a
     publicLabel: 'the altitude and abstraction pass',
     publicLabelZh: '修复层次与抽象合理性检查',
     readsDiff: true,
-    brief: `You are **Agent 3b: Altitude & Abstraction Fit**. One question, walked to the end: **is each change at the right depth?**
+    brief: `You are **Agent 3b: Altitude & Abstraction Fit**. One question, walked to the end: **is each change at the right depth, and the right SHAPE for what it re-implements?**
 
 Altitude is the failure that reads as correct at every individual line and is wrong as a whole. For each change ask where the problem it addresses actually lives, and compare that to where the fix was written:
 
@@ -373,6 +373,7 @@ Altitude is the failure that reads as correct at every individual line and is wr
 - **Too shallow in the other direction — the wrong owner.** The defect is upstream (another module, another service, the data's producer) and the diff compensates for it downstream. Say whose bug it is.
 - **Too deep — over-engineering.** A new abstraction, indirection layer, options object, or configuration point serving exactly one call site; a generalisation for a second case that does not exist. The cost is real and concrete: every future reader pays for the indirection, and the shape is fixed by a single example that may be unrepresentative.
 - **Blast radius.** When a change to shared infrastructure exists to serve one caller, name the *other* callers it now also affects, and what it means for them.
+- **Wrong shape — the enumeration trap.** A change that HAND-ROLLS parsing or matching of an **unbounded or adversarial surface** — untrusted input, a rendered format (what a viewer/renderer displays), or a spec/grammar — with per-corner special-cases that will accumulate: \`indexOf\`/\`slice\`/regex walking structured input, "match what the renderer renders" logic, a re-implemented grammar, a growing hand-listed set of cases. Such a surface has **no last corner**, so patching cases one at a time never converges — it is a change written at the wrong altitude: it should defer to an ABSTRACTION (a real parser, the tool's own authoritative structured output, or a fail-closed decision), not re-implement the surface inline. The finding is **not the current corner but the shape**: name the class-closing fix and file it ONCE, as this change's altitude finding, in place of enumerating its cases. Severity follows the risk the shape carries — a hand-rolled parser that can be fooled into a wrong pass/credit/accept is **Critical**, not a Suggestion.
 
 Every finding needs the concrete cost, not an aesthetic judgement: what breaks next, what has to be repeated, who else is affected. "This should be more general" with no named next caller is not a finding.
 
