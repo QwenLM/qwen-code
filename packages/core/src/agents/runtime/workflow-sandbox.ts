@@ -168,11 +168,10 @@ export interface WorkflowMeta {
  *      invocation time, not replayed during resume, so non-determinism in
  *      the meta literal (a `Date.now()` call in `meta.name`) does not
  *      break the resume contract that the script body honors.
- *   3. The vm result is walked field-by-field and copied into a new
- *      host-realm plain object. No JSON round-trip is needed because every
- *      contract field is a primitive — strings and arrays of plain
- *      objects with string fields — so prototype identity on the
- *      intermediate values is irrelevant.
+ *   3. The vm result is serialized in the bounded context, then parsed into
+ *      a new host-realm plain object. Every contract field is a primitive —
+ *      strings and arrays of plain objects with string fields — so the JSON
+ *      round-trip also severs vm-realm prototypes.
  *
  * Returns `{ stripped, meta: null }` when no meta declaration is present
  * (callers treat this as "no meta"). Throws when meta is present but
@@ -195,48 +194,98 @@ export function extractAndStripMeta(source: string): {
   // / `args` / workflow-sandbox bridge globals). The vm realm still
   // provides its own intrinsics, but that's intentional — see the
   // docstring above.
-  const metaContext = vm.createContext(Object.create(null));
+  const metaContext = vm.createContext(Object.create(null), {
+    microtaskMode: 'afterEvaluate',
+  });
+  let attachingPromiseHandler = false;
+  const stopTrackingPromises = promiseHooks.createHook({
+    init(promise) {
+      if (attachingPromiseHandler) return;
+      attachingPromiseHandler = true;
+      try {
+        // Promise#then consults @@species; hide a model-defined constructor
+        // while attaching the host rejection handler.
+        Object.defineProperty(promise, 'constructor', {
+          configurable: true,
+          value: Promise,
+        });
+        void Promise.prototype.then.call(promise, undefined, () => undefined);
+      } finally {
+        Reflect.deleteProperty(promise, 'constructor');
+        attachingPromiseHandler = false;
+      }
+    },
+  });
   let serialized: unknown;
+  let evaluationFailed = false;
   try {
     serialized = new vm.Script(
       `(() => {
+        const apply = Reflect.apply;
+        const arrayIsArray = Array.isArray;
+        const arrayPush = Array.prototype.push;
+        const jsonStringify = JSON.stringify;
+        const objectCreate = Object.create;
+        const objectKeys = Object.keys;
+        const weakSetAdd = WeakSet.prototype.add;
+        const weakSetDelete = WeakSet.prototype.delete;
+        const weakSetHas = WeakSet.prototype.has;
         const active = new WeakSet();
+        let hasThenable = false;
         function copy(value) {
-          if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+          const type = typeof value;
+          if (value === null || type === 'string' || type === 'number' || type === 'boolean') {
             return value;
           }
-          if (typeof value !== 'object') return undefined;
-          if (active.has(value)) return undefined;
-          active.add(value);
+          if (type !== 'object') return undefined;
+          if (apply(weakSetHas, active, [value])) return undefined;
+          apply(weakSetAdd, active, [value]);
           if (typeof value.then === 'function') {
-            try { value.catch(() => {}); } catch {}
-            throw new Error(
-              'extractAndStripMeta: meta values must not be Promises ' +
-              '(no async / dynamic import allowed in meta literal)',
-            );
+            hasThenable = true;
+            return undefined;
           }
-          if (Array.isArray(value)) {
+          if (arrayIsArray(value)) {
             const out = [];
-            for (let i = 0; i < value.length; i++) out.push(copy(value[i]));
-            active.delete(value);
+            for (let i = 0; i < value.length; i++) {
+              apply(arrayPush, out, [copy(value[i])]);
+            }
+            apply(weakSetDelete, active, [value]);
             return out;
           }
-          const out = Object.create(null);
-          for (const key of Object.keys(value)) out[key] = copy(value[key]);
-          active.delete(value);
+          const out = objectCreate(null);
+          const keys = objectKeys(value);
+          for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            out[key] = copy(value[key]);
+          }
+          apply(weakSetDelete, active, [value]);
           return out;
         }
-        return JSON.stringify(copy((${metaSource})));
+        const value = copy((${metaSource}));
+        return jsonStringify({ hasThenable, value });
       })()`,
     ).runInContext(metaContext, { timeout: META_EVAL_TIMEOUT_MS });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+  } catch {
+    evaluationFailed = true;
+  } finally {
+    stopTrackingPromises();
+  }
+  if (evaluationFailed) {
     throw new Error(
-      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
+      'extractAndStripMeta: failed to evaluate meta object literal',
     );
   }
-  const raw = JSON.parse(serialized as string) as unknown;
-  const meta = validateMeta(raw);
+  const result = JSON.parse(serialized as string) as {
+    hasThenable: boolean;
+    value: unknown;
+  };
+  if (result.hasThenable) {
+    throw new Error(
+      'extractAndStripMeta: meta values must not be Promises ' +
+        '(no async / dynamic import allowed in meta literal)',
+    );
+  }
+  const meta = validateMeta(result.value);
   return { stripped, meta };
 }
 
@@ -338,6 +387,7 @@ function isRegexContext(source: string, i: number): boolean {
 }
 
 import * as vm from 'node:vm';
+import { promiseHooks } from 'node:v8';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 

@@ -383,6 +383,99 @@ describe('extractAndStripMeta', () => {
     );
   });
 
+  it('bounds async meta continuations inside the vm timeout', () => {
+    const src = `export const meta = {
+      name: (async () => { await 0; while (true) {} })(),
+      description: 'd',
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  it('neutralizes rejected Promises when a later field times out', async () => {
+    const src = `export const meta = {
+      name: Promise.reject(new Error('dangling')),
+      description: (function () { while (true) {} })(),
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+
+  it('neutralizes every rejected Promise before rejecting meta', async () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      first: Promise.reject(new Error('first')),
+      second: Promise.reject(new Error('second')),
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+
+  it('neutralizes rejected Promise subclasses without invoking their species', async () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      extra: (() => {
+        class MetaPromise extends Promise {
+          static get [Symbol.species]() { while (true) {} }
+        }
+        return MetaPromise.reject(new Error('subclass'));
+      })(),
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+
+  it('does not coerce vm-thrown values in the host realm', () => {
+    const src = `export const meta = {
+      name: (function () {
+        throw { toString() { while (true) {} } };
+      })(),
+      description: 'd',
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+  });
+
+  it('uses captured vm intrinsics while copying meta', async () => {
+    const src = `export const meta = {
+      name: (Object.keys = () => ['name', 'description'], 'x'),
+      description: 'd',
+      hidden: Promise.reject(new Error('hidden')),
+    }
+    return 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+
+  it('does not depend on mutable Array methods while copying meta', () => {
+    const src = `export const meta = {
+      name: (Array.prototype.includes = () => false, 'x'),
+      description: 'd',
+    }
+    return 1`;
+    expect(extractAndStripMeta(src).meta).toEqual({
+      name: 'x',
+      description: 'd',
+    });
+  });
+
   // P4 Round 7 (wenshao): `phase('X'); phase('X')` previously yielded
   // `outcome.phases = ['X','X']` (sandbox unconditional push) while the
   // registry's onPhaseStarted deduped to `entry.phases = ['X']`. The
