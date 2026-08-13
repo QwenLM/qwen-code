@@ -8782,6 +8782,51 @@ describe('Session', () => {
         }
       });
 
+      it('forces channel-delivery prompts off even when enforcement is configured', async () => {
+        // One server-side channel classification gates both the rejection
+        // and the guard mode: channelDelivery turns are non-interactive
+        // deliveries, so the repeated-failure guard must not stop them
+        // either — they keep running to their natural end.
+        recreateSessionWithGuardMode('enforce');
+        try {
+          const execute = installFailingTool();
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'channel delivery task' }],
+              _meta: {
+                'qwen.daemon.channelDelivery': {
+                  deliveryId: 'prompt-guard-off-delivery',
+                  target: {
+                    channelName: 'dingtalk',
+                    type: 'user',
+                    id: 'user-1',
+                  },
+                },
+              },
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(execute).toHaveBeenCalledTimes(9);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+          expect(logRepeatedToolFailureGuardSpy).not.toHaveBeenCalled();
+          // Drain the scheduled channel delivery before teardown so the
+          // unref'd delivery timer cannot fire after the mocks reset.
+          await vi.waitFor(() => {
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'qwen/control/channel-delivery',
+              expect.objectContaining({
+                deliveryId: 'prompt-guard-off-delivery',
+              }),
+            );
+          });
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
       it('forces channel-routed prompts off even when enforcement is configured', async () => {
         recreateSessionWithGuardMode('enforce');
         try {
@@ -15111,6 +15156,84 @@ describe('Session', () => {
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+      });
+
+      it('keeps a Goal turn graceful when loop protection stops it', async () => {
+        // Goal continuations are non-interactive and bypass the bridge: a
+        // rejection would settle the turn as failed and pause the goal
+        // with no turn_error ever published. They resolve end_turn like
+        // cron and channel turns, settling the iteration normally.
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-loop-cap',
+        };
+        const turnKey = 'goal-runtime:turn-loop-cap';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'goal-loop-1',
+                    name: 'read_file',
+                    args: { file_path: 'a.ts' },
+                  },
+                  {
+                    id: 'goal-loop-2',
+                    name: 'read_file',
+                    args: { file_path: 'b.ts' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+            }),
+            {},
+          );
+        });
+        // Graceful end_turn settles the iteration; the goal is not paused.
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
       });
 
       it('pauses without counting a Goal turn cancelled before the model request', async () => {

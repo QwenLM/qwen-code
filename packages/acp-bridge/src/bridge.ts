@@ -1525,6 +1525,7 @@ function broadcastTurnComplete(
   promptResult: { stopReason?: string; [k: string]: unknown },
   promptId: string | undefined,
   originatorClientId: string | undefined,
+  mutateTurnState: boolean,
 ): void {
   try {
     const published = entry.events.publish({
@@ -1537,8 +1538,13 @@ function broadcastTurnComplete(
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
-    // A newer turn terminal supersedes any pending refresh-append error.
-    if (published !== undefined) entry.turnErrorEvent = undefined;
+    // A newer turn terminal supersedes any pending refresh-append error —
+    // but only for a prompt that actually ran. A queued prompt's terminal
+    // (deadline expiry, queued removal) publishes the event alone without
+    // mutating turn state, so it must not erase the refresh-replay record
+    // of the active turn's failure either.
+    if (mutateTurnState && published !== undefined)
+      entry.turnErrorEvent = undefined;
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -1609,6 +1615,16 @@ export function extractErrorCode(err: unknown): string | undefined {
  * `pending_prompt_started` is deliberately absent: it is published before
  * admission clears `turnErrorEvent`, so blocking the append in that window
  * keeps a stale error from trailing a turn that is already starting.
+ *
+ * Audit the full `broadcastWorkspaceEvent` vocabulary (and any other
+ * idle-reachable session-bus publish) before adding a new event type to
+ * the bus: every idle non-turn event belongs here, or an otherwise-idle
+ * activity — a model switch, an extension refresh, an MCP server change,
+ * a user-shell command — defeats the append and the loop terminal
+ * disappears from the refreshed transcript. `session_update` events are
+ * turn content except the user-shell output stream, which the guard
+ * skips via `isUserShellSessionUpdate` (its history goes to the model
+ * conversation, not the persisted transcript the refresh pages).
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1621,7 +1637,33 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_metadata_updated',
   'session_cwd_changed',
   'artifact_changed',
+  'settings_changed',
+  'extensions_changed',
+  'mcp_server_changed',
+  'mcp_server_added',
+  'mcp_server_removed',
+  'user_shell_command',
+  'user_shell_result',
 ]);
+
+/**
+ * User-shell output is published as `session_update` on the session bus
+ * while idle, but it carries no turn content for the persisted
+ * transcript (it is injected into the model conversation history
+ * instead), so it must not defeat the refresh-append of a pending
+ * terminal error the way a real turn's `session_update` does.
+ */
+function isUserShellSessionUpdate(event: BridgeEvent): boolean {
+  if (event.type !== 'session_update') return false;
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const update = (data as Record<string, unknown>)['update'];
+  if (!update || typeof update !== 'object' || Array.isArray(update))
+    return false;
+  const meta = (update as Record<string, unknown>)['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  return (meta as Record<string, unknown>)['source'] === 'user-shell';
+}
 
 export function classifyTurnErrorKind(
   message: string,
@@ -1686,12 +1728,12 @@ function broadcastTurnError(
     });
     if (mutateTurnState) {
       // Undefined when the bus dropped the publish (closed mid-teardown);
-      // the refresh-append guard then simply has nothing to replay.
+      // the refresh-append guard then simply has nothing to replay. A
+      // queued prompt's terminal (mutateTurnState=false) publishes the
+      // event alone and leaves the active turn's refresh-replay record
+      // untouched — the prompt never ran, so its terminal is not a newer
+      // turn boundary for the replay.
       entry.turnErrorEvent = published;
-    } else if (published !== undefined) {
-      // A queued prompt's terminal is a newer turn boundary: the prior
-      // in-memory error must no longer be replayed on refresh.
-      entry.turnErrorEvent = undefined;
     }
   } catch {
     /* bus may be closed during session teardown */
@@ -1735,6 +1777,14 @@ function publishPromptTerminal(
   }
   pendingEntry.terminalPublished = true;
   const originatorClientId = pendingEntry.originatorClientId;
+  // Only a running prompt's terminal belongs to the active turn. The
+  // `state === 'running'` gate (not `activePromptId`) is deliberate: on
+  // the normal settle path `settleActivePromptState` runs in
+  // `promptPromise.finally` BEFORE the terminal is published, so
+  // `activePromptId` is already cleared when a genuine active terminal
+  // lands here. Queued terminals publish their event alone and must
+  // neither set nor clear session-scoped turn state.
+  const mutateTurnState = pendingEntry.state === 'running';
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
       entry,
@@ -1742,6 +1792,7 @@ function publishPromptTerminal(
       terminal.result,
       pendingEntry.promptId,
       originatorClientId,
+      mutateTurnState,
     );
   } else if (terminal.kind === 'cancelled') {
     broadcastTurnComplete(
@@ -1750,6 +1801,7 @@ function publishPromptTerminal(
       { stopReason: 'cancelled' },
       pendingEntry.promptId,
       originatorClientId,
+      mutateTurnState,
     );
   } else {
     broadcastTurnError(
@@ -1758,13 +1810,7 @@ function publishPromptTerminal(
       terminal.err,
       pendingEntry.promptId,
       originatorClientId,
-      // Only a running prompt's failure is the active turn's failure. The
-      // `state === 'running'` gate (not `activePromptId`) is deliberate:
-      // on the normal settle path `settleActivePromptState` runs in
-      // `promptPromise.finally` BEFORE the terminal is published, so
-      // `activePromptId` is already cleared when a genuine active failure
-      // lands here.
-      pendingEntry.state === 'running',
+      mutateTurnState,
     );
   }
 }
@@ -5549,7 +5595,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const journal = entry.events.liveJournalSnapshot() ?? [];
             const hasNewerTurnContent = journal.some(
               (event) =>
-                !REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type),
+                !REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type) &&
+                !isUserShellSessionUpdate(event),
             );
             if (!hasNewerTurnContent) {
               compactedReplay = [...page.events, turnErrorEvent];

@@ -3669,6 +3669,11 @@ export class Session implements SessionContext {
       (params as { _meta?: Record<string, unknown> })._meta?.[
         CHANNEL_PROMPT_META_KEY
       ] === true;
+    // One server-side channel classification, consumed by both the
+    // rejection gate below and the guard-mode selection in
+    // #executePromptInner. The ACP boundary strips the channel-prompt key
+    // from untrusted callers, so both decisions see only trusted values.
+    const channelTurn = channelDelivery !== undefined || channelPromptTurn;
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3686,14 +3691,18 @@ export class Session implements SessionContext {
         channelDeliveryCapture,
         invocationContext,
         modelPrompt,
-        // Channel turns are non-interactive deliveries: like cron and
-        // background-notification turns they keep the graceful end-turn
-        // handling so the collected response text is still delivered. Both
-        // channel mechanisms qualify — the channelDelivery meta and the
-        // CHANNEL_PROMPT_META_KEY turns sent by the channel bridges, which
-        // carry no channelDelivery capture.
-        channelDelivery === undefined && !channelPromptTurn,
+        // Channel turns are non-interactive deliveries: like cron,
+        // background-notification, and goal turns they keep the graceful
+        // end-turn handling so the collected response text is still
+        // delivered. Both channel mechanisms qualify — the channelDelivery
+        // meta and the CHANNEL_PROMPT_META_KEY turns sent by the channel
+        // bridges, which carry no channelDelivery capture. Goal turns
+        // bypass the bridge entirely, so a rejection there would settle
+        // the turn as failed and pause the goal without any turn_error
+        // ever being published.
+        !channelTurn && goalTurn === undefined,
         goalTurn,
+        channelTurn,
       );
       promptResult = result;
       releasePendingSend();
@@ -3927,6 +3936,7 @@ export class Session implements SessionContext {
     modelPrompt?: string,
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -3952,6 +3962,7 @@ export class Session implements SessionContext {
             modelPrompt,
             rejectOnLoopDetected,
             goalTurn,
+            channelTurn,
           ),
         ),
       );
@@ -3967,6 +3978,7 @@ export class Session implements SessionContext {
     modelPrompt?: string,
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -4361,9 +4373,7 @@ export class Session implements SessionContext {
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
-              promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
-                ? 'off'
-                : this.repeatedToolFailureGuardMode,
+              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
 
             // conversation_finished must fire on every terminal path of the
@@ -4640,6 +4650,7 @@ export class Session implements SessionContext {
                       promptId,
                       toolLoopState,
                       onFullTurnModel,
+                      rejectOnLoopDetected,
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
@@ -5630,6 +5641,7 @@ export class Session implements SessionContext {
           toolPromptId,
           toolLoopState,
           options.onFullTurnModel,
+          options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.hadMidTurnUserInput) {
@@ -6071,6 +6083,7 @@ export class Session implements SessionContext {
     promptId: string,
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
+    rejectOnLoopDetected = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -6164,6 +6177,20 @@ export class Session implements SessionContext {
         toolLoopState,
         { recordToQwenLogger: false },
       );
+      if (!rejectOnLoopDetected) {
+        // Rejecting turns publish the structured turn_error as the
+        // user-visible explanation; graceful (non-interactive) stops have
+        // no replacement, so keep the transcript stop message for them.
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
+          );
+        }
+      }
       return {
         message: null,
         hadMidTurnUserInput,

@@ -12,7 +12,7 @@ Web Shell renders `loop_detected` from the structured kind, using localized plai
 
 Skipped tools keep their existing failed terminal update and error details so they cannot remain pending and their display behavior does not change. The additional `turn_error` provides the user-facing explanation for the stopped turn.
 
-The session remains alive and the per-turn loop state is recreated for the next prompt. Cron, background-notification, and channel-delivery turns keep their existing non-interactive handling: only interactive foreground prompts reject. A loop-detected rejection still drains the cron/notification queues, preserving the invariant that a loop-stopped turn never strands queued automatic work.
+The session remains alive and the per-turn loop state is recreated for the next prompt. Cron, background-notification, channel-delivery, and goal turns keep their existing non-interactive handling: only interactive foreground prompts reject. Goal turns bypass the bridge entirely, so rejecting one would settle it as failed and pause the goal without publishing any `turn_error`; they resolve `end_turn` like the other automatic turn types. A loop-detected rejection still drains the cron/notification queues, preserving the invariant that a loop-stopped turn never strands queued automatic work.
 
 When Web Shell reloads a live session from paginated persisted history, the bridge appends the current in-memory `turn_error` to that replay. This keeps the terminal error visible across a page refresh without changing historical persistence.
 
