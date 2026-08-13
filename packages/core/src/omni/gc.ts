@@ -108,6 +108,21 @@ export function isOmniDerivationSuspended(omniRootDir: string): boolean {
   return suspendedRoots.has(path.resolve(omniRootDir));
 }
 
+/**
+ * Await this process's in-flight GC for a store root, if one was started.
+ * The startup wiring runs the GC fire-and-forget so delivery is never
+ * blocked on a sweep — but the budget gate MUST NOT be consulted while
+ * the sweep that sets the suspension flag is still running, or the first
+ * derivation of every fresh process races past the budget (observed in
+ * E2E: one headless run wrote new derivatives before the over-budget
+ * verdict landed ~900ms later). Awaiting the settled run costs nothing
+ * when the GC already finished and never rejects (runOmniGcOnce catches).
+ */
+export async function settleOmniGc(omniRootDir: string): Promise<void> {
+  const existing = gcOnce.get(path.resolve(omniRootDir));
+  if (existing) await existing;
+}
+
 /** Real-directory guard (lstat, symlinks rejected) — the sweep deletes
  * files under every directory it descends into, and a symlinked shard
  * would redirect those deletions outside the store. Same rationale as

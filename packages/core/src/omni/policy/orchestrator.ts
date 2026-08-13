@@ -32,7 +32,7 @@ import {
   computePolicyFingerprint,
   OmniDegradationCache,
 } from './degradation-cache.js';
-import { isOmniDerivationSuspended } from '../gc.js';
+import { isOmniDerivationSuspended, settleOmniGc } from '../gc.js';
 import { DEFAULT_OMNI_PROCESSING_LIMITS } from './config.js';
 import { resolvePolicyToolSettings } from './tools/media-policy-tool.js';
 import type {
@@ -884,7 +884,10 @@ async function executePolicy(
   // above return before this point and produce nothing new. Fail the
   // policy rather than silently skip: a policy that was configured to run
   // and didn't must say why (its failure routes through the existing
-  // required/optional semantics).
+  // required/optional semantics). The startup GC is fire-and-forget, so
+  // settle it first — otherwise the first derivation of a fresh process
+  // races past the flag before the sweep can raise it.
+  await settleOmniGc(store.getOmniRootDir());
   if (isOmniDerivationSuspended(store.getOmniRootDir())) {
     throw new Error(
       `omni object store is over its byte budget with only ` +

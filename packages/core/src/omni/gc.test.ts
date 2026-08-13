@@ -18,6 +18,7 @@ import {
   isOmniDerivationSuspended,
   resetGcLatchForTests,
   runOmniGcOnce,
+  settleOmniGc,
 } from './gc.js';
 
 const DAY_MS = 24 * 3600_000;
@@ -274,6 +275,25 @@ describe('runOmniGcOnce', () => {
     const again = await runOmniGcOnce(gcOptions());
     expect(first.deletedObjects).toBe(1);
     expect(again).toBe(first);
+  });
+
+  it('settleOmniGc waits out an in-flight sweep before the gate reads the flag', async () => {
+    // The startup wiring is fire-and-forget; the budget gate must not
+    // consult isOmniDerivationSuspended while the sweep is still running
+    // (observed E2E: the first derivation of a fresh process slipped past
+    // the budget because the verdict landed ~900ms later).
+    const kept = 'b'.repeat(64);
+    await writeObject(kept, 30, 2048);
+    await referenceViaEntry(kept);
+    const root = store.getOmniRootDir();
+
+    // Fire-and-forget, exactly like the index.ts wiring — no await.
+    void runOmniGcOnce(gcOptions({ maxTotalBytes: 100 }));
+    await settleOmniGc(root);
+
+    expect(isOmniDerivationSuspended(root)).toBe(true);
+    // A root with no pending run settles immediately.
+    await expect(settleOmniGc('/nonexistent')).resolves.toBeUndefined();
   });
 
   it('never descends into a symlinked shard', async () => {
