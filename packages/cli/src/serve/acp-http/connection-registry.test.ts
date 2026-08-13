@@ -778,7 +778,7 @@ describe('ConnectionRegistry.getSnapshot', () => {
       );
 
       registry.delete(conn.connectionId);
-      expect(discarded).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(discarded).toHaveBeenCalledOnce());
       expect(delivered).not.toHaveBeenCalled();
 
       stream.complete('delivered');
@@ -789,6 +789,90 @@ describe('ConnectionRegistry.getSnapshot', () => {
       registry.dispose();
     }
   });
+
+  it('commits a provisional receipt when local delivery is ambiguous', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const stream = new ControlledStream();
+      conn.attachConnStream(stream);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded },
+      );
+
+      stream.complete('outcome_unknown');
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(delivered).toHaveBeenCalledOnce();
+      expect(discarded).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('lets an ambiguous delivery settle before destroy discards receipts', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const stream = new ControlledStream();
+      conn.attachConnStream(stream);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const outcomeUnknown = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded, outcomeUnknown },
+      );
+
+      registry.delete(conn.connectionId);
+      stream.complete('outcome_unknown');
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it.each([
+    ['live', { value: 1n }],
+    [
+      'buffered',
+      (() => {
+        const frame: { self?: unknown } = {};
+        frame.self = frame;
+        return frame;
+      })(),
+    ],
+  ])(
+    'contains a %s connection response serialization failure to one frame',
+    async (mode, frame) => {
+      const registry = new ConnectionRegistry();
+      try {
+        const conn = registry.create(true);
+        if (!conn) return;
+        for (const sessionId of ['sess-1', 'sess-2']) {
+          conn.ownSession(sessionId);
+          conn.getOrCreateSession(sessionId);
+        }
+        if (mode === 'live') conn.attachConnStream(new FakeStream('sse'));
+
+        await expect(conn.sendConn(frame)).resolves.toBe('failed');
+        expect(registry.get(conn.connectionId)).toBe(conn);
+        expect(conn.destroyed).toBe(false);
+        expect(conn.ownedSessions).toEqual(new Set(['sess-1', 'sess-2']));
+        expect(conn.sessions.get('sess-1')?.abort.signal.aborted).toBe(false);
+        expect(conn.sessions.get('sess-2')?.abort.signal.aborted).toBe(false);
+      } finally {
+        registry.dispose();
+      }
+    },
+  );
 
   it('settles delivery when a delivered receipt callback throws', async () => {
     const budget = new AcpPreAttachBudget({ maxFrames: 1, maxBytes: 1024 });

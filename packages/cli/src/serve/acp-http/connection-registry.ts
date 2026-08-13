@@ -48,6 +48,7 @@ export type DetachSessionFn = (
 export interface DeliveryReceipt {
   delivered(): void;
   discarded(): void;
+  outcomeUnknown?(): void;
 }
 
 interface PreparedFrame {
@@ -903,10 +904,13 @@ export class AcpConnection {
     for (const prepared of this.connBuffer.splice(0)) {
       this.discardPrepared(prepared);
     }
-    for (const prepared of this.pendingDeliveries) {
-      this.discardPreparedReceipt(prepared);
-    }
-    for (const receipt of [...this.pendingReceipts]) receipt.discarded();
+    this.connStream?.close(reason);
+    setImmediate(() => {
+      for (const prepared of this.pendingDeliveries) {
+        this.discardPreparedReceipt(prepared);
+      }
+      for (const receipt of [...this.pendingReceipts]) receipt.discarded();
+    });
     for (const binding of bindings) {
       try {
         this.teardownBinding(binding);
@@ -918,7 +922,6 @@ export class AcpConnection {
     }
     this.sessionOwnershipStates.clear();
     this.pending.clear();
-    this.connStream?.close(reason);
   }
 
   private teardownBinding(binding: SessionBinding): void {
@@ -962,7 +965,7 @@ export class AcpConnection {
       if (!this.isCurrentStreamOwner(stream, binding)) {
         return Promise.resolve('closed');
       }
-      this.failOwner(binding, 'ACP response serialization failed');
+      this.failSerializationOwner(binding);
       return Promise.resolve('failed');
     }
     if (!this.isCurrentStreamOwner(stream, binding)) {
@@ -1021,7 +1024,7 @@ export class AcpConnection {
       ) {
         return Promise.resolve('closed');
       }
-      this.failOwner(binding, 'ACP response serialization failed');
+      this.failSerializationOwner(binding);
       return Promise.resolve('failed');
     }
     if (
@@ -1108,6 +1111,7 @@ export class AcpConnection {
     void result.then(
       (outcome) => {
         if (outcome === 'delivered') receipt?.delivered();
+        else if (outcome === 'outcome_unknown') receipt?.outcomeUnknown?.();
         else receipt?.discarded();
       },
       () => receipt?.discarded(),
@@ -1131,6 +1135,12 @@ export class AcpConnection {
         settled = true;
         this.pendingReceipts.delete(tracked);
         this.invokeReceipt(receipt, 'discarded');
+      },
+      outcomeUnknown: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingReceipts.delete(tracked);
+        this.invokeReceipt(receipt, 'outcomeUnknown');
       },
     };
     this.pendingReceipts.add(tracked);
@@ -1177,7 +1187,11 @@ export class AcpConnection {
       if (prepared.receipt) {
         this.invokeReceipt(
           prepared.receipt,
-          outcome === 'delivered' ? 'delivered' : 'discarded',
+          outcome === 'delivered'
+            ? 'delivered'
+            : outcome === 'outcome_unknown'
+              ? 'outcomeUnknown'
+              : 'discarded',
         );
       }
     }
@@ -1192,10 +1206,14 @@ export class AcpConnection {
 
   private invokeReceipt(
     receipt: DeliveryReceipt,
-    outcome: 'delivered' | 'discarded',
+    outcome: 'delivered' | 'discarded' | 'outcomeUnknown',
   ): void {
     try {
-      receipt[outcome]();
+      if (outcome === 'outcomeUnknown') {
+        (receipt.outcomeUnknown ?? receipt.delivered)();
+      } else {
+        receipt[outcome]();
+      }
     } catch {
       writeStderrLine(`qwen serve: /acp ${outcome} receipt callback failed`);
     }
@@ -1227,6 +1245,11 @@ export class AcpConnection {
         }`,
       );
     }
+  }
+
+  private failSerializationOwner(binding: SessionBinding | undefined): void {
+    writeStderrLine('qwen serve: /acp response serialization failed');
+    if (binding) this.failOwner(binding, 'ACP response serialization failed');
   }
 
   private failConnection(message: string, recordFailure = true): void {

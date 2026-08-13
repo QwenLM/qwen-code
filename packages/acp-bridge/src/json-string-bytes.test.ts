@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { estimateJsonStringBytes } from './json-string-bytes.js';
 
 describe('estimateJsonStringBytes', () => {
@@ -53,5 +53,19 @@ describe('estimateJsonStringBytes', () => {
 
   it('returns limit + 1 as soon as the encoded string exceeds the limit', () => {
     expect(estimateJsonStringBytes('\u0001'.repeat(100), 20)).toBe(21);
+  });
+
+  it('uses native byte counting for large strings that need no escaping', () => {
+    const charCodeAt = vi.spyOn(String.prototype, 'charCodeAt');
+    try {
+      const value = 'x'.repeat(8 * 1024 * 1024);
+      expect(estimateJsonStringBytes(value, 1024)).toBe(1025);
+      expect(estimateJsonStringBytes(value, Number.MAX_SAFE_INTEGER)).toBe(
+        value.length + 2,
+      );
+      expect(charCodeAt).not.toHaveBeenCalled();
+    } finally {
+      charCodeAt.mockRestore();
+    }
   });
 });

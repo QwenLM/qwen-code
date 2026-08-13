@@ -1035,6 +1035,23 @@ export class AcpDispatcher {
     const ownershipIdentity = conn.captureSessionOwnershipIdentity(sessionId);
     const releaseIdentity = () =>
       conn.releaseSessionOwnershipIdentity(sessionId, ownershipIdentity);
+    const detachWithoutDeleting = () => {
+      try {
+        void runtime.bridge.detachClient(sessionId, clientId).catch(() => {});
+      } catch {
+        // Best-effort settlement; teardown must continue settling receipts.
+      }
+    };
+    const commit = () => {
+      settled = true;
+      const binding = conn.getOrCreateSession(sessionId);
+      binding.clientId = clientId;
+      if (options.initialReplayPending) {
+        conn.markInitialReplayPending(sessionId);
+      }
+      conn.ownSession(sessionId);
+      releaseIdentity();
+    };
     const rollback = () => {
       if (settled) return;
       settled = true;
@@ -1061,17 +1078,25 @@ export class AcpDispatcher {
       delivered: () => {
         if (settled) return;
         if (!conn.canCommitSessionOwnership(sessionId, ownershipIdentity)) {
-          rollback();
+          settled = true;
+          detachWithoutDeleting();
+          releaseIdentity();
           return;
         }
-        settled = true;
-        const binding = conn.getOrCreateSession(sessionId);
-        binding.clientId = clientId;
-        if (options.initialReplayPending) {
-          conn.markInitialReplayPending(sessionId);
+        commit();
+      },
+      outcomeUnknown: () => {
+        if (settled) return;
+        if (
+          !conn.destroyed &&
+          conn.canCommitSessionOwnership(sessionId, ownershipIdentity)
+        ) {
+          commit();
+        } else {
+          settled = true;
+          detachWithoutDeleting();
+          releaseIdentity();
         }
-        conn.ownSession(sessionId);
-        releaseIdentity();
       },
       discarded: rollback,
     };

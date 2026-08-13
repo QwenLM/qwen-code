@@ -8,6 +8,11 @@ export function estimateJsonStringBytes(
   value: string,
   limitBytes: number,
 ): number {
+  const unescapedBytes = Buffer.byteLength(value, 'utf8') + 2;
+  if (unescapedBytes > limitBytes) return limitBytes + 1;
+  if (!/["\\]|[^ -\ud7ff\ue000-\uffff]/u.test(value)) {
+    return unescapedBytes;
+  }
   let bytes = 2;
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index);

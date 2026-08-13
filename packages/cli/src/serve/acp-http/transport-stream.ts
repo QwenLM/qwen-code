@@ -8,7 +8,11 @@
  * Transport-agnostic stream interface consumed by `AcpConnection`.
  * Both `SseStream` (HTTP SSE) and `WsStream` (WebSocket) implement this.
  */
-export type DeliveryResult = 'delivered' | 'closed' | 'failed';
+export type DeliveryResult =
+  | 'delivered'
+  | 'outcome_unknown'
+  | 'closed'
+  | 'failed';
 
 export interface TransportCloseReason {
   code: number;

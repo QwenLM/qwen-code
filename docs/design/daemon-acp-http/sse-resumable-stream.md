@@ -188,7 +188,12 @@ Pre-attach queues are bounded by both count and serialized payload bytes. One
 stream owns at most 256 frames, one logical connection at most 1,024 frames and
 64 MiB, and all ACP HTTP mounts share a process-global 4,096-frame/256-MiB
 budget. A fresh attach transfers the lease to the transport writer and releases
-it only after local delivery or definitive failure. Resume still discards
+it only after local delivery or definitive failure. If SSE accepts a complete
+frame but closes before its final write callback, delivery is outcome-unknown;
+an ownership-granting response preserves the session rather than deleting it.
+If the logical connection is still live, ownership is conservatively
+committed; during connection teardown, the client is detached while persisted
+session data remains available for resume. Resume still discards
 id-bearing buffered events in favor of authoritative ring replay and preserves
 id-less reply ordering, but that discard now releases the retained byte lease.
 Overflow closes the exact session; connection-scoped or shared-WebSocket

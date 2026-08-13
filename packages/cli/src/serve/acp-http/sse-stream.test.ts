@@ -251,4 +251,37 @@ describe('SseStream', () => {
     callbacks.shift()?.();
     expect(s.isClosed).toBe(true);
   });
+
+  it('reports an accepted complete frame as outcome unknown on close', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+
+    for (let index = 0; index < 2; index++) {
+      await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+      callbacks.shift()?.();
+    }
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    expect((res as unknown as { chunks: string[] }).chunks.join('')).toBe(
+      'data: {"ok":true}\n\n',
+    );
+
+    (res as unknown as EventEmitter).emit('close');
+    await expect(delivery).resolves.toBe('outcome_unknown');
+    callbacks.shift()?.();
+  });
+
+  it('reports an incomplete accepted frame as closed', async () => {
+    const callbacks: WriteCallback[] = [];
+    const res = mockRes(undefined, callbacks);
+    const s = new SseStream(res);
+    const delivery = s.sendSerialized(Buffer.from('{"ok":true}'));
+
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    (res as unknown as EventEmitter).emit('close');
+
+    await expect(delivery).resolves.toBe('closed');
+    callbacks.shift()?.();
+  });
 });

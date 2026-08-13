@@ -83,10 +83,13 @@ export class SseStream implements TransportStream {
     const idLine = id !== undefined ? `id: ${id}\n` : '';
     return this.enqueueWrite(async () => {
       if (this.closed || this.res.writableEnded) return 'closed';
-      if (idLine && !(await this.doWrite(idLine))) return 'closed';
-      if (!(await this.doWrite('data: '))) return 'closed';
-      if (!(await this.doWrite(payload))) return 'closed';
-      if (!(await this.doWrite('\n\n'))) return 'closed';
+      if (idLine && (await this.doWrite(idLine)) !== 'delivered') {
+        return 'closed';
+      }
+      if ((await this.doWrite('data: ')) !== 'delivered') return 'closed';
+      if ((await this.doWrite(payload)) !== 'delivered') return 'closed';
+      const suffix = await this.doWrite('\n\n');
+      if (suffix !== 'delivered') return suffix;
       return 'delivered';
     });
   }
@@ -127,9 +130,7 @@ export class SseStream implements TransportStream {
   }
 
   private writeRaw(chunk: string | Buffer): Promise<void> {
-    return this.enqueueWrite(async () =>
-      (await this.doWrite(chunk)) ? 'delivered' : 'closed',
-    ).then(() => undefined);
+    return this.enqueueWrite(() => this.doWrite(chunk)).then(() => undefined);
   }
 
   private enqueueWrite(
@@ -157,10 +158,10 @@ export class SseStream implements TransportStream {
     return next.catch(() => 'failed');
   }
 
-  private doWrite(chunk: string | Buffer): Promise<boolean> {
-    return new Promise<boolean>((resolve, reject) => {
+  private doWrite(chunk: string | Buffer): Promise<DeliveryResult> {
+    return new Promise<DeliveryResult>((resolve, reject) => {
       if (this.closed || this.res.writableEnded) {
-        resolve(false);
+        resolve('closed');
         return;
       }
       let settled = false;
@@ -174,7 +175,7 @@ export class SseStream implements TransportStream {
         this.res.off('finish', onCloseEv);
         this.res.off('error', onErrorEv);
       };
-      const settle = (result: boolean) => {
+      const settle = (result: DeliveryResult) => {
         if (settled) return;
         settled = true;
         cleanup();
@@ -182,7 +183,7 @@ export class SseStream implements TransportStream {
       };
       const finishIfReady = () => {
         if (writeReturned !== undefined && callbackDone && drainDone) {
-          settle(true);
+          settle('delivered');
         }
       };
       const onDrain = () => {
@@ -190,7 +191,7 @@ export class SseStream implements TransportStream {
         finishIfReady();
       };
       const onCloseEv = () => {
-        settle(false);
+        settle(writeReturned === undefined ? 'closed' : 'outcome_unknown');
       };
       const onErrorEv = (err: Error) => {
         if (settled) return;
