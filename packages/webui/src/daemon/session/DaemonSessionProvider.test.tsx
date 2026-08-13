@@ -14600,9 +14600,15 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
         await flushTranscriptDispatch();
       });
-      expect(
-        blocks.map((block) => ('text' in block ? block.text : undefined)),
-      ).toEqual(['A transcript', ' still live']);
+      // The chunk's path is generator wake -> consumer loop -> the batched
+      // setTimeout(0) dispatch. Under CI contention that flush can land one
+      // tick after the single-macrotask window above, so bound-wait for the
+      // same exact blocks instead of reading them at a fixed flush depth.
+      await vi.waitFor(() => {
+        expect(
+          blocks.map((block) => ('text' in block ? block.text : undefined)),
+        ).toEqual(['A transcript', ' still live']);
+      });
 
       await act(async () => {
         target.reject(new Error(`${mode} refresh failed`));
