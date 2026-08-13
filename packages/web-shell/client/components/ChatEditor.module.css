@@ -117,6 +117,16 @@
   overflow: hidden;
 }
 
+:global([data-web-shell-reasoning-popover]) {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+:global([data-web-shell-model-submenu]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  min-width: min(280px, var(--radix-popover-content-available-width));
+}
+
 .slashPanel {
   max-height: min(
     460px,
@@ -1274,6 +1284,80 @@
   font-weight: 400;
   line-height: 1.2;
   text-overflow: ellipsis;
+}
+
+.dropdownSubmenuTrigger {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dropdownSubmenuTrigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dropdownSubmenuTrigger svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.dropdownSubmenuSection {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.reasoningOptions {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+}
+
+.reasoningSectionTitle {
+  padding: 4px 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.reasoningThinkingRow,
+.reasoningEffortRow {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 9px;
+}
+
+.reasoningEffortRow {
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reasoningEffortRow:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.reasoningEffortRow:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.reasoningDivider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
 }
 
 .dropdownItemActive .dropdownItemIcon,

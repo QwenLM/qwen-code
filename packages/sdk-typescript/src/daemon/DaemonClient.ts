@@ -35,6 +35,7 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
   BranchSessionRequest,
   DaemonBranchedSession,
   DaemonSideTaskSession,
@@ -4379,6 +4380,19 @@ export class DaemonClient {
         }
         return (await res.json()) as SetModelResult;
       },
+    );
+  }
+
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort',
+    value: string,
+    clientId?: string,
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+      `/session/${urlEncode(sessionId)}/config-option`,
+      'POST /session/:id/config-option',
+      { method: 'POST', body: { configId, value }, clientId },
     );
   }
 

@@ -2541,6 +2541,11 @@ export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/** Returned from `POST /session/:id/config-option`. */
+export interface DaemonSessionConfigOptionResult {
+  configOptions: unknown[];
+}
+
 /** Returned from `POST /session/:id/language`. */
 export interface SetSessionLanguageResult {
   language: string;

@@ -691,6 +691,7 @@ export type {
   PromptResult,
   PromptTextContent,
   SetModelResult,
+  DaemonSessionConfigOptionResult,
   SetSessionLanguageResult,
   KnownDaemonSessionArtifactChangeAction,
   KnownDaemonSessionArtifactKind,

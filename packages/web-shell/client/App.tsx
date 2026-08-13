@@ -10205,6 +10205,20 @@ export function App({
     ],
   );
 
+  const handleReasoningEffort = useCallback(
+    (value: string) => {
+      if (sessionWriteBlocked || !connectionRef.current.sessionId) {
+        return Promise.resolve();
+      }
+      return sessionActions
+        .setReasoningEffort(value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        );
+    },
+    [reportError, sessionActions, sessionWriteBlocked, t],
+  );
+
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
       const modelActionToken = ++modelActionTokenRef.current;
@@ -12353,6 +12367,8 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          reasoning={connection.reasoning}
+                          onSelectReasoningEffort={handleReasoningEffort}
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
