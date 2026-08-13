@@ -358,9 +358,17 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  // security.allowPrivateNetworkHooks is stripped from Workspace scope during
+  // Settings restricted to trusted scopes are stripped from Workspace during
   // the merge; warn so the user knows their workspace setting has no effect.
   const workspaceFile = loadedSettings.forScope(SettingScope.Workspace);
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.tools?.workflowsEnabled !== undefined
+  ) {
+    warningSet.add(
+      `Warning: tools.workflowsEnabled in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
   if (
     workspaceFile.rawJson !== undefined &&
     workspaceFile.originalSettings.security?.allowPrivateNetworkHooks !==
@@ -408,24 +416,38 @@ function tagMcpServerScope(
 }
 
 /**
- * Network security bypasses must never be honored from Workspace scope —
- * otherwise a malicious repository could self-grant access to private
- * infrastructure. Strip them from workspace settings before merging.
- * Returns a shallow copy — never mutates input.
+ * Settings that can grant sensitive or costly capabilities must never be
+ * honored from Workspace scope. Strip them before merging so a repository
+ * cannot opt the user into those capabilities. Returns a shallow copy.
  */
-function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
+function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+  const tools = settings.tools;
+  let safeTools = tools;
+  if (tools?.workflowsEnabled !== undefined) {
+    const { workflowsEnabled: _workflowsEnabled, ...restTools } = tools;
+    safeTools = restTools;
+  }
+  const security = settings.security;
+  let safeSecurity = security;
   if (
-    settings.security?.allowPrivateNetworkHooks === undefined &&
-    settings.security?.allowedInsecureVoiceBaseUrls === undefined
+    security?.allowPrivateNetworkHooks !== undefined ||
+    security?.allowedInsecureVoiceBaseUrls !== undefined
   ) {
+    const {
+      allowPrivateNetworkHooks: _privateHooks,
+      allowedInsecureVoiceBaseUrls: _insecureVoice,
+      ...restSecurity
+    } = security;
+    safeSecurity = restSecurity;
+  }
+  if (safeTools === tools && safeSecurity === security) {
     return settings;
   }
-  const {
-    allowPrivateNetworkHooks: _privateHooks,
-    allowedInsecureVoiceBaseUrls: _insecureVoice,
-    ...restSecurity
-  } = settings.security;
-  return { ...settings, security: restSecurity };
+  return {
+    ...settings,
+    ...(safeTools !== tools ? { tools: safeTools } : {}),
+    ...(safeSecurity !== security ? { security: safeSecurity } : {}),
+  };
 }
 
 function mergeSettings(
@@ -436,7 +458,10 @@ function mergeSettings(
   isTrusted: boolean,
 ): Settings {
   const safeWorkspace = isTrusted
-    ? tagMcpServerScope(stripWorkspaceSecurityBypasses(workspace), 'workspace')
+    ? tagMcpServerScope(
+        stripWorkspaceRestrictedSettings(workspace),
+        'workspace',
+      )
     : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for

@@ -3333,6 +3333,46 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('workflowsEnabled scope handling', () => {
+    it('should ignore workspace scope while preserving the user value', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowsEnabled: false } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              tools: { workflowsEnabled: true, useRipgrep: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowsEnabled).toBe(false);
+      expect(settings.merged.tools?.useRipgrep).toBe(false);
+    });
+
+    it('should warn when workspace settings define workflowsEnabled', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowsEnabled: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowsEnabled).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('tools.workflowsEnabled'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe('allowedInsecureVoiceBaseUrls scope handling', () => {
     it('should honor the allowlist from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);

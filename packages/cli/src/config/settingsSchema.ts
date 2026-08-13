@@ -2707,9 +2707,10 @@ const SETTINGS_SCHEMA = {
         label: 'Dynamic Workflows',
         category: 'Tools',
         // The Workflow tool is registered once while building the tool
-        // registry, /workflows is gated when commands load, and keyword
-        // steering resolves at app startup — so a mid-session toggle would
-        // appear to do nothing until the next launch.
+        // registry and /workflows is gated when commands load. Keyword
+        // steering reads the same startup-built Config on each submission,
+        // so changing the settings file mid-session cannot update any of the
+        // three surfaces until the next launch.
         requiresRestart: true,
         default: false,
         description:
