@@ -85,16 +85,16 @@ export async function startInteractiveUI(
     './render/dispatch.js'
   );
   if (isExperimentalRenderer(pickRenderer())) {
-    // Fail-closed preflight: runtimes without FFI (e.g. Node v24, no
-    // node:ffi) exit nonzero with a verified Bun command before the
-    // native-dependent renderer is imported.
-    const { ensureOpenTuiRuntimeSupported } = await import(
-      './render/runtime-gate.js'
-    );
-    ensureOpenTuiRuntimeSupported();
-    const { startOpenTuiUI } = await import('./render/opentui-entry.js');
-    await startOpenTuiUI({ config });
-    return;
+    // Runtime preflight: runtimes without FFI (e.g. Node v24, no node:ffi)
+    // gracefully fall back to the ink renderer instead of exiting, so the
+    // opentui default never breaks node-based launches.
+    const { probeOpenTuiRuntime } = await import('./render/runtime-gate.js');
+    if (probeOpenTuiRuntime().supported) {
+      const { startOpenTuiUI } = await import('./render/opentui-entry.js');
+      await startOpenTuiUI({ config });
+      return;
+    }
+    // fall through to ink
   }
 
   const version = await getCliVersion();
