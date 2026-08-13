@@ -82,7 +82,7 @@ jobs:
       # that policy.
       # `version` pins the scanner image; without it the action runs `latest`.
       - name: 'Scan for verified secrets'
-        if: github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'
+        if: "github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'"
         uses: 'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11' # v3.96.0
         continue-on-error: true
         with:

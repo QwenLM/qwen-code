@@ -85,7 +85,7 @@ describe('security workflows', () => {
     expect(trufflehogStep).toContain('continue-on-error: true');
     expect(trufflehogStep).toContain("version: '3.96.0'");
     expect(trufflehogStep).toContain(
-      "if: github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'",
+      "if: \"github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'\"",
     );
     expect(trufflehogStep).toContain("extra_args: '--only-verified'");
     expect(trufflehogStep).toContain(
