@@ -1637,6 +1637,29 @@ describe('external links in the desktop shell', () => {
     c.remove();
   });
 
+  it('routes modified desktop clicks through the opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      c.querySelector('a')!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
   it('requests an error toast when the desktop opener fails', async () => {
     const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
     (window as TauriWindow).__TAURI__ = { core: { invoke } };

@@ -695,6 +695,36 @@ describe('ArtifactPanel code review artifacts', () => {
     });
   });
 
+  it('routes modified external_url link clicks through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(artifactPanel(linkArtifact())));
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9059',
+    });
+  });
+
   it('requests an error toast when opening a link artifact fails', async () => {
     const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
     (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };

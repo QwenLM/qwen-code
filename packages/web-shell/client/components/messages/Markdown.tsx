@@ -744,12 +744,9 @@ function MarkdownLink({
   // In the packaged desktop shell the webview's implicit `target="_blank"`
   // handling silently drops the request on failure, so route external clicks
   // through the shell's explicit opener and surface errors as toasts. Plain
-  // browsers keep the native anchor behavior (cmd/ctrl+click included).
+  // browsers keep the native anchor behavior.
   const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
     if (!isExternalHref || !safeHref || !isDesktopShell()) return;
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-      return;
-    if (event.button !== 0) return;
     event.preventDefault();
     openExternalUrl(safeHref).catch((error: unknown) => {
       requestToast(

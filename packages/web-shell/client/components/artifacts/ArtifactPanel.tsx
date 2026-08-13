@@ -2361,9 +2361,6 @@ function ArtifactDetail({
   // explicit opener there; plain browsers keep native anchor behavior.
   const handleLocationClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
     if (!isExternalUrl || !isDesktopShell()) return;
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-      return;
-    if (event.button !== 0) return;
     event.preventDefault();
     openExternal();
   };
