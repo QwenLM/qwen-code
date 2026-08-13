@@ -71,6 +71,13 @@ export interface Ledger {
  * Step 1 additionally verifies the anchor is an ancestor of the fetched head
  * before scoping to it, so a tampered sha costs a full-range review, never a
  * mis-scoped one.
+ *
+ * Sibling check, deliberately not shared: `repo-context.ts` validates
+ * `plan.mergeBaseSha` as a FULL 40/64-char object id and hard-throws — that
+ * field comes from the trusted plan and is then resolved via git. This one
+ * fail-quietly filters a possibly-abbreviated anchor out of an untrusted
+ * body. Two claims, two strictnesses; one shared helper would invite using
+ * the loose one where the strict one is meant.
  */
 const SHA_RE = /^[0-9a-f]{7,64}$/;
 

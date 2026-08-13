@@ -491,7 +491,7 @@ export function composeReview(
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input);
+  const marker = ledgerMarkerFor(input, result.cappedBy);
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -500,7 +500,10 @@ export function composeReview(
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
  */
-function ledgerMarkerFor(input: ComposeReviewInput): string | null {
+function ledgerMarkerFor(
+  input: ComposeReviewInput,
+  cappedBy: string[],
+): string | null {
   try {
     if (!input.planPath) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
@@ -528,17 +531,24 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    // The anchor rides only when this round's scope was clean. These are the
-    // same conditions under which Step 8 forbids advancing the cache's
-    // `lastCommitSha`: an anchor written past unreviewed or undecided scope
-    // scopes the NEXT round's incremental diff past it, and no later round
-    // ever re-covers the gap. The findings always ride — a fail-closed round's
-    // work list is still a work list; it just cannot certify a range.
+    // The anchor rides only when this round's scope was clean. The four named
+    // inputs are the conditions under which Step 8 forbids advancing the
+    // cache's `lastCommitSha`; `cappedBy` folds in the verdict this module
+    // just computed itself — the caps with no input channel at all (a chunk
+    // nobody read, findings still `— [unverified]`, the deterministic gates'
+    // enrichments). The input fields alone were measured leaking: a round the
+    // module stamped "could not certify that any of this diff was reviewed"
+    // still carried the anchor. An anchor written past unreviewed or
+    // undecided scope scopes the NEXT round's incremental diff past it, and
+    // no later round ever re-covers the gap. The findings always ride — a
+    // fail-closed round's work list is still a work list; it just cannot
+    // certify a range.
     const failClosed =
       (input.unreviewedDimensions?.length ?? 0) > 0 ||
       (input.cannotTellCriticals?.length ?? 0) > 0 ||
       (input.uncoverableChunks?.length ?? 0) > 0 ||
-      input.contextUnavailable === true;
+      input.contextUnavailable === true ||
+      cappedBy.length > 0;
     const sha =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
