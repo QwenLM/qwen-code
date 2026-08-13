@@ -4441,6 +4441,7 @@ export class GeminiChat {
   }
 
   truncateHistory(keepCount: number): void {
+    const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
@@ -4448,7 +4449,12 @@ export class GeminiChat {
     // ephemeral, so losing them across a truncate is safe (the
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
-    clearLoadedSkillTracking(this.config.getToolRegistry(), 'truncateHistory');
+    if (this.history.length < prevLen) {
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'truncateHistory',
+      );
+    }
     this.clearPendingPartialState();
   }
 
@@ -4505,10 +4511,12 @@ export class GeminiChat {
     // `sendMessageStream` would otherwise leave a stale marker that
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
-    clearLoadedSkillTracking(
-      this.config.getToolRegistry(),
-      'stripOrphanedUserEntries',
-    );
+    if (strippedEntries.length > 0) {
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'stripOrphanedUserEntries',
+      );
+    }
     this.clearPendingPartialState();
     return strippedEntries;
   }

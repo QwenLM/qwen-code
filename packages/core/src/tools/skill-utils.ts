@@ -399,9 +399,10 @@ export function syncSkillEvictions(
 }
 
 /**
- * Blanket-clear loaded-skill tracking. Used by LLM compression
- * (`tryCompress`), where the summary may or may not retain any given skill
- * body and no per-skill eviction meta exists.
+ * Blanket-clear loaded-skill tracking. Used when history is rewritten in
+ * ways that may drop skill bodies without per-skill eviction meta: LLM
+ * compression (`tryCompress`), truncation (`truncateHistory`), and
+ * orphaned-entry stripping (`stripOrphanedUserEntriesFromHistory`).
  */
 export function clearLoadedSkillTracking(
   toolRegistry: ToolRegistry | undefined,
