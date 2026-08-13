@@ -1443,6 +1443,38 @@ const EN: Messages = {
   'system.taskCompleted': 'Background task completed',
   'system.taskFailed': 'Background task failed',
   'system.taskCancelled': 'Background task cancelled',
+  'notification.shell.completed': (v) =>
+    `Background shell "${v?.command ?? ''}" completed.`,
+  'notification.shell.failed': (v) =>
+    `Background shell "${v?.command ?? ''}" failed.`,
+  'notification.shell.cancelled': (v) =>
+    `Background shell "${v?.command ?? ''}" was cancelled.`,
+  'notification.monitor.completed': (v) =>
+    `Monitor "${v?.description ?? ''}" completed. (${v?.events ?? 0} events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
+  'notification.monitor.failed': (v) =>
+    `Monitor "${v?.description ?? ''}" failed. (${v?.events ?? 0} events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
+  'notification.monitor.cancelled': (v) =>
+    `Monitor "${v?.description ?? ''}" was cancelled. (${
+      v?.events ?? 0
+    } events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
+  'notification.agent.completed': (v) =>
+    `Background agent "${v?.description ?? ''}" completed.`,
+  'notification.agent.failed': (v) =>
+    `Background agent "${v?.description ?? ''}" failed.`,
+  'notification.agent.cancelled': (v) =>
+    `Background agent "${v?.description ?? ''}" was cancelled.`,
   'branch.failed': 'Failed to branch session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
@@ -2127,6 +2159,15 @@ const EN: Messages = {
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
   'model.none': 'No models available',
   'model.select': 'Select Model',
+  'model.section': 'Model',
+  'reasoning.options': 'Options',
+  'reasoning.thinking': 'Thinking',
+  'reasoning.thinkingOff': 'Thinking Off',
+  'reasoning.effort': 'Effort',
+  'reasoning.effort.low': 'Low',
+  'reasoning.effort.medium': 'Medium',
+  'reasoning.effort.xhigh': 'Extra High',
+  'reasoning.updateFailed': 'Failed to update reasoning options',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
   'model.setVision': 'Set Vision Model',
@@ -4234,6 +4275,30 @@ const ZH: Messages = {
   'system.taskCompleted': '后台任务执行完成',
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
+  'notification.shell.completed': (v) =>
+    `后台 Shell 已完成：${v?.command ?? ''}`,
+  'notification.shell.failed': (v) =>
+    `后台 Shell 执行失败：${v?.command ?? ''}`,
+  'notification.shell.cancelled': (v) =>
+    `后台 Shell 已取消：${v?.command ?? ''}`,
+  'notification.monitor.completed': (v) =>
+    `监控器已完成（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
+  'notification.monitor.failed': (v) =>
+    `监控器执行失败（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
+  'notification.monitor.cancelled': (v) =>
+    `监控器已取消（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
+  'notification.agent.completed': (v) =>
+    `后台智能体已完成：${v?.description ?? ''}`,
+  'notification.agent.failed': (v) =>
+    `后台智能体执行失败：${v?.description ?? ''}`,
+  'notification.agent.cancelled': (v) =>
+    `后台智能体已取消：${v?.description ?? ''}`,
   'branch.failed': '分支会话失败。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
@@ -4862,6 +4927,15 @@ const ZH: Messages = {
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
   'model.none': '没有可用模型',
   'model.select': '选择模型',
+  'model.section': '模型',
+  'reasoning.options': '选项',
+  'reasoning.thinking': '思考',
+  'reasoning.thinkingOff': '思考已关闭',
+  'reasoning.effort': '思考强度',
+  'reasoning.effort.low': '低',
+  'reasoning.effort.medium': '中',
+  'reasoning.effort.xhigh': '极高',
+  'reasoning.updateFailed': '更新思考选项失败',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
   'model.setVision': '设置视觉模型',
