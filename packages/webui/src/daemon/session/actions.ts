@@ -128,7 +128,7 @@ export interface CreateDaemonSessionActionsArgs {
       sessionId: string;
       mode: 'load' | 'resume';
       workspaceCwd?: string;
-      origin: 'action' | 'controlled';
+      origin: 'action' | 'controlled' | 'recovery';
       sameLogical?: boolean;
       signal?: AbortSignal;
     },
@@ -141,6 +141,14 @@ export interface CreateDaemonSessionActionsArgs {
   setSourceBoundOperationInFlight?: (inFlight: boolean) => void;
   sessionConfigGeneration?: WeakMap<DaemonSessionClient, number>;
   getTransitionOrigin?: () => 'action' | 'controlled';
+  isSessionRecoveryLocked?: () => boolean;
+  clearSessionRecovery?: () => void;
+  resumeSessionRecovery?: () => void;
+  onPromptAdmissionSettled?: () => void;
+  setPromptAdmissionInFlight?: (
+    session: DaemonSessionClient,
+    inFlight: boolean,
+  ) => void;
 }
 export function getConnectionAfterSessionClear(
   current: DaemonConnectionState,
@@ -213,6 +221,11 @@ export function createDaemonSessionActions({
   setSourceBoundOperationInFlight = () => undefined,
   sessionConfigGeneration = new WeakMap(),
   getTransitionOrigin = () => 'action',
+  isSessionRecoveryLocked = () => false,
+  clearSessionRecovery = () => undefined,
+  resumeSessionRecovery = () => undefined,
+  onPromptAdmissionSettled = () => undefined,
+  setPromptAdmissionInFlight = () => undefined,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
   let noticeOwner = sessionRef.current;
@@ -220,8 +233,20 @@ export function createDaemonSessionActions({
   let appliedReasoningActionToken = 0;
   let modelMutationGeneration = 0;
 
-  function requireStableSession(): void {
-    if (isCrossSessionTransitionPending()) {
+  function requireStableSession(options?: {
+    allowDuringRecovery?: boolean;
+  }): void {
+    const recoveryLocked = isSessionRecoveryLocked();
+    if (recoveryLocked && !options?.allowDuringRecovery) {
+      throw new DOMException(
+        'The session is read-only until recovery completes',
+        'InvalidStateError',
+      );
+    }
+    if (
+      isCrossSessionTransitionPending() &&
+      !(options?.allowDuringRecovery && recoveryLocked)
+    ) {
       throw new DOMException(
         'A session switch is still preparing',
         'InvalidStateError',
@@ -257,6 +282,14 @@ export function createDaemonSessionActions({
       (sessionConfigGeneration.get(session) ?? 0) + 1,
     );
     setSourceBoundOperationInFlight(false);
+  }
+
+  function requireRecoveryWritable(): void {
+    if (!isSessionRecoveryLocked()) return;
+    throw new DOMException(
+      'The session is read-only until recovery completes',
+      'InvalidStateError',
+    );
   }
 
   const isCurrentLogicalSession = (session: DaemonSessionClient) => {
@@ -312,6 +345,17 @@ export function createDaemonSessionActions({
     store.reset();
     setRestoreSessionId(undefined);
     setRestoreWorkspaceCwd(undefined);
+  }
+
+  function clearClosedRecoverySession(session: DaemonSessionClient) {
+    if (sessionRef.current !== session || !isSessionRecoveryLocked()) return;
+    clearSessionRecovery();
+    manualSessionClearRef.current = true;
+    clearActiveSessionState();
+    sessionRef.current = undefined;
+    setConnection((current) =>
+      getConnectionAfterSessionClear(current, session.sessionId),
+    );
   }
 
   function startPendingSessionLoad(
@@ -616,14 +660,17 @@ export function createDaemonSessionActions({
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
         options?.onAdmitted?.();
-        return await waitForAcceptedPromptCompletion(
+        const completion = waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,
           sessionId,
           ctrl,
           accepted.promptId,
         );
+        onPromptAdmissionSettled();
+        return await completion;
       } catch (error) {
+        onPromptAdmissionSettled();
         if (isAbortError(error)) {
           if (shouldSettlePromptForSession(session)) {
             store.dispatch({ type: 'assistant.done', reason: 'cancelled' });
@@ -690,39 +737,47 @@ export function createDaemonSessionActions({
       if (options?.retry) {
         promptRequest['retry'] = true;
       }
-      const accepted = await session.submitPrompt(
-        promptRequest as Parameters<typeof session.submitPrompt>[0],
-      );
-      if (options?.signal?.aborted) {
-        try {
-          const removal = await session.removePendingPrompt(accepted.promptId);
-          if (removal.removed) {
-            return { promptId: accepted.promptId, removedAfterAbort: true };
-          }
-        } catch (err) {
-          console.warn(
-            '[submitPrompt] removePendingPrompt failed after abort',
-            err,
-          );
-          noticeForSession(session)({
-            severity: 'error',
-            category: 'user_action',
-            operation: 'send_prompt',
-            code: 'daemon.send_prompt.pending_cleanup_failed',
-            message:
-              'Prompt was accepted after cancellation but could not be removed from the queue.',
-            debugMessage: err instanceof Error ? err.message : String(err),
-            recoverable: true,
-          });
-        }
-        throw (
-          options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+      setPromptAdmissionInFlight(session, true);
+      try {
+        const accepted = await session.submitPrompt(
+          promptRequest as Parameters<typeof session.submitPrompt>[0],
         );
+        if (options?.signal?.aborted) {
+          try {
+            const removal = await session.removePendingPrompt(
+              accepted.promptId,
+            );
+            if (removal.removed) {
+              return { promptId: accepted.promptId, removedAfterAbort: true };
+            }
+          } catch (err) {
+            console.warn(
+              '[submitPrompt] removePendingPrompt failed after abort',
+              err,
+            );
+            noticeForSession(session)({
+              severity: 'error',
+              category: 'user_action',
+              operation: 'send_prompt',
+              code: 'daemon.send_prompt.pending_cleanup_failed',
+              message:
+                'Prompt was accepted after cancellation but could not be removed from the queue.',
+              debugMessage: err instanceof Error ? err.message : String(err),
+              recoverable: true,
+            });
+          }
+          throw (
+            options.signal.reason ?? new DOMException('Aborted', 'AbortError')
+          );
+        }
+        return { promptId: accepted.promptId };
+      } finally {
+        setPromptAdmissionInFlight(session, false);
       }
-      return { promptId: accepted.promptId };
     },
 
     async cancel() {
+      requireRecoveryWritable();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -755,6 +810,7 @@ export function createDaemonSessionActions({
         ) {
           activePromptsRef.current.delete(session.sessionId);
         }
+        onPromptAdmissionSettled();
         if (isCurrentLogicalSession(session) && !hasSessionActivePrompt()) {
           setPromptStatus('idle');
         }
@@ -926,6 +982,7 @@ export function createDaemonSessionActions({
     },
 
     async respondToPermission(requestId, response) {
+      requireRecoveryWritable();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -948,6 +1005,7 @@ export function createDaemonSessionActions({
     },
 
     async submitPermission(requestId, optionId, answers) {
+      requireRecoveryWritable();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -1035,7 +1093,7 @@ export function createDaemonSessionActions({
       worktree?: { slug?: string };
       branch?: { name: string };
     }) {
-      requireStableSession();
+      requireStableSession({ allowDuringRecovery: true });
       let rawCreateStarted = false;
       let rawCreateSettled = false;
       let retireLateResult = false;
@@ -1175,6 +1233,7 @@ export function createDaemonSessionActions({
 
     async clearSession() {
       cancelCrossSessionTransition('Session transition cancelled by clear');
+      clearSessionRecovery();
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
       clearActiveSessionState();
@@ -1195,6 +1254,7 @@ export function createDaemonSessionActions({
       cancelCrossSessionTransition(
         'Session transition cancelled by new session',
       );
+      clearSessionRecovery();
       manualSessionClearRef.current = false;
       clearActiveSessionState();
       setConnection((current) => ({
@@ -1207,8 +1267,9 @@ export function createDaemonSessionActions({
     },
 
     async releaseSession(sessionId) {
+      const releasingCurrent = sessionRef.current?.sessionId === sessionId;
       try {
-        if (sessionRef.current?.sessionId === sessionId) {
+        if (releasingCurrent) {
           cancelCrossSessionTransition(
             'Session transition cancelled by release',
           );
@@ -1223,7 +1284,11 @@ export function createDaemonSessionActions({
           session.client.closeSession(sessionId),
           'Release session timed out',
         );
+        if (releasingCurrent) clearClosedRecoverySession(session);
       } catch (error) {
+        if (releasingCurrent && isSessionRecoveryLocked()) {
+          resumeSessionRecovery();
+        }
         throw dispatchActionError(
           addNotice,
           'Release session failed',
@@ -1243,7 +1308,11 @@ export function createDaemonSessionActions({
       );
       try {
         await withActionTimeout(session.close(), 'Close session timed out');
+        clearClosedRecoverySession(session);
       } catch (error) {
+        if (sessionRef.current === session && isSessionRecoveryLocked()) {
+          resumeSessionRecovery();
+        }
         throw dispatchActionError(
           noticeForSession(session),
           'Close session failed',
@@ -1495,7 +1564,9 @@ export function createDaemonSessionActions({
       message: string,
       opts?: { signal?: AbortSignal; messageId?: string },
     ): Promise<DaemonMidTurnMessageResult> {
-      if (isCrossSessionTransitionPending()) return { accepted: false };
+      if (isCrossSessionTransitionPending() || isSessionRecoveryLocked()) {
+        return { accepted: false };
+      }
       // Calls without an id are the old-daemon compatibility path and fall back
       // locally. With a stable id, transport failure is ambiguous (the POST may
       // already have committed), so let the caller reconcile instead of
@@ -1525,6 +1596,7 @@ export function createDaemonSessionActions({
       messageId: string,
       opts,
     ): Promise<DaemonRemoveMidTurnMessageResult> {
+      requireRecoveryWritable();
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
@@ -1576,6 +1648,7 @@ export function createDaemonSessionActions({
     },
 
     async removePendingPrompt(promptId: string, opts) {
+      requireRecoveryWritable();
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
@@ -1612,6 +1685,7 @@ export function createDaemonSessionActions({
         if (activePromptsRef.current.get(shellKey)?.controller === ctrl) {
           activePromptsRef.current.delete(shellKey);
         }
+        onPromptAdmissionSettled();
         if (isCurrentLogicalSession(session) && !hasSessionActivePrompt()) {
           setPromptStatus('idle');
         }
@@ -1649,6 +1723,7 @@ export function createDaemonSessionActions({
     },
 
     async cancelTask(taskId: string, kind: DaemonSessionTaskStatus['kind']) {
+      requireRecoveryWritable();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -1722,6 +1797,7 @@ export function createDaemonSessionActions({
       requestId: string,
       response: PermissionResponse,
     ): Promise<boolean> {
+      requireRecoveryWritable();
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,

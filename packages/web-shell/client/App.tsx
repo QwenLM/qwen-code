@@ -229,6 +229,7 @@ import {
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
+import { isSessionMutationBlocked } from './utils/sessionMutationBlock';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
   TasksStatusMessage,
@@ -2089,10 +2090,10 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
   );
-  const sessionWriteBlocked =
-    desiredSessionTargetPending ||
-    connection.sessionTransition?.phase === 'queued' ||
-    connection.sessionTransition?.phase === 'preparing';
+  const sessionWriteBlocked = isSessionMutationBlocked(
+    connection,
+    desiredSessionTargetPending,
+  );
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
   const sessionWriteBlockGenerationRef = useRef(0);
   if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
@@ -9665,6 +9666,7 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    if (sessionWriteBlockedRef.current) return;
     const owner = sessionOwnerGuard.capture();
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
@@ -12292,7 +12294,9 @@ export function App({
                           onImagePreview={openImagePanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
-                          onCancel={handleCancel}
+                          onCancel={
+                            sessionWriteBlocked ? undefined : handleCancel
+                          }
                           isRunning={streamingState !== 'idle'}
                           isPreparing={
                             isPreparingPrompt || isStartingNewSessionSuggestion

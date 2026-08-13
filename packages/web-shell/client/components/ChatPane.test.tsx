@@ -794,6 +794,23 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
+  it('keeps a recovering split pane read-only', () => {
+    connectionState.sessionRecoveryRequired = true;
+    connectionState.sessionTransition = {
+      phase: 'failed',
+      operation: 'load',
+      origin: 'recovery',
+      targetSessionId: 'sess-1',
+    };
+    render();
+
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(latestChatEditorProps.onCancel).toBeUndefined();
+    expect(latestOnSubmit?.('must stay local')).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
   it('lets the host handle a slash command', () => {
     const onSlashCommand = vi.fn(() => true);
     render({ onSlashCommand });

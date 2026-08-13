@@ -89,6 +89,7 @@ import {
   publishSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
 import {
+  bumpPendingPromptVersion,
   isPendingPromptEvent,
   publishPendingPromptEvent,
 } from '../pendingPromptVersion.js';
@@ -195,6 +196,8 @@ interface SameSessionCapture {
 interface PreparedRunnerHandoff {
   session: DaemonSessionClient;
   capabilities: DaemonCapabilities;
+  preserveStagedDisplayName?: true;
+  preserveStagedTokenUsage?: true;
 }
 interface StagedCrossSession {
   session: DaemonSessionClient;
@@ -208,14 +211,17 @@ interface StagedCrossSession {
   followupSuggestion?: DaemonFollowupSuggestionData;
   midTurnEvents: DaemonEvent[];
   pendingPromptEvents: DaemonEvent[];
+  promptTerminals: Map<string, DaemonEvent>;
   repair?: LiveJournalRepairEpisode;
 }
+type TransitionPurpose = 'ordinary' | 'resync' | 'live_repair';
 interface CrossSessionTarget {
   sessionId: string;
   workspaceCwd?: string;
   targetClientId?: string;
   mode: 'load' | 'resume';
-  origin: 'action' | 'controlled';
+  origin: 'action' | 'controlled' | 'recovery';
+  purpose?: TransitionPurpose;
   sameLogical?: boolean;
   signal?: AbortSignal;
 }
@@ -241,6 +247,19 @@ interface CrossSessionIntent extends CrossSessionTarget {
   resolve(): void;
   reject(error: unknown): void;
 }
+interface ResyncEpisode {
+  source: DaemonSessionClient;
+  sessionId: string;
+  workspaceCwd?: string;
+  clientId: string;
+  sourceEpoch?: string;
+  sourceCursor?: number;
+  reason: string;
+  lifecycle: number;
+  environmentGeneration: number;
+  deadlineAt: number;
+  attemptCount: number;
+}
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
@@ -254,6 +273,7 @@ function crossSessionKey(
   mode: CrossSessionTarget['mode'],
   historyPageSize: number | undefined,
   clientId: string | undefined,
+  purpose: TransitionPurpose = 'ordinary',
 ): string {
   const replayShape =
     mode === 'resume'
@@ -261,7 +281,7 @@ function crossSessionKey(
       : historyPageSize === undefined
         ? 'load:all'
         : `load:recent:${historyPageSize}`;
-  return `${sessionId}\0${normalizeWorkspaceIdentity(workspaceCwd)}\0${replayShape}\0${clientId ?? ''}`;
+  return `${sessionId}\0${normalizeWorkspaceIdentity(workspaceCwd)}\0${replayShape}\0${clientId ?? ''}\0${purpose}`;
 }
 function transitionState(
   target: CrossSessionTarget,
@@ -313,8 +333,13 @@ function stageCrossSession(input: {
   subagentTranscriptMode: 'full' | 'summary';
   eventOptions: { suppressOwnUserEcho: boolean; includeRawEvent: boolean };
   additionalEvents?: readonly DaemonEvent[];
+  purpose?: TransitionPurpose;
+  repairEpisode?: LiveJournalRepairEpisode;
+  repairMarkerVisible?: boolean;
 }): StagedCrossSession {
   const { session, capabilities, maxBlocks, subagentTranscriptMode } = input;
+  const purpose = input.purpose ?? 'ordinary';
+  const publishReplaySideEffects = purpose === 'ordinary';
   const notices: SessionNoticeInput[] = [];
   const dismissNoticeIds = new Set<string>();
   let noticeId = 0;
@@ -354,20 +379,41 @@ function stageCrossSession(input: {
   ) => {
     signals = typeof update === 'function' ? update(signals) : update;
   };
-  const shadow = createDaemonTranscriptStore({
-    maxBlocks: Number.MAX_SAFE_INTEGER,
-    retainSubagentBlocks: subagentTranscriptMode === 'full',
-  });
-  let transcriptBatch: DaemonUiEvent[] = [];
-  const repairTarget = findLiveJournalRepairTarget(
-    session.sessionId,
-    session.replaySnapshot.liveJournal,
-    session.lastEventId,
-    session.replayDegraded === true,
+  const repairMarkerVisible =
+    purpose === 'live_repair' &&
+    input.repairEpisode?.markerBlockId !== undefined &&
+    input.repairMarkerVisible === true;
+  const replayMaxBlocks =
+    purpose === 'live_repair'
+      ? repairMarkerVisible && input.repairEpisode
+        ? input.repairEpisode.checkpoint.maxBlocks
+        : maxBlocks
+      : Number.MAX_SAFE_INTEGER;
+  const shadow = createDaemonTranscriptStore(
+    repairMarkerVisible && input.repairEpisode
+      ? {
+          ...input.repairEpisode.checkpoint,
+          maxBlocks: replayMaxBlocks,
+        }
+      : {
+          maxBlocks: replayMaxBlocks,
+          retainSubagentBlocks: subagentTranscriptMode === 'full',
+        },
   );
+  let transcriptBatch: DaemonUiEvent[] = [];
+  const repairTarget =
+    purpose === 'live_repair'
+      ? undefined
+      : findLiveJournalRepairTarget(
+          session.sessionId,
+          session.replaySnapshot.liveJournal,
+          session.lastEventId,
+          session.replayDegraded === true,
+        );
   let repairCheckpoint: DaemonTranscriptState | undefined;
   const midTurnEvents: DaemonEvent[] = [];
   const pendingPromptEvents: DaemonEvent[] = [];
+  const promptTerminals = new Map<string, DaemonEvent>();
   let followupSuggestion: DaemonFollowupSuggestionData | undefined;
   const observedSnapshotEventIds = new Set<number>();
   const flush = () => {
@@ -403,7 +449,9 @@ function stageCrossSession(input: {
         updateConnection,
         { suppressLog: true },
       );
-      bumpWorkspaceEventSignals(normalized, updateSignals);
+      if (publishReplaySideEffects) {
+        bumpWorkspaceEventSignals(normalized, updateSignals);
+      }
       let transcript = filterDaemonUiEventsForTranscript(
         event,
         normalized,
@@ -426,13 +474,20 @@ function stageCrossSession(input: {
       } else if (event.type === 'turn_error') {
         enqueueTranscript([assistantDoneFromTurnEvent(event, 'error')]);
       }
-      if (parseSidechannelMidTurnInjected(event)) {
+      const promptId = eventPromptId(event);
+      if (
+        promptId &&
+        (event.type === 'turn_complete' || event.type === 'turn_error')
+      ) {
+        promptTerminals.set(promptId, event);
+      }
+      if (publishReplaySideEffects && parseSidechannelMidTurnInjected(event)) {
         midTurnEvents.push(event);
         if (midTurnEvents.length > 64) midTurnEvents.shift();
       }
       followupSuggestion =
         parseSidechannelFollowupSuggestion(event) ?? followupSuggestion;
-      if (isPendingPromptEvent(event)) {
+      if (publishReplaySideEffects && isPendingPromptEvent(event)) {
         pendingPromptEvents.push(event);
         if (pendingPromptEvents.length > 200) pendingPromptEvents.shift();
       }
@@ -448,8 +503,23 @@ function stageCrossSession(input: {
       });
     }
   };
-  for (const event of session.replaySnapshot.compactedReplay) consume(event);
-  for (const event of session.replaySnapshot.liveJournal) {
+  const repairSuffix = input.repairEpisode
+    ? findLiveJournalRepairSuffix(
+        [
+          ...session.replaySnapshot.compactedReplay,
+          ...session.replaySnapshot.liveJournal,
+        ],
+        input.repairEpisode.target.promptId,
+      )
+    : undefined;
+  const compactedReplay = repairMarkerVisible
+    ? []
+    : session.replaySnapshot.compactedReplay;
+  const liveJournal = repairMarkerVisible
+    ? (repairSuffix?.events ?? [])
+    : session.replaySnapshot.liveJournal;
+  for (const event of compactedReplay) consume(event);
+  for (const event of liveJournal) {
     if (event.id !== undefined) observedSnapshotEventIds.add(event.id);
     if (event === repairTarget?.marker) {
       flush();
@@ -457,8 +527,6 @@ function stageCrossSession(input: {
     }
     consume(event);
   }
-  for (const event of input.additionalEvents ?? []) consume(event);
-  flush();
   const replayTokenUsage =
     getReplayTokenUsage(session.replaySnapshot.liveJournal) ??
     getReplayTokenUsage(session.replaySnapshot.compactedReplay);
@@ -473,9 +541,29 @@ function stageCrossSession(input: {
     missingSession: false,
     sessionTransition: undefined,
   };
+  for (const event of input.additionalEvents ?? []) consume(event);
+  flush();
+  connection = {
+    ...connection,
+    status: 'connected',
+    error: undefined,
+    errorStatus: undefined,
+    missingSession: false,
+    sessionTransition: undefined,
+  };
   const transcript = shadow.getSnapshot();
+  const repairMarkerBlock = transcript.blocks.find(
+    (block) =>
+      block.kind === 'status' &&
+      block.source === 'history_truncated' &&
+      isRecord(block.data) &&
+      block.data['scope'] === 'live_journal',
+  );
   const replayExceededCapacity = transcript.blocks.length > maxBlocks;
-  transcript.maxBlocks = Math.max(maxBlocks, transcript.blocks.length);
+  transcript.maxBlocks =
+    purpose === 'live_repair'
+      ? replayMaxBlocks
+      : Math.max(maxBlocks, transcript.blocks.length);
   if (repairCheckpoint) repairCheckpoint.maxBlocks = transcript.maxBlocks;
   const repair =
     repairTarget && repairCheckpoint
@@ -483,10 +571,11 @@ function stageCrossSession(input: {
           sessionId: session.sessionId,
           target: repairTarget,
           checkpoint: repairCheckpoint,
+          ...(repairMarkerBlock ? { markerBlockId: repairMarkerBlock.id } : {}),
           observedSnapshotEventIds,
           snapshotLastEventId: session.lastEventId ?? 0,
           lastObservedEventId: session.lastEventId ?? 0,
-          terminalSeen: false,
+          terminalSeen: promptTerminals.has(repairTarget.promptId),
           attempted: false,
         }
       : undefined;
@@ -509,6 +598,7 @@ function stageCrossSession(input: {
     ...(followupSuggestion ? { followupSuggestion } : {}),
     midTurnEvents,
     pendingPromptEvents,
+    promptTerminals,
     ...(repair ? { repair } : {}),
   };
 }
@@ -924,14 +1014,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }
   const rawTransitionRef = useRef<CrossSessionIntent | undefined>(undefined);
   const pumpTransitionRef = useRef<() => void>(() => undefined);
+  const resyncEpisodeRef = useRef<ResyncEpisode | undefined>(undefined);
+  const beginResyncRef = useRef<
+    (
+      source: DaemonSessionClient,
+      reason: string,
+      sourceEpoch: string | undefined,
+      sourceCursor: number | undefined,
+    ) => void
+  >(() => undefined);
+  const beginLiveRepairRef = useRef<
+    (episode: LiveJournalRepairEpisode) => void
+  >(() => undefined);
+  const resumeResyncRef = useRef<() => void>(() => undefined);
   const lifecycleRef = useRef(0);
   const sourceBoundOperationCountRef = useRef(0);
   const sessionConfigGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
   );
+  const promptAdmissionCountsRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   const controlledRetryPendingRef = useRef(false);
+  const controlledClientRebindRef = useRef<string | undefined>(undefined);
   const cancelTransitionRef = useRef<(reason: string) => void>(() => undefined);
   const controlledTransitionOriginRef = useRef(false);
+  const lastHandledSessionIdRef = useRef<
+    string | undefined | typeof UNHANDLED_SESSION
+  >(UNHANDLED_SESSION);
+  const lastHandledWorkspaceRef = useRef<string | undefined>(undefined);
+  const lastHandledClientIdRef = useRef<string | undefined>(undefined);
   const transcriptHistoryRef = useRef<TranscriptHistoryState>({
     hasMore: false,
     loading: false,
@@ -983,11 +1095,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const historyPageSizeRef = useRef(historyPageSize);
   const subagentTranscriptModeRef = useRef(subagentTranscriptMode);
   const clientIdRef = useRef<string | undefined>(getStableClientId(clientId));
+  const controlledClientIdRef = useRef(clientId);
   eventOptionsRef.current = { suppressOwnUserEcho, includeRawEvent };
   reconnectConfigRef.current = { reconnectDelayMs, maxReconnectDelayMs };
   loadWarningsRef.current = loadWarnings;
   historyPageSizeRef.current = historyPageSize;
   subagentTranscriptModeRef.current = subagentTranscriptMode;
+  controlledClientIdRef.current = clientId;
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
   const createSessionRequestRef = useRef(createSessionRequest);
@@ -1090,6 +1204,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           return;
         }
         cancelTransitionRef.current('Session transition interrupted');
+        resyncEpisodeRef.current = undefined;
         liveJournalRepairRef.current?.controller?.abort();
         liveJournalRepairRef.current = undefined;
         tryLiveJournalRepairRef.current = undefined;
@@ -1266,6 +1381,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     const tryLiveJournalRepair = () => {
       if (disposed || abort.signal.aborted) return;
       const repair = liveJournalRepairRef.current;
+      const currentSession = sessionRef.current;
       if (
         !repair ||
         repair.attempted ||
@@ -1273,37 +1389,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         pendingSessionLoadRef.current ||
         desiredTransitionRef.current ||
         rawTransitionRef.current ||
+        sourceBoundOperationCountRef.current > 0 ||
+        (currentSession !== undefined &&
+          (promptAdmissionCountsRef.current.get(currentSession) ?? 0) > 0) ||
         transcriptHistoryRef.current.loading ||
-        sessionRef.current?.sessionId !== repair.sessionId ||
+        currentSession?.sessionId !== repair.sessionId ||
         hasCurrentSessionActivePromptRef.current()
       ) {
         return;
       }
-      const reload = repairReloadRef.current;
-      if (!reload) return;
       repair.attempted = true;
-      const controller = new AbortController();
-      repair.controller = controller;
-      void reload(controller.signal, { replaySource: 'memory' }).catch(
-        (error: unknown) => {
-          if (liveJournalRepairRef.current !== repair) return;
-          addNotice({
-            id: `daemon.live_journal_repair.failed:${repair.target.signature}`,
-            severity: 'warning',
-            category: 'connection',
-            operation: 'load_session',
-            code: 'daemon.live_journal_repair.failed',
-            message:
-              'Could not restore the complete turn. The retained replay remains visible.',
-            debugMessage:
-              error instanceof Error ? error.message : String(error),
-            recoverable: true,
-          });
-          liveJournalRepairRef.current = undefined;
-        },
-      );
+      beginLiveRepairRef.current(repair);
     };
     tryLiveJournalRepairRef.current = tryLiveJournalRepair;
+    queueMicrotask(tryLiveJournalRepair);
 
     const run = async () => {
       const client =
@@ -1317,6 +1416,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         preparedRunnerRef.current = undefined;
       }
       let session: DaemonSessionClient | undefined = prepared?.session;
+      const preserveStagedDisplayName =
+        prepared?.preserveStagedDisplayName === true;
+      const preserveStagedTokenUsage =
+        prepared?.preserveStagedTokenUsage === true;
       let capabilities:
         | Awaited<ReturnType<DaemonClient['capabilities']>>
         | undefined = prepared?.capabilities;
@@ -2208,19 +2311,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? { clientId: activeSession.clientId }
               : {}),
             workspaceCwd: activeSession.workspaceCwd,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              (current.sessionId === activeSession.sessionId
-                ? current.displayName
-                : undefined),
-            tokenUsage:
-              replayTokenUsage !== undefined
+            displayName: preserveStagedDisplayName
+              ? current.displayName
+              : (getSessionDisplayName(activeSession.state) ??
+                (current.sessionId === activeSession.sessionId
+                  ? current.displayName
+                  : undefined)),
+            tokenUsage: preserveStagedTokenUsage
+              ? current.tokenUsage
+              : replayTokenUsage !== undefined
                 ? replayTokenUsage
                 : current.sessionId === activeSession.sessionId
                   ? current.tokenUsage
                   : undefined,
-            tokenCount:
-              replayTokenCount !== undefined
+            tokenCount: preserveStagedTokenUsage
+              ? current.tokenCount
+              : replayTokenCount !== undefined
                 ? replayTokenCount
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
@@ -2371,9 +2477,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       current.reasoning?.effort,
                     )
                   : current.reasoning,
-              displayName:
-                getSessionDisplayName(activeSession.state) ??
-                current.displayName,
+              displayName: preserveStagedDisplayName
+                ? current.displayName
+                : (getSessionDisplayName(activeSession.state) ??
+                  current.displayName),
               contextWindow: configSnapshotCurrent
                 ? (sessionContextWindow ?? current.contextWindow)
                 : current.contextWindow,
@@ -2432,42 +2539,151 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
           let sawEvent = false;
           let resyncRequested = false;
-          const requestEpochResetReload = () => {
+          const requestStateResync = (reason: string) => {
             cancelTransitionRef.current(
               'Session transition cancelled by state resync',
             );
-            // An epoch reset means the daemon/EventBus timeline was rebuilt.
-            // The current SSE cursor and any restored/local prompt activity may
-            // describe the old epoch, so do a full /load and let
-            // hasActivePrompt from that fresh snapshot become authoritative.
-            const active = activePromptsRef.current.get(
-              activeSession.sessionId,
-            );
-            active?.controller.abort();
-            activePromptsRef.current.delete(activeSession.sessionId);
-            if (restoredActivePrompt) {
-              settleRestoredActivePrompt();
+            liveJournalRepairRef.current?.controller?.abort();
+            liveJournalRepairRef.current = undefined;
+            capabilities ??=
+              workspaceCapabilitiesRef.current ??
+              sessionCapabilitiesRef.current ??
+              connectionRef.current.capabilities;
+            if (capabilities === undefined) {
+              flushTranscriptSync();
+              clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              resyncRequested = true;
+              if (activeSession.clientId) {
+                resyncEpisodeRef.current = {
+                  source: activeSession,
+                  sessionId: activeSession.sessionId,
+                  workspaceCwd: activeSession.workspaceCwd,
+                  clientId: activeSession.clientId,
+                  sourceEpoch: runnerEventEpoch,
+                  sourceCursor: processedEventId,
+                  reason,
+                  lifecycle: lifecycleRef.current,
+                  environmentGeneration: environmentRef.current.generation,
+                  deadlineAt: Date.now() + 75_000,
+                  attemptCount: 0,
+                };
+              }
+              setConnectionSynchronous((current) => ({
+                ...current,
+                status: 'connected',
+                sessionRecoveryRequired: true,
+                sessionTransition: transitionState(
+                  {
+                    sessionId: activeSession.sessionId,
+                    workspaceCwd: activeSession.workspaceCwd,
+                    mode: 'load',
+                    origin: 'recovery',
+                    purpose: 'resync',
+                    sameLogical: true,
+                  },
+                  'failed',
+                  {
+                    message:
+                      'Transactional recovery capability could not be verified',
+                  },
+                ),
+              }));
+              addNotice({
+                severity: 'warning',
+                category: 'connection',
+                operation: 'load_session',
+                code: 'daemon.session_resync.capability_unknown',
+                message:
+                  'This session cannot be resynchronized safely because daemon capabilities are unavailable. Clear it before continuing.',
+                recoverable: true,
+              });
+              return;
             }
+            const supportsClientIdentity = capabilities.features.includes(
+              CLIENT_IDENTITY_FEATURE,
+            );
+            if (!supportsClientIdentity) {
+              if (reason === 'epoch_reset') {
+                const active = activePromptsRef.current.get(
+                  activeSession.sessionId,
+                );
+                active?.controller.abort();
+                activePromptsRef.current.delete(activeSession.sessionId);
+                if (restoredActivePrompt) settleRestoredActivePrompt();
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                setPromptStatus('idle');
+              } else if (!hasSessionActivePrompt()) {
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                setPromptStatus('idle');
+              }
+              clearPendingTranscriptEvents();
+              store.reset();
+              activeSession.setLastEventId(0);
+              reconnectSessionId = activeSession.sessionId;
+              nextSseConnectReason = 'state_resync';
+              session = undefined;
+              sessionRef.current = undefined;
+              hasCurrentSessionActivePromptRef.current = () => false;
+              setConnection((current) => ({
+                ...current,
+                status: 'connecting',
+                error: undefined,
+                errorStatus: resolveConnectionErrorStatus(
+                  undefined,
+                  current.errorStatus,
+                ),
+              }));
+              resyncRequested = true;
+              return;
+            }
+            flushTranscriptSync();
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-            setPromptStatus('idle');
-            clearPendingTranscriptEvents();
-            store.reset();
-            activeSession.setLastEventId(0);
-            reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
-            nextSseConnectReason = 'state_resync';
-            session = undefined;
-            sessionRef.current = undefined;
-            hasCurrentSessionActivePromptRef.current = () => false;
-            setConnection((current) => ({
+            if (!activeSession.clientId) {
+              setConnectionSynchronous((current) => ({
+                ...current,
+                status: 'connected',
+                sessionRecoveryRequired: true,
+                sessionTransition: transitionState(
+                  {
+                    sessionId: activeSession.sessionId,
+                    workspaceCwd: activeSession.workspaceCwd,
+                    mode: 'load',
+                    origin: 'recovery',
+                    purpose: 'resync',
+                    sameLogical: true,
+                  },
+                  'failed',
+                  {
+                    message:
+                      'Transactional recovery requires an owned client attachment',
+                  },
+                ),
+              }));
+              addNotice({
+                severity: 'warning',
+                category: 'connection',
+                operation: 'load_session',
+                code: 'daemon.session_resync.client_identity_missing',
+                message:
+                  'This session cannot be resynchronized safely. Clear it before opening another session.',
+                recoverable: true,
+              });
+              return;
+            }
+            setConnectionSynchronous((current) => ({
               ...current,
-              status: 'connecting',
+              status: 'connected',
+              sessionRecoveryRequired: true,
               error: undefined,
-              errorStatus: resolveConnectionErrorStatus(
-                undefined,
-                current.errorStatus,
-              ),
+              errorStatus: undefined,
             }));
+            beginResyncRef.current(
+              activeSession,
+              reason,
+              runnerEventEpoch,
+              processedEventId,
+            );
           };
           const eventStreamController = new AbortController();
           eventStream = {
@@ -2509,6 +2725,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 currentRepair.lastObservedEventId,
                 event.id,
               );
+            }
+            if (event.type === 'state_resync_required') {
+              const reason =
+                typeof event.data === 'object' && event.data !== null
+                  ? (event.data as Record<string, unknown>).reason
+                  : undefined;
+              requestStateResync(
+                typeof reason === 'string' ? reason : 'unknown',
+              );
+              break;
             }
             try {
               try {
@@ -2559,16 +2785,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   subagentTranscriptModeRef.current === 'summary'
                     ? projectMainTranscriptEvents(uiEvents)
                     : uiEvents;
-                if (event.type === 'state_resync_required') {
-                  const reason =
-                    typeof event.data === 'object' && event.data !== null
-                      ? (event.data as Record<string, unknown>).reason
-                      : undefined;
-                  if (reason === 'epoch_reset') {
-                    requestEpochResetReload();
-                    break;
-                  }
-                }
                 bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
                 if (uiEvents.length > 0) {
                   const hasGenerationSignal =
@@ -2679,7 +2895,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       store.clearAwaitingResync();
                     }
                     runnerReady = true;
+                    if (
+                      controlledClientRebindRef.current ===
+                      activeSession.sessionId
+                    ) {
+                      controlledClientRebindRef.current = undefined;
+                      if (
+                        controlledClientIdRef.current !== undefined &&
+                        controlledClientIdRef.current !== activeSession.clientId
+                      ) {
+                        setControlledRetryNonce((nonce) => nonce + 1);
+                      }
+                    }
                     queueMicrotask(pumpTransitionRef.current);
+                    queueMicrotask(tryLiveJournalRepair);
                     if (!hasSessionActivePrompt()) {
                       clearPassiveAssistantDoneTimer(
                         passiveAssistantDoneTimerRef,
@@ -2757,60 +2986,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   eventPromptId(event) === pendingRepair.target.promptId
                 ) {
                   pendingRepair.terminalSeen = true;
-                  queueMicrotask(tryLiveJournalRepair);
+                  tryLiveJournalRepair();
                 } else if (pendingRepair?.terminalSeen) {
                   queueMicrotask(tryLiveJournalRepair);
-                }
-                // ── state_resync_required handling ──────────────────────
-                // Resyncs are transcript recovery signals, not prompt terminal
-                // signals. For epoch_reset and ring_evicted we reload the session
-                // snapshot; the fresh /load response is the source of truth for
-                // hasActivePrompt and transcript replay.
-                if (event.type === 'state_resync_required') {
-                  const reason =
-                    typeof event.data === 'object' && event.data !== null
-                      ? (event.data as Record<string, unknown>).reason
-                      : undefined;
-                  if (reason !== 'epoch_reset') {
-                    cancelTransitionRef.current(
-                      'Session transition cancelled by state resync',
-                    );
-                    // Resync asks us to rebuild transcript state, but it is not a
-                    // prompt terminal signal. Keep loading alive for local/restored
-                    // prompts until turn_complete, turn_error, or prompt_cancelled.
-                    if (!hasSessionActivePrompt()) {
-                      setPromptStatus('idle');
-                      clearPassiveAssistantDoneTimer(
-                        passiveAssistantDoneTimerRef,
-                      );
-                    }
-                    clearPendingTranscriptEvents();
-                    store.reset();
-                    // Ring eviction means the SSE replay window has a real gap.
-                    // Resetting and continuing on the same stream can only replay
-                    // the surviving tail; reload the session snapshot instead so
-                    // compactedReplay/liveJournal rebuild the bounded replay
-                    // window.
-                    console.warn(
-                      '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
-                      activeSession.sessionId,
-                    );
-                    resyncRequested = true;
-                    nextSseConnectReason = 'state_resync';
-                    session = undefined;
-                    sessionRef.current = undefined;
-                    hasCurrentSessionActivePromptRef.current = () => false;
-                    setConnection((current) => ({
-                      ...current,
-                      status: 'connecting',
-                      error: undefined,
-                      errorStatus: resolveConnectionErrorStatus(
-                        undefined,
-                        current.errorStatus,
-                      ),
-                    }));
-                    break;
-                  }
                 }
                 // session_closed with reason 'client_close' means the
                 // user explicitly deleted the session. Stop the
@@ -2871,6 +3049,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           runnerReady = false;
           const restartRequested = eventStream.restartRequested;
           clearEventStream();
+          if (
+            resyncRequested &&
+            (capabilities === undefined ||
+              capabilities.features.includes(CLIENT_IDENTITY_FEATURE))
+          ) {
+            return;
+          }
           if (restartRequested) {
             nextSseConnectReason = 'prompt_restart';
             reconnectAttempt = 0;
@@ -3213,6 +3398,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           pendingSessionLoadRef.current = undefined;
         }
         if (stillOwnsSession) {
+          if (
+            resyncEpisodeRef.current?.source === ownedSession ||
+            (connectionRef.current.sessionRecoveryRequired === true &&
+              connectionRef.current.sessionId === ownedSession.sessionId)
+          ) {
+            cancelTransitionRef.current(
+              'Session recovery interrupted by environment replacement',
+            );
+            resyncEpisodeRef.current = undefined;
+            setConnectionSynchronous((current) => {
+              const next = { ...current };
+              delete next.sessionRecoveryRequired;
+              if (next.sessionTransition?.origin === 'recovery') {
+                delete next.sessionTransition;
+              }
+              return next;
+            });
+          }
           if (ownedSession.clientId) {
             void detachDaemonClient({
               baseUrl: resolvedBaseUrl!,
@@ -3345,6 +3548,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const missingSession = isMissingSessionHttpStatus(errorStatus);
           if (authFailure || missingSession) {
             const deadSessionId = session.sessionId;
+            if (resyncEpisodeRef.current?.source === session) {
+              cancelTransitionRef.current(
+                'Session recovery stopped after a terminal heartbeat failure',
+              );
+              resyncEpisodeRef.current = undefined;
+            }
             if (missingSession) {
               console.warn(
                 '[DaemonSessionProvider] heartbeat detected missing session (sessionId=%s, status=%d)',
@@ -3370,27 +3579,35 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionRef.current = undefined;
             }
           }
-          setConnection((current) =>
-            current.sessionId === session.sessionId
-              ? {
-                  ...current,
-                  status: authFailure ? 'error' : 'disconnected',
-                  error: effectiveMessage,
-                  errorStatus: resolveConnectionErrorStatus(
-                    errorStatus,
-                    current.errorStatus,
-                  ),
-                  missingSession,
-                  ...(authFailure || missingSession
-                    ? {
-                        sessionId: undefined,
-                        loadingTranscript: undefined,
-                        catchingUp: undefined,
-                      }
-                    : {}),
-                }
-              : current,
-          );
+          setConnection((current) => {
+            if (current.sessionId !== session.sessionId) return current;
+            const next = {
+              ...current,
+              status: authFailure
+                ? ('error' as const)
+                : ('disconnected' as const),
+              error: effectiveMessage,
+              errorStatus: resolveConnectionErrorStatus(
+                errorStatus,
+                current.errorStatus,
+              ),
+              missingSession,
+              ...(authFailure || missingSession
+                ? {
+                    sessionId: undefined,
+                    loadingTranscript: undefined,
+                    catchingUp: undefined,
+                  }
+                : {}),
+            };
+            if (authFailure || missingSession) {
+              delete next.sessionRecoveryRequired;
+              if (next.sessionTransition?.origin === 'recovery') {
+                delete next.sessionTransition;
+              }
+            }
+            return next;
+          });
         });
     }, heartbeatIntervalMs);
     return () => {
@@ -3414,8 +3631,80 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         typeof error.body['code'] === 'string'
           ? error.body['code']
           : undefined;
+      const recoveryReason =
+        target.purpose === 'resync'
+          ? resyncEpisodeRef.current?.reason
+          : undefined;
+      if (target.purpose === 'live_repair') {
+        setConnectionSynchronous((current) => {
+          const next = { ...current };
+          delete next.sessionTransition;
+          return next;
+        });
+        const repair = liveJournalRepairRef.current;
+        if (repair) {
+          addNotice({
+            id: `daemon.live_journal_repair.failed:${repair.target.signature}`,
+            severity: 'warning',
+            category: 'connection',
+            operation: 'load_session',
+            code: 'daemon.live_journal_repair.failed',
+            message:
+              'Could not restore the complete turn. The retained replay remains visible.',
+            debugMessage: message,
+            recoverable: true,
+          });
+        }
+        liveJournalRepairRef.current = undefined;
+        return;
+      }
+      if (target.purpose === 'resync' && isTerminalRecoveryFailure(error)) {
+        const source = resyncEpisodeRef.current?.source;
+        resyncEpisodeRef.current = undefined;
+        if (source && sessionRef.current === source) {
+          const active = activePromptsRef.current.get(source.sessionId);
+          active?.controller.abort();
+          activePromptsRef.current.delete(source.sessionId);
+          runnerControlRef.current?.stop();
+          sessionRef.current = undefined;
+          hasCurrentSessionActivePromptRef.current = () => false;
+          clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+          setPromptStatus('idle');
+          if (source.clientId && resolvedBaseUrl) {
+            void detachDaemonClient({
+              baseUrl: resolvedBaseUrl,
+              token: resolvedToken,
+              sessionId: source.sessionId,
+              clientId: source.clientId,
+            }).catch((detachError) =>
+              console.warn(
+                '[DaemonSessionProvider] terminal recovery detach failed:',
+                detachError,
+              ),
+            );
+          }
+        }
+        setConnectionSynchronous((current) => {
+          const next = {
+            ...current,
+            status: 'error' as const,
+            sessionId: undefined,
+            clientId: undefined,
+            error: message,
+            errorStatus: status,
+            missingSession: status === 404 || status === 410,
+          };
+          delete next.sessionRecoveryRequired;
+          delete next.sessionTransition;
+          return next;
+        });
+        return;
+      }
       setConnectionSynchronous((current) => ({
         ...current,
+        ...(target.purpose === 'resync'
+          ? { sessionRecoveryRequired: true as const }
+          : {}),
         sessionTransition: transitionState(target, 'failed', {
           message,
           ...(code !== undefined ? { code } : {}),
@@ -3426,15 +3715,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         severity: 'warning',
         category: 'connection',
         operation: target.mode === 'resume' ? 'resume_session' : 'load_session',
-        code: 'daemon.session_transition.failed',
-        message: target.sameLogical
-          ? `Could not refresh session ${target.sessionId}. The current attachment is still active.`
-          : `Could not open session ${target.sessionId}. The current session is still active.`,
-        debugMessage: message,
+        code:
+          target.purpose === 'resync'
+            ? 'daemon.session_resync.failed'
+            : 'daemon.session_transition.failed',
+        message:
+          target.purpose === 'resync'
+            ? `Could not resynchronize session ${target.sessionId}. The retained transcript is read-only; reload it or open another session.`
+            : target.sameLogical
+              ? `Could not refresh session ${target.sessionId}. The current attachment is still active.`
+              : `Could not open session ${target.sessionId}. The current session is still active.`,
+        debugMessage: recoveryReason
+          ? `${message} (resync reason: ${recoveryReason})`
+          : message,
         recoverable: true,
       });
     },
-    [addNotice, setConnectionSynchronous],
+    [addNotice, resolvedBaseUrl, resolvedToken, setConnectionSynchronous],
   );
 
   const retireAttachment = useCallback(
@@ -3481,6 +3778,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       desiredTransitionRef.current = undefined;
       if (mountedRef.current) publishCrossSessionFailure(intent, error);
       settleCrossSessionIntent(intent, error);
+      if (
+        intent.purpose !== 'resync' &&
+        intent.purpose !== 'live_repair' &&
+        resyncEpisodeRef.current?.source === sessionRef.current
+      ) {
+        queueMicrotask(resumeResyncRef.current);
+      }
     },
     [cleanupTransitionArtifacts, publishCrossSessionFailure],
   );
@@ -3489,10 +3793,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     (intent: CrossSessionIntent, capabilities: DaemonCapabilities) => {
       if (intent.deadlineStarted) return;
       intent.deadlineStarted = true;
-      const timeoutMs =
+      const configuredTimeout =
         resolveSessionRestoreTimeouts(capabilities).watchdogTimeoutMs;
-      if (timeoutMs === undefined) return;
-      intent.deadlineAt = Date.now() + timeoutMs;
+      const timeoutMs =
+        configuredTimeout ??
+        (intent.purpose === 'resync' || intent.purpose === 'live_repair'
+          ? 75_000
+          : undefined);
+      const deadlineAt =
+        intent.deadlineAt ??
+        (timeoutMs === undefined ? undefined : Date.now() + timeoutMs);
+      if (deadlineAt === undefined) return;
+      intent.deadlineAt = deadlineAt;
+      const remaining = Math.max(1, deadlineAt - Date.now());
       intent.timeout = setTimeout(() => {
         exposeCrossSessionFailure(
           intent,
@@ -3501,7 +3814,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             preserveInFlightCapture: rawTransitionRef.current === intent,
           },
         );
-      }, timeoutMs);
+      }, remaining);
     },
     [exposeCrossSessionFailure],
   );
@@ -3542,6 +3855,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         paginationError: false,
       });
       sessionRef.current = staged.session;
+      if (resyncEpisodeRef.current?.source === sourceToRetire) {
+        resyncEpisodeRef.current = undefined;
+      }
       lastSessionIdRef.current = staged.session.sessionId;
       activeWorkspaceCwdRef.current = staged.session.workspaceCwd;
       clientIdRef.current = staged.session.clientId;
@@ -3797,6 +4113,289 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [maxBlocks, retireAttachment, setConnectionSynchronous, store],
   );
 
+  const commitRecovery = useCallback(
+    (
+      intent: CrossSessionIntent,
+      candidate: DaemonSessionClient,
+      capabilities: DaemonCapabilities,
+      capture: SameSessionCapture | undefined,
+    ): boolean => {
+      const source = intent.source;
+      const control = runnerControlRef.current;
+      const snapshot = control?.snapshot();
+      const episode = resyncEpisodeRef.current;
+      const isResync = intent.purpose === 'resync';
+      const pendingControlledClientId =
+        isResync && controlledClientIdRef.current !== episode?.clientId
+          ? controlledClientIdRef.current
+          : undefined;
+      const repair = liveJournalRepairRef.current;
+      const watermark = candidate.lastEventId;
+      if (
+        !mountedRef.current ||
+        desiredTransitionRef.current !== intent ||
+        sessionRef.current !== source ||
+        source.clientId !== intent.sourceClientId ||
+        !candidate.clientId ||
+        candidate.clientId !== intent.sourceClientId ||
+        candidate.sessionId !== source.sessionId ||
+        normalizeWorkspaceIdentity(candidate.workspaceCwd) !==
+          normalizeWorkspaceIdentity(source.workspaceCwd) ||
+        candidate.eventEpoch === undefined ||
+        watermark === undefined ||
+        !Number.isSafeInteger(watermark) ||
+        watermark < 0 ||
+        candidate.replayPartial ||
+        candidate.replayError !== undefined ||
+        candidate.replayDegraded ||
+        !candidate.replaySnapshotComplete ||
+        (intent.deadlineAt !== undefined && Date.now() >= intent.deadlineAt)
+      ) {
+        return false;
+      }
+      if (isResync) {
+        const requiresWatermarkAdvance =
+          episode?.reason === 'ring_evicted' ||
+          episode?.reason === 'seeded_replay_not_in_ring' ||
+          episode?.reason === 'replay_budget_exceeded';
+        if (
+          !episode ||
+          episode.source !== source ||
+          episode.sessionId !== source.sessionId ||
+          normalizeWorkspaceIdentity(episode.workspaceCwd) !==
+            normalizeWorkspaceIdentity(source.workspaceCwd) ||
+          episode.clientId !== intent.sourceClientId ||
+          episode.lifecycle !== intent.lifecycle ||
+          episode.environmentGeneration !== intent.environmentGeneration ||
+          (episode.sourceEpoch === candidate.eventEpoch &&
+            episode.sourceCursor !== undefined &&
+            (requiresWatermarkAdvance
+              ? watermark <= episode.sourceCursor
+              : watermark < episode.sourceCursor))
+        ) {
+          return false;
+        }
+      } else if (
+        !repair ||
+        !capture ||
+        capture.invalidReason ||
+        snapshot?.session !== source ||
+        snapshot.clientId !== intent.sourceClientId ||
+        snapshot.eventEpoch !== candidate.eventEpoch ||
+        !snapshot.ready ||
+        snapshot.activeTurn ||
+        snapshot.processedEventId === undefined ||
+        watermark < capture.startEventId ||
+        snapshot.processedEventId < watermark
+      ) {
+        return false;
+      }
+
+      const active = activePromptsRef.current.get(source.sessionId);
+      const tail =
+        intent.purpose === 'live_repair' &&
+        capture &&
+        snapshot?.processedEventId
+          ? capture.events.filter(
+              (event) =>
+                event.id !== undefined &&
+                event.id > watermark &&
+                event.id <= snapshot.processedEventId!,
+            )
+          : [];
+      if (
+        [
+          ...candidate.replaySnapshot.compactedReplay,
+          ...candidate.replaySnapshot.liveJournal,
+          ...tail,
+        ].some((event) => event.type === 'state_resync_required')
+      ) {
+        return false;
+      }
+      if (snapshot?.processedEventId !== undefined && !isResync) {
+        candidate.setLastEventId(snapshot.processedEventId);
+      }
+      const repairMarkerVisible = Boolean(
+        repair?.markerBlockId &&
+          store
+            .getSnapshot()
+            .blocks.some((block) => block.id === repair.markerBlockId),
+      );
+      let staged: StagedCrossSession;
+      try {
+        staged = stageCrossSession({
+          session: candidate,
+          capabilities,
+          maxBlocks,
+          subagentTranscriptMode: subagentTranscriptModeRef.current,
+          eventOptions: eventOptionsRef.current,
+          purpose: intent.purpose,
+          ...(repair ? { repairEpisode: repair } : {}),
+          ...(repairMarkerVisible ? { repairMarkerVisible: true } : {}),
+          additionalEvents: tail,
+        });
+      } catch {
+        return false;
+      }
+      if (
+        staged.notices.some(
+          (notice) => notice.code === 'daemon.replay_event_malformed',
+        ) ||
+        staged.transcript.awaitingResync ||
+        (intent.purpose === 'live_repair' &&
+          !staged.promptTerminals.has(repair!.target.promptId))
+      ) {
+        return false;
+      }
+      const terminal = active?.promptId
+        ? staged.promptTerminals.get(active.promptId)
+        : undefined;
+      if (
+        isResync &&
+        active?.promptId &&
+        !candidate.hasActivePrompt &&
+        !terminal
+      ) {
+        return false;
+      }
+      const finalSnapshot = control?.snapshot();
+      if (
+        (intent.deadlineAt !== undefined && Date.now() >= intent.deadlineAt) ||
+        (intent.purpose === 'live_repair' &&
+          (finalSnapshot?.session !== source ||
+            finalSnapshot.clientId !== intent.sourceClientId ||
+            finalSnapshot.eventEpoch !== candidate.eventEpoch ||
+            finalSnapshot.processedEventId !== snapshot?.processedEventId ||
+            !finalSnapshot.ready ||
+            finalSnapshot.activeTurn))
+      ) {
+        return false;
+      }
+
+      if (control && control.capture === capture) control.capture = undefined;
+      control?.flush();
+      control?.stop();
+      store.reset(staged.transcript);
+      const nextHistory = isResync
+        ? staged.history
+        : repairMarkerVisible
+          ? {
+              ...transcriptHistoryRef.current,
+              loading: false,
+              paginationError: false,
+            }
+          : {
+              ...transcriptHistoryRef.current,
+              sessionId: candidate.sessionId,
+              beforeRecordId:
+                staged.history.beforeRecordId ??
+                transcriptHistoryRef.current.beforeRecordId,
+              cursor: staged.history.cursor,
+              loading: false,
+              paginationError: false,
+            };
+      transcriptHistoryRef.current = nextHistory;
+      setTranscriptHistoryState({
+        hasMore: nextHistory.hasMore,
+        loading: false,
+        capacityReached: nextHistory.capacityReached,
+        paginationError: false,
+      });
+      sessionRef.current = candidate;
+      lastSessionIdRef.current = candidate.sessionId;
+      activeWorkspaceCwdRef.current = candidate.workspaceCwd;
+      clientIdRef.current = candidate.clientId;
+      persistStableClientId(candidate.clientId, candidate.sessionId);
+      setConnectionSynchronous((current) => {
+        const next = {
+          ...current,
+          ...staged.connection,
+          capabilities,
+        };
+        delete next.sessionRecoveryRequired;
+        delete next.sessionTransition;
+        return next;
+      });
+      desiredTransitionRef.current = undefined;
+      resyncEpisodeRef.current = undefined;
+      let hasActivePromptAfterCommit = candidate.hasActivePrompt === true;
+      if (terminal) {
+        settleActivePromptFromTurnEvent(
+          activePromptsRef.current,
+          settledPromptsRef.current,
+          source.sessionId,
+          terminal,
+          store,
+          setPromptStatus,
+          passiveAssistantDoneTimerRef,
+          { requireBoundPromptId: true, dispatchTranscript: false },
+        );
+      }
+      if (
+        candidate.hasActivePrompt &&
+        (intent.purpose === 'live_repair' ||
+          (active !== undefined && terminal === undefined))
+      ) {
+        settledRestoredActivePromptSessionsRef.current.add(candidate);
+      }
+      if (intent.purpose === 'live_repair') {
+        hasActivePromptAfterCommit = false;
+      }
+      hasCurrentSessionActivePromptRef.current = () =>
+        hasActivePromptAfterCommit;
+      setPromptStatus(hasActivePromptAfterCommit ? 'streaming' : 'idle');
+      if (isResync) {
+        clearSidechannelFollowupSuggestion();
+        if (staged.followupSuggestion) {
+          publishSidechannelFollowupSuggestion(staged.followupSuggestion);
+        }
+        setWorkspaceEventSignals((current) => ({
+          memoryVersion: current.memoryVersion + 1,
+          agentsVersion: current.agentsVersion + 1,
+          toolsVersion: current.toolsVersion + 1,
+          settingsVersion: current.settingsVersion + 1,
+          mcpVersion: current.mcpVersion + 1,
+          extensionsVersion: current.extensionsVersion + 1,
+          artifactsVersion: current.artifactsVersion + 1,
+          initVersion: current.initVersion + 1,
+          authVersion: current.authVersion + 1,
+        }));
+        bumpPendingPromptVersion();
+      }
+      liveJournalRepairRef.current = staged.repair;
+      preparedRunnerRef.current = {
+        session: candidate,
+        capabilities,
+        ...(tail.some(
+          (event) =>
+            event.type === 'session_metadata_updated' &&
+            isRecord(event.data) &&
+            Object.prototype.hasOwnProperty.call(event.data, 'displayName'),
+        )
+          ? { preserveStagedDisplayName: true }
+          : {}),
+        ...(getReplayTokenUsage(tail) !== undefined
+          ? { preserveStagedTokenUsage: true }
+          : {}),
+      };
+      manualSessionClearRef.current = false;
+      setRestoreMode('load');
+      setRestoreSessionId(candidate.sessionId);
+      setRestoreWorkspaceCwd(candidate.workspaceCwd);
+      setRestoreSessionNonce((nonce) => nonce + 1);
+      settleCrossSessionIntent(intent);
+      retireAttachment(source, intent);
+      if (
+        pendingControlledClientId !== undefined &&
+        pendingControlledClientId !== candidate.clientId
+      ) {
+        controlledClientRebindRef.current = candidate.sessionId;
+      }
+      return true;
+    },
+    [maxBlocks, retireAttachment, setConnectionSynchronous, store],
+  );
+
   const pumpCrossSessionTransition = useCallback(() => {
     const intent = desiredTransitionRef.current;
     if (!intent) return;
@@ -3828,6 +4427,43 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       sessionCapabilitiesRef.current ??
       connectionRef.current.capabilities;
     if (!capabilities?.features.includes(CLIENT_IDENTITY_FEATURE)) return;
+
+    const recoveryIntent =
+      intent.purpose === 'resync' || intent.purpose === 'live_repair';
+    if (recoveryIntent && intent.candidate) {
+      const candidate = intent.candidate;
+      if (intent.purpose === 'live_repair') {
+        const snapshot = runnerControlRef.current?.snapshot();
+        if (
+          intent.capture !== undefined &&
+          intent.capture.invalidReason === undefined &&
+          snapshot?.session === intent.source &&
+          snapshot.clientId === intent.sourceClientId &&
+          snapshot.eventEpoch === candidate.eventEpoch &&
+          (!snapshot.ready ||
+            snapshot.activeTurn ||
+            snapshot.processedEventId === undefined ||
+            (candidate.lastEventId !== undefined &&
+              snapshot.processedEventId < candidate.lastEventId))
+        ) {
+          return;
+        }
+      }
+      if (
+        !commitRecovery(
+          intent,
+          candidate,
+          intent.candidateCapabilities ?? capabilities,
+          intent.capture,
+        )
+      ) {
+        exposeCrossSessionFailure(
+          intent,
+          new Error('Session recovery failed integrity validation'),
+        );
+      }
+      return;
+    }
 
     if (intent.sameLogical && intent.candidate) {
       const candidate = intent.candidate;
@@ -3886,7 +4522,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
 
     if (rawTransitionRef.current) return;
-    if (intent.sameLogical) {
+    if (intent.sameLogical && !recoveryIntent) {
       const snapshot = runnerControlRef.current?.snapshot();
       if (
         snapshot?.session !== intent.source ||
@@ -3929,6 +4565,86 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         runnerControlRef.current!.capture = capture;
       }
       armTransitionDeadline(intent, capabilities);
+    } else if (intent.purpose === 'live_repair') {
+      const snapshot = runnerControlRef.current?.snapshot();
+      if (
+        snapshot?.session !== intent.source ||
+        snapshot.clientId !== intent.sourceClientId ||
+        snapshot.eventEpoch === undefined ||
+        snapshot.processedEventId === undefined ||
+        !snapshot.ready ||
+        snapshot.activeTurn
+      ) {
+        setConnectionSynchronous((current) => ({
+          ...current,
+          sessionTransition: transitionState(intent, 'queued'),
+        }));
+        return;
+      }
+      const capture: SameSessionCapture = {
+        source: intent.source,
+        sourceClientId: intent.sourceClientId,
+        eventEpoch: snapshot.eventEpoch,
+        startEventId: snapshot.processedEventId,
+        lastCapturedEventId: snapshot.processedEventId,
+        bytes: 0,
+        events: [],
+      };
+      intent.capture = capture;
+      runnerControlRef.current!.capture = capture;
+      armTransitionDeadline(intent, capabilities);
+    } else if (intent.purpose === 'resync') {
+      const active = activePromptsRef.current.get(intent.sessionId);
+      if (
+        sourceBoundOperationCountRef.current > 0 ||
+        (promptAdmissionCountsRef.current.get(intent.source) ?? 0) > 0 ||
+        activePromptsRef.current.has(`${intent.sessionId}:shell`) ||
+        (active !== undefined && active.promptId === undefined)
+      ) {
+        setConnectionSynchronous((current) => ({
+          ...current,
+          sessionTransition: transitionState(intent, 'queued'),
+        }));
+        return;
+      }
+      const refreshedClientId = intent.source.clientId;
+      if (!refreshedClientId) {
+        exposeCrossSessionFailure(
+          intent,
+          new Error('Session recovery client identity is unavailable'),
+        );
+        return;
+      }
+      const episode = resyncEpisodeRef.current;
+      if (episode?.source !== intent.source) {
+        exposeCrossSessionFailure(
+          intent,
+          new Error('Session recovery owner changed unexpectedly'),
+        );
+        return;
+      }
+      episode.clientId = refreshedClientId;
+      if (refreshedClientId !== intent.sourceClientId) {
+        intent.sourceClientId = refreshedClientId;
+        intent.targetClientId = refreshedClientId;
+        intent.key = crossSessionKey(
+          intent.sessionId,
+          intent.workspaceCwd,
+          intent.mode,
+          intent.effectiveHistoryPageSize,
+          refreshedClientId,
+          intent.purpose,
+        );
+      }
+      clientIdRef.current = refreshedClientId;
+      persistStableClientId(refreshedClientId, intent.sessionId);
+      setConnectionSynchronous((current) =>
+        current.sessionId === intent.sessionId &&
+        current.clientId !== refreshedClientId
+          ? { ...current, clientId: refreshedClientId }
+          : current,
+      );
+      armTransitionDeadline(intent, capabilities);
     }
     const requestClientId = intent.targetClientId;
     if (!requestClientId) {
@@ -3938,7 +4654,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       );
       return;
     }
+    if (
+      intent.purpose === 'resync' &&
+      resyncEpisodeRef.current?.source === intent.source &&
+      resyncEpisodeRef.current.attemptCount >= 3
+    ) {
+      exposeCrossSessionFailure(
+        intent,
+        new Error('Session recovery retry limit exhausted'),
+      );
+      return;
+    }
     rawTransitionRef.current = intent;
+    if (intent.purpose === 'resync') {
+      const episode = resyncEpisodeRef.current;
+      const attemptCount =
+        episode?.source === intent.source
+          ? episode.attemptCount + 1
+          : (intent.retryAttempt ?? 0) + 1;
+      if (episode?.source === intent.source) {
+        episode.attemptCount = attemptCount;
+      }
+      intent.retryAttempt = attemptCount;
+    }
     setConnectionSynchronous((current) => ({
       ...current,
       sessionTransition: transitionState(intent, 'preparing'),
@@ -3995,6 +4733,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }
         if (
           intent.sameLogical &&
+          (intent.purpose ?? 'ordinary') === 'ordinary' &&
           (candidate.eventEpoch === undefined ||
             candidate.eventEpoch !== intent.capture?.eventEpoch ||
             candidate.lastEventId === undefined ||
@@ -4018,6 +4757,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           return;
         }
         if (
+          (intent.purpose === 'resync' || intent.purpose === 'live_repair') &&
+          (candidate.eventEpoch === undefined ||
+            candidate.lastEventId === undefined ||
+            !Number.isSafeInteger(candidate.lastEventId) ||
+            candidate.lastEventId < 0 ||
+            candidate.replayPartial ||
+            candidate.replayError !== undefined ||
+            candidate.replayDegraded ||
+            !candidate.replaySnapshotComplete)
+        ) {
+          retireAttachment(candidate, intent);
+          if (latest === intent) {
+            exposeCrossSessionFailure(
+              latest,
+              new Error('Session recovery returned an incomplete snapshot'),
+            );
+          }
+          return;
+        }
+        if (
           intent.resultSuperseded === true ||
           latest?.key !== intent.key ||
           latest.lifecycle !== intent.lifecycle ||
@@ -4030,6 +4789,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           latest.capture = intent.capture;
           latest.candidate = candidate;
           latest.candidateCapabilities = capabilities;
+          queueMicrotask(pumpTransitionRef.current);
           return;
         }
         let staged: StagedCrossSession;
@@ -4062,6 +4822,33 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         if (
           autoReconnect &&
           latest === intent &&
+          intent.purpose === 'resync' &&
+          (intent.retryAttempt ?? 1) < 3 &&
+          isStructuredRecoveryRetryable(error)
+        ) {
+          retryScheduled = true;
+          const retryAfterMs = getRecoveryRetryDelayMs(
+            error,
+            intent.retryAttempt ?? 1,
+            reconnectConfigRef.current,
+          );
+          const remaining =
+            intent.deadlineAt === undefined
+              ? retryAfterMs + 1
+              : intent.deadlineAt - Date.now();
+          if (retryAfterMs < remaining) {
+            setTimeout(pumpTransitionRef.current, retryAfterMs);
+          } else {
+            retryScheduled = false;
+            exposeCrossSessionFailure(
+              latest,
+              new Error('Session recovery deadline expired'),
+            );
+          }
+        } else if (
+          autoReconnect &&
+          latest === intent &&
+          (intent.purpose ?? 'ordinary') === 'ordinary' &&
           isClosingSessionLoadError(error)
         ) {
           retryScheduled = true;
@@ -4098,6 +4885,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     armTransitionDeadline,
     autoReconnect,
     commitCrossSession,
+    commitRecovery,
     commitSameSession,
     exposeCrossSessionFailure,
     maxBlocks,
@@ -4138,6 +4926,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       request: CrossSessionTarget,
       startLegacy: () => Promise<void>,
     ): Promise<void> => {
+      const recoveryEpisode = resyncEpisodeRef.current;
+      let manualRecoveryRetry = false;
+      if (
+        request.sameLogical &&
+        recoveryEpisode?.source === sessionRef.current &&
+        request.purpose === undefined
+      ) {
+        request = {
+          ...request,
+          mode: 'load',
+          origin: 'recovery',
+          purpose: 'resync',
+        };
+        manualRecoveryRetry = true;
+      }
       const capabilities =
         workspaceCapabilitiesRef.current ??
         sessionCapabilitiesRef.current ??
@@ -4153,7 +4956,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ),
         );
       }
-      if (sourceBoundOperationCountRef.current > 0) {
+      if (manualRecoveryRetry && recoveryEpisode) {
+        const watchdog =
+          resolveSessionRestoreTimeouts(capabilities).watchdogTimeoutMs ??
+          75_000;
+        recoveryEpisode.lifecycle = lifecycleRef.current;
+        recoveryEpisode.deadlineAt = Date.now() + watchdog;
+        recoveryEpisode.attemptCount = 0;
+      }
+      if (
+        sourceBoundOperationCountRef.current > 0 &&
+        (request.purpose ?? 'ordinary') === 'ordinary'
+      ) {
         return rejectPreflight(
           new DOMException(
             'Another session operation is already in progress',
@@ -4197,6 +5011,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         );
       }
       const effectiveHistoryPageSize =
+        (request.purpose ?? 'ordinary') === 'ordinary' &&
         request.mode === 'load' &&
         historyPageSizeRef.current !== undefined &&
         capabilities.features.includes(SESSION_TRANSCRIPT_PAGINATION_FEATURE)
@@ -4208,6 +5023,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         request.mode,
         effectiveHistoryPageSize,
         undefined,
+        request.purpose,
       );
       const raw = rawTransitionRef.current;
       const rawShape = raw
@@ -4217,22 +5033,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             raw.mode,
             raw.effectiveHistoryPageSize,
             undefined,
+            raw.purpose,
           )
         : undefined;
       const targetClientId =
-        clientId ??
-        (request.sameLogical
+        request.purpose === 'resync' || request.purpose === 'live_repair'
           ? source.clientId
-          : rawShape === requestShape
-            ? raw?.targetClientId
-            : undefined) ??
-        getStableClientId(undefined, request.sessionId);
+          : (clientId ??
+            (request.sameLogical
+              ? source.clientId
+              : rawShape === requestShape
+                ? raw?.targetClientId
+                : undefined) ??
+            getStableClientId(undefined, request.sessionId));
       const key = crossSessionKey(
         request.sessionId,
         request.workspaceCwd,
         request.mode,
         effectiveHistoryPageSize,
         targetClientId,
+        request.purpose,
       );
       if (raw && raw.key !== key) raw.resultSuperseded = true;
       const current = desiredTransitionRef.current;
@@ -4274,13 +5094,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         environmentGeneration: environmentRef.current.generation,
         sourceClientId: source.clientId,
         targetClientId,
+        ...(request.purpose === 'resync' && recoveryEpisode
+          ? { deadlineAt: recoveryEpisode.deadlineAt }
+          : {}),
         promise,
         resolve,
         reject,
       };
       desiredTransitionRef.current = intent;
       const adoptingRaw = rawTransitionRef.current?.key === key;
-      if (request.sameLogical && adoptingRaw) {
+      if (
+        request.purpose === 'resync' ||
+        request.purpose === 'live_repair' ||
+        (request.sameLogical && adoptingRaw)
+      ) {
         armTransitionDeadline(intent, capabilities);
       }
       if (request.signal) {
@@ -4336,6 +5163,103 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       setConnectionSynchronous,
     ],
   );
+
+  const startRecoveryTransition = useCallback(
+    (purpose: 'resync' | 'live_repair') => {
+      const source = sessionRef.current;
+      if (!source) return;
+      const episode = resyncEpisodeRef.current;
+      if (purpose === 'resync' && episode?.source === source) {
+        episode.lifecycle = lifecycleRef.current;
+      }
+      const transition = beginCrossSessionTransition(
+        {
+          sessionId: source.sessionId,
+          mode: 'load',
+          workspaceCwd: source.workspaceCwd,
+          origin: 'recovery',
+          purpose,
+          sameLogical: true,
+        },
+        () => Promise.reject(new Error('Transactional recovery unavailable')),
+      );
+      const intent = desiredTransitionRef.current;
+      if (purpose === 'resync' && intent?.purpose === 'resync' && episode) {
+        intent.deadlineAt = episode.deadlineAt;
+      }
+      void transition.catch(() => undefined);
+    },
+    [beginCrossSessionTransition],
+  );
+  resumeResyncRef.current = () => {
+    const episode = resyncEpisodeRef.current;
+    if (!episode || sessionRef.current !== episode.source) return;
+    startRecoveryTransition('resync');
+  };
+  beginResyncRef.current = (source, reason, sourceEpoch, sourceCursor) => {
+    const capabilities = connectionRef.current.capabilities;
+    const watchdog =
+      resolveSessionRestoreTimeouts(capabilities).watchdogTimeoutMs;
+    const deadlineAt = Date.now() + (watchdog ?? 75_000);
+    resyncEpisodeRef.current = {
+      source,
+      sessionId: source.sessionId,
+      workspaceCwd: source.workspaceCwd,
+      clientId: source.clientId!,
+      sourceEpoch,
+      sourceCursor,
+      reason,
+      lifecycle: lifecycleRef.current,
+      environmentGeneration: environmentRef.current.generation,
+      deadlineAt,
+      attemptCount: 0,
+    };
+    startRecoveryTransition('resync');
+  };
+  beginLiveRepairRef.current = (episode) => {
+    liveJournalRepairRef.current = episode;
+    const capabilities = connectionRef.current.capabilities;
+    if (capabilities === undefined) {
+      addNotice({
+        id: `daemon.live_journal_repair.failed:${episode.target.signature}`,
+        severity: 'warning',
+        category: 'connection',
+        operation: 'load_session',
+        code: 'daemon.live_journal_repair.failed',
+        message:
+          'Could not restore the complete turn because daemon capabilities are unavailable. The retained replay remains visible.',
+        recoverable: true,
+      });
+      liveJournalRepairRef.current = undefined;
+      return;
+    }
+    if (!capabilities.features.includes(CLIENT_IDENTITY_FEATURE)) {
+      const reload = repairReloadRef.current;
+      if (!reload) return;
+      const controller = new AbortController();
+      episode.controller = controller;
+      void reload(controller.signal, { replaySource: 'memory' }).catch(
+        (error: unknown) => {
+          if (liveJournalRepairRef.current !== episode) return;
+          addNotice({
+            id: `daemon.live_journal_repair.failed:${episode.target.signature}`,
+            severity: 'warning',
+            category: 'connection',
+            operation: 'load_session',
+            code: 'daemon.live_journal_repair.failed',
+            message:
+              'Could not restore the complete turn. The retained replay remains visible.',
+            debugMessage:
+              error instanceof Error ? error.message : String(error),
+            recoverable: true,
+          });
+          liveJournalRepairRef.current = undefined;
+        },
+      );
+      return;
+    }
+    startRecoveryTransition('live_repair');
+  };
 
   const actions = useMemo<DaemonSessionActions>(
     () =>
@@ -4445,6 +5369,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
             });
           }
+          if (!inFlight && sourceBoundOperationCountRef.current === 0) {
+            queueMicrotask(() => {
+              pumpTransitionRef.current();
+              tryLiveJournalRepairRef.current?.();
+            });
+          }
         },
         sessionConfigGeneration: sessionConfigGenerationRef.current,
         getTransitionOrigin: () => {
@@ -4456,6 +5386,48 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current?.controller?.abort();
           liveJournalRepairRef.current = undefined;
         },
+        isSessionRecoveryLocked: () => {
+          const episode = resyncEpisodeRef.current;
+          const transition = desiredTransitionRef.current;
+          return (
+            (episode !== undefined && episode.source === sessionRef.current) ||
+            (transition?.origin === 'recovery' &&
+              transition.source === sessionRef.current) ||
+            connectionRef.current.sessionRecoveryRequired === true
+          );
+        },
+        clearSessionRecovery: () => {
+          resyncEpisodeRef.current = undefined;
+          setConnectionSynchronous((current) => {
+            if (
+              current.sessionRecoveryRequired !== true &&
+              current.sessionTransition?.origin !== 'recovery'
+            ) {
+              return current;
+            }
+            const next = { ...current };
+            delete next.sessionRecoveryRequired;
+            if (next.sessionTransition?.origin === 'recovery') {
+              delete next.sessionTransition;
+            }
+            return next;
+          });
+        },
+        resumeSessionRecovery: () => queueMicrotask(resumeResyncRef.current),
+        onPromptAdmissionSettled: () =>
+          queueMicrotask(pumpTransitionRef.current),
+        setPromptAdmissionInFlight: (session, inFlight) => {
+          const current = promptAdmissionCountsRef.current.get(session) ?? 0;
+          const next = current + (inFlight ? 1 : -1);
+          if (next > 0) promptAdmissionCountsRef.current.set(session, next);
+          else promptAdmissionCountsRef.current.delete(session);
+          if (!inFlight && next <= 0) {
+            queueMicrotask(() => {
+              pumpTransitionRef.current();
+              tryLiveJournalRepairRef.current?.();
+            });
+          }
+        },
       }),
     [
       addNotice,
@@ -4465,6 +5437,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       resolvedBaseUrl,
       resolvedToken,
       restartEventStreamOnPrompt,
+      setConnectionSynchronous,
       store,
     ],
   );
@@ -4675,16 +5648,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       loadMore: loadMoreTranscript,
     };
   }, [connection.sessionId, loadMoreTranscript, transcriptHistoryState]);
-  const lastHandledSessionIdRef = useRef<
-    string | undefined | typeof UNHANDLED_SESSION
-  >(UNHANDLED_SESSION);
-  const lastHandledWorkspaceRef = useRef<string | undefined>(undefined);
-  const lastHandledClientIdRef = useRef<string | undefined>(undefined);
-
   useEffect(() => {
     const targetWorkspaceCwd =
       resolvedWorkspaceCwd ?? connectionRef.current.workspaceCwd;
     const previousSessionId = lastHandledSessionIdRef.current;
+    const currentSession = sessionRef.current;
+    const recoveryEpisode = resyncEpisodeRef.current;
+    if (
+      recoveryEpisode !== undefined &&
+      currentSession !== undefined &&
+      recoveryEpisode.source === currentSession &&
+      connectionRef.current.sessionRecoveryRequired === true &&
+      sessionId === currentSession.sessionId &&
+      normalizeWorkspaceIdentity(targetWorkspaceCwd) ===
+        normalizeWorkspaceIdentity(currentSession.workspaceCwd)
+    ) {
+      if (clientId !== undefined && clientId !== recoveryEpisode.clientId) {
+        return;
+      }
+    }
+    if (
+      currentSession !== undefined &&
+      sessionId === currentSession.sessionId &&
+      normalizeWorkspaceIdentity(targetWorkspaceCwd) ===
+        normalizeWorkspaceIdentity(currentSession.workspaceCwd)
+    ) {
+      if (clientId === undefined || clientId === currentSession.clientId) {
+        controlledClientRebindRef.current = undefined;
+      } else {
+        const runner = runnerControlRef.current?.snapshot();
+        if (runner?.session !== currentSession || !runner.ready) {
+          controlledClientRebindRef.current = currentSession.sessionId;
+          return;
+        }
+      }
+    }
     if (
       lastHandledSessionIdRef.current === sessionId &&
       normalizeWorkspaceIdentity(lastHandledWorkspaceRef.current) ===
@@ -4718,7 +5716,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
 
     const currentSessionId = connectionRef.current.sessionId;
-    const currentSession = sessionRef.current;
     const sameLogicalTarget =
       sessionId === currentSessionId &&
       normalizeWorkspaceIdentity(targetWorkspaceCwd) ===
@@ -4737,7 +5734,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       (controlledCapabilities === undefined ||
         controlledCapabilities.features.includes(CLIENT_IDENTITY_FEATURE));
     if (sameLogicalTarget && !needsTransactionalClientRebind) {
-      if (connectionRef.current.sessionTransition?.phase === 'failed') {
+      if (
+        connectionRef.current.sessionTransition?.phase === 'failed' &&
+        connectionRef.current.sessionTransition.origin !== 'recovery'
+      ) {
         setConnectionSynchronous((current) => {
           if (current.sessionTransition?.phase !== 'failed') return current;
           const next = { ...current };
@@ -4817,10 +5817,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
 /**
  * Settle the session's active prompt from a `turn_complete` / `turn_error`
- * event. Dispatches `assistant.done` directly on `store`, so callers that have
- * buffered (batched) transcript events must flush them first
- * (`flushTranscriptSync()`) — otherwise `assistant.done` is applied ahead of
- * the turn's still-buffered transcript content.
+ * event. By default it dispatches `assistant.done` directly on `store`, so
+ * callers with buffered transcript events must flush them first. Recovery
+ * staging can suppress that dispatch after its shadow replay materializes the
+ * terminal.
  */
 function settleActivePromptFromTurnEvent(
   activePrompts: Map<string, ActivePrompt>,
@@ -4830,7 +5830,10 @@ function settleActivePromptFromTurnEvent(
   store: DaemonTranscriptStore,
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>,
   passiveAssistantDoneTimerRef: TimerRef,
-  opts: { requireBoundPromptId?: boolean } = {},
+  opts: {
+    requireBoundPromptId?: boolean;
+    dispatchTranscript?: boolean;
+  } = {},
 ): boolean {
   if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
     return false;
@@ -4851,7 +5854,9 @@ function settleActivePromptFromTurnEvent(
   try {
     const result = matchTurnEvent(event, promptId);
     if (!result) return false;
-    store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
+    if (opts.dispatchTranscript !== false) {
+      store.dispatch(assistantDoneFromTurnEvent(event, result.stopReason));
+    }
     setPromptStatus('idle');
     if (active.resolve) {
       activePrompts.delete(sessionId);
@@ -4864,7 +5869,9 @@ function settleActivePromptFromTurnEvent(
       });
     }
   } catch (error) {
-    store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
+    if (opts.dispatchTranscript !== false) {
+      store.dispatch(assistantDoneFromTurnEvent(event, 'error'));
+    }
     setPromptStatus('idle');
     if (active.reject) {
       activePrompts.delete(sessionId);
@@ -5465,5 +6472,59 @@ function isClosingSessionLoadError(
       body['error'].endsWith(
         'The session is closing; retry after close completes',
       ))
+  );
+}
+
+function isStructuredRecoveryRetryable(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || !isRecord(error.body)) {
+    return false;
+  }
+  const code = error.body['code'];
+  if (error.status === 404) return code === 'session_closing';
+  if (error.status === 409) {
+    return (
+      code === 'restore_in_progress' &&
+      error.body['reason'] !== 'awaiting_abandoned_cleanup' &&
+      error.body['retryable'] === true
+    );
+  }
+  return (
+    error.status === 503 &&
+    code === 'acp_channel_unavailable' &&
+    error.body['retryable'] === true
+  );
+}
+
+function getRecoveryRetryDelayMs(
+  error: unknown,
+  attempt: number,
+  reconnect: { reconnectDelayMs: number; maxReconnectDelayMs: number },
+): number {
+  if (error instanceof DaemonHttpError && isRecord(error.body)) {
+    const seconds = error.body['retryAfterSeconds'];
+    if (
+      typeof seconds === 'number' &&
+      Number.isFinite(seconds) &&
+      seconds > 0
+    ) {
+      return Math.ceil(seconds * 1000);
+    }
+    if (error.status === 409) return 5000;
+  }
+  return getReconnectDelayMs(
+    attempt,
+    reconnect.reconnectDelayMs,
+    reconnect.maxReconnectDelayMs,
+  );
+}
+
+function isTerminalRecoveryFailure(error: unknown): boolean {
+  const status = extractHttpStatus(error);
+  if (status === 401 || status === 403 || status === 410) return true;
+  if (status !== 404) return false;
+  return !(
+    error instanceof DaemonHttpError &&
+    isRecord(error.body) &&
+    error.body['code'] === 'session_closing'
   );
 }

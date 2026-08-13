@@ -44,6 +44,14 @@ type MockConnection = {
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
+  sessionRecoveryRequired?: true;
+  sessionTransition?: {
+    phase: 'queued' | 'preparing' | 'failed';
+    operation: 'load' | 'resume';
+    origin: 'action' | 'controlled' | 'recovery';
+    targetSessionId: string;
+    targetWorkspaceCwd?: string;
+  };
   gitBranch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
   voiceTarget?: VoiceWorkspaceTarget;
@@ -4413,6 +4421,8 @@ beforeEach(() => {
   mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockConnection.sessionRecoveryRequired = undefined;
+  mockConnection.sessionTransition = undefined;
   mockConnection.capabilities = {
     qwenCodeVersion: '1.2.3',
     features: [],
@@ -10038,6 +10048,24 @@ describe('App session callbacks', () => {
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the main composer read-only after recovery preparation fails', async () => {
+    mockConnection.sessionRecoveryRequired = true;
+    mockConnection.sessionTransition = {
+      phase: 'failed',
+      operation: 'load',
+      origin: 'recovery',
+      targetSessionId: 'session-1',
+    };
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.onCancel).toBeUndefined();
+    expect(testState.latestChatEditorProps?.onSubmit('blocked')).toBe(false);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.cancel).not.toHaveBeenCalled();
   });
 
   it('opens a Live session in its owning Conversations workspace', async () => {

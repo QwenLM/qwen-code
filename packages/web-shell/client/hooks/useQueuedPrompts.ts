@@ -1067,6 +1067,7 @@ export function useQueuedPrompts({
       inputAnnotations?: DaemonInputAnnotation[],
       onAdmitted?: () => void,
     ) => {
+      if (writeBlockedRef.current) return false;
       const trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0) return true;
       const targetSessionId = latestSessionIdRef.current;
@@ -1605,6 +1606,7 @@ export function useQueuedPrompts({
 
   const removeQueuedPrompt = useCallback(
     (id: number) => {
+      if (writeBlockedRef.current) return;
       const target = queuedPromptsRef.current.find((p) => p.id === id);
       if (target?.admissionOutcome === 'unknown') return;
       if (
@@ -1640,6 +1642,7 @@ export function useQueuedPrompts({
 
   const resolveUnknownQueuedPrompt = useCallback(
     (id: number, restore: boolean): boolean => {
+      if (writeBlockedRef.current) return false;
       const ownerToken = ownerTokenRef.current;
       const target = queuedPromptsRef.current.find(
         (prompt) => prompt.id === id,
@@ -1694,6 +1697,7 @@ export function useQueuedPrompts({
 
   const editQueuedPrompt = useCallback(
     async (id: number) => {
+      if (writeBlockedRef.current) return;
       const target = queuedPromptsRef.current.find((p) => p.id === id);
       if (!target || target.serverState === 'submitting') return;
       if (
@@ -1738,6 +1742,7 @@ export function useQueuedPrompts({
   );
 
   const editLastQueuedPrompt = useCallback((): boolean => {
+    if (writeBlockedRef.current) return false;
     const current = queuedPromptsRef.current;
     if (current.length === 0) return false;
     const target = current[current.length - 1];
@@ -1787,6 +1792,7 @@ export function useQueuedPrompts({
   ]);
 
   const clearQueuedPrompts = useCallback((): boolean => {
+    if (writeBlockedRef.current) return false;
     if (queuedPromptsRef.current.length === 0) return false;
     const clearOwnerToken = ownerTokenRef.current;
     const clearSessionId = latestSessionIdRef.current;

@@ -48,6 +48,7 @@ import type {
   EditorHandle,
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
+import { isSessionMutationBlocked } from '../utils/sessionMutationBlock';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -495,6 +496,7 @@ export function ChatPane({
     [voiceTarget, voiceUserRevision, voiceWorkspaceRevisions],
   );
   const isResponding = streamingState !== 'idle';
+  const sessionWriteBlocked = isSessionMutationBlocked(connection);
   const artifactsByTurn = useMemo(
     () =>
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
@@ -537,6 +539,7 @@ export function ChatPane({
     discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
+    writeBlocked: sessionWriteBlocked,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -571,6 +574,7 @@ export function ChatPane({
     ): boolean => {
       const trimmed = text.trim();
       if (!trimmed && (images?.length ?? 0) === 0) return false;
+      if (sessionWriteBlocked) return false;
       if (admissionPayloadLocked) return false;
       if (
         trimmed &&
@@ -667,6 +671,7 @@ export function ChatPane({
     [
       actions,
       admissionPayloadLocked,
+      sessionWriteBlocked,
       catalogOwnerCwd,
       clearFollowup,
       connection.sessionId,
@@ -1077,7 +1082,7 @@ export function ChatPane({
         <ChatEditor
           ref={editorRef}
           onSubmit={handleSubmit}
-          onCancel={handleCancel}
+          onCancel={sessionWriteBlocked ? undefined : handleCancel}
           isRunning={isResponding}
           commands={commands}
           queuedMessages={queuedTexts}
@@ -1096,7 +1101,9 @@ export function ChatPane({
           reasoning={connection.reasoning}
           onSelectReasoningEffort={handleSelectReasoningEffort}
           dialogOpen={approvalActive}
-          disabled={approvalActive || admissionPayloadLocked}
+          disabled={
+            approvalActive || admissionPayloadLocked || sessionWriteBlocked
+          }
           voiceTarget={hidden ? undefined : voiceTarget}
           voiceStatusRevision={voiceStatusRevision}
           followupState={followupState}
@@ -1111,7 +1118,9 @@ export function ChatPane({
         />
         {CustomComposerFooter && (
           <CustomComposerFooter
-            disabled={approvalActive || admissionPayloadLocked}
+            disabled={
+              approvalActive || admissionPayloadLocked || sessionWriteBlocked
+            }
             isRunning={isResponding}
             currentMode={connection.currentMode ?? 'default'}
             currentModel={connection.currentModel ?? ''}

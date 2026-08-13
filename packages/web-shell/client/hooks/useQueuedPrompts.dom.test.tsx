@@ -1246,6 +1246,79 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
   });
 
+  it('keeps queue admission decisions inert while session writes are blocked', async () => {
+    const { actions, pendingSubmit } = createActions();
+    const { editor, render } = mount('responding', actions);
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: false,
+    });
+
+    act(() => latest.enqueuePrompt('', [{ data: 'eA==', media_type: 'x' }]));
+    await act(async () => {
+      pendingSubmit.reject(new TypeError('response lost'));
+      await Promise.resolve();
+    });
+    const before = latest.queuedPrompts;
+    render('responding', 'session-1', false, true);
+
+    act(() => {
+      expect(latest.enqueuePrompt('blocked prompt')).toBe(false);
+      expect(latest.restoreUnknownQueuedPrompt(1)).toBe(false);
+      expect(latest.discardUnknownQueuedPrompt(1)).toBe(false);
+      expect(latest.editLastQueuedPrompt()).toBe(false);
+    });
+
+    expect(latest.queuedPrompts).toEqual(before);
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+    expect(actions.removePendingPrompt).not.toHaveBeenCalled();
+    expect(actions.removeMidTurnMessage).not.toHaveBeenCalled();
+    expect(editor.setText).not.toHaveBeenCalled();
+  });
+
+  it.each(['remove', 'edit', 'clear'] as const)(
+    'keeps an admitted server row inert when %s is blocked',
+    async (operation) => {
+      const { actions, pendingSubmit } = createActions();
+      const { editor, render, store } = mount('responding', actions);
+
+      act(() =>
+        latest.enqueuePrompt('', [{ data: 'eA==', media_type: 'image/png' }]),
+      );
+      await act(async () => {
+        pendingSubmit.resolve({ promptId: 'server-queued' });
+        await Promise.resolve();
+      });
+      expect(latest.queuedPrompts).toMatchObject([
+        {
+          id: 1,
+          serverPromptId: 'server-queued',
+          serverState: 'queued',
+        },
+      ]);
+      const before = latest.queuedPrompts;
+      vi.mocked(actions.removePendingPrompt).mockClear();
+      editor.setText.mockClear();
+      editor.restoreImages.mockClear();
+      store.appendLocalUserMessage.mockClear();
+      render('responding', 'session-1', false, true);
+
+      if (operation === 'edit') {
+        await act(async () => latest.editQueuedPrompt(1));
+      } else {
+        act(() => {
+          if (operation === 'remove') latest.removeQueuedPrompt(1);
+          else expect(latest.clearQueuedPrompts()).toBe(false);
+        });
+      }
+
+      expect(latest.queuedPrompts).toEqual(before);
+      expect(actions.removePendingPrompt).not.toHaveBeenCalled();
+      expect(editor.setText).not.toHaveBeenCalled();
+      expect(editor.restoreImages).not.toHaveBeenCalled();
+      expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it('retains mid-turn rows and marks in-flight admissions unknown on clear', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({

@@ -54,7 +54,7 @@ export type DaemonConnectionStatus =
 export interface DaemonSessionTransition {
   phase: 'queued' | 'preparing' | 'failed';
   operation: 'load' | 'resume';
-  origin: 'action' | 'controlled';
+  origin: 'action' | 'controlled' | 'recovery';
   targetSessionId: string;
   targetWorkspaceCwd?: string;
   targetClientId?: string;
@@ -114,6 +114,8 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+  /** The retained session has a known event gap and is read-only until resynced. */
+  sessionRecoveryRequired?: true;
   sessionTransition?: DaemonSessionTransition;
 }
 

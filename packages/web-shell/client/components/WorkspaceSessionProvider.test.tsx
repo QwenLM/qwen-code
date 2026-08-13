@@ -294,6 +294,28 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     });
   });
 
+  it('does not roll a controlled target back for an internal recovery failure', async () => {
+    const onSessionIdChange = await renderTarget('session-a', '/work/a');
+    onSessionIdChange.mockClear();
+    mocks.connection = {
+      status: 'connected',
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+      sessionRecoveryRequired: true,
+      sessionTransition: {
+        phase: 'failed',
+        operation: 'load',
+        origin: 'recovery',
+        targetSessionId: 'session-b',
+        targetWorkspaceCwd: '/work/b',
+      },
+    };
+
+    await renderTarget('session-b', '/work/b', onSessionIdChange);
+
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
   it('rolls back a primary-workspace target when workspace props are omitted', async () => {
     const onSessionIdChange = vi.fn();
     await act(async () => {

@@ -1151,6 +1151,38 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current).toBeUndefined();
   });
 
+  it('resumes recovery when closing the current session fails', async () => {
+    const session = createMockSession('session-a');
+    session.close.mockRejectedValue(new Error('close failed'));
+    const resumeSessionRecovery = vi.fn();
+    const { actions } = createActionsHarness({
+      isSessionRecoveryLocked: () => true,
+      resumeSessionRecovery,
+      session,
+    });
+
+    await expect(actions.closeSession()).rejects.toThrow('close failed');
+
+    expect(resumeSessionRecovery).toHaveBeenCalledOnce();
+  });
+
+  it('resumes recovery when releasing the current session fails', async () => {
+    const session = createMockSession('session-a');
+    session.client.closeSession.mockRejectedValue(new Error('release failed'));
+    const resumeSessionRecovery = vi.fn();
+    const { actions } = createActionsHarness({
+      isSessionRecoveryLocked: () => true,
+      resumeSessionRecovery,
+      session,
+    });
+
+    await expect(actions.releaseSession('session-a')).rejects.toThrow(
+      'release failed',
+    );
+
+    expect(resumeSessionRecovery).toHaveBeenCalledOnce();
+  });
+
   it('restarts the event stream after prompt admission', async () => {
     const restartEventStream = vi.fn();
     const onAdmissionStarted = vi.fn();
@@ -1656,6 +1688,7 @@ function createActionsHarness(
     activePrompts?: Map<string, ActivePrompt>;
     addNotice?: ReturnType<typeof vi.fn>;
     beginCrossSessionTransition?: ReturnType<typeof vi.fn>;
+    cancelCrossSessionTransition?: ReturnType<typeof vi.fn>;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
@@ -1672,6 +1705,8 @@ function createActionsHarness(
     isSourceBoundOperationInFlight?: () => boolean;
     isCrossSessionTransitionPending?: () => boolean;
     isDifferentLogicalTransitionPending?: () => boolean;
+    isSessionRecoveryLocked?: () => boolean;
+    resumeSessionRecovery?: ReturnType<typeof vi.fn>;
     setPromptStatus?: ReturnType<typeof vi.fn>;
     hasSessionActivePrompt?: () => boolean;
   } = {},
@@ -1725,10 +1760,13 @@ function createActionsHarness(
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     beginCrossSessionTransition: opts.beginCrossSessionTransition,
+    cancelCrossSessionTransition: opts.cancelCrossSessionTransition,
     isCrossSessionTransitionPending: opts.isCrossSessionTransitionPending,
     isDifferentLogicalTransitionPending:
       opts.isDifferentLogicalTransitionPending,
     isSourceBoundOperationInFlight: opts.isSourceBoundOperationInFlight,
+    isSessionRecoveryLocked: opts.isSessionRecoveryLocked,
+    resumeSessionRecovery: opts.resumeSessionRecovery,
     getTransitionOrigin: opts.getTransitionOrigin,
     setSourceBoundOperationInFlight: opts.setSourceBoundOperationInFlight,
     sessionConfigGeneration: opts.sessionConfigGeneration,
@@ -1778,6 +1816,7 @@ function createMockSession(
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
     setConfigOption: vi.fn(
       async (): Promise<{ configOptions: unknown[] }> => ({

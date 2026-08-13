@@ -209,6 +209,7 @@ export function WorkspaceSessionProvider({
       const transition = connection.sessionTransition;
       if (
         transition?.phase === 'failed' &&
+        transition.origin === 'controlled' &&
         transition.targetSessionId === effectiveSessionId &&
         transition.targetWorkspaceCwd === desiredWorkspace?.cwd &&
         failureLatchRef.current !== desiredKey
