@@ -400,6 +400,7 @@ describe('the posting gate', () => {
     );
     expect(advice()).not.toContain('Re-run with `--comment`');
     expect(advice()).toContain('invoked naming it');
+    expect(advice()).toContain('Nothing recorded authorises binding');
     writeStderrSpy.mockClear();
 
     // ...or a different PR than this submission targets.
@@ -410,6 +411,17 @@ describe('the posting gate', () => {
     );
     expect(advice()).not.toContain('Re-run with `--comment`');
     expect(advice()).toContain('invoked naming it');
+    writeStderrSpy.mockClear();
+
+    // Nothing recorded at all, with the setting authorising: the refusal
+    // names the missing invocation, and the advice preamble must not
+    // contradict it by presupposing recorded arguments exist.
+    runSubmit(args({ skillArgs: join(dir, 'advice-missing.txt') }), 'unknown', {
+      defaultComment: true,
+    });
+    expect(advice()).toContain('no recorded invocation names a pull request');
+    expect(advice()).toContain('Nothing recorded authorises binding');
+    expect(advice()).not.toContain('The recorded arguments');
     expect(ghMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(3);
   });
