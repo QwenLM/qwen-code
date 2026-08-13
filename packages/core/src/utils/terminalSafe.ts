@@ -53,6 +53,20 @@ export function stripTerminalControlSequences(s: string): string {
 }
 
 /**
+ * Whether a UTF-16 code unit is a Unicode bidirectional override /
+ * isolate codepoint: `\u202a-\u202e` (LRE / RLE / PDF / LRO / RLO) or
+ * `\u2066-\u2069` (LRI / RLI / FSI / PDI). These reorder how adjacent
+ * text renders without changing a byte — the "Trojan Source" class
+ * (CVE-2021-42574). The range set lives here so every display sanitizer
+ * strips from one home.
+ */
+export function isBidiControlChar(code: number): boolean {
+  return (
+    (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+/**
  * Strip C0 control characters (except TAB), C1 control characters, and
  * Unicode bidirectional override / isolate characters from a string
  * destined for terminal/UI display.
@@ -90,9 +104,40 @@ export function stripDisplayControlChars(text: string): string {
     }
     if (code < 0x20) continue;
     if (code >= 0x80 && code <= 0x9f) continue;
-    if (code >= 0x202a && code <= 0x202e) continue;
-    if (code >= 0x2066 && code <= 0x2069) continue;
+    if (isBidiControlChar(code)) continue;
     out += text[i];
   }
   return out;
+}
+
+/** Max length for a background-notification label shown in the UI. */
+export const NOTIFICATION_LABEL_MAX_LENGTH = 80;
+
+/**
+ * Normalize an arbitrary label (shell command, monitor description,
+ * background-agent label) for compact single-line display surfaces.
+ *
+ * Strips display control characters ({@link stripDisplayControlChars}),
+ * collapses whitespace runs to single spaces, trims, and caps the result
+ * at {@link NOTIFICATION_LABEL_MAX_LENGTH} **code points**, appending
+ * `'...'` when truncating. The gate and the slice both measure code
+ * points, so a truncation can never split a surrogate pair (a code-unit
+ * slice could emit an unpaired surrogate), and an astral-heavy label
+ * within the cap is never falsely "truncated" into a longer string.
+ *
+ * Shared by every background-notification label surface — the registries'
+ * legacy displayText and the ACP session's structured i18n fields — so
+ * the surfaces cannot drift.
+ */
+export function truncateNotificationLabel(label: string): string {
+  const normalized = stripDisplayControlChars(label)
+    .replace(/\s+/g, ' ')
+    .trim();
+  const codePoints = [...normalized];
+  if (codePoints.length <= NOTIFICATION_LABEL_MAX_LENGTH) {
+    return normalized;
+  }
+  return (
+    codePoints.slice(0, NOTIFICATION_LABEL_MAX_LENGTH - 3).join('') + '...'
+  );
 }

@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  GoalSnapshotV2,
   SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -17,6 +18,8 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -157,7 +160,7 @@ export interface BridgeRestoreSessionRequest {
   workspaceCwd: string;
   /** Optional echo of a daemon-issued client id for this session. */
   clientId?: string;
-  /** Internal replay transport for `session/load`; defaults to bulk response. */
+  /** Internal replay transport for `session/load`; defaults to stream. */
   historyReplay?: 'stream' | 'response';
   /** Optional newest persisted-record page requested for response replay. */
   historyPageSize?: number;
@@ -185,6 +188,8 @@ export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
   'qwen.session.loadReplayHideInherited';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
+export const LOAD_REPLAY_MAX_UPDATES = 10_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 
@@ -335,6 +340,7 @@ export interface ChannelStartupProfileV1 {
 export interface BridgeLoadReplayEnvelope {
   v: typeof LOAD_REPLAY_VERSION;
   updates: SessionUpdate[];
+  anchorRecordId?: string;
   hasMore?: boolean;
   partial?: true;
   replayError?: string;
@@ -359,7 +365,7 @@ export interface BridgeRestoredSession extends BridgeSession {
   replayError?: string;
   /** Compacted events for all completed turns (O(turns) size). */
   compactedReplay?: BridgeEvent[];
-  /** Raw events since last turn boundary (current incomplete turn). */
+  /** Bounded replay events for the current incomplete turn. */
   liveJournal?: BridgeEvent[];
   /** True when persisted records exist before the returned replay page. */
   historyHasMore?: boolean;
@@ -601,16 +607,14 @@ export interface BridgeSessionSummary {
 }
 
 /**
- * A session's live `/goal` state, as reported by the `qwen --acp` child.
- *
- * Only the active goal crosses the bridge. The child also caches the most
- * recent goal that ended on its own, but nothing on this side reads it, so it
- * is not part of the wire shape — add it back alongside the first consumer.
+ * A session's live canonical Goal state, as reported by the `qwen --acp`
+ * child. `active` remains as a compatibility projection for existing hosts.
  */
 export interface BridgeSessionGoal {
+  snapshot: GoalSnapshotV2;
   active: {
     condition: string;
-    /** Judge turns completed so far; 0 before the first stop-hook evaluation. */
+    /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
     /** The judge's verdict on the most recent turn, when it has run. */
@@ -666,6 +670,13 @@ export interface BridgeClientRequestContext {
    */
   promptId?: string;
   /**
+   * Internal originator for a daemon-owned mid-turn message promoted into the
+   * normal prompt FIFO. It was authenticated when the message was enqueued,
+   * so promotion must not revalidate it after that client has detached.
+   * Transport routes never populate this field from request input.
+   */
+  promotedMidTurn?: { originatorClientId?: string };
+  /**
    * Internal synchronous admission signal. The bridge invokes it only after
    * the prompt owns a pending-queue slot. Transport routes never populate it
    * from request input.
@@ -677,6 +688,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** User-facing projection supplied by an authenticated channel worker. */
+  promptDisplayText?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -716,6 +729,8 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
+  'qwen.daemon.promptDisplayText';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -755,6 +770,11 @@ export interface BridgeHeartbeatState {
  * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
+ * Cap on each per-session mid-turn reconciliation ring.
+ */
+export const MID_TURN_RECONCILIATION_RING_SIZE = 200;
 
 /**
  * Child-to-parent request that atomically assigns the next Todo Stop Guard
@@ -816,16 +836,24 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
   [CLIENT_MCP_OVER_WS_CONFIG_FLAG]?: boolean;
 };
 
-/**
- * One queued mid-turn message. `originatorClientId` is the trusted client id
- * that pushed it (from `resolveTrustedClientId`), carried so the drain's SSE
- * echo can be routed/filtered to that client only — a peer attached to the
- * same session must not dedupe a message it did not queue.
- */
+/** One daemon-owned, session-global queued mid-turn message. */
 export interface MidTurnQueueEntry {
   messageId: string;
   text: string;
   originatorClientId?: string;
+  queueOnly?: boolean;
+  onSettledWithoutDrain?: () => void;
+}
+
+/**
+ * Reconciliation snapshot returned by `getMidTurnMessages`. `messages` is the
+ * current queue content plus bounded rings for messages drained into the
+ * running turn and messages promoted into the normal pending-prompt FIFO.
+ */
+export interface BridgeMidTurnMessagesSnapshot {
+  messages: Array<Pick<MidTurnQueueEntry, 'messageId' | 'text'>>;
+  settledMessageIds: string[];
+  promotedMessageIds: string[];
 }
 
 /**
@@ -839,6 +867,7 @@ export interface PendingPromptEntry {
   promptId: string;
   queuedAt: number;
   originatorClientId?: string;
+  promotedMidTurn?: true;
   text: string;
   abortController: AbortController;
   state: 'queued' | 'running';
@@ -883,8 +912,23 @@ export interface BridgeDaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
+  /**
+   * Per-session BASELINE journal caps. A session's effective caps can be
+   * higher mid-turn under adaptive growth — see
+   * `BridgeDaemonSessionDiagnostic.maxJournalEvents` /
+   * `maxJournalBytes` and `journalGrowth` below.
+   */
   maxJournalEvents: number;
   maxJournalBytes: number;
+  /**
+   * Adaptive live-journal growth configuration, or `null` when growth is
+   * disabled (fixed caps above). The pool is daemon-wide: every bridge of
+   * the daemon accounts its sessions against the same aggregate.
+   */
+  journalGrowth: {
+    poolBytes: number;
+    hardCapBytes: number;
+  } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }
@@ -904,6 +948,12 @@ export interface BridgeDaemonSessionDiagnostic {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /**
+   * The session's EFFECTIVE live-journal caps right now — the configured
+   * baseline, or higher when adaptive growth raised them mid-turn.
+   */
+  maxJournalEvents: number;
+  maxJournalBytes: number;
 }
 
 export interface BridgeDaemonStatusSnapshot {
@@ -1450,9 +1500,8 @@ export interface AcpSessionBridge {
   ): Promise<{ cleared: boolean; condition?: string }>;
 
   /**
-   * Read a live session's goal state. Throws `SessionNotFoundError` when the
-   * session is not resident — goals live in the child's memory, so a
-   * non-resident session has no goal to report.
+   * Read a live session's Goal state. Throws `SessionNotFoundError` when the
+   * session is not resident because this route addresses the selected runtime.
    */
   getSessionGoal(sessionId: string): Promise<BridgeSessionGoal>;
 
@@ -1523,6 +1572,12 @@ export interface AcpSessionBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /** Change one advertised ACP configuration option for a live session. */
+  setSessionConfigOption(
+    sessionId: string,
+    req: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse>;
 
   /**
    * Switch UI language and optionally LLM output language for a live
@@ -1625,24 +1680,29 @@ export interface AcpSessionBridge {
   ): Promise<BridgeForkAgentResult>;
 
   /**
-   * Queue a mid-turn user message for the running turn. The ACP child drains
-   * it between tool batches via the `craft/drainMidTurnQueue` ext-method so
-   * the model sees it before the turn ends. Accepted only while the session
-   * is busy (a prompt is queued or active); an idle (or full-queue) session
-   * returns `{ accepted: false }` so the caller falls back to a normal
-   * next-turn prompt. `context.clientId` is authorized against the session
-   * like `/prompt` and `/btw` — throws `InvalidClientIdError` when the id is
-   * not bound to the session, and `SessionNotFoundError` for unknown ids. The
-   * trusted client id is recorded as the message's originator so the drain's
-   * SSE echo only dedupes that client's pending queue.
+   * Queue a daemon-owned mid-turn user message. The ACP child drains it between
+   * tool batches while a turn is active; a message admitted after the session
+   * becomes idle is promoted into the normal prompt FIFO. A full queue returns
+   * `{ accepted: false }` without taking ownership. `context.clientId` is
+   * authorized against the session like `/prompt` and `/btw` — throws
+   * `InvalidClientIdError` when the id is not bound to the session, and
+   * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
+   * With `options.queueOnly` an idle session rejects instead of promoting. If
+   * a busy session settles before draining the message,
+   * `onSettledWithoutDrain` lets the caller drive the next turn itself.
    */
   enqueueMidTurnMessage(
     sessionId: string,
     message: string,
     context?: BridgeClientRequestContext,
+    messageId?: string,
+    options?: {
+      queueOnly?: boolean;
+      onSettledWithoutDrain?: () => void;
+    },
   ): { accepted: boolean; messageId?: string };
 
-  /** Remove a message that has not yet been drained into the running turn. */
+  /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(
     sessionId: string,
     messageId: string,
@@ -1658,6 +1718,19 @@ export interface AcpSessionBridge {
     sessionId: string,
     notification: BridgeBackgroundNotification,
   ): Promise<{ sessionId: string; accepted: boolean }>;
+
+  /**
+   * Return the mid-turn reconciliation snapshot for a session: messages still
+   * waiting in the queue plus bounded terminal id rings. Lets clients project
+   * daemon state after a page refresh or a missed event frame.
+   * `context.clientId` is authorized against the session like the sibling
+   * mid-turn routes; throws `InvalidClientIdError` when the id is not bound
+   * to the session, and `SessionNotFoundError` for unknown ids.
+   */
+  getMidTurnMessages(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): BridgeMidTurnMessagesSnapshot;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

@@ -23,18 +23,28 @@ import {
   DEFAULT_RESERVE_SECONDS,
   DEFAULT_ROUND_SECONDS,
   DEFAULT_COMPOSE_FLOOR_SECONDS,
+  DEFAULT_TOOL_CONCURRENCY,
+  TOOL_CONCURRENCY_ENV,
   budgetStopEntry,
   budgetStopEntryZh,
+  clearBudgetStop,
+  expectedAdmissionSeconds,
   expectedRoundSeconds,
   readBudgetStop,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
+  ROUND_CAP_PHRASE,
+  roundCapStopDisclosure,
+  roundCapStopEntry,
+  roundCapStopEntryZh,
+  writeRoundCapStop,
   stampRound,
   verifyBudgetExhausted,
   verifyBudgetMessage,
   writeBudgetStop,
 } from './deadline.js';
+import { promptRecordDir } from './prompt-record.js';
 
 const NOW_MS = 1_754_000_000_000;
 const NOW_S = NOW_MS / 1000;
@@ -275,6 +285,117 @@ describe('the round-cost estimate — measured when it can be', () => {
   });
 });
 
+describe('the pair admission price — a round launched beside an in-flight round pays for both', () => {
+  // The convergence pair's second member is built seconds after the first's
+  // stamp, so nothing has measured a round yet. Pricing it off that
+  // seconds-old span committed the pair at one round's price for up to two
+  // rounds' wall — these pin the wave-priced pair instead.
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function plan(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'deadline-pair-'));
+    dirs.push(dir);
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, '{}');
+    backdatePlan(p);
+    return p;
+  }
+
+  it('prices a round with no in-flight predecessor like expectedRoundSeconds', () => {
+    const p = plan();
+    expect(expectedAdmissionSeconds(p, 1, 6, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    stampRound(p, 1, NOW_MS - 2_400_000); // round 1 returned 40 min ago
+    expect(expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS)).toBe(
+      expectedRoundSeconds(p, 2, NOW_MS),
+    );
+    expect(expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS)).toBe(2400);
+  });
+
+  it('prices the pair at both members when the pool serializes them', () => {
+    // Six chunks on the default 10-slot pool: one wave per round, two
+    // waves for the pair — the seconds-old round-1 stamp has measured
+    // nothing, so the price is 2x the round estimate, not the floor.
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    expect(expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS)).toBe(
+      2 * DEFAULT_ROUND_SECONDS,
+    );
+  });
+
+  it('prices the pair at one round when the pool holds both members at once', () => {
+    // Three chunks on ten slots: both members fit in a single wave, and
+    // the pair's wall is one round's — the 3A shape reads the same (width
+    // 1 on any pool of two or more).
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    expect(expectedAdmissionSeconds(p, 2, 3, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+    expect(expectedAdmissionSeconds(p, 2, 1, {}, NOW_MS)).toBe(
+      DEFAULT_ROUND_SECONDS,
+    );
+  });
+
+  it('reads the pool from the tool-concurrency env, like the scheduler', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    // A 12-slot pool holds all twelve auditors of a 6-chunk pair in one
+    // wave.
+    expect(
+      expectedAdmissionSeconds(
+        p,
+        2,
+        6,
+        { [TOOL_CONCURRENCY_ENV]: '12' },
+        NOW_MS,
+      ),
+    ).toBe(DEFAULT_ROUND_SECONDS);
+    // A 3-slot pool runs a 6-chunk round in two waves and the pair in
+    // four — two rounds' price again.
+    expect(
+      expectedAdmissionSeconds(
+        p,
+        2,
+        6,
+        { [TOOL_CONCURRENCY_ENV]: '3' },
+        NOW_MS,
+      ),
+    ).toBe(2 * DEFAULT_ROUND_SECONDS);
+    // Malformed falls back to the default pool, never to a wedge.
+    expect(
+      expectedAdmissionSeconds(
+        p,
+        2,
+        6,
+        { [TOOL_CONCURRENCY_ENV]: 'soon' },
+        NOW_MS,
+      ),
+    ).toBe(
+      Math.ceil(
+        (DEFAULT_ROUND_SECONDS * Math.ceil(12 / DEFAULT_TOOL_CONCURRENCY)) /
+          Math.ceil(6 / DEFAULT_TOOL_CONCURRENCY),
+      ),
+    );
+  });
+
+  it('keeps the reserve on top of the pair price at the refusal boundary', () => {
+    const p = plan();
+    stampRound(p, 1, NOW_MS - 30_000);
+    const price = expectedAdmissionSeconds(p, 2, 6, {}, NOW_MS);
+    expect(price).toBe(2 * DEFAULT_ROUND_SECONDS);
+    const env = {
+      [DEADLINE_ENV]: String(NOW_S + DEFAULT_RESERVE_SECONDS + price),
+    };
+    expect(reverseAuditBudgetExhausted(env, price, NOW_MS)).toBeNull();
+    env[DEADLINE_ENV] = String(NOW_S + DEFAULT_RESERVE_SECONDS + price - 1);
+    expect(reverseAuditBudgetExhausted(env, price, NOW_MS)).not.toBeNull();
+  });
+});
+
 describe('the budget-stop marker — the deterministic half of the disclosure', () => {
   const dirs: string[] = [];
   afterEach(() => {
@@ -340,6 +461,72 @@ describe('the budget-stop marker — the deterministic half of the disclosure', 
       NOW_MS,
     );
     expect(readBudgetStop(p)?.round).toBe(3);
+  });
+
+  it('first refusal wins — a later cap write does not flip a same-run budget marker', () => {
+    // The retry-after-refusal misbehavior class: the time gate refuses round
+    // 3, the orchestrator asks for round 4 anyway, the cap gate fires first
+    // (4 > 3) and — without the guard — overwrites the marker. compose-review
+    // would then splice out the wrong relayed entry and post two contradictory
+    // stop disclosures. First-write-wins keeps the marker the audit actually
+    // stopped on.
+    const p = stopPlan();
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      3,
+      NOW_MS,
+    );
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    const stop = readBudgetStop(p);
+    expect(stop?.cause).toBeUndefined(); // still the time-budget marker
+    expect(stop?.entry).toBe(
+      'reverse audit — stopped before round 3 by the review time budget',
+    );
+  });
+
+  it('first refusal wins the other way — a later budget write does not flip a cap marker', () => {
+    const p = stopPlan();
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      5,
+      NOW_MS,
+    );
+    const stop = readBudgetStop(p);
+    expect(stop?.cause).toBe('round-cap');
+    expect(stop?.cap).toBe(3);
+  });
+
+  it('clearBudgetStop removes a same-run marker — and never throws', () => {
+    // The CONVERGED-exit tests in agent-prompt.test.ts pin the call SITE;
+    // this pins the function itself, so a refactor that moves the clear out
+    // of refuseConverged (or unlinks a different file) fails here directly,
+    // not only through the loop-level tests.
+    const p = stopPlan();
+    writeRoundCapStop(p, 3, 4, NOW_MS);
+    expect(readBudgetStop(p)?.cause).toBe('round-cap');
+    clearBudgetStop(p);
+    expect(readBudgetStop(p)).toBeNull();
+    // A repeat clear (file already gone), a run with no record dir at all,
+    // and an unlink that fails (record dir blocked by a regular file) are
+    // all no-ops, not throws: the file is the thing to be rid of, and a
+    // clear that cannot run still only leaves a cap on, never corrupts a
+    // verdict.
+    expect(() => clearBudgetStop(p)).not.toThrow();
+    const fresh = stopPlan();
+    expect(() => clearBudgetStop(fresh)).not.toThrow();
+    writeFileSync(promptRecordDir(fresh), 'a file where the record dir goes');
+    expect(() => clearBudgetStop(fresh)).not.toThrow();
   });
 
   it('the dedup phrase travels with the entry it identifies', () => {
@@ -426,6 +613,11 @@ describe('reverseAuditBudgetMessage', () => {
     expect(msg).toContain('never a hand-rolled agent');
     expect(msg).toContain('compose floor');
     expect(msg).toContain('Do NOT re-verify findings already');
+    // The wait-bound and no-fresh-pass clauses the round-cap refusal's
+    // tail carries (and SKILL.md's budget-stop bullet documents) — the
+    // two refusals share one bounded-tail protocol, so both pin both.
+    expect(msg).toContain('stop waiting on any verifier batch still out');
+    expect(msg).toContain('invent a fresh re-verification pass');
   });
 
   it('says "the next round" when no round number was passed', () => {
@@ -439,6 +631,74 @@ describe('reverseAuditBudgetMessage', () => {
     );
     expect(msg).toContain('0 minute(s) remain');
     expect(msg).toContain('stopped before the next round');
+  });
+});
+
+describe('writeRoundCapStop — the round-cap marker', () => {
+  it('round-trips through readBudgetStop with cause and cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
+      expect(stop?.entry).toBe(roundCapStopEntry(3));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a cap marker from before the plan capture is a previous run — the guard still writes', () => {
+    // Mirror of the budget-stop fence test for the round-cap writer: run 1
+    // stops at the cap and is killed before cleanup; run 2 re-captures the
+    // plan and runs past the cap again. The first-refusal-wins guard must
+    // read through the stale file via the run-epoch fence — a raw
+    // existsSync check would make run 2's writeRoundCapStop a no-op, and
+    // compose-review would neither cap the verdict nor print the stop
+    // disclosure for an audit that stopped at the cap.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, 4, PLAN_CAPTURED_MS - 28_800_000); // 8h before capture
+      expect(readBudgetStop(plan)).toBeNull(); // fenced out as a previous run
+      writeRoundCapStop(plan, 3, 4, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop?.cause).toBe('round-cap');
+      expect(stop?.cap).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('disclosure names the cap in both languages', () => {
+    expect(roundCapStopDisclosure(3).reason).toContain(ROUND_CAP_PHRASE);
+    expect(roundCapStopDisclosure(3).reason).toContain('of 3');
+    expect(roundCapStopEntryZh(3)).toContain('3');
+  });
+
+  it('writes round as an explicit null when the caller passes undefined', () => {
+    // The chunkless call site (agent-prompt.ts) passes `round: undefined`; the
+    // `?? null` fallback must keep the key PRESENT with a null value, not let
+    // JSON.stringify drop it — a consumer that distinguishes null from an
+    // absent key would otherwise misread the marker.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-stop-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, '{}');
+      backdatePlan(plan);
+      writeRoundCapStop(plan, 3, undefined, NOW_MS);
+      const stop = readBudgetStop(plan);
+      expect(stop).not.toBeNull();
+      expect(stop && 'round' in stop).toBe(true);
+      expect(stop?.round).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

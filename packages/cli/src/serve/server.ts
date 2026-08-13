@@ -89,7 +89,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
-import { createHealthDemoRoutes } from './routes/health-demo.js';
+import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
@@ -98,8 +98,11 @@ import {
   registerWorkspaceQualifiedFileReadRoutes,
 } from './routes/workspace-file-read.js';
 import {
+  createUploadConcurrencyGate,
   registerWorkspaceFileWriteRoutes,
+  registerWorkspaceFileUploadRoutes,
   registerWorkspaceQualifiedFileWriteRoutes,
+  registerWorkspaceQualifiedFileUploadRoutes,
 } from './routes/workspace-file-write.js';
 import { registerWorkspaceSetupGithubRoutes } from './routes/workspace-setup-github.js';
 import {
@@ -293,6 +296,7 @@ export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
+  invalidateWorkspaceSessionListCache,
   listWorkspaceSessionsForResponse,
 } from './server/session-list.js';
 export type {
@@ -1006,9 +1010,12 @@ export function createServeApp(
       // that don't inject `deps.bridge` get daemon env + preflight cells.
       statusProvider,
       delegateReadTextFileToClient: false,
-      // Final ACP text writes remain delegated through WorkspaceFileSystem.
+      // Final ACP text writes remain delegated. Workspace writes use WFS;
+      // marked same-host tool writes may use the factory's host writer.
       // Unexpected delegated reads still fail closed at the WFS boundary.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+        allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+      }),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -1601,15 +1608,14 @@ export function createServeApp(
     workspaceQualifiedAcpEnabled,
   });
 
-  const healthDemoRoutes = createHealthDemoRoutes({
+  const healthRoutes = createHealthRoutes({
     opts,
-    getPort,
     workspaceRegistry,
     getActiveSseCount,
     getRateLimiter: () => rateLimiter,
   });
-  if (healthDemoRoutes.exposeHealthPreAuth) {
-    healthDemoRoutes.register(app);
+  if (healthRoutes.exposeHealthPreAuth) {
+    healthRoutes.register(app);
   }
 
   installAccessLogMiddleware(app, daemonLog);
@@ -1698,13 +1704,12 @@ export function createServeApp(
     app.use(rateLimiter.middleware);
   }
 
-  if (!healthDemoRoutes.exposeHealthPreAuth) {
+  if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
-    // the token. Otherwise unauthenticated callers can ping any
-    // reachable address:port to confirm a daemon exists (and `/demo`
-    // leaks the full API surface).
-    healthDemoRoutes.register(app);
+    // `/health` AFTER `bearerAuth` so probes must carry the token.
+    // Otherwise unauthenticated callers can ping any reachable
+    // address:port to confirm a daemon exists.
+    healthRoutes.register(app);
   }
 
   installJsonBodyParser(app);
@@ -2076,6 +2081,27 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    workspaceRegistry,
+  });
+  // One shared four-slot gate bounds upload-body buffering across both the
+  // legacy and workspace-qualified upload routes.
+  const uploadGate = createUploadConcurrencyGate();
+  registerWorkspaceFileUploadRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    uploadGate,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+  });
+  registerWorkspaceQualifiedFileUploadRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    uploadGate,
     workspaceRegistry,
   });
   registerWorkspaceSetupGithubRoutes(app, {

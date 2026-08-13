@@ -593,6 +593,7 @@ describe('ShellTool', () => {
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
           path: expectedSedFilePath,
           content: 'bar bar\n',
+          toolWriteOrigin: 'shell_sed_edit',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
         expect(result.llmContent).toContain('sed edit applied');
@@ -715,6 +716,7 @@ describe('ShellTool', () => {
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
           path: expectedSedFilePath,
           content: 'bar\n',
+          toolWriteOrigin: 'shell_sed_edit',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
         expect(result.llmContent).toContain('sed edit applied');
@@ -788,6 +790,7 @@ describe('ShellTool', () => {
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
           path: expectedSedFilePath,
           content: 'baz\n',
+          toolWriteOrigin: 'shell_sed_edit',
           _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
         });
         expect(result.llmContent).toContain('sed edit applied');

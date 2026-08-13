@@ -35,6 +35,7 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
   BranchSessionRequest,
   DaemonBranchedSession,
   DaemonSideTaskSession,
@@ -72,6 +73,8 @@ import type {
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
   DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileUploadRequest,
+  DaemonWorkspaceFileUploadResult,
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceAgentDetail,
@@ -152,6 +155,7 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -1899,6 +1903,177 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Upload binary bytes to the workspace. Shared raw-POST core used by both
+   * the legacy-primary `uploadWorkspaceFile` and the workspace-qualified
+   * variant, parameterized by URL path + route label. Keeps auth headers,
+   * timeout/abort composition, progress transport, and `DaemonHttpError`
+   * construction in one place.
+   *
+   * Uses `XMLHttpRequest` when `req.onProgress` is provided (`fetch` exposes
+   * no upload progress); plain `fetch` otherwise. Progress is browser-only:
+   * requesting it where `XMLHttpRequest` is unavailable fails before sending.
+   *
+   * @internal
+   */
+  async uploadFileToPath(
+    uploadPath: string,
+    label: string,
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    const target = new URL(`${this.baseUrl}${uploadPath}`);
+    target.searchParams.set('path', req.path);
+    const url = target.toString();
+    const headers = this.headers(
+      { 'Content-Type': 'application/octet-stream' },
+      clientId,
+    );
+    if (req.onProgress) {
+      return await this.uploadWithProgress(url, label, req, headers);
+    }
+    return await this.fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers,
+        body: req.data,
+        ...(req.signal ? { signal: req.signal } : {}),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, label);
+        const text = await res.text();
+        let body: unknown;
+        try {
+          body = text ? JSON.parse(text) : undefined;
+        } catch {
+          body = text;
+        }
+        // Match the XHR path's parse-then-shape-check so the two transports
+        // fail identically on malformed 2xx bodies.
+        if (!body || typeof body !== 'object' || !('path' in body)) {
+          throw new Error(`${label}: invalid upload response body`);
+        }
+        return body as DaemonWorkspaceFileUploadResult;
+      },
+      req.timeoutMs,
+      'rest',
+    );
+  }
+
+  private async uploadWithProgress(
+    url: string,
+    label: string,
+    req: DaemonWorkspaceFileUploadRequest,
+    headers: Record<string, string>,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    if (typeof XMLHttpRequest === 'undefined') {
+      throw new Error(
+        `${label}: upload progress requires XMLHttpRequest (browser only)`,
+      );
+    }
+    let effectiveTimeoutMs = this.fetchTimeoutMs;
+    if (
+      req.timeoutMs !== undefined &&
+      Number.isFinite(req.timeoutMs) &&
+      req.timeoutMs >= 0
+    ) {
+      effectiveTimeoutMs = req.timeoutMs;
+    }
+    const onProgress = req.onProgress;
+    return await new Promise<DaemonWorkspaceFileUploadResult>(
+      (resolve, reject) => {
+        if (req.signal?.aborted) {
+          reject(
+            req.signal.reason ??
+              new DOMException('The operation was aborted.', 'AbortError'),
+          );
+          return;
+        }
+        const xhr = new XMLHttpRequest();
+        let abortListener: (() => void) | undefined;
+        // Detach the abort listener once the request settles so a long-lived
+        // signal does not retain a reference to this XHR after completion.
+        const cleanup = () => {
+          if (abortListener && req.signal) {
+            req.signal.removeEventListener('abort', abortListener);
+          }
+        };
+        xhr.open('POST', url);
+        for (const [name, value] of Object.entries(headers)) {
+          xhr.setRequestHeader(name, value);
+        }
+        if (effectiveTimeoutMs > 0) xhr.timeout = effectiveTimeoutMs;
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) {
+            onProgress({ loaded: event.loaded, total: event.total });
+          }
+        };
+        xhr.onload = () => {
+          cleanup();
+          let body: unknown;
+          try {
+            body = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
+          } catch {
+            body = xhr.responseText;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            // The fetch path rejects non-JSON 2xx bodies (`res.json()`
+            // throws); match it so the two transports fail identically.
+            if (!body || typeof body !== 'object' || !('path' in body)) {
+              reject(new Error(`${label}: invalid upload response body`));
+              return;
+            }
+            resolve(body as DaemonWorkspaceFileUploadResult);
+            return;
+          }
+          const detail =
+            body && typeof body === 'object' && 'error' in body
+              ? String((body as { error: unknown }).error)
+              : `HTTP ${xhr.status}`;
+          reject(new DaemonHttpError(xhr.status, body, `${label}: ${detail}`));
+        };
+        xhr.onerror = () => {
+          cleanup();
+          reject(new Error(`${label}: network request failed`));
+        };
+        xhr.ontimeout = () => {
+          cleanup();
+          reject(new DOMException('timeout', 'TimeoutError'));
+        };
+        xhr.onabort = () => {
+          cleanup();
+          reject(
+            req.signal?.reason ??
+              new DOMException('The operation was aborted.', 'AbortError'),
+          );
+        };
+        if (req.signal) {
+          abortListener = () => xhr.abort();
+          req.signal.addEventListener('abort', abortListener, { once: true });
+        }
+        try {
+          xhr.send(req.data as XMLHttpRequestBodyInit);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      },
+    );
+  }
+
+  async uploadWorkspaceFile(
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    return await this.uploadFileToPath(
+      '/file/upload',
+      'POST /file/upload',
+      req,
+      clientId,
+    );
+  }
+
   // -- Workspace memory (workspace memory/agents) ------------------------------
 
   /**
@@ -2531,24 +2706,24 @@ export class DaemonClient {
 
   async resolveSubagentSession(
     sessionId: string,
-    toolCallId: string,
+    subagentRef: string,
     clientId?: string,
   ): Promise<DaemonSubagentSessionResolution> {
     return await this.jsonRequest<DaemonSubagentSessionResolution>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}`,
-      'GET /session/:id/subagents/:toolCallId',
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}`,
+      'GET /session/:id/subagents/:subagentRef',
       { clientId, mode: 'rest' },
     );
   }
 
   async cancelSubagentSession(
     sessionId: string,
-    toolCallId: string,
+    subagentRef: string,
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
     return await this.jsonRequest<{ cancelled: boolean }>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}/cancel`,
-      'POST /session/:id/subagents/:toolCallId/cancel',
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/cancel`,
+      'POST /session/:id/subagents/:subagentRef/cancel',
       { clientId, mode: 'rest', method: 'POST' },
     );
   }
@@ -3038,18 +3213,18 @@ export class DaemonClient {
   /**
    * Queue a user message typed while the session's turn is still running. The
    * ACP child drains it between tool batches so the model sees it before the
-   * turn ends. Resolves `{ accepted: false }` when the session is idle — the
-   * caller should then send the message as a normal next-turn prompt.
+   * turn ends. Every accepted request is daemon-owned; a caller-supplied id
+   * makes ambiguous retries idempotent.
    */
   async enqueueMidTurnMessage(
     sessionId: string,
     message: string,
-    opts?: { signal?: AbortSignal; clientId?: string },
+    opts?: { signal?: AbortSignal; clientId?: string; messageId?: string },
   ): Promise<DaemonMidTurnMessageResult> {
     // Route through `fetchWithTimeout` like every other method so a hung daemon
     // can't wedge this promise forever (the caller in `actions.ts` awaits it).
-    // The helper composes any caller `signal` (the turn-scoped abort) WITH its
-    // timeout controller, so the mid-turn-settle abort still propagates.
+    // The helper composes any caller signal with its timeout controller. Legacy
+    // callers use this to cancel a push when the active turn settles.
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-message`,
       {
@@ -3058,7 +3233,7 @@ export class DaemonClient {
           { 'Content-Type': 'application/json' },
           opts?.clientId,
         ),
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, messageId: opts?.messageId }),
         signal: opts?.signal,
       },
       async (res) => {
@@ -3092,6 +3267,37 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonRemoveMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot for a session: messages still
+   * waiting in the daemon queue plus bounded terminal id rings.
+   * Callers reconcile against this
+   * instead of resending accepted messages at the idle boundary. Only available
+   * when the daemon advertises `session_mid_turn_message_query` — older
+   * daemons answer 404 and callers keep the legacy behavior.
+   */
+  async getMidTurnMessages(
+    sessionId: string,
+    opts?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<DaemonMidTurnMessagesResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+        signal: opts?.signal,
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/mid-turn-messages',
+          );
+        }
+        return (await res.json()) as DaemonMidTurnMessagesResult;
       },
     );
   }
@@ -4174,6 +4380,19 @@ export class DaemonClient {
         }
         return (await res.json()) as SetModelResult;
       },
+    );
+  }
+
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort',
+    value: string,
+    clientId?: string,
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+      `/session/${urlEncode(sessionId)}/config-option`,
+      'POST /session/:id/config-option',
+      { method: 'POST', body: { configId, value }, clientId },
     );
   }
 
@@ -5857,6 +6076,18 @@ export class WorkspaceDaemonClient {
     return this.post(
       '/file/edit',
       'POST /workspaces/:workspace/file/edit',
+      req,
+      clientId,
+    );
+  }
+
+  uploadWorkspaceFile(
+    req: DaemonWorkspaceFileUploadRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileUploadResult> {
+    return this.client.uploadFileToPath(
+      `/workspaces/${this.workspaceSelector}/file/upload`,
+      'POST /workspaces/:workspace/file/upload',
       req,
       clientId,
     );

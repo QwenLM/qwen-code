@@ -9,9 +9,17 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { ReactNode, RefObject } from 'react';
+import type {
+  ReactNode,
+  RefObject,
+  DragEvent as ReactDragEvent,
+  ChangeEvent as ReactChangeEvent,
+} from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  DAEMON_APPROVAL_MODES,
+  useOptionalWorkspace,
+} from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
 import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/webui/daemon-react-sdk';
 import type {
@@ -21,6 +29,7 @@ import type {
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
+import type { DaemonReasoningControls } from '@qwen-code/webui/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
 import { SpecularComposerEffect } from './SpecularComposerEffect';
@@ -42,6 +51,8 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
+import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
+import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import {
   getComposerTagIconUrl,
@@ -51,6 +62,9 @@ import { isSafeImageSrc } from './messages/Markdown';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
+import { getContextUsageLevel } from '../utils/contextUsage';
+import { formatContextUsageDetail } from '../utils/formatTokenCount';
+import { normalizeImageMediaType } from '../utils/imageIngestion';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -65,7 +79,14 @@ import {
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
-import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FolderClosedIcon,
+  LoaderCircleIcon,
+  UploadIcon,
+  XIcon,
+} from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
@@ -74,6 +95,7 @@ import {
   PopoverTrigger,
 } from './ui/popover';
 import { Input } from './ui/input';
+import { Switch } from './ui/switch';
 import {
   Tooltip,
   TooltipContent,
@@ -91,6 +113,7 @@ import styles from './ChatEditor.module.css';
 
 export type ComposerToolbarAction =
   | 'approvalMode'
+  | 'contextUsage'
   | 'gitBranch'
   | 'model'
   | 'commands'
@@ -99,8 +122,26 @@ export type ComposerToolbarAction =
   | 'voice'
   | 'workspace';
 
+// Dropped folders surface in `dataTransfer.files` as 0-byte Files; only the
+// items API can tell them apart, and folder uploads are out of scope.
+function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
+  const items = dataTransfer.items;
+  if (!items || items.length === 0) {
+    return Array.from(dataTransfer.files);
+  }
+  const files: File[] = [];
+  for (const item of Array.from(items)) {
+    if (item.kind !== 'file') continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
+}
+
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'contextUsage',
   'gitBranch',
   'model',
   'widthMode',
@@ -167,9 +208,16 @@ interface ChatEditorProps {
   showChatWidthToggle?: boolean;
   chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
+  /** Current context-window occupancy for the `contextUsage` toolbar ring. */
+  tokenCount?: number;
+  contextWindow?: number;
+  /** Show the context-usage breakdown, exactly like typing /context. */
+  onShowContextUsage?: () => void;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  reasoning?: DaemonReasoningControls;
+  onSelectReasoningEffort?: (value: string) => Promise<void> | void;
   workspaces?: Array<{
     id: string;
     cwd: string;
@@ -201,6 +249,9 @@ interface ChatEditorProps {
   composerTagIcons?: WebShellComposerTagIconMap;
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /** Click a pasted image in the composer to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -498,6 +549,46 @@ function WidthModeIcon({ mode }: { mode: '1000' | 'wide' }) {
   );
 }
 
+const CONTEXT_RING_RADIUS = 6;
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
+
+// The arc is visually capped at 100%; the numeric label keeps reporting
+// real overflow.
+function ContextUsageRing({ pct }: { pct: number }) {
+  const capped = Math.min(pct, 100);
+  const level = getContextUsageLevel(pct);
+  const valueClass =
+    level === 'error'
+      ? `${styles.contextRingValue} ${styles.contextRingValueError}`
+      : level === 'warning'
+        ? `${styles.contextRingValue} ${styles.contextRingValueWarning}`
+        : styles.contextRingValue;
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle
+        cx="8"
+        cy="8"
+        r={CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+        className={styles.contextRingTrack}
+      />
+      <circle
+        cx="8"
+        cy="8"
+        r={CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeDasharray={CONTEXT_RING_CIRCUMFERENCE}
+        strokeDashoffset={CONTEXT_RING_CIRCUMFERENCE * (1 - capped / 100)}
+        transform="rotate(-90 8 8)"
+        className={valueClass}
+      />
+    </svg>
+  );
+}
+
 function ModelIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -652,6 +743,8 @@ function ToolbarPopover({
   searchable = false,
   searchLabel,
   noResultsLabel,
+  header,
+  submenu,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -664,13 +757,23 @@ function ToolbarPopover({
   searchable?: boolean;
   searchLabel?: string;
   noResultsLabel?: (query: string) => string;
+  header?: ReactNode;
+  submenu?: {
+    triggerLabel: string;
+    triggerAriaLabel: string;
+    sectionLabel: string;
+  };
 }) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [submenuOpen, setSubmenuOpen] = useState(false);
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
   const handoffRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const submenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const returningFromSubmenuRef = useRef(false);
   const hasRichItems = items.some((item) => item.description || item.icon);
   const visibleItems = searchable
     ? filterToolbarDropdownItems(items, searchQuery)
@@ -679,10 +782,97 @@ function ToolbarPopover({
   useEffect(() => {
     if (!open) {
       setSearchQuery('');
+      setSubmenuOpen(false);
+      returningFromSubmenuRef.current = false;
     }
   }, [open]);
 
+  useEffect(() => {
+    if (open && submenuOpen) {
+      searchInputRef.current?.focus();
+      return;
+    }
+    if (open && returningFromSubmenuRef.current) {
+      returningFromSubmenuRef.current = false;
+      submenuTriggerRef.current?.focus();
+    }
+  }, [open, submenuOpen]);
+
   const hasCheckItems = hasRichItems || showCheck;
+  const dropdownItems = (
+    <div
+      className={`${styles.dropdownList} ${
+        hasRichItems
+          ? styles.dropdownRich
+          : showCheck
+            ? styles.dropdownCheck
+            : ''
+      } ${searchable ? styles.dropdownListConstrained : ''}`}
+    >
+      {visibleItems.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`${styles.dropdownItem} ${
+            item.id === activeId ? styles.dropdownItemActive : ''
+          }`}
+          title={item.label}
+          onClick={() => {
+            selectionRef.current = true;
+            onSelect(item.id);
+          }}
+        >
+          {hasCheckItems ? (
+            <>
+              {hasRichItems && (
+                <span className={styles.dropdownItemIcon}>{item.icon}</span>
+              )}
+              <span className={styles.dropdownItemContent}>
+                <span className={styles.dropdownItemLabel}>{item.label}</span>
+                {item.description && (
+                  <span className={styles.dropdownItemDesc}>
+                    {item.description}
+                  </span>
+                )}
+              </span>
+              <span className={styles.dropdownItemCheck}>
+                {item.id === activeId ? <CheckIcon /> : null}
+              </span>
+            </>
+          ) : (
+            item.label
+          )}
+        </button>
+      ))}
+      {visibleItems.length === 0 && noResultsLabel && (
+        <div className={styles.dropdownEmpty} role="status">
+          {noResultsLabel(searchQuery)}
+        </div>
+      )}
+    </div>
+  );
+  const searchableItems = (
+    <>
+      {searchable && (
+        <Input
+          ref={searchInputRef}
+          type="search"
+          value={searchQuery}
+          aria-label={searchLabel}
+          placeholder={searchLabel}
+          autoComplete="off"
+          onChange={(event) => setSearchQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
+            event.preventDefault();
+            returningFromSubmenuRef.current = true;
+            setSubmenuOpen(false);
+          }}
+        />
+      )}
+      {dropdownItems}
+    </>
+  );
 
   return (
     <Popover
@@ -721,7 +911,13 @@ function ToolbarPopover({
         collisionPadding={8}
         collisionBoundary={collisionBoundary ?? undefined}
         data-web-shell-toolbar-popover
+        data-web-shell-reasoning-popover={submenu ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
+        onOpenAutoFocus={(event) => {
+          if (!submenu) return;
+          event.preventDefault();
+          submenuTriggerRef.current?.focus();
+        }}
         onPointerDownOutside={(event) => {
           const target = event.target;
           if (
@@ -749,70 +945,127 @@ function ToolbarPopover({
           selectionRef.current = false;
         }}
       >
-        {searchable && (
-          <Input
-            type="search"
-            value={searchQuery}
-            aria-label={searchLabel}
-            placeholder={searchLabel}
-            autoComplete="off"
-            onChange={(event) => setSearchQuery(event.target.value)}
-          />
-        )}
-        <div
-          className={`${styles.dropdownList} ${
-            hasRichItems
-              ? styles.dropdownRich
-              : showCheck
-                ? styles.dropdownCheck
-                : ''
-          } ${searchable ? styles.dropdownListConstrained : ''}`}
-        >
-          {visibleItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`${styles.dropdownItem} ${
-                item.id === activeId ? styles.dropdownItemActive : ''
-              }`}
-              title={item.label}
-              onClick={() => {
-                selectionRef.current = true;
-                onSelect(item.id);
-              }}
-            >
-              {hasCheckItems ? (
-                <>
-                  {hasRichItems && (
-                    <span className={styles.dropdownItemIcon}>{item.icon}</span>
-                  )}
-                  <span className={styles.dropdownItemContent}>
-                    <span className={styles.dropdownItemLabel}>
-                      {item.label}
+        {submenu ? (
+          <>
+            {header}
+            <div className={styles.dropdownSubmenuSection}>
+              <div className={styles.reasoningSectionTitle}>
+                {submenu.sectionLabel}
+              </div>
+              <Popover
+                open={submenuOpen}
+                onOpenChange={(nextOpen) => {
+                  setSubmenuOpen(nextOpen);
+                  if (!nextOpen) setSearchQuery('');
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    ref={submenuTriggerRef}
+                    className={`${styles.dropdownItem} ${styles.dropdownSubmenuTrigger}`}
+                    data-web-shell-model-submenu-trigger
+                    aria-haspopup="dialog"
+                    aria-expanded={submenuOpen}
+                    aria-label={submenu.triggerAriaLabel}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'ArrowRight') return;
+                      event.preventDefault();
+                      setSubmenuOpen(true);
+                    }}
+                  >
+                    <span title={submenu.triggerLabel}>
+                      {submenu.triggerLabel}
                     </span>
-                    {item.description && (
-                      <span className={styles.dropdownItemDesc}>
-                        {item.description}
-                      </span>
-                    )}
-                  </span>
-                  <span className={styles.dropdownItemCheck}>
-                    {item.id === activeId ? <CheckIcon /> : null}
-                  </span>
-                </>
-              ) : (
-                item.label
-              )}
-            </button>
-          ))}
-          {visibleItems.length === 0 && noResultsLabel && (
-            <div className={styles.dropdownEmpty} role="status">
-              {noResultsLabel(searchQuery)}
+                    <ChevronRightIcon aria-hidden="true" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  side="right"
+                  align="end"
+                  alignOffset={-10}
+                  sideOffset={15}
+                  collisionPadding={8}
+                  collisionBoundary={collisionBoundary ?? undefined}
+                  data-web-shell-toolbar-popover
+                  data-web-shell-model-submenu
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </PopoverContent>
+              </Popover>
             </div>
-          )}
-        </div>
+          </>
+        ) : (
+          <>
+            {header}
+            {searchableItems}
+          </>
+        )}
       </PopoverContent>
     </Popover>
+  );
+}
+
+function ModelReasoningControls({
+  reasoning,
+  onSelect,
+}: {
+  reasoning: DaemonReasoningControls;
+  onSelect: (value: string) => Promise<void> | void;
+}) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const select = async (value: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await onSelect(value);
+    } catch {
+      // The owning surface reports action errors.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={styles.reasoningOptions} data-web-shell-model-reasoning>
+      <div className={styles.reasoningSectionTitle}>
+        {t('reasoning.options')}
+      </div>
+      <div className={styles.reasoningThinkingRow}>
+        <span>{t('reasoning.thinking')}</span>
+        <Switch
+          checked={reasoning.enabled}
+          disabled={busy}
+          aria-label={t('reasoning.thinking')}
+          data-web-shell-thinking-toggle
+          onCheckedChange={(enabled) =>
+            void select(enabled ? reasoning.effort : 'none')
+          }
+        />
+      </div>
+      <div className={styles.reasoningDivider} />
+      <div className={styles.reasoningSectionTitle}>
+        {t('reasoning.effort')}
+      </div>
+      {reasoning.efforts.map((effort) => (
+        <button
+          key={effort}
+          type="button"
+          className={styles.reasoningEffortRow}
+          aria-pressed={reasoning.effort === effort}
+          data-web-shell-effort={effort}
+          disabled={!reasoning.enabled || busy}
+          onClick={() => void select(effort)}
+        >
+          <span>{t(`reasoning.effort.${effort}`)}</span>
+          <span className={styles.dropdownItemCheck}>
+            {reasoning.effort === effort ? <CheckIcon /> : null}
+          </span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1175,9 +1428,14 @@ export const ChatEditor = memo(
       showChatWidthToggle = true,
       chatWidthToggleMin,
       visibleToolbarActions,
+      tokenCount = 0,
+      contextWindow = 0,
+      onShowContextUsage,
       availableModels = [],
       onSelectMode,
       onSelectModel,
+      reasoning,
+      onSelectReasoningEffort,
       workspaces,
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
@@ -1203,6 +1461,8 @@ export const ChatEditor = memo(
       composerTagIcons,
       voiceTarget,
       voiceStatusRevision,
+      onImageIngestionNotice,
+      onImagePreview,
     } = props;
 
     const {
@@ -1213,7 +1473,90 @@ export const ChatEditor = memo(
       renderComposerTagTooltip,
       onComposerTagClick,
       parseUserMessageContent,
+      fileUploadEnabled,
     } = useWebShellCustomization();
+
+    // File-upload picker. The @ panel's "Upload file" item reports the browsed
+    // directory; we click a hidden <input type="file"> so the browser treats it
+    // as part of the user gesture, then upload into that directory.
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const uploadPickerTargetRef = useRef('.');
+    const uploadPickerTargetKeyRef = useRef('');
+    const uploadPickerRestoreRef = useRef<(() => void) | undefined>(undefined);
+
+    // Resolve the upload target BEFORE useComposerCore so the @ panel's upload
+    // item can be capability-gated (hidden on daemons without the feature).
+    const uploadWorkspace = useOptionalWorkspace();
+    const uploadTarget = useMemo(() => {
+      if (!uploadWorkspace) return undefined;
+      // The host prop can force-disable upload even when the daemon advertises
+      // the capability; it does NOT bypass the capability check. Both must
+      // allow: `fileUploadEnabled === false` short-circuits, otherwise the
+      // `workspace_file_upload` capability is still required.
+      if (fileUploadEnabled === false) return undefined;
+      const features = uploadWorkspace.capabilities?.features ?? [];
+      if (!features.includes('workspace_file_upload')) return undefined;
+      if (atWorkspaceCwd) {
+        if (!features.includes('workspace_qualified_rest_core'))
+          return undefined;
+        // The selected workspace must be present exactly once and trusted.
+        const matches = (uploadWorkspace.capabilities?.workspaces ?? []).filter(
+          (w) => w.cwd === atWorkspaceCwd,
+        );
+        if (matches.length !== 1 || matches[0].trusted === false)
+          return undefined;
+        return {
+          client: uploadWorkspace.client.workspaceByCwd(atWorkspaceCwd),
+          targetKey: atWorkspaceCwd,
+        };
+      }
+      const primaryMatches = (
+        uploadWorkspace.capabilities?.workspaces ?? []
+      ).filter((workspace) => workspace.primary);
+      if (primaryMatches.length !== 1 || primaryMatches[0].trusted !== true)
+        return undefined;
+      return { client: uploadWorkspace.client, targetKey: '<primary>' };
+    }, [uploadWorkspace, atWorkspaceCwd, fileUploadEnabled]);
+    const uploadEnabled = uploadTarget !== undefined;
+    const maxUploadBytes =
+      uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
+      50 * 1024 * 1024;
+    const uploadTargetKey = `${sessionId ?? '<no-session>'}:${
+      uploadTarget?.targetKey ?? '<none>'
+    }`;
+
+    // -- File upload ----------------------------------------------------------
+    // The hook's cancel/reset granularity includes the session: ChatEditor is
+    // shared across sessions (a switch swaps the doc in the same EditorView),
+    // so an upload that survives a same-workspace session switch would append
+    // its @file reference to the other session's draft.
+    const fileUpload = useFileUpload({
+      client: uploadTarget?.client,
+      maxBytes: maxUploadBytes,
+      targetKey: uploadTargetKey,
+    });
+
+    const triggerFilePicker = useCallback(
+      (targetDir: string, restoreQuery?: () => void) => {
+        uploadPickerTargetRef.current = targetDir;
+        uploadPickerTargetKeyRef.current = uploadTargetKey;
+        uploadPickerRestoreRef.current = restoreQuery;
+        fileInputRef.current?.click();
+      },
+      [uploadTargetKey],
+    );
+
+    // A pending picker restore belongs to the CURRENT target's draft. Flush
+    // it before a target change (session switch, capability flip) persists or
+    // replaces the doc: afterwards the editor holds another draft, and the
+    // layout effect runs before the composer's passive session-swap effect
+    // saves the outgoing draft. Also covers the picker being torn down while
+    // the OS dialog is open — no cancel/change event will ever arrive.
+    useLayoutEffect(() => {
+      const restore = uploadPickerRestoreRef.current;
+      uploadPickerRestoreRef.current = undefined;
+      restore?.();
+    }, [uploadTargetKey]);
 
     const core = useComposerCore({
       onSubmit,
@@ -1245,12 +1588,210 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      onImageIngestionNotice,
+      onFileUploadRequest: uploadEnabled ? triggerFilePicker : undefined,
+      workspaceUploadBusy: fileUpload.isBusy,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
     const { t } = useI18n();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
+
+    const addComposerTags = core.addTags;
+    const clearImageDragState = core.clearImageDragState;
+    const insertUploadReference = useCallback(
+      (path: string) => {
+        const serialized = fileReferenceInsertText(path).trim();
+        addComposerTags(
+          [
+            {
+              id: `file:${serialized}`,
+              kind: 'file',
+              value: path,
+              serialized,
+            },
+          ],
+          { placement: 'inline', position: 'end' },
+        );
+      },
+      [addComposerTags],
+    );
+    const uploadStatusText = (upload: FileUploadItem): string => {
+      switch (upload.status) {
+        case 'pending':
+          return t('composer.upload.pending');
+        case 'uploading':
+          return `${t('composer.upload.uploading')} ${Math.round(
+            upload.progress * 100,
+          )}%`;
+        case 'done':
+          return upload.resultPath !== undefined &&
+            upload.resultPath !== upload.targetPath
+            ? `${t('composer.upload.renamed')} ${upload.resultPath}`
+            : t('composer.upload.done');
+        case 'error':
+          return (
+            upload.error ??
+            (upload.errorCode === 'tooLarge'
+              ? t('composer.upload.error.tooLarge', {
+                  limit: `${Math.round(maxUploadBytes / (1024 * 1024))} MiB`,
+                })
+              : upload.errorCode === 'noDaemon'
+                ? t('composer.upload.error.noDaemon')
+                : upload.errorCode === 'tooManyFiles'
+                  ? t('composer.upload.error.tooManyFiles', {
+                      count: upload.skippedCount ?? 0,
+                    })
+                  : t('composer.upload.error'))
+          );
+      }
+    };
+    const [uploadDragActive, setUploadDragActive] = useState(false);
+    const uploadDragDepthRef = useRef(0);
+    const handleUploadDragEnter = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (
+          !uploadEnabled ||
+          disabled ||
+          !event.dataTransfer.types.includes('Files')
+        )
+          return;
+        event.preventDefault();
+        uploadDragDepthRef.current += 1;
+        setUploadDragActive(true);
+      },
+      [uploadEnabled, disabled],
+    );
+    const handleUploadDragOver = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (
+          !uploadEnabled ||
+          disabled ||
+          !event.dataTransfer.types.includes('Files')
+        )
+          return;
+        event.preventDefault();
+      },
+      [uploadEnabled, disabled],
+    );
+    const handleUploadDragLeave = useCallback(() => {
+      if (uploadDragDepthRef.current === 0) return;
+      uploadDragDepthRef.current = Math.max(0, uploadDragDepthRef.current - 1);
+      if (uploadDragDepthRef.current === 0) setUploadDragActive(false);
+    }, []);
+    const clearUploadDragState = useCallback(() => {
+      uploadDragDepthRef.current = 0;
+      setUploadDragActive(false);
+    }, []);
+    // Shell regions outside the drop-handling surface (e.g. the upload
+    // strip) must still cancel file drags; an uncancelled drop navigates
+    // the tab to the file, tearing down the SPA mid-turn.
+    const cancelShellFileDrag = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (event.dataTransfer.types.includes('Files')) event.preventDefault();
+      },
+      [],
+    );
+    // `uploadFiles` is a stable callback from the hook; depend on it (not the
+    // freshly-created `fileUpload` object) so these handlers are not rebuilt
+    // on every render.
+    const uploadFiles = fileUpload.uploadFiles;
+    const handleUploadDrop = useCallback(
+      (event: ReactDragEvent<HTMLDivElement>) => {
+        if (!event.dataTransfer.types.includes('Files')) {
+          core.imageTransferHandlers.onDropCapture(event);
+          return;
+        }
+        const files = collectDroppedFiles(event.dataTransfer);
+        uploadDragDepthRef.current = 0;
+        setUploadDragActive(false);
+        if (disabled) {
+          // Cancel the drop itself; otherwise the browser navigates the tab
+          // to the dropped file, tearing down the Web Shell SPA mid-turn.
+          event.preventDefault();
+          return;
+        }
+        if (
+          !uploadEnabled ||
+          files.length === 0 ||
+          files.every((file) => normalizeImageMediaType(file.type, file.name))
+        ) {
+          core.imageTransferHandlers.onDropCapture(event);
+          return;
+        }
+        clearImageDragState();
+        event.preventDefault();
+        event.stopPropagation();
+        uploadFiles(files, '.', insertUploadReference);
+      },
+      [
+        core.imageTransferHandlers,
+        clearImageDragState,
+        disabled,
+        uploadEnabled,
+        uploadFiles,
+        insertUploadReference,
+      ],
+    );
+    const handleUploadPickerChange = useCallback(
+      (event: ReactChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(event.target.files ?? []);
+        const targetDir = uploadPickerTargetRef.current;
+        const capturedKey = uploadPickerTargetKeyRef.current;
+        const restore = uploadPickerRestoreRef.current;
+        uploadPickerRestoreRef.current = undefined;
+        event.target.value = '';
+        // Only upload if the target workspace is unchanged since the picker
+        // opened; otherwise a stale directory path would land in the newly
+        // selected workspace (the hook's generation cancel only clears items
+        // already queued, not this fresh call).
+        if (
+          files.length > 0 &&
+          capturedKey !== '' &&
+          capturedKey === uploadTargetKey
+        ) {
+          const queued = uploadFiles(files, targetDir, insertUploadReference);
+          if (queued === 0) {
+            // Every chosen file was rejected locally (e.g. all oversized):
+            // the picker closed without any upload, so give the query back.
+            restore?.();
+          }
+        } else {
+          // The @ panel deleted the mention query before opening the picker.
+          // A blocked or empty selection must give it back, like the native
+          // cancel path does, instead of silently eating the typed text.
+          restore?.();
+        }
+      },
+      [uploadFiles, insertUploadReference, uploadTargetKey],
+    );
+    useEffect(() => {
+      // React only wires `cancel` on <dialog>; the file input needs a native
+      // listener. `cancel` does not bubble, so delegation cannot see it.
+      const input = fileInputRef.current;
+      if (!uploadEnabled || !input) return;
+      const onCancel = () => {
+        const restore = uploadPickerRestoreRef.current;
+        uploadPickerRestoreRef.current = undefined;
+        restore?.();
+      };
+      input.addEventListener('cancel', onCancel);
+      return () => input.removeEventListener('cancel', onCancel);
+    }, [uploadEnabled]);
+
+    useEffect(() => {
+      if (!uploadDragActive) return;
+      window.addEventListener('dragend', clearUploadDragState);
+      window.addEventListener('blur', clearUploadDragState);
+      return () => {
+        window.removeEventListener('dragend', clearUploadDragState);
+        window.removeEventListener('blur', clearUploadDragState);
+      };
+    }, [clearUploadDragState, uploadDragActive]);
+    useEffect(() => {
+      if (disabled) clearUploadDragState();
+    }, [clearUploadDragState, disabled]);
 
     useEffect(() => {
       onAttachmentsChange?.(core.hasAttachments);
@@ -1658,6 +2199,18 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
+    const showReasoningOptions = Boolean(reasoning && onSelectReasoningEffort);
+    const reasoningEffortLabel = reasoning
+      ? t(`reasoning.effort.${reasoning.effort}`)
+      : '';
+    const modelChipLabel = showReasoningOptions
+      ? `${modelLabel} · ${
+          reasoning?.enabled ? reasoningEffortLabel : t('reasoning.thinkingOff')
+        }`
+      : modelLabel;
+    const normalizedModelChipLabel = modelChipLabel.endsWith(' · ')
+      ? modelLabel
+      : modelChipLabel;
     const selectedWorkspace = workspaces?.find((entry) =>
       selectedWorkspaceCwd ? entry.cwd === selectedWorkspaceCwd : entry.primary,
     );
@@ -1688,6 +2241,7 @@ export const ChatEditor = memo(
     const showModeLabel = toolbarLabelVisibility.mode;
     const showModelLabel = toolbarLabelVisibility.model;
     const showCancelButton = isRunning && !core.hasContent;
+    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
     const mobileVoiceActive = showQuickActions && voiceActive;
 
     useEffect(() => {
@@ -1853,9 +2407,9 @@ export const ChatEditor = memo(
       gitBranch,
       gitBranchVisible,
       isRunning,
-      modelLabel,
       modelLabelReady,
       modeLabel,
+      normalizedModelChipLabel,
       sessionName,
       showModelAction,
       showModeAction,
@@ -1875,12 +2429,80 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        onDragOver={cancelShellFileDrag}
+        onDrop={cancelShellFileDrag}
       >
+        {fileUpload.uploads.length > 0 && (
+          <div className={styles.uploadStrip} data-web-shell-upload-strip>
+            {/* One live region per strip, fed only by terminal transitions:
+                per-row regions would announce every >=2% progress tick. */}
+            <div className={styles.srOnly} role="status" aria-live="polite">
+              {fileUpload.uploads
+                .filter(
+                  (upload) =>
+                    upload.status === 'done' || upload.status === 'error',
+                )
+                .map(
+                  (upload) =>
+                    `${upload.file.name}: ${uploadStatusText(upload)}`,
+                )
+                .join(' \u2014 ')}
+            </div>
+            {fileUpload.uploads.map((upload) => {
+              const busy =
+                upload.status === 'pending' || upload.status === 'uploading';
+              return (
+                <div
+                  key={upload.id}
+                  className={styles.uploadRow}
+                  data-status={upload.status}
+                >
+                  {busy ? (
+                    <LoaderCircleIcon
+                      className={styles.uploadRowSpinner}
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <UploadIcon aria-hidden="true" />
+                  )}
+                  <span className={styles.uploadRowName}>
+                    {upload.file.name}
+                  </span>
+                  <span className={styles.uploadRowStatus}>
+                    {uploadStatusText(upload)}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.uploadRowAction}
+                    aria-label={
+                      busy
+                        ? t('composer.upload.cancel')
+                        : t('composer.upload.dismiss')
+                    }
+                    onClick={() => fileUpload.removeUpload(upload.id)}
+                  >
+                    <XIcon aria-hidden="true" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <div
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
+          data-upload-drag-active={uploadDragActive || undefined}
           data-typewriter-visible={showTypewriterPlaceholder || undefined}
+          data-image-drag-active={
+            (core.imageDragActive && !uploadDragActive) || undefined
+          }
+          aria-busy={core.pendingImageBatchCount > 0 || undefined}
+          {...core.imageTransferHandlers}
+          onDragEnter={handleUploadDragEnter}
+          onDragOver={handleUploadDragOver}
+          onDragLeave={handleUploadDragLeave}
+          onDropCapture={handleUploadDrop}
           onClick={() => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -1889,6 +2511,18 @@ export const ChatEditor = memo(
           }}
         >
           <SpecularComposerEffect targetRef={containerRef} />
+          {uploadEnabled && (
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className={styles.hiddenUploadInput}
+              data-web-shell-upload-input
+              onChange={handleUploadPickerChange}
+              tabIndex={-1}
+              aria-hidden="true"
+            />
+          )}
           {searchMode && (
             <div
               ref={searchUiRef}
@@ -2006,25 +2640,59 @@ export const ChatEditor = memo(
                 )}
                 {core.pastedImages.length > 0 && (
                   <div className={styles.images}>
-                    {core.pastedImages.map((img, i) => (
-                      <div key={i} className={styles.imageThumb}>
-                        <img
-                          src={`data:${img.media_type};base64,${img.data}`}
-                          alt=""
-                        />
-                        <button
-                          className={styles.imageRemove}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            core.removeImage(i);
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
+                    {core.pastedImages.map((img, i) => {
+                      const src = `data:${img.media_type};base64,${img.data}`;
+                      return (
+                        <div key={i} className={styles.imageThumb}>
+                          <img
+                            src={src}
+                            alt=""
+                            onClick={
+                              onImagePreview
+                                ? () => onImagePreview(src)
+                                : undefined
+                            }
+                          />
+                          <button
+                            type="button"
+                            className={styles.imageRemove}
+                            disabled={disabled}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (disabled) return;
+                              core.removeImage(i);
+                            }}
+                            aria-label="Remove image"
+                          >
+                            <svg
+                              width="8"
+                              height="8"
+                              viewBox="0 0 10 10"
+                              fill="none"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="M2 2l6 6M8 2l-6 6"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
+              </div>
+            )}
+            {uploadDragActive && (
+              <div
+                className={styles.uploadDropOverlay}
+                data-web-shell-upload-drop-overlay
+              >
+                <UploadIcon aria-hidden="true" />
+                <span>{t('composer.upload.drop')}</span>
               </div>
             )}
             {core.slashMenu && (
@@ -2085,7 +2753,6 @@ export const ChatEditor = memo(
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
                   onBlur={core.mobileComposer.onBlur}
-                  onPaste={core.mobileComposer.onPaste}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
                   rows={1}
@@ -2261,6 +2928,25 @@ export const ChatEditor = memo(
                         noResultsLabel={(query) =>
                           t('model.noMatch', { query })
                         }
+                        submenu={
+                          showReasoningOptions
+                            ? {
+                                triggerLabel: modelLabel,
+                                triggerAriaLabel: `${t('model.select')}: ${modelLabel}`,
+                                sectionLabel: t('model.section'),
+                              }
+                            : undefined
+                        }
+                        header={
+                          showReasoningOptions &&
+                          reasoning &&
+                          onSelectReasoningEffort ? (
+                            <ModelReasoningControls
+                              reasoning={reasoning}
+                              onSelect={onSelectReasoningEffort}
+                            />
+                          ) : undefined
+                        }
                         trigger={
                           <button
                             className={`${styles.toolBtn} ${styles.modelToolBtn} ${
@@ -2274,15 +2960,15 @@ export const ChatEditor = memo(
                               core.closeAtMenu();
                               setQuickActionsOpen(false);
                             }}
-                            aria-label={`${t('model.select')}: ${modelLabel}`}
-                            title={modelLabel}
+                            aria-label={`${t('model.select')}: ${normalizedModelChipLabel}`}
+                            title={normalizedModelChipLabel}
                           >
                             <span className={styles.toolBtnModelIcon}>
                               <ModelIcon />
                             </span>
                             {showModelLabel && (
                               <span className={styles.toolBtnText}>
-                                {modelLabel}
+                                {normalizedModelChipLabel}
                               </span>
                             )}
                             <span className={styles.toolBtnArrow}>
@@ -2378,6 +3064,40 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
+                {showToolbarAction('contextUsage') &&
+                  contextWindow > 0 &&
+                  tokenCount > 0 && (
+                    <TooltipProvider delayDuration={300}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
+                            data-hide-during-mobile-voice
+                            data-web-shell-context-usage
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onShowContextUsage?.();
+                            }}
+                            disabled={!onShowContextUsage}
+                            aria-label={t('status.contextUsed', {
+                              pct: ((tokenCount / contextWindow) * 100).toFixed(
+                                1,
+                              ),
+                            })}
+                          >
+                            <span className={styles.toolBtnIcon}>
+                              <ContextUsageRing
+                                pct={(tokenCount / contextWindow) * 100}
+                              />
+                            </span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          {formatContextUsageDetail(tokenCount, contextWindow)}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
                 {showToolbarAction('voice') && (
                   <>
                     <LiveVoiceButton />
@@ -2398,23 +3118,23 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    isPreparing || showCancelButton
+                    composerPreparing || showCancelButton
                       ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                           cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                         }`
                       : styles.sendBtn
                   }
                   disabled={
-                    isPreparing
+                    composerPreparing
                       ? true
                       : showCancelButton
                         ? !onCancel
-                        : core.disabled || !core.hasContent
+                        : !core.canSubmit
                   }
                   data-web-shell-composer-submit
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isPreparing) {
+                    if (composerPreparing) {
                       return;
                     }
                     if (showCancelButton) {
@@ -2424,7 +3144,7 @@ export const ChatEditor = memo(
                     core.submitText();
                   }}
                   aria-label={
-                    isPreparing
+                    composerPreparing
                       ? t('common.loading')
                       : showCancelButton
                         ? cancelArmed
@@ -2438,7 +3158,7 @@ export const ChatEditor = memo(
                       : undefined
                   }
                 >
-                  {isPreparing ? (
+                  {composerPreparing ? (
                     <LoadingIcon />
                   ) : showCancelButton ? (
                     cancelArmed ? (
@@ -2573,7 +3293,9 @@ export const ChatEditor = memo(
                 <span className={styles.toolBtnModelIcon}>
                   <ModelIcon />
                 </span>
-                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnText}>
+                  {normalizedModelChipLabel}
+                </span>
                 <span className={styles.toolBtnArrow}>
                   <ChevronDownIcon />
                 </span>
@@ -2585,7 +3307,9 @@ export const ChatEditor = memo(
                 <span className={styles.toolBtnModelIcon}>
                   <ModelIcon />
                 </span>
-                <span className={styles.toolBtnText}>{modelLabel}</span>
+                <span className={styles.toolBtnText}>
+                  {normalizedModelChipLabel}
+                </span>
                 <span className={styles.toolBtnArrow}>
                   <ChevronDownIcon />
                 </span>

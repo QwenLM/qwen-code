@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
@@ -16,10 +23,10 @@ import {
   useWorkspace,
   type DaemonSessionActions,
 } from '@qwen-code/webui/daemon-react-sdk';
-import type {
-  DaemonSessionArtifact,
-  DaemonSessionMonitorTaskStatus,
-  DaemonWorkspaceCapability,
+import {
+  type DaemonSessionArtifact,
+  type DaemonSessionMonitorTaskStatus,
+  type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
@@ -45,6 +52,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
 import {
   getActiveTodosForPlanRevision,
   isExitPlanApprovalRequest,
@@ -68,6 +76,7 @@ import {
   skillDescriptionKey,
 } from '../constants/localCommands';
 import { mergeCommands } from '../hooks/daemonSessionMappers';
+import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
@@ -124,6 +133,12 @@ export type PaneHeaderActionsRenderer = (
   info: PaneHeaderActionsInfo,
 ) => ReactNode;
 
+interface UnknownPromptAdmission {
+  owner: { sessionId: string | undefined };
+  commitAccepted?: ComposerSubmitCommit;
+  payloadAvailable: boolean;
+}
+
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
@@ -161,6 +176,7 @@ export interface ChatPaneProps {
   /** Whether this pane is currently the maximized (solo) one. */
   isMaximized?: boolean;
   onError?: (error: unknown, fallback: string) => void;
+  onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
@@ -179,6 +195,8 @@ export interface ChatPaneProps {
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
+  /** Whether this pane owns Session Catalog turn-completion reconciliation. */
+  reportCatalogTurnCompletion?: boolean;
   hidden?: boolean;
   voiceUserRevision?: number;
   voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
@@ -202,6 +220,7 @@ export function ChatPane({
   onToggleMaximize,
   isMaximized = false,
   onError,
+  onImageIngestionNotice,
   onSlashCommand,
   onRightPanelOpen,
   onOpenMonitor,
@@ -210,6 +229,7 @@ export function ChatPane({
   restartSseOnPrompt = false,
   embedded = false,
   onFirstPromptAdmitted,
+  reportCatalogTurnCompletion = true,
   hidden = false,
   voiceUserRevision = 0,
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
@@ -222,6 +242,9 @@ export function ChatPane({
   const connection = useConnection();
   const actions = useActions();
   const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
   const transcriptHistory = useTranscriptHistory();
@@ -298,7 +321,93 @@ export function ChatPane({
   }, [artifacts, connection.sessionId, onPaneArtifactsChange]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
+  const catalogOwnerCwd =
+    connection.workspaceCwd &&
+    workspaceCwd &&
+    connection.workspaceCwd !== workspaceCwd
+      ? undefined
+      : (connection.workspaceCwd ?? workspaceCwd);
+  const previousCatalogStreamingStateRef = useRef(streamingState);
+  const catalogStreamingSessionIdRef = useRef<string | undefined>(
+    streamingState !== 'idle' ? connection.sessionId : undefined,
+  );
+  const catalogStreamingWorkspaceCwdRef = useRef<string | undefined>(
+    streamingState !== 'idle' ? catalogOwnerCwd : undefined,
+  );
+  useEffect(() => {
+    const previous = previousCatalogStreamingStateRef.current;
+    previousCatalogStreamingStateRef.current = streamingState;
+    if (
+      streamingState !== 'idle' &&
+      (previous === 'idle' ||
+        catalogStreamingSessionIdRef.current === undefined)
+    ) {
+      catalogStreamingSessionIdRef.current = connection.sessionId;
+      catalogStreamingWorkspaceCwdRef.current = catalogOwnerCwd;
+    } else if (
+      streamingState !== 'idle' &&
+      connection.sessionId === catalogStreamingSessionIdRef.current &&
+      catalogStreamingWorkspaceCwdRef.current === undefined
+    ) {
+      catalogStreamingWorkspaceCwdRef.current = catalogOwnerCwd;
+    }
+    if (
+      previous !== 'idle' &&
+      streamingState === 'idle' &&
+      connection.sessionId &&
+      connection.sessionId === catalogStreamingSessionIdRef.current &&
+      catalogOwnerCwd &&
+      catalogOwnerCwd === catalogStreamingWorkspaceCwdRef.current &&
+      reportCatalogTurnCompletion
+    ) {
+      sessionCatalogController.turnCompleted(catalogOwnerCwd);
+    }
+  }, [
+    catalogOwnerCwd,
+    connection.sessionId,
+    reportCatalogTurnCompletion,
+    sessionCatalogController,
+    streamingState,
+  ]);
   const firstPromptAdmittedRef = useRef(false);
+  const [unknownPromptAdmission, setUnknownPromptAdmission] =
+    useState<UnknownPromptAdmission | null>(null);
+  const admissionOwnerRef = useRef({ sessionId: connection.sessionId });
+  if (admissionOwnerRef.current.sessionId !== connection.sessionId) {
+    admissionOwnerRef.current = { sessionId: connection.sessionId };
+  }
+  useEffect(() => {
+    firstPromptAdmittedRef.current = false;
+    setUnknownPromptAdmission(null);
+  }, [connection.sessionId]);
+  const admissionPayloadLocked =
+    unknownPromptAdmission?.payloadAvailable === true;
+  const discardUnknownPromptPayload = useCallback(() => {
+    const current = unknownPromptAdmission;
+    if (!current?.payloadAvailable) return;
+    if (admissionOwnerRef.current !== current.owner) {
+      setUnknownPromptAdmission(null);
+      return;
+    }
+    current.commitAccepted?.();
+    setUnknownPromptAdmission({
+      owner: current.owner,
+      payloadAvailable: false,
+    });
+  }, [unknownPromptAdmission]);
+  const continueEditingUnknownPrompt = useCallback(() => {
+    if (!window.confirm(t('queue.continueEditingConfirm'))) return;
+    const current = unknownPromptAdmission;
+    if (!current?.payloadAvailable) return;
+    if (admissionOwnerRef.current !== current.owner) {
+      setUnknownPromptAdmission(null);
+      return;
+    }
+    setUnknownPromptAdmission({
+      owner: current.owner,
+      payloadAvailable: false,
+    });
+  }, [t, unknownPromptAdmission]);
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
@@ -412,6 +521,10 @@ export function ChatPane({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_mutation',
     ) === true;
+  const canQueryMidTurn =
+    connection.capabilities?.features.includes(
+      'session_mid_turn_message_query',
+    ) === true;
   const {
     queuedPrompts,
     queuedTexts,
@@ -420,11 +533,15 @@ export function ChatPane({
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
+    restoreUnknownQueuedPrompt,
+    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected: connection.status === 'connected',
     sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
     canMutateMidTurn,
+    canQueryMidTurn,
     streamingState,
     sessionActions: actions,
     store,
@@ -453,8 +570,10 @@ export function ChatPane({
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
-      if (!trimmed) return false;
+      if (!trimmed && (images?.length ?? 0) === 0) return false;
+      if (admissionPayloadLocked) return false;
       if (
+        trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
         return true;
@@ -469,38 +588,96 @@ export function ChatPane({
         return false;
       }
       const inputAnnotations = metadata?.inputAnnotations;
+      const notifyFirstPromptAdmitted = () => {
+        if (
+          trimmed &&
+          !firstPromptAdmittedRef.current &&
+          onFirstPromptAdmitted
+        ) {
+          firstPromptAdmittedRef.current = true;
+          onFirstPromptAdmitted(trimmed);
+        }
+      };
       if (streamingStateRef.current === 'idle') {
+        const admissionOwner = admissionOwnerRef.current;
+        let admissionStarted = false;
+        let admitted = false;
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
             ...(inputAnnotations ? { inputAnnotations } : {}),
+            onAdmissionStarted: () => {
+              admissionStarted = true;
+            },
             onAdmitted: () => {
-              if (!firstPromptAdmittedRef.current && onFirstPromptAdmitted) {
-                firstPromptAdmittedRef.current = true;
-                onFirstPromptAdmitted(trimmed);
+              if (admissionOwnerRef.current !== admissionOwner) return;
+              if (connection.sessionId && catalogOwnerCwd) {
+                sessionCatalogController.promptAdmitted(
+                  catalogOwnerCwd,
+                  connection.sessionId,
+                );
               }
+              admitted = true;
+              notifyFirstPromptAdmitted();
               clearFollowup();
               commitAccepted?.();
             },
           })
-          .catch((error: unknown) =>
-            reportError(error, 'Failed to send prompt'),
-          );
+          .catch((error: unknown) => {
+            if (admissionOwnerRef.current !== admissionOwner) return;
+            const definitelyRejected =
+              isDefinitelyRejectedPromptAdmission(error);
+            if (admitted || !admissionStarted || definitelyRejected) {
+              reportError(error, 'Failed to send prompt');
+              return;
+            }
+            if (catalogOwnerCwd) {
+              sessionCatalogController.promptAdmissionUncertain(
+                catalogOwnerCwd,
+              );
+            }
+            setUnknownPromptAdmission({
+              owner: admissionOwner,
+              commitAccepted,
+              payloadAvailable: true,
+            });
+            onImageIngestionNotice?.('warning', t('queue.admissionUnknown'));
+            console.warn(
+              '[ChatPane] prompt admission outcome is unknown',
+              error,
+            );
+          });
         return false;
       }
-      return inputAnnotations
-        ? enqueuePrompt(trimmed, images, undefined, inputAnnotations)
-        : enqueuePrompt(trimmed, images);
+      const queued =
+        !trimmed && !inputAnnotations
+          ? enqueuePrompt(trimmed, images)
+          : enqueuePrompt(
+              trimmed,
+              images,
+              undefined,
+              inputAnnotations,
+              notifyFirstPromptAdmitted,
+            );
+      if (queued !== false && catalogOwnerCwd) {
+        sessionCatalogController.invalidateWorkspace(catalogOwnerCwd);
+      }
+      return queued;
     },
     [
       actions,
+      admissionPayloadLocked,
+      catalogOwnerCwd,
       clearFollowup,
       connection.sessionId,
       connection.status,
       enqueuePrompt,
       onFirstPromptAdmitted,
+      onImageIngestionNotice,
       reportError,
       restartSseOnPrompt,
+      sessionCatalogController,
+      t,
     ],
   );
 
@@ -537,6 +714,21 @@ export function ChatPane({
       });
     },
     [connection.sessionId, onRightPanelOpen],
+  );
+
+  const handleImagePreview = useCallback(
+    (src: string, alt?: string) => {
+      if (!connection.sessionId) return;
+      handleRightPanelOpen({
+        id: 'image',
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        turnId: connection.sessionId,
+        src,
+        ...(alt ? { alt } : {}),
+      });
+    },
+    [connection.sessionId, handleRightPanelOpen, t],
   );
 
   // Composer wiring, all scoped to THIS pane's own DaemonSession context. The
@@ -615,6 +807,15 @@ export function ChatPane({
         );
     },
     [actions, reportError],
+  );
+  const handleSelectReasoningEffort = useCallback(
+    (value: string) =>
+      actions
+        .setReasoningEffort(value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        ),
+    [actions, reportError, t],
   );
 
   const headerLabel =
@@ -803,6 +1004,7 @@ export function ChatPane({
                   : undefined
               }
               onTurnOutputOpen={handleRightPanelOpen}
+              onImagePreview={handleImagePreview}
               onError={reportError}
               generateContent={
                 connection.capabilities?.features.includes('session_generation')
@@ -850,7 +1052,28 @@ export function ChatPane({
           canMutateMidTurn={canMutateMidTurn}
           onDelete={removeQueuedPrompt}
           onEdit={editQueuedPrompt}
+          onRestoreUnknown={restoreUnknownQueuedPrompt}
+          onDiscardUnknown={discardUnknownQueuedPrompt}
         />
+        {unknownPromptAdmission && (
+          <div
+            className={styles.admissionUnknown}
+            role="status"
+            data-testid="pane-prompt-admission-unknown"
+          >
+            <span>{t('queue.admissionUnknown')}</span>
+            {unknownPromptAdmission.payloadAvailable && (
+              <span className={styles.admissionUnknownActions}>
+                <button type="button" onClick={continueEditingUnknownPrompt}>
+                  {t('queue.continueEditing')}
+                </button>
+                <button type="button" onClick={discardUnknownPromptPayload}>
+                  {t('queue.discardUnknown')}
+                </button>
+              </span>
+            )}
+          </div>
+        )}
         <ChatEditor
           ref={editorRef}
           onSubmit={handleSubmit}
@@ -870,21 +1093,25 @@ export function ChatPane({
           availableModels={availableModels}
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
+          reasoning={connection.reasoning}
+          onSelectReasoningEffort={handleSelectReasoningEffort}
           dialogOpen={approvalActive}
-          disabled={approvalActive}
+          disabled={approvalActive || admissionPayloadLocked}
           voiceTarget={hidden ? undefined : voiceTarget}
           voiceStatusRevision={voiceStatusRevision}
           followupState={followupState}
           onAcceptFollowup={onAcceptFollowup}
           onDismissFollowup={onDismissFollowup}
+          onImageIngestionNotice={onImageIngestionNotice}
           sessionId={connection.sessionId}
+          onImagePreview={handleImagePreview}
           atWorkspaceCwd={paneWorkspaceCwd}
           placeholderText={t('splitView.composerPlaceholder')}
           animatePlaceholder={false}
         />
         {CustomComposerFooter && (
           <CustomComposerFooter
-            disabled={approvalActive}
+            disabled={approvalActive || admissionPayloadLocked}
             isRunning={isResponding}
             currentMode={connection.currentMode ?? 'default'}
             currentModel={connection.currentModel ?? ''}

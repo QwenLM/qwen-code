@@ -1935,6 +1935,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: edit.filePath,
         content: edit.newContent,
+        toolWriteOrigin: 'shell_sed_edit',
         _meta: edit.meta,
       });
 
