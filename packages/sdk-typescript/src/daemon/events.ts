@@ -9,6 +9,7 @@ import type {
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
   PermissionOutcome,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
@@ -663,6 +664,14 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonSettingsChangedData {
+  key: string;
+  value?: unknown;
+  scope?: string;
+  mutation?: DaemonSkillToggleMutation;
+  [key: string]: unknown;
+}
+
 export interface DaemonTrustChangeRequestedData {
   workspaceCwd: string;
   desiredState: 'trusted' | 'untrusted';
@@ -1070,7 +1079,7 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
 >;
 export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
-  Record<string, unknown>
+  DaemonSettingsChangedData
 >;
 export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
   'trust_change_requested',
@@ -1738,10 +1747,7 @@ export function asKnownDaemonEvent(
         : undefined;
     case 'settings_changed':
       return event.data != null && typeof event.data === 'object'
-        ? (event as DaemonEventEnvelope<
-            'settings_changed',
-            Record<string, unknown>
-          >)
+        ? (event as DaemonSettingsChangedEvent)
         : undefined;
     case 'trust_change_requested':
       return isTrustChangeRequestedData(event.data)

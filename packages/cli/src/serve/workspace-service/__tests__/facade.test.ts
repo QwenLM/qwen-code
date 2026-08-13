@@ -167,6 +167,34 @@ function makeCtx(
   };
 }
 
+function skillToggleSettingsChanged(args: {
+  key: 'skills.disabled' | 'skills.enabled';
+  value: unknown;
+  skills: Array<{ name: string; enabled: boolean }>;
+  activation: 'applied' | 'deferred' | 'partial';
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  originatorClientId?: string;
+}) {
+  return {
+    type: 'settings_changed',
+    data: {
+      key: args.key,
+      value: args.value,
+      scope: 'workspace',
+      mutation: {
+        id: expect.any(String),
+        kind: 'skill_toggle',
+        skills: args.skills,
+        activation: args.activation,
+        sessionsRefreshed: args.sessionsRefreshed,
+        sessionsFailed: args.sessionsFailed,
+      },
+    },
+    originatorClientId: args.originatorClientId ?? 'client-1',
+  };
+}
+
 async function withIsolatedQwenHome<T>(fn: () => Promise<T>): Promise<T> {
   return withIsolatedWorkspace(() => fn());
 }
@@ -1647,15 +1675,16 @@ describe('createDaemonWorkspaceService', () => {
         sessionsRefreshed: 2,
         sessionsFailed: 0,
       });
-      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'settings_changed',
-        data: {
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
           key: 'skills.disabled',
           value: ['review'],
-          scope: 'workspace',
-        },
-        originatorClientId: 'client-1',
-      });
+          skills: [{ name: 'review', enabled: false }],
+          activation: 'applied',
+          sessionsRefreshed: 2,
+          sessionsFailed: 0,
+        }),
+      );
     });
 
     it('does not retain a status snapshot read while a settings refresh is in flight', async () => {
@@ -1750,15 +1779,16 @@ describe('createDaemonWorkspaceService', () => {
         enabled: true,
         activation: 'applied',
       });
-      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'settings_changed',
-        data: {
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
           key: 'skills.enabled',
           value: ['review'],
-          scope: 'workspace',
-        },
-        originatorClientId: 'client-1',
-      });
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'applied',
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+        }),
+      );
     });
 
     it('reports partial activation when a session refresh fails', async () => {
@@ -2193,15 +2223,19 @@ describe('createDaemonWorkspaceService', () => {
         ],
       });
       expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
-      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'settings_changed',
-        data: {
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
           key: 'skills.disabled',
           value: ['review', 'deploy'],
-          scope: 'workspace',
-        },
-        originatorClientId: 'client-1',
-      });
+          skills: [
+            { name: 'review', enabled: false },
+            { name: 'deploy', enabled: false },
+          ],
+          activation: 'applied',
+          sessionsRefreshed: 2,
+          sessionsFailed: 0,
+        }),
+      );
     });
 
     it('orders results and errors by request targets, not persist outcomes', async () => {
@@ -2459,15 +2493,16 @@ describe('createDaemonWorkspaceService', () => {
         results: [{ skillName: 'review', enabled: true, changed: true }],
       });
       expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
-      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'settings_changed',
-        data: {
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
           key: 'skills.disabled',
           value: undefined,
-          scope: 'workspace',
-        },
-        originatorClientId: 'client-1',
-      });
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'deferred',
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+        }),
+      );
     });
 
     it('publishes one settings_changed event per settingsChanges entry in order', async () => {
@@ -2499,24 +2534,34 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2);
-      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(1, {
-        type: 'settings_changed',
-        data: {
+      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(
+        1,
+        skillToggleSettingsChanged({
           key: 'skills.disabled',
           value: undefined,
-          scope: 'workspace',
-        },
-        originatorClientId: 'client-1',
-      });
-      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(2, {
-        type: 'settings_changed',
-        data: {
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'deferred',
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+        }),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(
+        2,
+        skillToggleSettingsChanged({
           key: 'skills.enabled',
           value: ['review'],
-          scope: 'workspace',
-        },
-        originatorClientId: 'client-1',
-      });
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'deferred',
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+        }),
+      );
+      const firstMutation = publishWorkspaceEvent.mock.calls[0]?.[0]?.data
+        ?.mutation as { id?: string } | undefined;
+      const secondMutation = publishWorkspaceEvent.mock.calls[1]?.[0]?.data
+        ?.mutation as { id?: string } | undefined;
+      expect(firstMutation?.id).toEqual(expect.any(String));
+      expect(firstMutation?.id).toBe(secondMutation?.id);
     });
 
     it('reports partial activation when the shared batch refresh fails', async () => {

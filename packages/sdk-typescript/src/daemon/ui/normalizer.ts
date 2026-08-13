@@ -10,6 +10,7 @@ import type {
   DaemonErrorKind,
   DaemonEvent,
   DaemonSessionArtifactChange,
+  DaemonSkillToggleMutation,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS } from '../types.js';
 import type {
@@ -1485,6 +1486,48 @@ function normalizeToolToggled(
   ];
 }
 
+function parseSkillToggleMutation(
+  value: unknown,
+): DaemonSkillToggleMutation | undefined {
+  if (!isRecord(value) || value['kind'] !== 'skill_toggle') return undefined;
+  const id = typeof value['id'] === 'string' ? value['id'] : undefined;
+  const activation = value['activation'];
+  const skills = value['skills'];
+  const sessionsRefreshed = value['sessionsRefreshed'];
+  const sessionsFailed = value['sessionsFailed'];
+  if (
+    !id ||
+    (activation !== 'applied' &&
+      activation !== 'deferred' &&
+      activation !== 'partial') ||
+    !Array.isArray(skills) ||
+    skills.length === 0 ||
+    typeof sessionsRefreshed !== 'number' ||
+    !Number.isFinite(sessionsRefreshed) ||
+    typeof sessionsFailed !== 'number' ||
+    !Number.isFinite(sessionsFailed)
+  ) {
+    return undefined;
+  }
+  const parsedSkills: Array<{ name: string; enabled: boolean }> = [];
+  for (const skill of skills) {
+    if (!isRecord(skill)) return undefined;
+    const name = skill['name'];
+    const enabled = skill['enabled'];
+    if (typeof name !== 'string' || name.length === 0) return undefined;
+    if (typeof enabled !== 'boolean') return undefined;
+    parsedSkills.push({ name, enabled });
+  }
+  return {
+    id,
+    kind: 'skill_toggle',
+    skills: parsedSkills,
+    activation,
+    sessionsRefreshed,
+    sessionsFailed,
+  };
+}
+
 function normalizeSettingsChanged(
   event: DaemonEvent,
   base: NormalizedEventBase,
@@ -1494,6 +1537,9 @@ function normalizeSettingsChanged(
   if (!key) {
     return fallbackDebug(event, base, 'malformed settings_changed payload');
   }
+  const mutation = isRecord(event.data)
+    ? parseSkillToggleMutation(event.data['mutation'])
+    : undefined;
   return [
     {
       ...base,
@@ -1501,6 +1547,7 @@ function normalizeSettingsChanged(
       key,
       scope: scope ?? 'workspace',
       value: isRecord(event.data) ? event.data['value'] : undefined,
+      ...(mutation ? { mutation } : {}),
     },
   ];
 }
