@@ -45,6 +45,10 @@ interface StatusLineDialogProps {
 
 const THEME_COLORS_KEY = 'theme-colors';
 const DESCRIPTION_COLUMN = 24;
+// Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
+// + search block(3) + list marginTop(1) + preview block(3) + footer(2).
+// The preview block is exactly one content line: buildStatusLinePresetLines
+// returns at most one line, and the empty state renders one fallback line.
 const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
 
 function buildInitialSelectedKeys(settings: LoadedSettings): string[] {

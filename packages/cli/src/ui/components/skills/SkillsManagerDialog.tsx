@@ -526,6 +526,8 @@ export function SkillsManagerDialog({
   const hasQuery = query.trim().length > 0;
   const showsLockedSearchResults =
     hasQuery && items.length === 0 && filteredLocked.length > 0;
+  // The 3 reserves the locked block's non-skill rows in non-search mode:
+  // marginTop(1) + header(1) + hint row(1).
   const lockedItemBudget =
     availableTerminalHeight === undefined
       ? filteredLocked.length

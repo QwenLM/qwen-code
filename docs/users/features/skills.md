@@ -248,6 +248,8 @@ Or browse the user-invocable list with the slash command (including path-gated S
 /skills
 ```
 
+On short terminals, locked-skill rows may collapse into a `Hidden locked skills: N · type to search` counter to fit the dialog's height budget; typing a search query narrows the locked list and surfaces the hidden matches.
+
 Or inspect the filesystem:
 
 ```bash

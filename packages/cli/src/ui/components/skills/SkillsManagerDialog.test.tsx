@@ -31,6 +31,19 @@ const mixedSkills: SkillConfig[] = [
     body: '',
   })),
 ];
+// More skills than the pre-fix default locked budget (24 - 11 - 3 = 10) so a
+// regression to a numeric default truncates the list and fails the
+// unconstrained test below.
+const manyLockedSkills: SkillConfig[] = Array.from({ length: 12 }, (_, i) => {
+  const name = `locked-${String(i + 1).padStart(2, '0')}`;
+  return {
+    name,
+    description: `${name} skill`,
+    level: 'user' as const,
+    filePath: `/skills/${name}/SKILL.md`,
+    body: '',
+  };
+});
 
 function createSettings(
   disabled = lockedSkills.map((skill) => skill.name),
@@ -146,13 +159,13 @@ describe('SkillsManagerDialog', () => {
   it('keeps every locked skill without a height constraint', async () => {
     const config = {
       getSkillManager: () => ({
-        listSkills: vi.fn().mockResolvedValue(lockedSkills),
+        listSkills: vi.fn().mockResolvedValue(manyLockedSkills),
       }),
     } as unknown as Config;
     const { lastFrame } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <SkillsManagerDialog
-          settings={createSettings()}
+          settings={createSettings(manyLockedSkills.map((skill) => skill.name))}
           config={config}
           addItem={vi.fn()}
           onClose={vi.fn()}
@@ -162,6 +175,65 @@ describe('SkillsManagerDialog', () => {
       </KeypressProvider>,
     );
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('two'));
+    await vi.waitFor(() => expect(lastFrame()).toContain('locked-12'));
+    expect(lastFrame()).not.toContain('Hidden locked skills');
+  });
+
+  it('surfaces locked matches when search filters out every unlocked skill', async () => {
+    const config = {
+      getSkillManager: () => ({
+        listSkills: vi.fn().mockResolvedValue(mixedSkills),
+      }),
+    } as unknown as Config;
+    const { stdin, lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <SkillsManagerDialog
+          settings={createSettings(['one', 'two'])}
+          config={config}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          reloadCommands={vi.fn()}
+          setInputBuffer={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
+    );
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    act(() => {
+      stdin.write('one');
+    });
+    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    expect(lastFrame()).not.toContain('No skills match the search.');
+  });
+
+  it('shows the no-match message instead of a dangling (see below) pointer', async () => {
+    const config = {
+      getSkillManager: () => ({
+        listSkills: vi.fn().mockResolvedValue(lockedSkills),
+      }),
+    } as unknown as Config;
+    const { stdin, lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <SkillsManagerDialog
+          settings={createSettings()}
+          config={config}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          reloadCommands={vi.fn()}
+          setInputBuffer={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
+    );
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('(see below)'));
+    act(() => {
+      stdin.write('zzz');
+    });
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('No skills match the search.'),
+    );
+    expect(lastFrame()).not.toContain('(see below)');
   });
 });
