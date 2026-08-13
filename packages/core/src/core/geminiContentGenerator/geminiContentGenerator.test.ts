@@ -434,6 +434,17 @@ describe('GeminiContentGenerator', () => {
       expect(sentThinkingConfig()).toEqual({ includeThoughts: true });
     });
 
+    it('omits both knobs when reasoning is set without an effort', async () => {
+      const gen = generatorFor('gemini-2.5-pro', {});
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({ includeThoughts: true });
+    });
+
     it('leaves an explicit request-level thinkingConfig alone', async () => {
       const gen = generatorFor('gemini-2.5-pro');
 
