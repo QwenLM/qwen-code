@@ -71,6 +71,7 @@ import {
   type RosterPlan,
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
+import { labelFromLaunchPrompt } from './agent-identity.js';
 import { chunkIdsProblem } from './diff-plan.js';
 import { readBudgetStop } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
@@ -358,13 +359,15 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
-  // The brief's codename line names the agent wherever it sits: launchers
-  // prepend context lines, and a first-line-only read has labelled twelve
-  // finders with one shared PR-summary sentence — every disclosure then
-  // rendered the same truncated PR quote instead of a name a reader can act
-  // on. (The pattern is the brief opener `agent-prompt` writes.)
-  const codename = /You are review agent `([^`\n]+)`/.exec(rec.launchPrompt);
-  if (codename) return `agent ${codename[1]}`;
+  // The identity line names the agent wherever it sits: launchers prepend
+  // context lines, and a first-line-only read has labelled twelve finders
+  // with one shared PR-summary sentence — every disclosure then rendered
+  // the same truncated PR quote instead of a name a reader can act on. The
+  // parser is shared with cost-ledger's row labels, so the round and
+  // owned-file suffixes survive here too — two reverse-audit rounds must
+  // not fold into one indistinguishable disclosure line.
+  const identity = labelFromLaunchPrompt(rec.launchPrompt);
+  if (identity !== null) return identity;
   const first = rec.launchPrompt.split('\n')[0]?.trim() ?? '';
   if (first) return first.replace(/\s+/g, ' ');
   return rec.agentName || rec.agentId;

@@ -340,6 +340,12 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: none — all checks my dimension defines were completed within budget.',
       'Budget gap: none — all planned checks done under the tool budget',
       'Budget gap: None (all checks completed within the tool-call budget)',
+      // One vocabulary across the idiom family: `below` in the completion
+      // tail, and the stayed idiom with the same qualifiers the tail takes.
+      'Budget gap: none — all checks completed below budget.',
+      'Budget gap: none — stayed inside budget.',
+      'Budget gap: none — stayed under the tool budget',
+      'Budget gap: none — stayed below the tool-call budget.',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);
     }

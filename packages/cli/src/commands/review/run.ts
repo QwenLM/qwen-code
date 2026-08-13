@@ -81,53 +81,81 @@ export interface RunReviewResult {
 }
 
 /**
- * The PR number a `review run` target names, or null for local/file targets.
- * Used to pin the artifact scan to THIS run's files: two concurrent
- * `review run`s in one repo share `.qwen/tmp`, and a generic newest-composed
- * scan has captured the OTHER run's verdict the moment it appeared (measured:
- * two of three parallel PR reviews republished a neighbour's `composedPath`).
- *
- * Classified by the child's own parser, not a local regex: the child names
- * its artifacts after what `parse-args` decided, so any second classifier
- * here diverges exactly where the shapes get interesting — `/pull/9014/files`
- * (a PR to the parser, unmatched by a $-anchored regex), `0042` (the parser
- * writes `pr-42-`, a verbatim pin looks for `pr-0042-`), `docs/pull/42` (a
- * file path to the parser). A run whose pin disagrees with the child reports
- * a completed review as "no verdict was produced".
+ * What a `review run` target IS, in the child's own terms. Classified by the
+ * child's parser, not a local regex: the child names its artifacts after
+ * what `parse-args` decided, so any second classifier here diverges exactly
+ * where the shapes get interesting — `/pull/9014/files` (a PR to the parser,
+ * unmatched by a $-anchored regex), `0042` (the parser writes `pr-42-`, a
+ * verbatim pin looks for `pr-0042-`), `docs/pull/42` (a file path to the
+ * parser). A run whose pin disagrees with the child reports a completed
+ * review as "no verdict was produced".
  */
-export function prNumberFromTarget(target?: string): string | null {
-  if (!target) return null;
+export type RunTargetClass =
+  | { kind: 'pr'; number: string }
+  | { kind: 'file'; base: string }
+  | { kind: 'local' };
+
+export function classifyRunTarget(target?: string): RunTargetClass {
+  if (!target) return { kind: 'local' };
   const { target: t } = parseReviewArgs(target);
-  return t.type === 'pr-number' || t.type === 'pr-url'
-    ? String(t.number)
-    : null;
+  if (t.type === 'pr-number' || t.type === 'pr-url') {
+    return { kind: 'pr', number: String(t.number) };
+  }
+  if (t.type === 'file') {
+    // The skill's `{target}` token for a file review is the file's basename
+    // (`--target <filename>` in the capture step), so that is the identity
+    // the child's artifact names carry.
+    return { kind: 'file', base: t.path.split(/[\\/]/).pop() ?? t.path };
+  }
+  return { kind: 'local' };
+}
+
+const escapeRe = (s: string): string =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The one composed-verdict filename this run's target class produces, per
+ * the skill's literal `--out .qwen/tmp/qwen-review-{target}-composed.json`
+ * template: `pr-<n>` for a PR, the file's basename for a file review, the
+ * fixed token `local` for a bare run. Exact names, not shape heuristics —
+ * a name-shape pin (`(?!pr-\d+-)…`) rejected a file run's OWN artifact
+ * whenever the reviewed file was named `pr-<digits>-…`, and conversely let
+ * a PR pin claim that file run's artifact. Two concurrent `review run`s
+ * share `.qwen/tmp`, and the pre-pin newest-composed scan captured the
+ * OTHER run's verdict the moment it appeared (measured: two of three
+ * parallel PR reviews republished a neighbour's `composedPath`).
+ *
+ * Known residual race, accepted: the pin separates target IDENTITIES, not
+ * runs. Two concurrent runs of the SAME target (two bare runs, or the same
+ * PR twice) write the same filename, and whichever child composes last wins
+ * on disk for both parents — only a per-run nonce in the child's artifact
+ * names could key that apart, and the bundled skill, not this command,
+ * would have to mint it. Same-target collisions predate the pin; do not
+ * diagnose them as a pin failure.
+ */
+export function composedPatternFor(cls: RunTargetClass): RegExp {
+  switch (cls.kind) {
+    case 'pr':
+      return new RegExp(`^qwen-review-pr-${cls.number}-composed\\.json$`);
+    case 'file':
+      return new RegExp(`^qwen-review-${escapeRe(cls.base)}-composed\\.json$`);
+    case 'local':
+    default:
+      return /^qwen-review-local-composed\.json$/;
+  }
 }
 
 /**
- * The composed-verdict filenames this run can claim. A PR target owns exactly
- * its own `qwen-review-pr-<n>-…composed.json`; a local/file target owns any
- * composed artifact EXCEPT a PR-scoped one, so a concurrent PR review cannot
- * be mistaken for the local run (the reverse direction is already covered by
- * the PR pin).
- *
- * Known residual race, accepted: the pin separates target CLASSES, not runs.
- * Two concurrent no-target runs both write the one fixed filename
- * `qwen-review-local-composed.json`, and whichever child composes last wins
- * on disk for both parents — target identity cannot key that apart without
- * threading a per-run nonce into the child's artifact names, which the
- * bundled skill, not this command, would have to mint. Same-target
- * collisions predate the pin; do not diagnose them as a pin failure.
+ * The saved report under `.qwen/reviews/`, pinned as far as its naming
+ * allows. PR reports reliably end `-pr-<n>.md`; local/file report stems are
+ * model-chosen (three formats observed in one day), so those runs claim any
+ * report EXCEPT a PR-suffixed one — non-PR runs can still pool each other's
+ * reports in a concurrent window. The report is informational; the verdict
+ * (`composedPatternFor`) is what carries the exit code, and it is exact.
  */
-export function composedPatternFor(prNumber: string | null): RegExp {
-  return prNumber
-    ? new RegExp(`^qwen-review-pr-${prNumber}-.*composed\\.json$`)
-    : /^qwen-review-(?!pr-\d+-).*composed\.json$/;
-}
-
-/** Same pinning for the saved report under `.qwen/reviews/`. */
-export function reportPatternFor(prNumber: string | null): RegExp {
-  return prNumber
-    ? new RegExp(`-pr-${prNumber}\\.md$`)
+export function reportPatternFor(cls: RunTargetClass): RegExp {
+  return cls.kind === 'pr'
+    ? new RegExp(`-pr-${cls.number}\\.md$`)
     : /^(?!.*-pr-\d+\.md$).*\.md$/;
 }
 
@@ -179,13 +207,16 @@ export function buildReviewPrompt(args: {
  * `startMs`, or null. Pre-existing artifacts from earlier reviews in the same
  * repo must not be mistaken for this run's verdict — a stale composed JSON says
  * whatever the LAST review decided, which is exactly the wrong thing to
- * republish — so anything older than the run is invisible here.
+ * republish — so anything older than the run is invisible here. The mtime
+ * rides along with the path: the capture poll compares it against what it
+ * already holds, and re-statting the path here would race the child's Step 9
+ * sweep, which unlinks these files while the parent may still be polling.
  */
 export function newestArtifactSince(
   dir: string,
   pattern: RegExp,
   startMs: number,
-): string | null {
+): { path: string; mtime: number } | null {
   let best: { path: string; mtime: number } | null = null;
   let names: string[];
   try {
@@ -205,7 +236,7 @@ export function newestArtifactSince(
     if (mtime < startMs) continue;
     if (!best || mtime > best.mtime) best = { path, mtime };
   }
-  return best ? best.path : null;
+  return best;
 }
 
 /**
@@ -367,27 +398,20 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // coverage re-check can legitimately recompose the verdict (measured: a live
   // run rewrote its composed artifact twelve minutes after the first write),
   // and the FIRST snapshot would republish the superseded one.
-  const prNumber = prNumberFromTarget(args.target);
-  const composedPattern = composedPatternFor(prNumber);
+  const targetClass = classifyRunTarget(args.target);
+  const composedPattern = composedPatternFor(targetClass);
   let capturedPath: string | null = null;
   let capturedVerdict: ComposedVerdict | null = null;
   let capturedMtime = -Infinity;
   const captureTimer = setInterval(() => {
-    const path = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
-    if (path === null) return;
-    let mtime: number;
-    try {
-      mtime = statSync(path).mtimeMs;
-    } catch {
-      return; // swept between scan and stat; keep the captured verdict
-    }
-    if (mtime <= capturedMtime) return;
+    const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
+    if (best === null || best.mtime <= capturedMtime) return;
     // A half-written file fails to parse; the next tick retries it.
-    const verdict = readComposed(path);
+    const verdict = readComposed(best.path);
     if (verdict !== null) {
-      capturedPath = path;
+      capturedPath = best.path;
       capturedVerdict = verdict;
-      capturedMtime = mtime;
+      capturedMtime = best.mtime;
     }
   }, COMPOSED_POLL_MS);
 
@@ -459,18 +483,13 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   let composedPath: string | null = capturedPath;
   let composed: ComposedVerdict | null = capturedVerdict;
   if (composed === null) {
-    composedPath = newestArtifactSince(
-      REVIEW_TMP_DIR,
-      composedPattern,
-      cutoffMs,
-    );
+    const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
+    composedPath = best?.path ?? null;
     composed = composedPath ? readComposed(composedPath) : null;
   }
-  const reportPath = newestArtifactSince(
-    REVIEWS_DIR,
-    reportPatternFor(prNumber),
-    cutoffMs,
-  );
+  const reportPath =
+    newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
+      ?.path ?? null;
 
   const completed = composed !== null;
   const result: RunReviewResult = {
