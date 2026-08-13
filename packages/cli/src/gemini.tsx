@@ -384,16 +384,27 @@ export async function main() {
     '--internal-agent-view-pty-host',
   );
   if (ptyHostArgIndex !== -1) {
-    const launchPath = process.argv[ptyHostArgIndex + 1];
-    const socketPath = process.argv[ptyHostArgIndex + 2];
-    if (!launchPath || !socketPath) {
-      throw new Error('Agent View PTY host requires launch and socket paths.');
-    }
-    const { runAgentViewPtyHostProcess } = await import(
-      './agent-view/pty-host-process.js'
+    // Gate on the host auth token: the spawner always sets it in the child
+    // env, while a natural-language prompt mentioning the flag never does.
+    // Without the gate such a prompt would hijack the process into PTY-host
+    // mode and readFile/JSON.parse arbitrary words from the command line.
+    const { PTY_HOST_AUTH_TOKEN_ENV } = await import(
+      './agent-view/pty-host-env.js'
     );
-    const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
-    process.exit(exit.exitCode);
+    if (process.env[PTY_HOST_AUTH_TOKEN_ENV]) {
+      const launchPath = process.argv[ptyHostArgIndex + 1];
+      const socketPath = process.argv[ptyHostArgIndex + 2];
+      if (!launchPath || !socketPath) {
+        throw new Error(
+          'Agent View PTY host requires launch and socket paths.',
+        );
+      }
+      const { runAgentViewPtyHostProcess } = await import(
+        './agent-view/pty-host-process.js'
+      );
+      const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
+      process.exit(exit.exitCode);
+    }
   }
 
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
@@ -868,6 +879,8 @@ export async function main() {
       argv.prompt !== undefined ||
       argv.promptInteractive !== undefined ||
       argv.query !== undefined ||
+      argv.inputFile !== undefined ||
+      argv.forkSession === true ||
       !process.stdin.isTTY;
     if (
       await routeManagedAgentViewResume(
@@ -922,10 +935,10 @@ export async function main() {
     // background session is never resumed by a second foreground runtime.
     if (argv.continue) {
       const {
-        isManagedAgentViewResumeBlocked,
+        isManagedAgentViewContinueBlocked,
         MANAGED_AGENT_VIEW_RESUME_MESSAGE,
       } = await import('./startup/agent-view-resume-guard.js');
-      if (await isManagedAgentViewResumeBlocked(config.getSessionId())) {
+      if (await isManagedAgentViewContinueBlocked(config.getSessionId())) {
         writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
         process.exit(1);
       }

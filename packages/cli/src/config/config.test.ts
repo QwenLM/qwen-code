@@ -404,6 +404,43 @@ describe('parseArguments', () => {
     },
   );
 
+  it('routes `agents --json` through the list command end-to-end', async () => {
+    process.argv = ['node', 'script.js', 'agents', '--json'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStdoutLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockExit).toHaveBeenCalledWith(0);
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining('['),
+      );
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
+  it.each([
+    ['stop', ['stop', 'the', 'server']],
+    ['kill', ['kill', 'the', 'server']],
+    ['rm', ['rm', 'the', 'server']],
+    ['attach', ['attach', 'the', 'server']],
+    ['logs', ['logs', 'the', 'server']],
+    ['respawn', ['respawn', 'the', 'server']],
+  ])(
+    'still parses verb-initial input starting with `%s` as a positional prompt',
+    async (_verb, args) => {
+      process.argv = ['node', 'script.js', ...args];
+
+      const argv = await parseArguments();
+
+      expect(argv.query).toBe(args.join(' '));
+    },
+  );
+
   it('propagates non-zero exitCode from the update handler', async () => {
     process.argv = ['node', 'script.js', 'update'];
     mockUpdateHandler.mockImplementation(() => {
@@ -573,12 +610,49 @@ describe('parseArguments', () => {
       await expect(parseArguments()).rejects.toThrow('process.exit called');
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         expect.stringContaining(
-          'Cannot use --bg/--background with piped stdin',
+          'Cannot use --bg/--background when stdin is not an interactive terminal',
         ),
       );
     } finally {
       mockExit.mockRestore();
       process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it.each([
+    ['--yolo', ['--bg', 'background task', '--yolo']],
+    ['-y', ['--bg', 'background task', '-y']],
+    ['--sandbox', ['--bg', 'background task', '--sandbox']],
+    ['-s', ['--bg', 'background task', '-s']],
+    ['--sandbox-image', ['--bg', 'background task', '--sandbox-image', 'img']],
+    ['--system-prompt', ['--bg', 'background task', '--system-prompt', 'sp']],
+    [
+      '--append-system-prompt',
+      ['--bg', 'background task', '--append-system-prompt', 'sp'],
+    ],
+    ['--mcp-config', ['--bg', 'background task', '--mcp-config', '{}']],
+    ['--extensions', ['--bg', 'background task', '--extensions', 'ext']],
+    ['-e', ['--bg', 'background task', '-e', 'ext']],
+    ['--allowed-tools', ['--bg', 'background task', '--allowed-tools', 't']],
+    [
+      '--allowed-mcp-server-names',
+      ['--bg', 'background task', '--allowed-mcp-server-names', 's'],
+    ],
+  ])('rejects --bg combined with %s', async (_label, args) => {
+    process.argv = ['node', 'script.js', ...args];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Cannot use --bg/--background with'),
+      );
+    } finally {
+      mockExit.mockRestore();
     }
   });
 

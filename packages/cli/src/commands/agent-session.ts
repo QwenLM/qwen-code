@@ -45,6 +45,7 @@ function sessionCommand(
   return {
     command,
     describe,
+    builder: (yargs: Argv) => yargs.positional('id', { type: 'string' }),
     handler: async (argv) => {
       const supervisor = await getSessionSupervisor();
       writeStdoutLine(formatResult(await supervisor[method](argv['id'])));
@@ -67,6 +68,7 @@ function getLogsOutput(result: unknown): string {
 export const attachCommand: CommandModule<unknown, SessionArgs> = {
   command: 'attach <id>',
   describe: 'Attach to an Agent View session',
+  builder: (yargs: Argv) => yargs.positional('id', { type: 'string' }),
   handler: async (argv) => {
     const supervisor = await getSessionSupervisor();
     try {
@@ -104,16 +106,20 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
   describe: 'Respawn Agent View session(s)',
   builder: (yargs: Argv) =>
     yargs
+      // Session short-ids can be all digits; keep them strings so the
+      // guards below (and the RPC layer) see them consistently.
+      .positional('id', { type: 'string' })
       .option('all', {
         type: 'boolean',
         default: false,
         description: 'Respawn all Agent View sessions',
       })
       .check((argv) => {
-        if (argv.all === true && typeof argv['id'] === 'string') {
+        const hasId = typeof argv['id'] === 'string' && argv['id'].length > 0;
+        if (argv.all === true && hasId) {
           return 'qwen agents respawn accepts <id> or --all, not both.';
         }
-        if (argv.all === true || typeof argv['id'] === 'string') return true;
+        if (argv.all === true || hasId) return true;
         return 'qwen agents respawn requires <id> or --all.';
       }),
   handler: async (argv) => {
@@ -122,7 +128,7 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
       writeJsonResult(await supervisor.respawn());
       return;
     }
-    if (typeof argv['id'] !== 'string') {
+    if (typeof argv['id'] !== 'string' || argv['id'].length === 0) {
       throw new Error('qwen agents respawn requires <id> or --all.');
     }
     writeJsonResult(await supervisor.respawn(argv['id']));

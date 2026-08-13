@@ -150,6 +150,31 @@ describe('agent session commands', () => {
     expect(mockSupervisor.respawn).not.toHaveBeenCalled();
   });
 
+  it('rejects respawn with neither <id> nor --all', async () => {
+    await expect(parseCommand('respawn')).rejects.toThrow(
+      'qwen agents respawn requires <id> or --all.',
+    );
+
+    expect(mockSupervisor.respawn).not.toHaveBeenCalled();
+  });
+
+  it('rejects respawn with an empty <id>', async () => {
+    await expect(parseCommand('respawn ')).rejects.toThrow();
+
+    expect(mockSupervisor.respawn).not.toHaveBeenCalled();
+  });
+
+  it('keeps all-digit session ids as strings', async () => {
+    await parseCommand('stop 12345678');
+
+    expect(mockSupervisor.stop).toHaveBeenCalledWith('12345678');
+
+    mockSupervisor.respawn.mockClear();
+    await parseCommand('respawn 87654321');
+
+    expect(mockSupervisor.respawn).toHaveBeenCalledWith('87654321');
+  });
+
   it('routes respawn --all to the supervisor and prints JSON', async () => {
     await parseCommand('respawn --all');
 

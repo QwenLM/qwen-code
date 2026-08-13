@@ -1032,8 +1032,26 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['background'] && argv['includeDirectories']) {
             return 'Cannot use --bg/--background with --include-directories';
           }
+          if (argv['background'] && argv['yolo']) {
+            return 'Cannot use --bg/--background with --yolo (-y)';
+          }
+          if (
+            argv['background'] &&
+            (argv['sandbox'] ||
+              argv['sandboxImage'] ||
+              argv['systemPrompt'] ||
+              argv['appendSystemPrompt'] ||
+              argv['mcpConfig'] ||
+              argv['extensions'] ||
+              argv['allowedTools'] ||
+              argv['allowedMcpServerNames'])
+          ) {
+            return 'Cannot use --bg/--background with --sandbox, --sandbox-image, --system-prompt, --append-system-prompt, --mcp-config, --extensions, --allowed-tools, or --allowed-mcp-server-names';
+          }
           if (argv['background'] && !process.stdin.isTTY) {
-            return 'Cannot use --bg/--background with piped stdin; pass the background prompt as a positional argument';
+            // The positional-prompt gate above already ran, so the prompt
+            // is positional here; the only actionable fix is a TTY.
+            return 'Cannot use --bg/--background when stdin is not an interactive terminal; run it from a TTY';
           }
           if (argv['prompt'] && hasPositionalQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';

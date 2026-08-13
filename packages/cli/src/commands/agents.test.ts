@@ -27,7 +27,7 @@ const mockSupervisor = vi.hoisted(() => ({
         attachState: 'detached',
         projectCwd: '/tmp/workspace',
         originalCwd: '/tmp/workspace',
-        activeCwd: '/tmp/workspace',
+        activeCwd: '/tmp/workspace/.qwen/worktrees/fix-tests',
         createdAt: '2026-07-17T09:00:00.000Z',
         updatedAt: '2026-07-17T09:00:00.000Z',
         worktree: {
@@ -38,6 +38,8 @@ const mockSupervisor = vi.hoisted(() => ({
       activity: {
         schemaVersion: 1,
         summary: 'write tests',
+        waitingFor: 'permission',
+        queuedPromptCount: 2,
         lastActivityAt: '2026-07-17T09:00:00.000Z',
         capabilities: [],
       },
@@ -49,6 +51,23 @@ const mockSupervisor = vi.hoisted(() => ({
         pinned: true,
         createdAt: '2026-07-17T09:00:00.000Z',
         updatedAt: '2026-07-17T09:00:00.000Z',
+      },
+    },
+    {
+      sessionId: 'session-attached',
+      state: {
+        schemaVersion: 1,
+        sessionId: 'session-attached',
+        ownership: 'managed',
+        sessionState: 'idle',
+        processState: 'alive',
+        attachState: 'attached',
+        projectCwd: '/tmp/workspace',
+        originalCwd: '/tmp/workspace',
+        activeCwd: '/tmp/other-project',
+        createdAt: '2026-07-17T08:30:00.000Z',
+        updatedAt: '2026-07-17T08:30:00.000Z',
+        worktree: { mode: 'none' },
       },
     },
     {
@@ -115,6 +134,29 @@ describe('agents command', () => {
     expect(typeof agentsCommand.handler).toBe('function');
   });
 
+  it.each([
+    ['routes bare `agents` to the list handler', ''],
+    ['routes `agents --json` to the list handler', '--json'],
+  ])('%s', async (_label, flags) => {
+    const builder = agentsCommand.builder;
+    if (typeof builder !== 'function') {
+      throw new Error('agents command builder must be a function');
+    }
+    const parser = builder(
+      yargs([])
+        .exitProcess(false)
+        .fail((message, error) => {
+          throw error ?? new Error(message);
+        })
+        .locale('en'),
+    );
+
+    await parser.parseAsync(`agents ${flags}`.trim());
+
+    expect(mockSupervisor.list).toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalled();
+  });
+
   it('registers --cwd, --json, and --all options', () => {
     const options = (
       buildParser() as Argv & {
@@ -147,12 +189,23 @@ describe('agents command', () => {
         state: 'working',
         processState: 'alive',
         projectCwd: '/tmp/workspace',
-        activeCwd: '/tmp/workspace',
+        activeCwd: '/tmp/workspace/.qwen/worktrees/fix-tests',
         attached: false,
         pinned: true,
         createdAt: '2026-07-17T09:00:00.000Z',
         updatedAt: '2026-07-17T09:00:00.000Z',
         summary: 'write tests',
+        waitingFor: 'permission',
+        queuedPromptCount: 2,
+      }),
+      expect.objectContaining({
+        sessionId: 'session-attached',
+        state: 'idle',
+        processState: 'alive',
+        projectCwd: '/tmp/workspace',
+        activeCwd: '/tmp/other-project',
+        attached: true,
+        pinned: false,
       }),
     ]);
     expect(mockSupervisor.list).toHaveBeenCalledWith(
@@ -186,9 +239,10 @@ describe('agents command', () => {
     ) as Array<{ sessionId: string; state: string }>;
     expect(payload.map((agent) => agent.sessionId)).toEqual([
       'session-1',
+      'session-attached',
       'session-done',
     ]);
-    expect(payload[1]).toMatchObject({
+    expect(payload[2]).toMatchObject({
       sessionId: 'session-done',
       state: 'completed',
       processState: 'exited',
@@ -214,7 +268,8 @@ describe('agents command', () => {
     );
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      'session-1 working alive /tmp/workspace Write Tests write tests',
+      'session-1 working alive /tmp/workspace/.qwen/worktrees/fix-tests Write Tests write tests\n' +
+        'session-attached idle alive /tmp/other-project',
     );
     expect(mockSupervisor.list).toHaveBeenCalledWith(
       path.resolve('/tmp/workspace'),

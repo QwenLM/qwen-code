@@ -14,7 +14,7 @@ export const AGENT_VIEW_WORKER_RESUME_MESSAGE =
   'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.';
 
 export const MANAGED_AGENT_VIEW_ONE_SHOT_RESUME_MESSAGE =
-  'Cannot use one-shot input (-p/--prompt, -i, or piped stdin) with --resume of a session that is still running as a background agent. Use `qwen agents attach <id>` to interact with it instead.';
+  'Cannot use one-shot input (-p/--prompt, -i, --input-file, --fork-session, or piped stdin) with --resume of a session that is still running as a background agent. Use `qwen agents attach <id>` to interact with it instead.';
 
 export async function isManagedAgentViewResumeBlocked(
   sessionId: string,
@@ -23,6 +23,21 @@ export async function isManagedAgentViewResumeBlocked(
   if (isAgentViewWorkerEnv(env)) return false;
   const state = await readAgentViewSessionState(sessionId);
   return state?.ownership === 'managed';
+}
+
+/**
+ * `--continue` has no supervisor routing to revive exited sessions (unlike
+ * `--resume`, which attaches through the supervisor), so block only while
+ * the managed worker is still alive; an exited managed session is safe to
+ * resume directly in the foreground.
+ */
+export async function isManagedAgentViewContinueBlocked(
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  if (isAgentViewWorkerEnv(env)) return false;
+  const state = await readAgentViewSessionState(sessionId);
+  return state?.ownership === 'managed' && state.processState !== 'exited';
 }
 
 export function isAgentViewWorkerResumeCommandBlocked(

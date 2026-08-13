@@ -28,6 +28,17 @@ import {
   writeAgentViewSessionState,
 } from './supervisor-store.js';
 
+const mockAttachAgentViewSupervisorTerminal = vi.hoisted(() => vi.fn());
+
+vi.mock('./supervisor-client.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./supervisor-client.js')>();
+  return {
+    ...actual,
+    attachAgentViewSupervisorTerminal: mockAttachAgentViewSupervisorTerminal,
+  };
+});
+
 const cleanupDirs: string[] = [];
 const cleanupServers: AgentViewSupervisorServerHandle[] = [];
 
@@ -90,6 +101,31 @@ describe('Agent View supervisor runner', () => {
     expect(handle.socketPath).toBe(socketPath);
     expect(handle.startedProcess).toBeUndefined();
     await expect(handle.status()).resolves.toEqual({ state: 'ready' });
+  });
+
+  it('binds attach to the blocking terminal bridge', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const server = createFakeSupervisor(socketPath, {
+      status: () => ({ state: 'ready' }),
+      list: () => [],
+      shutdown: () => ({ shuttingDown: true }),
+    });
+    await server.listen();
+    cleanupServers.push(server);
+    mockAttachAgentViewSupervisorTerminal.mockClear();
+
+    const handle = await ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => createFakeProcess()),
+    });
+
+    await handle.attach('session-9');
+
+    expect(mockAttachAgentViewSupervisorTerminal).toHaveBeenCalledOnce();
+    const [callSocketPath, callSessionId] =
+      mockAttachAgentViewSupervisorTerminal.mock.calls[0];
+    expect(callSocketPath).toBe(socketPath);
+    expect(callSessionId).toBe('session-9');
   });
 
   it('spawns through the injected process factory and waits for readiness', async () => {

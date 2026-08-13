@@ -6234,6 +6234,48 @@ describe('AppContainer State Management', () => {
       ).toBe(false);
     });
   });
+
+  describe('Agent View idle gate state', () => {
+    it('passes a populated idle-gate ref to the slash command processor', () => {
+      mockedUseGeminiStream.mockReturnValue({
+        pendingToolCalls: [
+          {
+            status: 'awaiting_approval',
+            confirmationDetails: { type: 'ask_user_question' },
+          },
+        ],
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const calls = mockedUseSlashCommandProcessor.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const gateRef = calls[calls.length - 1]?.at(-1) as {
+        current: Record<string, boolean | undefined>;
+      };
+      expect(gateRef?.current).toMatchObject({
+        hasPendingUserQuestion: true,
+        hasPendingToolConfirmation: true,
+      });
+    });
+  });
 });
 
 describe('dedupeNewestFirst', () => {

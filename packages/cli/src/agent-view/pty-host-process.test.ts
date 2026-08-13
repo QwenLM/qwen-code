@@ -379,8 +379,10 @@ describe('Agent View PTY host process server', () => {
           'Unauthorized PTY host request.',
         );
       } finally {
-        exitCallback?.({ exitCode: 0 });
-        await runPromise;
+        // A non-zero worker exit must surface verbatim: gemini.tsx calls
+        // process.exit(exit.exitCode) on this resolved value.
+        exitCallback?.({ exitCode: 3 });
+        await expect(runPromise).resolves.toEqual({ exitCode: 3 });
       }
     } finally {
       if (previousToken === undefined) {

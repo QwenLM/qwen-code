@@ -18,8 +18,9 @@ import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
  * `QWEN_CODE_PRIVATE_ACP_CAPABILITY` authenticates the daemon-spawned ACP
  * child. The `QWEN_AGENT_VIEW_*` keys carry an Agent View worker's identity
  * and sideband token; an agent-run child inheriting them could impersonate
- * the worker and inject worker events. Their direct consumers already scrub
- * them from `process.env` after reading them.
+ * the worker and inject worker events. Unlike the tokens above, the worker
+ * re-reads these keys for its whole lifetime, so no consumer scrubs them —
+ * this denylist is their only isolation boundary.
  *
  * This denylist is intentionally NARROW: it strips only Qwen-internal secrets,
  * NOT third-party credentials such as `GH_TOKEN`, `AWS_*`, or `NPM_TOKEN`.
