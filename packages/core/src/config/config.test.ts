@@ -2522,6 +2522,83 @@ describe('Server Config (config.ts)', () => {
       expect(replacement.getSnapshot().goal?.status).toBe('active');
     });
 
+    it('holds selective Goal readiness and autonomous work until finalization', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const started: string[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      let ready = false;
+      void config.getGoalRuntimeReady().then(() => {
+        ready = true;
+      });
+
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(started).toEqual([]);
+
+      config.finalizeSessionRestore();
+
+      await expect(config.getGoalRuntimeReady()).resolves.toBe(
+        config.getGoalRuntime(),
+      );
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+    });
+
+    it('rejects selective Goal readiness when restore is abandoned', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const readiness = config.getGoalRuntimeReady();
+
+      config.startNewSession('replacement-session');
+
+      await expect(readiness).rejects.toThrow('Session restore was abandoned');
+    });
+
     it('owns one durable Goal runtime per canonical session', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const first = config.getGoalRuntime();

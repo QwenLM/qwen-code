@@ -401,6 +401,11 @@ export interface NotificationRecordPayload {
     status: string;
     kind: 'agent' | 'monitor' | 'shell';
     toolUseId?: string;
+    /** Structured fields for i18n rendering (persisted for page refresh). */
+    description?: string;
+    commandLabel?: string;
+    eventCount?: number;
+    droppedLines?: number;
   };
 }
 
@@ -569,6 +574,16 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+export interface ChatRecordingRestoreState {
+  lastCompletedUuid: string;
+  turnParentUuids: Array<string | null>;
+  customTitle?: string;
+  titleSource?: TitleSource;
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -711,25 +726,31 @@ export class ChatRecordingService {
     writerLeaseRequired = config.isSessionWriterLeaseEnabled?.() ??
       config.getExperimentalZedIntegration?.() ??
       true,
+    restoreState?: ChatRecordingRestoreState,
   ) {
     this.config = config;
     this.writerLeaseRequired = writerLeaseRequired;
     const resumed = config.getResumedSessionData();
     if (writerLeaseRequired) {
-      this.lastRecordUuid = resumed?.lastCompletedUuid ?? null;
+      this.lastRecordUuid =
+        restoreState?.lastCompletedUuid ?? resumed?.lastCompletedUuid ?? null;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
     } else {
       this.state = 'active';
       this.acceptingWrites = true;
-      this.restoreSessionState(
-        resumed
-          ? {
-              conversation: resumed.conversation ?? { messages: [] },
-              lastCompletedUuid: resumed.lastCompletedUuid,
-            }
-          : undefined,
-        resumed ? this.readPersistedTitleInfo() : undefined,
-      );
+      if (restoreState) {
+        this.restoreProjectedState(restoreState);
+      } else {
+        this.restoreSessionState(
+          resumed
+            ? {
+                conversation: resumed.conversation ?? { messages: [] },
+                lastCompletedUuid: resumed.lastCompletedUuid,
+              }
+            : undefined,
+          resumed ? this.readPersistedTitleInfo() : undefined,
+        );
+      }
     }
   }
 
@@ -861,6 +882,20 @@ export class ChatRecordingService {
     }
   }
 
+  private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    this.lastRecordUuid = state.lastCompletedUuid;
+    this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.turnParentUuids = [...state.turnParentUuids];
+    this.currentCustomTitle = state.customTitle;
+    this.currentTitleSource = state.titleSource;
+    this.currentParentSessionId = state.parentSessionId;
+    this.currentSourceType = state.sourceType;
+    this.currentSourceId = state.sourceId;
+    if (this.currentCustomTitle) {
+      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+    }
+  }
+
   activate(
     lease: SessionWriterLease,
     sessionData?: {
@@ -868,6 +903,7 @@ export class ChatRecordingService {
       lastCompletedUuid: string | null;
     },
     persistedTitleInfo?: { title?: string; source?: TitleSource },
+    restoreState?: ChatRecordingRestoreState,
   ): void {
     if (
       !this.writerLeaseRequired ||
@@ -877,7 +913,11 @@ export class ChatRecordingService {
       throw new SessionWriterUnavailableError();
     }
     this.binding = { sessionId: lease.sessionId, lease };
-    this.restoreSessionState(sessionData, persistedTitleInfo);
+    if (restoreState) {
+      this.restoreProjectedState(restoreState);
+    } else {
+      this.restoreSessionState(sessionData, persistedTitleInfo);
+    }
     this.state = 'active';
     this.acceptingWrites = true;
   }
