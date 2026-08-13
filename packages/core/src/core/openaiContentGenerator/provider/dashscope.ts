@@ -170,6 +170,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
    * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
+   * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
    *
    * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
@@ -217,6 +218,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       (hostname.endsWith('.alibaba-inc.com') ||
         hostname.endsWith('.aliyun-inc.com'));
 
+    // Alibaba Cloud API Gateway domains proxying to DashScope-compatible
+    // APIs. Covers *.alicloudapi.com.
+    const isAliCloudApiOrigin =
+      hostname !== null && hostname.endsWith('.alicloudapi.com');
+
     // Check if proxy is configured and matches
     const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
       ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
@@ -232,6 +238,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       !isDashscopeOrigin &&
       !isTokenPlanOrigin &&
       !isInternalOrigin &&
+      !isAliCloudApiOrigin &&
       !isProxyMatch
     ) {
       debugLogger.debug(
@@ -245,8 +252,18 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       );
     }
 
+    if (isAliCloudApiOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via alicloudapi origin: ${hostname}`,
+      );
+    }
+
     return (
-      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
+      isDashscopeOrigin ||
+      isTokenPlanOrigin ||
+      isInternalOrigin ||
+      isAliCloudApiOrigin ||
+      isProxyMatch
     );
   }
 

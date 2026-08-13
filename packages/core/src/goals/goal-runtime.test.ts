@@ -3670,6 +3670,82 @@ describe('goal runtime', () => {
     });
   });
 
+  it('prepares an active restore without broadcasting or starting work', async () => {
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    const listener = vi.fn();
+    runtime.bindHost(host);
+    runtime.subscribe(listener);
+    const record = goalStateRecord({
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'g-selective',
+        revision: 1,
+        objective: 'resume selectively',
+        status: 'active',
+        evidenceCursor: { recordId: 'restore-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    });
+
+    await runtime.prepareRestore([record]);
+
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(listener).not.toHaveBeenCalled();
+    expect(host.started).toEqual([]);
+
+    await runtime.activateRestoredWork();
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('coalesces preparation and activation and rejects activation before preparation', async () => {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    await expect(runtime.activateRestoredWork()).rejects.toThrow(
+      'preparation has not started',
+    );
+    const record = goalStateRecord({
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    });
+
+    const firstPreparation = runtime.prepareRestore([record]);
+    const secondPreparation = runtime.prepareRestore([record]);
+    await Promise.all([firstPreparation, secondPreparation]);
+    const firstActivation = runtime.activateRestoredWork();
+    const secondActivation = runtime.activateRestoredWork();
+
+    await expect(
+      Promise.all([firstActivation, secondActivation]),
+    ).resolves.toEqual([undefined, undefined]);
+  });
+
+  it('prevents unfinished restore preparation from committing after disposal', async () => {
+    let releaseAppend!: () => void;
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal({ beforeAppend: () => appendGate }),
+    });
+    const preparing = runtime.prepareRestore([legacyGoalRecord()]);
+
+    await Promise.resolve();
+    runtime.dispose();
+    releaseAppend();
+
+    await expect(preparing).rejects.toThrow('Goal runtime has been disposed');
+    await expect(runtime.activateRestoredWork()).rejects.toThrow(
+      'Goal runtime has been disposed',
+    );
+  });
+
   it('commits paused legacy recovery before a reentrant resume', async () => {
     const journal = fakeGoalJournal({
       appendErrors: [new Error('migration write failed'), undefined],

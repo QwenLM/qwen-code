@@ -87,6 +87,8 @@ import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
+  TOAST_REQUEST_EVENT,
+  type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
 } from './components/ToastHost';
@@ -932,6 +934,14 @@ export interface WebShellProps {
   onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: `false` force-
+   * disables upload even when the daemon advertises the capability, while
+   * `true`/omitted still requires the capability to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1799,6 +1809,7 @@ export function App({
   builtinAtProviders,
   atProviders,
   composerTagIcons,
+  fileUploadEnabled,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2055,6 +2066,7 @@ export function App({
       markdownTableMode,
       markdown,
       loadingPhrases,
+      fileUploadEnabled,
     }),
     [
       composerTagIcons,
@@ -2078,6 +2090,7 @@ export function App({
       markdownTableMode,
       markdown,
       loadingPhrases,
+      fileUploadEnabled,
     ],
   );
   const CustomFooter = renderFooter;
@@ -8096,6 +8109,19 @@ export function App({
     window.addEventListener('qwen:open-session', handler);
     return () => window.removeEventListener('qwen:open-session', handler);
   }, [handleOpenSessionFromOverview]);
+
+  // Listen for toast requests from deeply nested components (markdown links
+  // and artifact actions reporting a failed external open, for example).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<ToastRequestDetail>).detail;
+      if (detail && typeof detail.message === 'string' && detail.message) {
+        pushToast(detail.tone, detail.message);
+      }
+    };
+    window.addEventListener(TOAST_REQUEST_EVENT, handler);
+    return () => window.removeEventListener(TOAST_REQUEST_EVENT, handler);
+  }, [pushToast]);
 
   useEffect(() => {
     if (
