@@ -727,6 +727,36 @@ describe('ArtifactPanel code review artifacts', () => {
     delete (window as { __TAURI__?: unknown }).__TAURI__;
   });
 
+  it('keeps relative link artifacts on the native anchor path', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(artifactPanel({ ...linkArtifact(), url: '#artifact' })),
+    );
+    await flush();
+
+    const button = Array.from(container.querySelectorAll('a')).find(
+      (el) => el.textContent === 'Open link',
+    );
+    expect(button).toBeTruthy();
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+    delete (window as { __TAURI__?: unknown }).__TAURI__;
+  });
+
   it('still sends an ordinary JSON artifact to the generic editor', async () => {
     // The regression the early `return` in the dispatch can cause: an
     // artifact WITHOUT the code_review metadata must keep reaching the

@@ -2,7 +2,11 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isDesktopShell, openExternalUrl } from './externalOpen';
+import {
+  isDesktopShell,
+  isExternalOpenUrl,
+  openExternalUrl,
+} from './externalOpen';
 
 type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
 
@@ -25,6 +29,22 @@ describe('externalOpen', () => {
     expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/QwenLM/qwen-code/issues/9060',
     });
+  });
+
+  it('normalizes schemes for the Tauri allowlist', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    await openExternalUrl('HTTPS://github.com/QwenLM/qwen-code/issues/9060');
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+  });
+
+  it('recognizes only opener-supported external URLs', () => {
+    expect(isExternalOpenUrl('https://example.com')).toBe(true);
+    expect(isExternalOpenUrl('MAILTO:test@example.com')).toBe(true);
+    expect(isExternalOpenUrl('#section')).toBe(false);
+    expect(isExternalOpenUrl('/relative')).toBe(false);
   });
 
   it('propagates desktop command failures so callers can toast', async () => {

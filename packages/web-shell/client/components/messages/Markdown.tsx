@@ -26,7 +26,11 @@ import {
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
-import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
+import {
+  isDesktopShell,
+  isExternalOpenUrl,
+  openExternalUrl,
+} from '../../utils/externalOpen';
 import { requestToast } from '../ToastHost';
 import {
   useWebShellCustomization,
@@ -736,9 +740,7 @@ function MarkdownLink({
     );
   }
   const safeHref = isSafeHref(href) ? href : undefined;
-  const isExternalHref = Boolean(
-    safeHref && SAFE_HREF_SCHEMES.test(safeHref.trim()),
-  );
+  const isExternalHref = isExternalOpenUrl(safeHref);
   // In the packaged desktop shell the webview's implicit `target="_blank"`
   // handling silently drops the request on failure, so route external clicks
   // through the shell's explicit opener and surface errors as toasts. Plain

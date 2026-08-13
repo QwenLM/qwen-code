@@ -37,7 +37,11 @@ import {
 } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
-import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
+import {
+  isDesktopShell,
+  isExternalOpenUrl,
+  openExternalUrl,
+} from '../../utils/externalOpen';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { requestToast } from '../ToastHost';
 import { DialogShell } from '../dialogs/DialogShell';
@@ -2342,8 +2346,9 @@ function ArtifactDetail({
   const { t } = useI18n();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
+  const isExternalUrl = isExternalOpenUrl(safeUrl);
   const openExternal = () => {
-    if (!safeUrl) return;
+    if (!safeUrl || !isExternalUrl) return;
     openExternalUrl(safeUrl).catch((error: unknown) => {
       requestToast(
         'error',
@@ -2355,7 +2360,7 @@ function ArtifactDetail({
   // failed new-window requests, so route external opens through the shell's
   // explicit opener there; plain browsers keep native anchor behavior.
   const handleLocationClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
-    if (!isDesktopShell()) return;
+    if (!isExternalUrl || !isDesktopShell()) return;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
       return;
     if (event.button !== 0) return;
