@@ -113,7 +113,15 @@ describe('SuggestionsDisplay mouse wiring', () => {
     const props = vi.mocked(CompletionCategoryMouseController).mock.calls[0][0];
     expect(props.categories).toEqual(['all', 'file', 'session']);
     expect(props.containerRef.current).not.toBeNull();
-    expect(props.categoryRefs.current.filter(Boolean)).toHaveLength(3);
+    expect(props.categoryRefs.current).toHaveLength(props.categories.length);
+    expect(
+      props.categoryRefs.current.map((node) =>
+        node?.childNodes[0]?.childNodes
+          .map((child) => ('nodeValue' in child ? child.nodeValue : ''))
+          .join('')
+          .trim(),
+      ),
+    ).toEqual(['All', 'Files', 'Sessions']);
     expect(props.onSelectCategory).toBe(onSelectCategory);
   });
 
