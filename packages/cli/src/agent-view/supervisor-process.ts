@@ -300,11 +300,14 @@ class AgentViewSupervisorProcessHandler
     const cwd = typeof params?.['cwd'] === 'string' ? params['cwd'] : undefined;
     if (!cwd) return snapshots;
     const resolvedCwd = path.resolve(cwd);
+    const descendantPrefix = resolvedCwd.endsWith(path.sep)
+      ? resolvedCwd
+      : `${resolvedCwd}${path.sep}`;
     return snapshots.filter(
       (snapshot) =>
         snapshot.state.projectCwd === resolvedCwd ||
         snapshot.state.activeCwd === resolvedCwd ||
-        snapshot.state.activeCwd.startsWith(`${resolvedCwd}${path.sep}`),
+        snapshot.state.activeCwd.startsWith(descendantPrefix),
     );
   }
   subscribe(
@@ -1156,7 +1159,10 @@ class AgentViewSupervisorProcessHandler
       if (state.ownership !== 'adopting') {
         continue;
       }
-      if (isStaleStartingState(state, this.options)) {
+      if (
+        isStaleStartingState(state, this.options) ||
+        !isAliveProcessState(state.processState)
+      ) {
         const failedAt = new Date().toISOString();
         await writeAgentViewSessionState(
           {
@@ -1321,6 +1327,9 @@ class AgentViewSupervisorProcessHandler
         throw new Error(`No Agent View session found for ${sessionId}.`);
       }
     }
+    // Heal a dead-but-non-terminal session (e.g. persisted 'working' after a
+    // daemon restart) so its orphaned pending-prompt marker can be cleared.
+    state = await this.workers.refreshMissingWorkerState(state);
 
     const activity = await clearStalePendingPromptIfNeeded(
       state,
@@ -2724,9 +2733,9 @@ async function applyWorkerEvent(
         ? event.sessionState
         : state.sessionState;
 
-  await writeAgentViewSessionState(
+  await patchAgentViewSessionState(
+    event.sessionId,
     {
-      ...state,
       sessionState,
       processState: 'alive',
       activeCwd,
