@@ -105,6 +105,9 @@ describe('no-AK integration CI wiring', () => {
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
       );
+      expect(testStep).toContain(
+        'trap \'rm -rf "$TMPDIR" 2>/dev/null || true\' EXIT',
+      );
       let previous = -1;
       for (const command of [
         'set +e',

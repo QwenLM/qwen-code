@@ -519,7 +519,7 @@ jobs:
             if [ -n "$QWEN_CI_TMPDIR" ]; then
               TMPDIR="$QWEN_CI_TMPDIR"
               export TMPDIR
-              trap 'rm -rf "$TMPDIR"' EXIT
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
@@ -841,7 +841,7 @@ jobs:
             if [ -n "$QWEN_CI_TMPDIR" ]; then
               TMPDIR="$QWEN_CI_TMPDIR"
               export TMPDIR
-              trap 'rm -rf "$TMPDIR"' EXIT
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
@@ -971,7 +971,7 @@ jobs:
             if [ -n "$QWEN_CI_TMPDIR" ]; then
               TMPDIR="$QWEN_CI_TMPDIR"
               export TMPDIR
-              trap 'rm -rf "$TMPDIR"' EXIT
+              trap 'rm -rf "$TMPDIR" 2>/dev/null || true' EXIT
             fi
           fi
           ( while true; do echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
