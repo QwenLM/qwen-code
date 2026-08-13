@@ -2756,6 +2756,26 @@ describe('Gemini Client (client.ts)', () => {
       expect(cacheClear).toHaveBeenCalled();
     });
 
+    it('resets the skill-review window so signals do not leak into the next session', async () => {
+      client['toolCallCount'] = 19;
+      client['userSteeredSinceReview'] = true;
+      client['experienceSignalsSinceReview'] = {
+        retryArc: true,
+        hasSubstantiveWork: true,
+        failedToolNames: new Set(['run_shell_command']),
+      };
+
+      await client.resetChat();
+
+      expect(client['toolCallCount']).toBe(0);
+      expect(client['userSteeredSinceReview']).toBe(false);
+      expect(client['experienceSignalsSinceReview']).toEqual({
+        retryArc: false,
+        hasSubstantiveWork: false,
+        failedToolNames: new Set(),
+      });
+    });
+
     it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
       // resetChat() must call clearRevealedDeferredTools() — without
       // this, deferred tools revealed via ToolSearch in the previous
@@ -8966,6 +8986,135 @@ hello
         expect(client['userSteeredSinceReview']).toBe(true);
       });
 
+      it('should count a steer attached to an accepted ToolResult submission', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            pushCount += 1;
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'no_experience_signal',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-attached-steer',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'not that file, the other one' }],
+                accept: vi.fn(),
+                restore: vi.fn(),
+              },
+            },
+          ),
+        );
+
+        expect(client['userSteeredSinceReview']).toBe(true);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'continue' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-after-attached-steer',
+          ),
+        );
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            experienceSignals: expect.objectContaining({ userSteer: true }),
+          }),
+        );
+      });
+
+      it('should accumulate tool results re-submitted as an accepted Retry', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        // The Retry path strips orphaned user entries first.
+        Object.assign(client.getChat(), {
+          getHistoryLength: vi.fn().mockReturnValue(2),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            pushCount += 1;
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'no_experience_signal',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'run_shell_command',
+                  response: { error: 'test failed' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-retry-tool-result',
+            { type: SendMessageType.Retry },
+          ),
+        );
+
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['run_shell_command']),
+        );
+      });
+
+      it('should reset the full fast-path window when review is already_running', async () => {
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'already_running',
+          taskId: 'task-inflight',
+        });
+
+        // Fast-path window: count between the experience floor and the
+        // backstop threshold, with populated signals.
+        client['toolCallCount'] = 10;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(['run_shell_command']),
+        };
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger while in-flight' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-inflight-fastpath',
+          ),
+        );
+
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
+        });
+      });
+
       it('should not count inputs rejected before history push', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
         mockTurnRunFn.mockImplementation(() =>
@@ -12859,6 +13008,7 @@ Other open files:
         expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
           new Set(),
         );
+        expect(client['userSteeredSinceReview']).toBe(false);
       });
 
       it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {

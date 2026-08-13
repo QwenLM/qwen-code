@@ -2567,11 +2567,29 @@ export class GeminiClient {
     let experienceInputRecorded = false;
     const recordAcceptedExperienceInput = () => {
       if (experienceInputRecorded) return;
-      if (messageType === SendMessageType.ToolResult) {
+      const content =
+        messageType === SendMessageType.ToolResult ||
+        messageType === SendMessageType.Retry
+          ? createUserContent(request)
+          : undefined;
+      if (
+        content &&
+        (messageType === SendMessageType.ToolResult ||
+          // A Retry can re-submit a ToolResult whose original submission was
+          // rejected before the history push; once this push lands, its
+          // functionResponse parts carry real tool outcomes.
+          content.parts?.some((part) => part.functionResponse))
+      ) {
         this.experienceSignalsSinceReview = accumulateExperienceSignals(
-          [createUserContent(request)],
+          [content],
           this.experienceSignalsSinceReview,
         );
+        // A steer attached to an accepted ToolResult submission counts as a
+        // user steer too: the CLI's mid-tool-loop steer flow submits steers
+        // under ToolResult, not SendMessageType.Steer.
+        if (attachedSteerInput) {
+          this.userSteeredSinceReview = true;
+        }
       } else if (messageType === SendMessageType.Steer) {
         this.userSteeredSinceReview = true;
       } else {

@@ -23,16 +23,16 @@ different outcome"。触发器应当直接检测这些事件的确定性特征�
 1. **经验信号快速通道**：检测到任一试错信号，且窗口内工具调用 ≥
    `AUTO_SKILL_EXPERIENCE_FLOOR`（5，保证评审 agent 有足够素材）；
 2. **计数兜底通道**（保留原行为用于召回）：工具调用 ≥ `AUTO_SKILL_THRESHOLD`（20），且
-   窗口内存在实质性工作（至少一次 `write_file` / `edit` / `notebook_edit` /
-   `run_shell_command`）。纯读会话不再触发。
+   窗口内存在实质性工作（已知只读内置工具之外的任意工具调用，含 `mcp__*` 等动态命名
+   工具）。纯读会话不再触发。
 
 ### 经验信号
 
-| 信号                 | 定义                                                                | 检测方式                                                                                                      |
-| -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | `functionResponse.response.error` 存在，或 shell 输出中 `Exit Code: N`（N≠0）视为失败；后续同一工具成功即成立 |
-| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时置位                                       |
-| `hasSubstantiveWork` | 窗口内有写/执行类工具调用                                           | 仅用于兜底通道，排除纯读会话                                                                                  |
+| 信号                 | 定义                                                                | 检测方式                                                                                                                                                                                            |
+| -------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | 仅以 `functionResponse.response.error` 存在判定失败（shell 的真实失败由 shell.ts 附 `error` 键，grep 等退出码 1 不算失败；`[Operation Cancelled]`、中断修补等合成标记不计）；后续同一工具成功即成立 |
+| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时，或被接受的 `ToolResult` 提交附带 steer 时置位                                                                                  |
+| `hasSubstantiveWork` | 窗口内有非只读工具调用（含 `mcp__*` 等动态命名工具）                | 仅用于兜底通道，排除纯读会话                                                                                                                                                                        |
 
 > 曾设想过独立的 `testFlip`（测试红转绿）信号，但它为真时 `retryArc` 在同一次扫描中
 > 必然为真（转绿的那次成功同时闭合试错弧），对门控决策零增量，故合并进 `retryArc`，
@@ -40,11 +40,12 @@ different outcome"。触发器应当直接检测这些事件的确定性特征�
 
 ### 窗口（防重复触发）
 
-`GeminiClient` 直接累计自上次评审以来的工具结果状态：`ToolResult` 到达时更新
-`retryArc` / `failedToolNames`，工具完成时更新 `hasSubstantiveWork`，`Steer` 到达时置位
-`userSteer`。评审被调度（或本应触发但已有评审在跑）时，累计状态与 `toolCallCount` 一起
-清零。累计器不依赖 history 数组下标，因此 history 压缩、摘要和重排不会丢失尚未消费的
-信号。
+`GeminiClient` 直接累计自上次评审以来的工具结果状态：`ToolResult`（含以 `Retry` 重提交
+被接受的 ToolResult）到达时更新 `retryArc` / `failedToolNames`，工具完成时更新
+`hasSubstantiveWork`（被取消的工具不计数），`Steer` 到达或被接受的 ToolResult 附带
+steer 时置位 `userSteer`。评审被调度（或本应触发但已有评审在跑）时，累计状态与
+`toolCallCount` 一起清零。累计器不依赖 history 数组下标，因此 history 压缩、摘要和重排
+不会丢失尚未消费的信号。
 
 ### 门控逻辑（`MemoryManager.scheduleSkillReview`）
 
@@ -53,7 +54,7 @@ disabled / skillsModified            → 维持原有跳过
 fastPath  = (retryArc || userSteer) && toolCallCount >= 5
 backstop  = hasSubstantiveWork && toolCallCount >= threshold(默认 20)
 !fastPath && !backstop               → skipped
-  toolCallCount < 5                  → 'below_threshold'
+  toolCallCount < 5 或 有实质性工作     → 'below_threshold'
   其余                               → 'no_experience_signal'（新增 skippedReason）
 fastPath || backstop                 → scheduled
 ```

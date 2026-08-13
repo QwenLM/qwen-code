@@ -5358,6 +5358,91 @@ describe('useGeminiStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('skips recordCompletedToolCall for cancelled tools in the main completion loop', async () => {
+    // A cancelled tool in the main (non-deduped) path never ran end-to-end,
+    // so it must not inflate toolCallCount / hasSubstantiveWork — parity
+    // with the dedup branch above.
+    const cancelledTool = {
+      request: {
+        callId: 'call_main_cancelled',
+        name: 'write_file',
+        args: { path: '/tmp/cancelled.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-main-cancel',
+      },
+      status: 'cancelled',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_main_cancelled',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_main_cancelled',
+              name: 'write_file',
+              response: { error: 'cancelled' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'cancelled write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // No history pairing: the tool flows through the main geminiTools loop.
+    client.getHistoryFunctionResponseIds = vi.fn().mockReturnValue(new Set());
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([cancelledTool]);
+      }
+    });
+
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('runs Race A dedup BEFORE the active-stream early-return (regression guard)', async () => {
     // The dedup block in handleCompletedTools is intentionally placed
     // ABOVE the active-stream early-return: the scheduler's

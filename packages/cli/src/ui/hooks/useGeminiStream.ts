@@ -4647,6 +4647,10 @@ export const useGeminiStream = (
       }
 
       for (const toolCall of geminiTools) {
+        // Skip cancelled tools, matching the dedup branch above: a cancelled
+        // tool never ran end-to-end, so it must not inflate `toolCallCount`
+        // or flip `hasSubstantiveWork` for the skill-review window.
+        if (toolCall.status === 'cancelled') continue;
         geminiClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,

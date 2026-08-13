@@ -5,7 +5,8 @@
  */
 
 import type { Content } from '@google/genai';
-import { ToolNames } from '../tools/tool-names.js';
+import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
+import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
 
 /**
  * Deterministic proxies for the skill-review prompt's own admission criteria
@@ -35,21 +36,25 @@ export function hasExperienceSignal(signals: ExperienceSignals): boolean {
   return signals.retryArc || signals.userSteer;
 }
 
-const SUBSTANTIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
-  ToolNames.WRITE_FILE,
-  ToolNames.EDIT,
-  ToolNames.NOTEBOOK_EDIT,
-  ToolNames.SHELL,
+// Known read-only builtin tools. Anything outside this set — write/execute
+// builtins, MCP tools (`mcp__*`), extension tools, unknown names — counts as
+// substantive work for the count backstop.
+const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.READ_FILE,
+  ToolNames.ZOOM_IMAGE,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.LS,
+  ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
+  ToolNames.LSP,
+  ToolNames.TOOL_SEARCH,
+  ToolNames.READ_MCP_RESOURCE,
 ]);
 
 export function isSubstantiveToolCall(name: string): boolean {
-  return SUBSTANTIVE_TOOL_NAMES.has(name);
+  return !READ_ONLY_TOOL_NAMES.has(canonicalToolName(name));
 }
-
-// The real status block emitted by shell.ts ends with `Exit Code: N` followed
-// by a `Signal:` line; command output is embedded before it, so a forged
-// `Exit Code:` line inside the output cannot satisfy this anchor.
-const EXIT_CODE_PATTERN = /\nExit Code: (\d+)\nSignal: /;
 
 function isFailedResponse(part: {
   functionResponse?: { name?: string; response?: Record<string, unknown> };
@@ -57,13 +62,23 @@ function isFailedResponse(part: {
   const fr = part.functionResponse;
   if (!fr?.name || !fr.response) return null;
   const error = fr.response['error'];
-  if (typeof error === 'string' && error.trim()) return true;
-  if (fr.name === ToolNames.SHELL) {
-    const output = fr.response['output'];
-    const exit =
-      typeof output === 'string' ? EXIT_CODE_PATTERN.exec(output) : null;
-    return exit ? exit[1] !== '0' : null;
+  if (typeof error === 'string' && error.trim()) {
+    // Synthesized non-failure markers (per-tool cancellation, interrupted-
+    // turn orphan repair) carry `error` but are not genuine failures.
+    // Return `null` (unknown), not `false` — a `false` would close a
+    // pending genuine-failure arc for the same tool.
+    if (
+      error.startsWith('[Operation Cancelled]') ||
+      error === ORPHAN_TOOL_USE_REPAIR_REASON
+    ) {
+      return null;
+    }
+    return true;
   }
+  // No `error` key: the tool reports success-shaped semantics. In
+  // particular, shell.ts only attaches `error` when `isShellExitError`
+  // holds, so whitelisted exit-1 commands (grep/rg/diff/test) land here as
+  // successes, matching the shell tool's own failure classification.
   return false;
 }
 
@@ -91,22 +106,14 @@ export function accumulateExperienceSignals(
       if (failed === null) continue;
       const toolName = part.functionResponse?.name;
       if (!toolName) continue;
+      const canonicalName = canonicalToolName(toolName);
       if (failed) {
-        failedToolNames.add(toolName);
-      } else if (failedToolNames.delete(toolName)) {
+        failedToolNames.add(canonicalName);
+      } else if (failedToolNames.delete(canonicalName)) {
         retryArc = true;
       }
     }
   }
 
   return { retryArc, hasSubstantiveWork, failedToolNames };
-}
-
-/** Scans one complete history window. `userSteer` is supplied by the caller. */
-export function detectExperienceSignals(
-  history: Content[],
-): Omit<ExperienceSignals, 'userSteer'> {
-  const { failedToolNames: _failedToolNames, ...signals } =
-    accumulateExperienceSignals(history);
-  return signals;
 }
