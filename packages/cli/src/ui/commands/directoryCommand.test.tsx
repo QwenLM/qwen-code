@@ -278,7 +278,7 @@ describe('directoryCommand', () => {
         expect.arrayContaining([path.normalize('/home/user/new-project')]),
         expect.anything(),
         expect.anything(),
-        expect.anything(),
+        true,
         'tree',
         expect.anything(),
       );

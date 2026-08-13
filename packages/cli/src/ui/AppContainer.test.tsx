@@ -6373,7 +6373,10 @@ describe('AppContainer State Management', () => {
       // The INFO item must be added before the submission is admitted, so it
       // renders above the prompt.
       expect(enqueueMessage).toHaveBeenCalled();
-      expect(addItem.mock.invocationCallOrder[0]).toBeLessThan(
+      const announcementIndex = addItem.mock.calls.findIndex(([item]) =>
+        isContextFilesAnnouncement(item),
+      );
+      expect(addItem.mock.invocationCallOrder[announcementIndex]).toBeLessThan(
         enqueueMessage.mock.invocationCallOrder[0],
       );
 
@@ -6507,6 +6510,14 @@ describe('AppContainer State Management', () => {
         '/custom/workspace',
       );
       vi.spyOn(mockConfig, 'isSafeMode').mockReturnValue(false);
+      // Pin distinct sentinels for same-typed slots 4 and 7 so a
+      // positional swap is caught.
+      vi.spyOn(mockConfig, 'getExtensionContextFilePaths').mockReturnValue([
+        'ext-context.md',
+      ]);
+      vi.spyOn(mockConfig, 'getContextRuleExcludes').mockReturnValue([
+        'exclude-rule',
+      ]);
       const setContextFilePathsSpy = vi.spyOn(
         mockConfig,
         'setContextFilePaths',
@@ -6537,10 +6548,10 @@ describe('AppContainer State Management', () => {
         '/custom/workspace',
         expect.anything(),
         expect.anything(),
+        ['ext-context.md'],
+        true,
         expect.anything(),
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
+        ['exclude-rule'],
         expect.anything(),
       );
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);

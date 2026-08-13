@@ -14,10 +14,12 @@ import {
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   consumesContextAnnouncementLatch,
   findMidInputSlashCommand,
   findSlashCommandTokens,
   getBestSlashCommandMatch,
+  isContextFilesAnnouncement,
 } from './commandUtils.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { CommandKind, type SlashCommand } from '../commands/types.js';
@@ -1341,5 +1343,36 @@ describe('consumesContextAnnouncementLatch', () => {
     expect(consumesContextAnnouncementLatch('/help', options(true))).toBe(
       false,
     );
+  });
+});
+
+describe('isContextFilesAnnouncement', () => {
+  it('matches an INFO item with the announcement prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md`,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a non-INFO item even when text starts with the prefix', () => {
+    // A user prompt literally starting with "Read context files:" must
+    // not be treated as the announcement after a rewind.
+    expect(
+      isContextFilesAnnouncement({
+        type: 'user',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} please`,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects an INFO item without the prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: 'Memory refreshed successfully.',
+      }),
+    ).toBe(false);
   });
 });
