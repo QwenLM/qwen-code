@@ -1122,7 +1122,12 @@ class AgentViewSupervisorProcessHandler
             this.hasLiveAttach(snapshot.sessionId) ||
             this.hasPendingWorkerInputControl(snapshot.sessionId) ||
             this.hasPendingWorkerStopControl(snapshot.sessionId) ||
-            hasPendingPrompt(latestActivity)
+            hasPendingPrompt(latestActivity) ||
+            // Re-run the idle-window freshness check against the re-read
+            // record: activity a worker reported since the pre-lock
+            // snapshot makes hibernating now cost the user a respawn.
+            (latestActivity?.lastActivityAt !== undefined &&
+              nowMs - Date.parse(latestActivity.lastActivityAt) < policy.idleMs)
           ) {
             if (latestState?.processState === 'hibernating') {
               await writeAgentViewSessionState(
@@ -1542,16 +1547,18 @@ class AgentViewSupervisorProcessHandler
     ) {
       return state;
     }
+    // Patch only the owned field through the queued mutation: re-asserting
+    // a whole stale snapshot here would erase a concurrent exit verdict.
     // Keep the original updatedAt: clearing a stale attach flag is a
     // reconciliation, not a lifecycle change — bumping it would reset the
     // clock isStaleStartingState uses to recover a stuck starting session.
-    const next = {
-      ...state,
-      attachState: 'detached' as const,
-    };
-    await writeAgentViewSessionState(next, this.store);
+    await patchAgentViewSessionState(
+      state.sessionId,
+      { attachState: 'detached' },
+      this.store,
+    );
     this.notifyChanged();
-    return next;
+    return { ...state, attachState: 'detached' };
   }
 }
 
@@ -2195,7 +2202,11 @@ class WorkerRegistry {
     storedPids: number[],
   ): void {
     const timeout = setTimeout(() => {
-      void (async () => {
+      // Run inside the host-setup lock so the decision serializes with a
+      // concurrent respawn: mid-launch the worker record still carries the
+      // replaced worker's stale pids, which would misidentify the respawn
+      // as the dead worker this stop was scheduled for.
+      void this.withHostSetupLock(sessionId, async () => {
         for (const pid of storedPids) {
           try {
             process.kill(pid, 'SIGTERM');
@@ -2219,7 +2230,7 @@ class WorkerRegistry {
           this.preserveQueuedInputControls(sessionId);
           await markStoppedSession(sessionId, this.store, 'exited');
         }
-      })()
+      })
         .catch(() => {})
         .finally(() => {
           this.onChanged();

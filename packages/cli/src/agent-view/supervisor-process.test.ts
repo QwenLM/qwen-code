@@ -1613,17 +1613,32 @@ describe('Agent View supervisor process helpers', () => {
     ]);
 
     expect(launchCount).toBe(2);
-    expect(JSON.parse(firstSocket.outputLine())).toMatchObject({
-      id: 'request-1',
-      ok: true,
-    });
-    expect(JSON.parse(secondSocket.outputLine())).toMatchObject({
-      id: 'request-2',
+    // The winner is whichever attach acquires the setup lock first, which
+    // is nondeterministic; assert the pair of outcomes, not the order.
+    const outcomes = [
+      JSON.parse(firstSocket.outputLine()) as {
+        id: string;
+        ok: boolean;
+        error?: { code?: string };
+      },
+      JSON.parse(secondSocket.outputLine()) as {
+        id: string;
+        ok: boolean;
+        error?: { code?: string };
+      },
+    ];
+    expect(outcomes.map((o) => o.id).sort()).toEqual([
+      'request-1',
+      'request-2',
+    ]);
+    expect(outcomes.find((o) => o.ok)).toMatchObject({ ok: true });
+    expect(outcomes.find((o) => !o.ok)).toMatchObject({
       ok: false,
       error: { code: 'already_attached' },
     });
 
     firstSocket.closeInput();
+    secondSocket.closeInput();
     await firstAttached;
     await secondAttached;
     await fs.rm(globalDir, { recursive: true, force: true });
@@ -2509,6 +2524,18 @@ describe('Agent View supervisor process helpers', () => {
       vi.useRealTimers();
       killSpy.mockRestore();
     }
+
+    // Drain the fallback's detached markStoppedSession write before
+    // deleting the store; the stop verdict itself already landed during
+    // stop(), so key the drain on the fallback's updatedAt bump.
+    const verdict = await readAgentViewSessionState(result.sessionId, {
+      globalDir,
+    });
+    await waitForSessionState(
+      result.sessionId,
+      globalDir,
+      (state) => state.updatedAt !== verdict?.updatedAt,
+    );
 
     await fs.rm(globalDir, { recursive: true, force: true });
   });
