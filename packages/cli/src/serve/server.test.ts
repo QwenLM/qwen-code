@@ -25,7 +25,7 @@ import request from 'supertest';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
 import {
-  createServeApp,
+  createServeApp as createServeAppImpl,
   computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
@@ -293,6 +293,38 @@ const baseOpts: ServeOptions = {
   mode: 'http-bridge',
 };
 
+// Direct app tests bypass runQwenServe's reconciler cleanup.
+const createdApps = new Set<ReturnType<typeof createServeAppImpl>>();
+
+function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
+  const app = createServeAppImpl(...args);
+  createdApps.add(app);
+  return app;
+}
+
+function stopCreatedApps() {
+  for (const app of createdApps) {
+    (
+      app.locals as { stopExtensionGenerationReconciler?: () => void }
+    ).stopExtensionGenerationReconciler?.();
+  }
+  createdApps.clear();
+}
+
+afterEach(stopCreatedApps);
+
+it('stops extension generation reconcilers for direct app tests', () => {
+  const stopExtensionGenerationReconciler = vi.fn();
+  createdApps.add({
+    locals: { stopExtensionGenerationReconciler },
+  } as ReturnType<typeof createServeAppImpl>);
+
+  stopCreatedApps();
+
+  expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+  expect(createdApps.size).toBe(0);
+});
+
 function fakeDaemonLog(): DaemonLogger {
   return {
     info: vi.fn(),
@@ -365,7 +397,11 @@ afterAll(async () => {
   restoreEnv('QWEN_HOME', previousServerTestQwenHome);
   restoreEnv('QWEN_RUNTIME_DIR', previousServerTestRuntimeDir);
   resetHomeEnvBootstrapForTesting();
-  await fsp.rm(serverTestEnvironmentRoot, { recursive: true, force: true });
+  await fsp.rm(serverTestEnvironmentRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+  });
 });
 
 function deferred<T = void>(): {
@@ -26891,7 +26927,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   }
 
   it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26932,7 +26967,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26954,7 +26988,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected fsFactory verbatim when supplied', async () => {
-    const { createServeApp } = await import('./server.js');
     const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
     const app = createServeApp(
       {
@@ -26977,7 +27010,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads production-style primary trust into the default runtime metadata', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26993,7 +27025,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads primary runtime env metadata into the default registry runtime', async () => {
-    const { createServeApp } = await import('./server.js');
     const primaryRuntimeEnv = {
       mode: 'runtime-overlay',
       overlayKeys: ['OPENAI_API_KEY'],
@@ -27015,7 +27046,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses an injected workspace registry as the primary runtime source', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27088,7 +27118,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('accepts matching runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27112,8 +27141,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires the Voice coordinator paired with runtime removal', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -27130,8 +27157,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires a live bridge provider when runtime generations can change', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -27148,7 +27173,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27204,7 +27228,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27328,7 +27351,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('default fsFactory is built with trusted=false (writes refused)', async () => {
-    const { createServeApp } = await import('./server.js');
     const { isFsError } = await import('./fs/index.js');
     const os = await import('node:os');
     const tmp = await import('node:fs').then((m) =>
