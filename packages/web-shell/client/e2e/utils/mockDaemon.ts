@@ -98,6 +98,7 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  configOptionRequests(): DaemonRequestRecord[];
 }
 
 type ScenarioOverrides = Partial<
@@ -430,6 +431,10 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
       ),
+    configOptionRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/config-option$/.test(request.path),
+      ),
   };
 }
 
@@ -541,6 +546,27 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+// Mirror production query modes: `group=pinned` is the pinned bucket;
+// `group=all` (and missing group) returns the full active list. The UI
+// excludes pinned rows from organized sections via `excludePinned`.
+function filterScenarioSessions(
+  scenario: WebShellDaemonScenario,
+  searchParams: URLSearchParams,
+): DaemonSessionSummary[] {
+  const group = searchParams.get('group');
+  const sourceType = searchParams.get('sourceType');
+  const sourceSessions = sourceType
+    ? scenario.sessions.filter(
+        (session) =>
+          session.sourceType === sourceType ||
+          (sourceType === 'default' && session.sourceType === undefined),
+      )
+    : scenario.sessions;
+  return group === 'pinned'
+    ? sourceSessions.filter((session) => Boolean(session.isPinned))
+    : sourceSessions;
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
@@ -565,6 +591,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
@@ -581,7 +608,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -636,7 +663,11 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
@@ -721,7 +752,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -847,16 +878,14 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror production query modes: `group=pinned` is the pinned bucket;
-    // `group=all` (and missing group) returns the full active list. The UI
-    // excludes pinned rows from organized sections via `excludePinned`.
-    const group = searchParams.get('group');
-    const sessions =
-      group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
-    await json(route, { sessions });
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    await json(route, {
+      sessions: filterScenarioSessions(scenario, searchParams),
+    });
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
@@ -1304,6 +1333,24 @@ async function handleDaemonRoute(
       }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
+      return;
+    }
+    if (action === 'config-option') {
+      const configId = readStringField(body, 'configId');
+      const value = readStringField(body, 'value');
+      if (configId !== 'reasoning_effort' || !value) {
+        await badRequest(route, 'Invalid config-option request.');
+        return;
+      }
+      const configOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions.map((option) =>
+            isRecord(option) && option['id'] === configId
+              ? { ...option, currentValue: value }
+              : option,
+          )
+        : [];
+      scenario.state.configOptions = configOptions;
+      await json(route, { configOptions });
       return;
     }
     if (action === 'approval-mode') {
