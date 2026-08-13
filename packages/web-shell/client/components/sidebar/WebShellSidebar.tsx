@@ -3115,7 +3115,7 @@ export function WebShellSidebar({
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
         sessionActionItems.has('archive') && canMutateSessionArchive(session);
-      const showReadOnlyArchive = readOnly && showArchive;
+      const showReadOnlyArchive = readOnly && showArchive && !showPin;
       const showSharedArchive = showArchive && !showReadOnlyArchive;
       const showRename = sessionActionItems.has('rename') && mutableScope;
       const activeExportScope = getActiveExportScope(session);

@@ -4398,7 +4398,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
   // that used to render two archive actions.
   async function pinnedSecondaryCatalog(
     cwd: string,
-    options?: { archiveState?: string; group?: string },
+    options?: { group?: string },
   ): Promise<DaemonSessionSummary[]> {
     return cwd === '/tmp/other' && options?.group === 'pinned'
       ? [
@@ -4436,28 +4436,15 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
   }
 
   async function countArchiveMenuItemsInRow(label: string): Promise<number> {
-    const triggers = Array.from(
-      sessionRow(label).querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="More actions"]',
-      ),
-    );
-    let archiveItems = 0;
-    for (const trigger of triggers) {
-      await act(async () => {
-        click(trigger);
-        await Promise.resolve();
-      });
-      archiveItems += Array.from(
-        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-      ).filter((item) => item.textContent?.includes('Archive')).length;
-      await act(async () => {
-        document.body.dispatchEvent(
-          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
-        );
-        await Promise.resolve();
-      });
-    }
-    return archiveItems;
+    const trigger = sessionAction(label);
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    return Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).filter((item) => item.textContent?.includes('Archive')).length;
   }
 
   it('keeps one inline archive action when ownership changes', async () => {
@@ -4466,14 +4453,37 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
 
     renderSidebar();
     await settle();
-
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
+    expect(
+      sessionRow('Pinned secondary').querySelectorAll(
+        '[class*="sessionActions"]',
+      ),
+    ).toHaveLength(1);
+  });
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
-    await settle();
-    expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
-    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
+  it('keeps archive when the read-only cluster is the sole owner', async () => {
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary-only',
+              workspaceCwd: cwd,
+              displayName: 'Secondary only',
+            },
+          ]
+        : [],
+    );
+    renderSidebar({
+      sessionActions: { items: ['archive'], inlineItems: ['archive'] },
+    });
+    await expandWorkspace('other');
+    expect(archiveButtonsInRow('Secondary only')).toHaveLength(1);
+    expect(
+      sessionRow('Secondary only').querySelectorAll(
+        '[class*="sessionActions"]',
+      ),
+    ).toHaveLength(1);
   });
 
   it('keeps exactly one archive menu item when archive is dropdown-only', async () => {
@@ -4481,7 +4491,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
     renderSidebar({
-      sessionActions: { items: ['pin', 'archive'], inlineItems: ['pin'] },
+      sessionActions: { inlineItems: ['pin'] },
     });
     await settle();
 
