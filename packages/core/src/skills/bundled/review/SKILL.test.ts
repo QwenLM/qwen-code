@@ -129,9 +129,9 @@ describe('bundled review skill', () => {
     const invocations =
       body.match(/"\$\{QWEN_CODE_CLI:-qwen\}" review match-remote/g) ?? [];
     expect(invocations).toHaveLength(2);
-    // The bare-number path threads the host `gh repo view` resolved at —
+    // The bare-number path threads the host `review meta` resolved at —
     // dropping it rematches auth-config-only GHE clones against github.com.
-    expect(body).toContain('--host <host from gh repo view>');
+    expect(body).toContain('--host <host from meta>');
     expect(body).toContain('Exit 6 means no remote matches');
     expect(body).toContain(
       'the matcher exits 6 (no remote matches) or 7 (several do)',
