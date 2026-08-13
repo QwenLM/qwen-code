@@ -402,11 +402,16 @@ export function coverageFromTranscripts(
   // continues in a new session, and the interrupted attempt's evidence lives
   // under the session id the run ledger recorded. Same fence (the plan's
   // mtime), which a resume deliberately leaves untouched.
+  // `currentDirOptional`: a resumed continuation that recovered everything and
+  // launched nothing has no current-session dir yet (the harness creates it on
+  // the first launch), and this gate must read the prior attempt's evidence
+  // rather than refusing as broken infrastructure. Only ENOENT is absorbed.
   const records = readRunTranscripts(
     planPath,
     mtimeMs,
     env,
     plan.diffPathAbsolute,
+    { currentDirOptional: true },
   );
   const built = readRecordedPrompts(planPath);
 
@@ -712,7 +717,13 @@ export function coverageFromTranscripts(
 
     const u = UNCOVERABLE_RE.exec(rec.finalText);
     if (u && chunk !== null && Number(u[1]) === chunk) {
-      uncoverable.add(chunk);
+      // The same supersession guard the sibling flags carry. Without it a
+      // stale declaration — a prior attempt's agent on a resumed run, or a
+      // relaunched agent's first try — permanently deletes live coverage
+      // below (`for (const id of uncoverable) covered.delete(id)` is
+      // post-loop and order-independent), so no compliant relaunch can ever
+      // clear it and the verdict caps on lines this run demonstrably read.
+      if (!superseded(rec, chunk)) uncoverable.add(chunk);
       continue;
     }
 
@@ -982,6 +993,10 @@ export function coverageFromTranscripts(
   // whose launch verbatim-contains a CLI-built prompt and shows the brief or
   // the diff actually opened earns a count here.
   const certifies = (r: AgentRecord): boolean => {
+    // A record whose own return declares a chunk unreachable did not review
+    // it; counting it as recovered would have the body announce work
+    // "counted as reviewed" beside the gap that same record disclosed.
+    if (UNCOVERABLE_RE.test(r.finalText)) return false;
     const c = assignedChunk(r);
     if (c !== null) {
       const b = builtOf(`chunk-${c}`);
@@ -1399,6 +1414,7 @@ export function verificationGaps(
     mtimeMs,
     env,
     plan.diffPathAbsolute,
+    { currentDirOptional: true },
   );
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];

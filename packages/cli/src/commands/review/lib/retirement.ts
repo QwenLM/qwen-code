@@ -665,7 +665,13 @@ export function scheduleReverseAuditRound(
   // and their dry receipts are exactly what lets the continuation retire
   // territory instead of re-auditing it. The fence stays the plan's mtime,
   // which a resume deliberately leaves untouched.
-  const transcripts = readRunTranscripts(planPath, since, env, diffPath);
+  // `currentDirOptional`: a resumed run schedules its next round BEFORE
+  // launching any current-session agent, so its own transcript dir does not
+  // exist yet; without the option this throws and re-audits territory the
+  // prior attempt already retired.
+  const transcripts = readRunTranscripts(planPath, since, env, diffPath, {
+    currentDirOptional: true,
+  });
   const built = readRecordedPrompts(planPath, since);
 
   // The prior-round records: one per (chunk, round) prompt this CLI built.

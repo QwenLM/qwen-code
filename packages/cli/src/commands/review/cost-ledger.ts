@@ -39,11 +39,12 @@ import {
 import {
   transcriptPaths,
   listAgentTranscriptFiles,
+  priorSessionDirs,
   TranscriptsUnavailableError,
   textOf,
 } from './lib/transcripts.js';
 import { labelFromIdentityLine } from './lib/agent-identity.js';
-import { priorSessionIds } from './lib/run-ledger.js';
+import { priorSessionEntries } from './lib/run-ledger.js';
 
 interface CostLedgerArgs {
   plan: string;
@@ -108,6 +109,7 @@ interface UsageEvent {
 function readUsage(
   file: string,
   floorMs: number,
+  ceilingMs?: number,
 ): { events: UsageEvent[]; launch: string } {
   const raw = readFileSync(file, 'utf8');
   const events: UsageEvent[] = [];
@@ -135,6 +137,11 @@ function readUsage(
       // conversation to the review. The plan's own mtime marks the review start
       // — the same floor `check-coverage` applies to transcripts.
       if (!Number.isFinite(tsMs) || tsMs < floorMs) continue;
+      // A prior session's window closes when the NEXT attempt began: the old
+      // CLI session may have gone on serving unrelated turns after this
+      // review was interrupted, and billing those to the review is the exact
+      // mirror of the omission folding prior cost exists to fix.
+      if (ceilingMs !== undefined && tsMs >= ceilingMs) continue;
       // Finite ≥ 0, else null: the main loop coerces broken-proxy usage
       // (negative or NaN counts) before recording, but the agent path records
       // raw provider usage, and each consumer below picks its own fallback
@@ -309,6 +316,19 @@ function planFloorMs(planPath: string): number {
   return floorMs;
 }
 
+/** The first and last moment a set of usage events covers. */
+function spanOf(events: UsageEvent[]): { firstMs: number; lastMs: number } {
+  let firstMs = Number.POSITIVE_INFINITY;
+  let lastMs = Number.NEGATIVE_INFINITY;
+  for (const e of events) {
+    if (e.timestampMs < firstMs) firstMs = e.timestampMs;
+    if (e.timestampMs > lastMs) lastMs = e.timestampMs;
+  }
+  return Number.isFinite(firstMs)
+    ? { firstMs, lastMs }
+    : { firstMs: 0, lastMs: 0 };
+}
+
 export function computeLedger(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -387,24 +407,62 @@ export function computeLedger(
   // so unreadable prior state is skipped, never fatal, and the count of
   // sessions that did contribute is reported.
   const priorMainEvents: UsageEvent[] = [];
+  const priorSpans: Array<{ firstMs: number; lastMs: number }> = [];
+  // The prior-session events, by identity: the wall-clock sum below folds
+  // each session's own span, so the current session's must exclude them.
+  const priorEventSet = new Set<UsageEvent>();
   let priorSessions = 0;
-  for (const id of priorSessionIds(planPath, env)) {
+  // Paths come from the shared accessor, which drops a symlinked prior
+  // directory: the ledger reads file CONTENT with no certification step, so
+  // it is the consumer a planted link would mislead most cheaply.
+  const priorDirs = new Map(
+    priorSessionDirs(planPath, env).map((p) => [p.sessionId, p]),
+  );
+  for (const entry of priorSessionEntries(planPath, env)) {
+    const paths = priorDirs.get(entry.sessionId);
     let contributed = 0;
+    let events: UsageEvent[] = [];
     try {
-      const events = readUsage(
-        join(projectDir, 'chats', `${id}.jsonl`),
+      events = readUsage(
+        paths?.chatFile ??
+          join(projectDir, 'chats', `${entry.sessionId}.jsonl`),
         floorMs,
+        entry.endsAtMs ?? undefined,
       ).events;
       priorMainEvents.push(...events);
       contributed += events.length;
     } catch {
       // The prior attempt's chat is lost; its agents may still count.
     }
-    const priorDir = join(projectDir, 'subagents', id);
-    try {
-      contributed += readAgentDir(priorDir, listAgentTranscriptFiles(priorDir));
-    } catch {
-      // No prior agent dir is a real state (it died before launching any).
+    if (paths !== undefined) {
+      const before = agentEvents.length;
+      try {
+        contributed += readAgentDir(
+          paths.dir,
+          listAgentTranscriptFiles(paths.dir),
+        );
+      } catch (err) {
+        // Absent is the legitimate state (the attempt died before launching
+        // anything). Any OTHER fault is disclosed rather than silently
+        // floored: the summary would otherwise announce that this session's
+        // cost is included while omitting all of its agents.
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          writeStderrLineSafe(
+            `WARNING: could not list the prior session's subagent transcripts at ` +
+              `${paths.dir} (${(err as NodeJS.ErrnoException)?.code ?? (err as Error).message}); ` +
+              `that attempt's agent cost is missing from this ledger.`,
+          );
+        }
+      }
+      const priorAgentEvents = agentEvents.slice(before);
+      if (priorAgentEvents.length > 0) {
+        priorSpans.push(spanOf(priorAgentEvents));
+        for (const e of priorAgentEvents) priorEventSet.add(e);
+      }
+    }
+    if (events.length > 0) {
+      priorSpans.push(spanOf(events));
+      for (const e of events) priorEventSet.add(e);
     }
     if (contributed > 0) priorSessions++;
   }
@@ -439,15 +497,21 @@ export function computeLedger(
     ...allMainEvents,
     ...agentEvents,
   ]);
-  const wallSeconds =
-    totals.firstAt !== null && totals.lastAt !== null
-      ? Math.max(
-          0,
-          Math.round(
-            (Date.parse(totals.lastAt) - Date.parse(totals.firstAt)) / 1000,
-          ),
-        )
-      : 0;
+  // The time this review SPENT, not the envelope it spans. On a resumed run
+  // the envelope would include the dead gap between the interrupted attempt
+  // and the continuation — minutes to hours of nothing — and the ledger
+  // renders this as "min wall" beside real token counts. Summing each
+  // session's own span is identical on a single-session run (one span) and
+  // honest on a resumed one.
+  const currentEvents = [...mainEvents, ...agentEvents].filter(
+    (e) => !priorEventSet.has(e),
+  );
+  const spans = [...priorSpans];
+  if (currentEvents.length > 0) spans.push(spanOf(currentEvents));
+  const wallSeconds = spans.reduce(
+    (acc, sp) => acc + Math.max(0, Math.round((sp.lastMs - sp.firstMs) / 1000)),
+    0,
+  );
 
   const { id: _i, label: _l, ...totalsRest } = totals;
   return {

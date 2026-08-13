@@ -5821,3 +5821,39 @@ describe('composeReview — a resumed run is continuity, not a coverage gap', ()
     expect(r.body).not.toContain('Partially reviewed');
   });
 });
+
+describe('composeReview — continuity renders on every verdict', () => {
+  /** A resumed run: chunk-1's agent re-homed to the ledgered prior session. */
+  function resumedPlan(): string {
+    const p = coveredPlan();
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    renameSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      join(dir, 'subagents', 'S0', 'agent-a1.jsonl'),
+    );
+    writeFileSync(
+      join(promptRecordDir(p), 'run-sessions.json'),
+      JSON.stringify([
+        { sessionId: 'S0', atMs: Date.now() },
+        { sessionId: 'S1', atMs: Date.now() },
+      ]),
+    );
+    return p;
+  }
+
+  it('renders on REQUEST_CHANGES', () => {
+    const r = composeReview(
+      base({ planPath: resumedPlan(), criticalsInline: 1 }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+
+  it('renders on COMMENT', () => {
+    const r = composeReview(
+      base({ planPath: resumedPlan(), suggestionsInline: 1 }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+  });
+});
