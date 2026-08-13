@@ -158,6 +158,8 @@ function simulateSinglePath(
     };
   }
   if (turnShape === 'tool-using') {
+    // The simulation models the safe ToolResult point after selector completion.
+    // Selector latency is varied by scenario; ToolResult timing is not.
     return {
       initialDocIds: [],
       toolResultDocIds: refined,
@@ -199,6 +201,8 @@ function simulateFastPath(
   const remaining = refined.filter((id) => !delivered.has(id));
 
   if (turnShape === 'tool-using') {
+    // The simulation models the safe ToolResult point after selector completion.
+    // Selector latency is varied by scenario; ToolResult timing is not.
     return {
       initialDocIds: fast,
       toolResultDocIds: remaining,
@@ -341,10 +345,10 @@ function measureDeterministicLatencyMs(fixture: EvalFixture): {
 const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
 describe('auto-memory recall delivery evaluation', () => {
-  it('keeps the deterministic fast path far inside the initial budget', () => {
+  it('keeps deterministic candidate selection far inside the initial budget', () => {
     const { p50, p95 } = measureDeterministicLatencyMs(loadFixture());
-    // The fast path only earns its place if scoring is negligible next to the
-    // budget it has to fit inside. Generous bound: this runs on shared CI.
+    // The fast delivery path reuses this candidate selection, so the measured
+    // work must stay negligible next to the budget. Generous bound: shared CI.
     expect(p95).toBeLessThan(INITIAL_BUDGET_MS / 10);
     expect(p50).toBeLessThanOrEqual(p95);
   });

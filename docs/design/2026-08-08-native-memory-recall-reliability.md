@@ -29,12 +29,13 @@ Fast/Refined architecture originally proposed in RFC #7040.
 
 - Give user-query recall a fixed 100 ms initial wait budget.
 - Deliver a result that settles inside the budget in the initial prompt.
-- If the budget expires, deliver the deterministic result instead of nothing.
-  `selectModelCandidateDocuments` already computes lexically ranked,
-  active-tool-filtered candidates in order to build the model manifest, so the
-  fast result reuses them and costs no extra scan or I/O. It is capped at two
-  documents (`MAX_FAST_RECALL_DOCS`), well below the five-document prompt
-  limit, because it carries no model judgement.
+- If the budget expires and the deterministic candidate pass found relevant
+  documents, deliver that bounded result instead of nothing.
+  `selectModelCandidateDocuments` already computes lexically ranked candidates
+  in order to build the model manifest, so the fast result reuses them and
+  costs no extra scan or I/O. It is capped at two documents
+  (`MAX_FAST_RECALL_DOCS`), well below the five-document prompt limit, because
+  it carries no model judgement.
 - Leave recall pending after a fast delivery so the model-selected result still
   lands at the existing same-query ToolResult delivery point.
 - Exclude documents the fast phase already delivered from that later delivery,
@@ -106,8 +107,8 @@ than asserted. Delivery is measured separately in `recall-delivery-eval.test.ts`
 because a correct selection that never reaches the model is worth nothing.
 
 - Recall settling inside the budget is delivered initially.
-- A budget expiry delivers the deterministic result rather than nothing, and
-  leaves recall alive for later ToolResult delivery.
+- A budget expiry with deterministic candidates delivers that bounded result
+  rather than nothing, and leaves recall alive for later ToolResult delivery.
 - The later delivery never repeats a document the fast phase already sent.
 - Cancellation ends the bounded wait and prevents stale delivery.
 - A fast result never crosses a query boundary.
@@ -115,10 +116,11 @@ because a correct selection that never reaches the model is worth nothing.
 - A labeled set covers Chinese, English, Japanese, Korean, mixed text,
   NFKC normalization, body-only matches, and no-result queries.
 - Long CJK queries keep bounded scoring work and preserve both query ends.
-- Existing active-tool noise filtering remains unchanged. The model-selector
-  failure fallback still triggers and returns at most five documents; its
-  scoring quality intentionally improves per the scorer changes above
-  (measured by the frozen-scorer comparison in `recall-eval.test.ts`).
+- Existing active-tool noise filtering remains unchanged on the deterministic
+  candidate path. The model-selector failure fallback still triggers and
+  returns at most five documents; its scoring quality intentionally improves
+  per the scorer changes above (measured by the frozen-scorer comparison in
+  `recall-eval.test.ts`).
 
 ### Known limitations
 

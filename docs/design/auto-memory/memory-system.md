@@ -351,7 +351,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[resolveRelevantAutoMemoryPromptForQuery] --> B[scanAllAutoMemoryTopicDocuments +\nscanAllUserAutoMemoryTopicDocuments\n扫描项目级与用户级全部主题文件]
-    B --> C[filterExcludedAutoMemoryDocuments\n合并作用域并过滤本轮已写入的文件]
+    B --> C[filterExcludedAutoMemoryDocuments\n合并作用域并过滤排除列表中的文件]
     C --> D{query 为空\n或 docs 为空\n或 limit <= 0?}
     D -- 是 --> E[返回空 prompt\nstrategy: none]
     D -- 否 --> F{是否配置了 Config?}
@@ -413,13 +413,15 @@ flowchart TD
     E --> G[Recall 继续运行]
     F --> G
     G --> H{本轮是否有\nToolResult?}
-    H -- 是 --> I[排除 Fast 已投递文档\n按剩余文档重建 Prompt]
-    I --> J{还有剩余文档?}
-    J -- 是 --> K[注入 ToolResult\nphase: refined]
-    J -- 否 --> L{Recall 选中了文档?}
+    H -- 是 --> I{Recall 是否已完成?}
+    I -- 是 --> J[排除 Fast 已投递文档\n按剩余文档重建 Prompt]
+    I -- 否 --> M[丢弃\nno_safe_delivery_point]
+    J --> J1{还有剩余文档?}
+    J1 -- 是 --> K[注入 ToolResult\nphase: refined]
+    J1 -- 否 --> L{Recall 选中了文档?}
     L -- 是 --> L1[丢弃\nalready_delivered]
     L -- 否 --> L2[丢弃\nno_relevant_results]
-    H -- 否 --> M[丢弃\nno_safe_delivery_point]
+    H -- 否 --> M
 ```
 
 **为什么需要 Fast 阶段**：当存在 Config 时 Recall 会等待 Model Selector，
