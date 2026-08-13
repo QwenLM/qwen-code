@@ -13,6 +13,7 @@ public class PermissionModeTest {
         assertEquals("default", PermissionMode.DEFAULT.getValue());
         assertEquals("plan", PermissionMode.PLAN.getValue());
         assertEquals("auto-edit", PermissionMode.AUTO_EDIT.getValue());
+        assertEquals("auto", PermissionMode.AUTO.getValue());
         assertEquals("yolo", PermissionMode.YOLO.getValue());
     }
 
