@@ -794,6 +794,8 @@ describe('tool row rendering', () => {
 
     const errorIcon = container.querySelector('[class*="iconError"]');
     expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.getAttribute('role')).toBe('img');
+    expect(errorIcon?.getAttribute('aria-label')).toBe('Failed');
     expect(errorIcon?.querySelector('svg')).not.toBeNull();
     expect(container.textContent).not.toContain('Failed');
   });
@@ -833,6 +835,23 @@ describe('tool row rendering', () => {
     expect(titleRow).not.toBeNull();
     expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
     expect(titleRow?.textContent).not.toContain('Failed');
+  });
+
+  it('renders no status icon in the expanded completed tool card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'completed',
+        content: [{ type: 'content', content: { text: 'ok' } }],
+      }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"]')).toBeNull();
   });
 
   it('shows an error icon in the expanded failed todo card title', () => {
