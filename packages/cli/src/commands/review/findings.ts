@@ -83,6 +83,13 @@ export interface Finding {
   shortSummary: string;
   /** The concrete trigger and wrong outcome — the finding's evidence. */
   failureScenario: string;
+  /**
+   * The executed evidence that settled the verdict (a probe's two sides, an
+   * A/B's quoted pair, a sweep count) — or the verifier's
+   * `not run — <reason>` line. Carried as data so the report and the comment
+   * bodies quote one recorded string instead of transcribing it twice more.
+   */
+  witness?: string;
   suggestedFix?: string;
   /** Free-form kebab-case tag (`correctness`, `security`, `test-coverage`, …). */
   category?: string;
@@ -351,6 +358,11 @@ export function validateFindings(raw: unknown): Finding[] {
     const shortSummary =
       asString(o, 'shortSummary') ?? asString(o, 'short_summary');
 
+    // `witness` round-trips for the same reason `outcomeNote` does: the Step 4
+    // witness rule attaches it once, and the report and the comment bodies read
+    // it back out of the artifact instead of transcribing the evidence again.
+    const witness = asString(o, 'witness');
+
     return {
       id,
       severity,
@@ -361,6 +373,7 @@ export function validateFindings(raw: unknown): Finding[] {
         ? compressSummary(shortSummary)
         : compressSummary(summary),
       failureScenario,
+      ...(witness ? { witness } : {}),
       ...(asString(o, 'suggestedFix') || asString(o, 'suggested_fix')
         ? {
             suggestedFix: (asString(o, 'suggestedFix') ??

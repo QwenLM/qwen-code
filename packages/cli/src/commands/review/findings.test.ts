@@ -1214,4 +1214,15 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     expect(f.outcome).toBeUndefined();
     expect(f.outcomeNote).toBeUndefined();
   });
+
+  it('keeps witness, so the executed evidence survives being fed back', () => {
+    // The Step 4 witness rule attaches the evidence once; the report and the
+    // comment bodies read it back out of the artifact. Dropped here, every
+    // downstream quote becomes a fresh transcription.
+    const [f] = validateFindings([
+      { ...base, witness: 'BASE: 2 calls / PR: 1 call — probe flipped' },
+    ]);
+    expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
+    expect(validateFindings([{ ...base }])[0].witness).toBeUndefined();
+  });
 });
