@@ -21,6 +21,7 @@ import {
   setGhHost,
   parseNdjson,
   gh,
+  ghRaw,
   ghWithInput,
   ghWithInputRetried,
   ensureAuthenticated,
@@ -319,5 +320,26 @@ describe('ensureAuthenticated() transient retry', () => {
     );
     expect(mockExecFileSync).toHaveBeenCalledTimes(1); // no retry
     expect(atomsWaitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('ghRaw()', () => {
+  beforeEach(() => {
+    mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => setGhHost(undefined));
+
+  it('returns bytes untouched — no trim, no CRLF rewrite', () => {
+    // A diff of a CRLF file: the `\r` before git's line-terminating `\n` is
+    // blob content, and a trailing whitespace-only context line is part of
+    // the last hunk. Both must survive (fetch-pr's raw-bytes policy).
+    mockExecFileSync.mockReturnValueOnce(' line one\r\n   \r\n');
+    expect(ghRaw('pr', 'diff', '1')).toBe(' line one\r\n   \r\n');
+  });
+
+  it('gh() still trims and normalises (the contrast pin)', () => {
+    mockExecFileSync.mockReturnValueOnce(' a\r\nb\n');
+    expect(gh('pr', 'diff', '1')).toBe('a\nb');
   });
 });

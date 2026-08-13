@@ -174,8 +174,12 @@ describe('commentBodyCommand handler', () => {
     });
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
     const ghOrder = ghRawMock.mock.invocationCallOrder[0];
+    const authOrder = ensureAuthenticatedMock.mock.invocationCallOrder[0];
     const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
-    expect(hostOrder).toBeLessThan(ghOrder);
+    // ensureAuthenticated spawns the first real gh process (`gh auth
+    // status`), so the ordering must hold against it too, not just the
+    // data call.
+    expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
   });
 
   it('exits 2 for --kind review without --pr', () => {
@@ -188,6 +192,41 @@ describe('commentBodyCommand handler', () => {
     });
     expect(process.exitCode).toBe(2);
     expect(ghRawMock).not.toHaveBeenCalled();
+    // The usage error must preempt the auth check — on an unauthenticated
+    // machine "log in" can never fix a missing --pr.
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a malformed --repo (usage error, not a fetch failure)', () => {
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'inline',
+      repo: '../escape',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+  });
+
+  it('--out prints the JSON marker, not the raw body', () => {
+    ghRawMock.mockReturnValue('raw markdown body');
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'inline',
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/body.md',
+    });
+    expect(writeStdoutLineMock).toHaveBeenCalledWith(
+      JSON.stringify({
+        outPath: resolve('/tmp/body.md'),
+        chars: 'raw markdown body'.length,
+      }),
+    );
+    expect(writeStdoutLineMock).not.toHaveBeenCalledWith('raw markdown body');
+    expect(process.exitCode).toBeUndefined();
   });
 
   it('exits 1 when the fetch fails', () => {

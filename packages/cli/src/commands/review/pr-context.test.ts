@@ -353,8 +353,10 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
     );
     // A markerless blocker past the snippet cap is recoverable only through
     // the named fetch — and the emitted command must not need filling in.
+    // The full prefix is pinned too: without `"${QWEN_CODE_CLI:-qwen}" review`
+    // the emitted text is an unrunnable bare subcommand name.
     expect(md).toContain(
-      'comment-body 21 --kind inline --repo QwenLM/qwen-code',
+      '"${QWEN_CODE_CLI:-qwen}" review comment-body 21 --kind inline --repo QwenLM/qwen-code',
     );
     expect(md).toContain(
       'comment-body 31 --kind issue --repo QwenLM/qwen-code',
@@ -1225,5 +1227,43 @@ describe('buildMarkdown host baking', () => {
     const md = buildMarkdown('6711', 'o/r', meta, [], [], [longReview]);
     expect(md).toContain('comment-body 7 --kind review --pr 6711 --repo o/r');
     expect(md).not.toContain('--host');
+  });
+
+  it('bakes --host for inline and issue kinds too, not just reviews', () => {
+    // The long-body surfaces are mostly inline/issue comments (snippet cuts,
+    // budget-degraded blockers) — a "kinds differ" refactor must not strand
+    // their refetch commands on the default host.
+    const inline = [
+      {
+        id: 21,
+        user: { login: 'r' },
+        body: `**[Critical]** ${'y'.repeat(9000)}`,
+        path: 'a.ts',
+        line: 1,
+      },
+    ];
+    const issue = [
+      {
+        id: 31,
+        user: { login: 'r' },
+        body: 'z'.repeat(9000),
+      },
+    ];
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      inline,
+      issue,
+      [],
+      null,
+      'ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 21 --kind inline --repo o/r --host ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 31 --kind issue --repo o/r --host ghe.example.com',
+    );
   });
 });

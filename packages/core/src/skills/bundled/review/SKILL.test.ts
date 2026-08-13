@@ -144,7 +144,9 @@ describe('bundled review skill', () => {
     // auth-config-only GHE clone, resolves github.com — a foreign headSha
     // produces a false "head advanced mid-review" ruling.
     const body = skillBody();
-    expect(body).toContain('review meta <n> --repo <owner>/<repo>');
+    expect(body).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review meta <n> --repo <owner>/<repo>',
+    );
     expect(body).toMatch(
       /meta <n> --repo <owner>\/<repo>` \(add `--host <host>` for Enterprise\)/,
     );

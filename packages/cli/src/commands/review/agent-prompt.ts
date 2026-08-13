@@ -81,6 +81,7 @@ import {
   repositoryContextOf,
   type RepositoryContext,
 } from './lib/repository-context.js';
+import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
@@ -1196,8 +1197,21 @@ export function buildRoleBrief(
           'against without a pull request.',
       );
     }
+    // The plan is a file on disk — re-validate before welding values into a
+    // shell command the agent is told to run verbatim (compose-review does
+    // the same on its read path).
+    if (!/^\d+$/.test(String(pr))) {
+      throw new Error(
+        `agent-prompt: plan prNumber is not a number: ${JSON.stringify(pr)}`,
+      );
+    }
+    if (!isOwnerRepo(repo)) {
+      throw new Error(
+        `agent-prompt: plan ownerRepo is not owner/repo: ${JSON.stringify(repo)}`,
+      );
+    }
     const host =
-      typeof report.host === 'string' && report.host !== ''
+      typeof report.host === 'string' && HOSTNAME_RE.test(report.host)
         ? report.host
         : null;
     const dir = opts.planPath ? dirname(resolve(opts.planPath)) : null;

@@ -89,13 +89,44 @@ describe('plan-diff', () => {
       maxChunkLines: 400,
       pr: 6998,
       repo: 'QwenLM/qwen-code',
+      host: 'ghe.example.com',
     });
 
     const plan = JSON.parse(readFileSync(out, 'utf8'));
     expect(plan.prNumber).toBe('6998');
     expect(plan.ownerRepo).toBe('QwenLM/qwen-code');
+    // The host rides along — Agent 0's welded issue-context command routes
+    // at it (a lightweight run has no fetch-pr to carry it otherwise).
+    expect(plan.host).toBe('ghe.example.com');
     // And no worktree appears — the identity does not fake a tree.
     expect(plan.worktreePath).toBeUndefined();
+  });
+
+  it('omits host when none is passed, and rejects a non-hostname', () => {
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      pr: 6998,
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).host).toBeUndefined();
+
+    // The role-0 weld interpolates this value unquoted into a shell command
+    // — a metacharacter payload must die here, not in an agent's shell.
+    expect(() =>
+      (planDiffCommand.handler as (a: unknown) => void)({
+        diff_path: diffPath,
+        out,
+        maxChunkLines: 400,
+        pr: 6998,
+        repo: 'QwenLM/qwen-code',
+        host: 'ghe.example.com; touch /tmp/pwned',
+      }),
+    ).toThrow(/not a hostname/);
   });
 
   it('records the effort the caller passed, so the roster reads it from the plan', () => {

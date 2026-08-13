@@ -1019,8 +1019,9 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     issue,
     reviews,
     prevLedger,
-    // The effective host goes into the emitted refetch commands; undefined
-    // (github.com / inherited GH_HOST) leaves the `--host` flag off.
+    // The effective host (explicit --host, else an operator-exported
+    // GH_HOST) goes into the emitted refetch commands; only a resolved
+    // undefined — the github.com default — leaves the `--host` flag off.
     resolveGhHost(args.host),
   );
 

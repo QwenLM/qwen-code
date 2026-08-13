@@ -279,6 +279,24 @@ describe('runIssueContext', () => {
     });
     expect(() => runIssueContext(ARGS)).toThrow(/gh >= 2\.72\.0/);
   });
+
+  it('falls back to the PR repo for a closing ref with no repository payload', () => {
+    // GraphQL's Issue.repository is NON_NULL, so this is a defensive branch —
+    // pinned so a later "simplification" to a throw or a hardcode goes red.
+    mockClosing([{ number: 77 }]);
+    mockIssue('orphan ref');
+    runIssueContext(ARGS);
+    expect(ghMock).toHaveBeenNthCalledWith(
+      2,
+      'issue',
+      'view',
+      '77',
+      '--repo',
+      'QwenLM/qwen-code',
+      '--json',
+      'title,body,comments',
+    );
+  });
 });
 
 describe('issueContextCommand handler', () => {
@@ -300,8 +318,12 @@ describe('issueContextCommand handler', () => {
     });
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
     const ghOrder = ghMock.mock.invocationCallOrder[0];
+    const authOrder = ensureAuthenticatedMock.mock.invocationCallOrder[0];
     const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
-    expect(hostOrder).toBeLessThan(ghOrder);
+    // ensureAuthenticated spawns the first real gh process (`gh auth
+    // status`), so the ordering must hold against it too, not just the
+    // data call.
+    expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
   });
 
   it('exits 2 on a usage error (malformed --repo)', () => {
@@ -328,5 +350,29 @@ describe('issueContextCommand handler', () => {
       out: '/tmp/ic.md',
     });
     expect(process.exitCode).toBe(1);
+  });
+
+  it('wires --issue through to the extra fetch', () => {
+    mockClosing([]);
+    mockIssue('five');
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+      issue: [555],
+    });
+    expect(ghMock).toHaveBeenNthCalledWith(
+      2,
+      'issue',
+      'view',
+      '555',
+      '--repo',
+      'QwenLM/qwen-code',
+      '--json',
+      'title,body,comments',
+    );
+    expect(process.exitCode).toBeUndefined();
   });
 });

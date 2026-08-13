@@ -137,7 +137,7 @@ by nature — remain, to be re-authored or gated in Phase 3):
 | Agent 0's `closingIssuesReferences` + `gh issue view` pair                                | `qwen review issue-context <n> --out <file>` — emits the evidence markdown; GitHub: closing issues + bodies + comments; Aone: workitems + fields + comments |
 | `gh pr diff` (lightweight cross-repo mode)                                                | `qwen review fetch-diff <target>`                                                                                                                           |
 | `gh api repos/…/pulls/comments/<id>` refetch refs that `pr-context` emits into context.md | emit `qwen review comment-body <id>` commands instead (provider-routed)                                                                                     |
-| `GH_HOST=<host>` prefixing rule for all model-run gh calls                                | gone — subcommands route internally                                                                                                                         |
+| `GH_HOST=<host>` prefixing rule for all model-run gh calls                                | gone for every call except the Step 4 render-adjudication carve-out, which keeps its `GH_HOST=<host> ` prefix until Phase 3 re-authors it                   |
 
 This phase is GitHub-only behavior-preserving and independently shippable: it
 removes the exact class of prose-carried failures the skill has measured, even
@@ -209,8 +209,11 @@ local git, not a platform compare API — none exists on Aone.
 publish image assets degrade to embedding nothing and noting the skip.
 `cleanup`'s bypass audit maps to `comment list` filtered by
 `author.account == whoami()` within the audit window. Everything else
-(capture-local, plan-diff, findings, verification, reverse audit, build-test,
-save-artifact, cost-ledger) is platform-neutral already.
+(capture-local, findings, verification, reverse audit, build-test,
+save-artifact, cost-ledger) is platform-neutral already — with one
+qualification: `plan-diff` gains a `--host` option in Phase 1 (recorded into
+the plan as the host carrier for lightweight runs, read by the welded Agent 0
+command), so its platform dimension is the recorded host, not any API call.
 
 ### D9 — Bound the diff: keep existing command/file names
 
@@ -225,7 +228,10 @@ double the diff for no behavioral gain.
 packages/cli/src/commands/review/lib/platform/
   types.ts         — ReviewPlatform + shared request/result types
   registry.ts      — detect(target, cwd, settings) → platform
-  github.ts        — extraction of today's logic (uses lib/gh.ts unchanged)
+  github.ts        — extraction of today's logic (Phase 1 note: lib/gh.ts
+                     gained the untouched-bytes ghRaw transport and empty-flag
+                     host normalisation, and github.ts consumes ghRaw;
+                     existing call behavior otherwise unchanged)
   aone-client.ts   — a1 exec wrapper (execFileSync, -f json, retry policy)
   aone.ts          — Aone implementation
 ```
@@ -233,7 +239,8 @@ packages/cli/src/commands/review/lib/platform/
 New/changed subcommands: `meta` (new), `issue-context` (new), `fetch-diff`
 (new), `comment-body` (new); `parse-args`, `match-remote`, `fetch-pr`,
 `pr-context`, `comment-status`, `presubmit`, `submit`, `compose-review`,
-`cleanup`, `test-plan` route through the registry.
+`cleanup`, `test-plan` route through the registry; `plan-diff` gains `--host`
+(recorded into the plan — see D8).
 
 `agent-briefs.ts` (Agent 0 brief, scratch-repo carve-out) and `agent-prompt.ts`
 (`gh pr view` fallback warning) are re-authored to reference subcommands only —
@@ -249,13 +256,20 @@ Enterprise paragraph.
   behavior identical; existing tests pin behavior. SKILL.md untouched.
 - **Phase 1 — prose absorption (GitHub-only).** The four new subcommands;
   SKILL.md + briefs re-authored; GitHub behavior unchanged. Shippable on its
-  own merits.
+  own merits. Note: unlike Phase 0, the subcommand/provider code here is NEW
+  implementation of operations that previously existed only as prose —
+  nothing pre-existing pinned them; their behavior is pinned by tests added
+  in the phase-1 PR itself (as merged: PR #9096's own tests).
 - **Phase 2 — Aone read path.** `aone-client`, detection, fetch, context,
   issue-context, comment-status, presubmit (read-only parts). Full local review
   of an Aone CR works; `--comment` on an Aone target refuses with a clear
   message. E2E: review a real odps_src CR locally.
 - **Phase 3 — Aone write path.** `submit` (batched inline + summary + verdict),
-  `composeUrl`, cleanup audit, AI-comment marking. E2E: `--comment` against a
+  `composeUrl`, cleanup audit, AI-comment marking. Also owns the deferred
+  render-adjudication carve-out: either re-author it per provider (the
+  Enterprise host must reach the verifier subagent — SKILL.md currently says
+  exported-GH_HOST only, and "unavailable otherwise"), or gate it off
+  explicitly on non-github.com runs. E2E: `--comment` against a
   scratch/test CR.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab

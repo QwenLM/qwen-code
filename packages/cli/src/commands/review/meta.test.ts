@@ -98,6 +98,18 @@ describe('runMeta', () => {
     expect(hostOrder).toBeLessThan(prViewOrder);
   });
 
+  it('an explicit --host flag wins over the discovered host in the cwd branch', () => {
+    ghMock
+      .mockReturnValueOnce(
+        '{"owner":{"login":"o"},"name":"r","url":"https://github.com/o/r"}',
+      )
+      .mockReturnValueOnce('{"headRefOid":"abc","url":"u"}');
+    runMeta({ prNumber: 1, host: 'ghe.example.com' });
+    // A dropped args.host here would route the PR call at the discovered
+    // github.com instead — the operator's Enterprise host silently ignored.
+    expect(setGhHostMock).toHaveBeenLastCalledWith('ghe.example.com');
+  });
+
   it('an operator-exported GH_HOST keeps precedence over the discovered host', () => {
     process.env['GH_HOST'] = 'ghe.example.com';
     ghMock.mockReturnValue(
@@ -189,8 +201,12 @@ describe('metaCommand handler', () => {
     });
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
     const ghOrder = ghMock.mock.invocationCallOrder[0];
+    const authOrder = ensureAuthenticatedMock.mock.invocationCallOrder[0];
     const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
-    expect(hostOrder).toBeLessThan(ghOrder);
+    // ensureAuthenticated spawns the first real gh process (`gh auth
+    // status`), so the ordering must hold against it too, not just the
+    // data call.
+    expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
   });
 
   it('prints the result as one JSON object', () => {

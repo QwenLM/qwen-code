@@ -2286,7 +2286,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('QwenLM/qwen-code');
     expect(p).toContain(join(resolve('/x'), 'qwen-review-pr-6766-context.md'));
     // The evidence fetch is the welded issue-context command, not a gh prose line.
-    expect(p).toContain('review issue-context 6766 --repo QwenLM/qwen-code');
+    // The full wrapper is pinned: without `"${QWEN_CODE_CLI:-qwen}" review`
+    // the emitted text is an unrunnable bare subcommand name.
+    expect(p).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review issue-context 6766 --repo QwenLM/qwen-code',
+    );
     expect(p).toContain(
       join(resolve('/x'), 'qwen-review-pr-6766-issue-context.md'),
     );
@@ -2303,7 +2307,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       planPath,
     });
     expect(p).toContain(
-      'review issue-context 6766 --repo QwenLM/qwen-code --host ghe.example.com',
+      '"${QWEN_CODE_CLI:-qwen}" review issue-context 6766 --repo QwenLM/qwen-code --host ghe.example.com',
     );
   });
 

@@ -41,7 +41,7 @@ function isTransientGhError(err: unknown): boolean {
  */
 function execGhWithRetry(
   args: string[],
-  options: { input?: string; trim?: boolean },
+  options: { input?: string; raw?: boolean },
 ): string {
   const execOptions: Parameters<typeof execFileSync>[2] = {
     encoding: 'utf8',
@@ -51,11 +51,15 @@ function execGhWithRetry(
   };
   for (let attempt = 0; ; attempt++) {
     try {
-      const out = (execFileSync('gh', args, execOptions) as string).replace(
-        /\r\n/g,
-        '\n',
-      );
-      return options.trim === false ? out : out.trim();
+      const out = execFileSync('gh', args, execOptions) as string;
+      // The raw path returns bytes untouched: in a diff of a CRLF file the
+      // `\r` before git's line-terminating `\n` is blob CONTENT, and the
+      // trim would drop a trailing whitespace-only context line — fetch-pr
+      // writes raw bytes for the same reason.
+      if (options.raw === true) {
+        return out;
+      }
+      return out.replace(/\r\n/g, '\n').trim();
     } catch (err) {
       if (attempt < MAX_RETRIES && isTransientGhError(err)) {
         const delay = BASE_DELAY_MS * (attempt + 1);
@@ -178,13 +182,13 @@ export function gh(...args: string[]): string {
 }
 
 /**
- * Same transport without the trailing trim — for payloads whose edges are
- * content: a diff whose last context line is whitespace-only, a comment
- * body whose first line is an indented code block. CRLF normalisation
- * still applies (mixed line endings break hunk parsing downstream).
+ * Same transport with the bytes UNTOUCHED — no trim, no CRLF rewrite. For
+ * payloads whose edges and line endings are content: a diff of a CRLF file
+ * (the `\r` is blob content; fetch-pr writes raw bytes for the same reason),
+ * a comment body whose first line is an indented code block.
  */
 export function ghRaw(...args: string[]): string {
-  return execGhWithRetry(args, { trim: false });
+  return execGhWithRetry(args, { raw: true });
 }
 
 /**

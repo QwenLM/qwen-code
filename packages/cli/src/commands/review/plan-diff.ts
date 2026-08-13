@@ -20,6 +20,7 @@ import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
+import { HOSTNAME_RE } from './lib/gh.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
@@ -83,6 +84,16 @@ function runPlanDiff(args: PlanDiffArgs): void {
     );
   }
 
+  // The plan is a file on disk and the role-0 weld interpolates this host
+  // unquoted into a shell command the agent runs verbatim — validate before
+  // recording, as fetch-pr's handler does via setGhHost's HOSTNAME_RE.
+  const host = args.host?.trim() || undefined;
+  if (host !== undefined && !HOSTNAME_RE.test(host)) {
+    throw new TypeError(
+      `plan-diff: --host is not a hostname: ${JSON.stringify(args.host)}`,
+    );
+  }
+
   const plan = buildDiffPlan(diffText, args.maxChunkLines);
   const result: PlanDiffResult = {
     diffPath,
@@ -98,10 +109,8 @@ function runPlanDiff(args: PlanDiffArgs): void {
           ownerRepo: args.repo,
           // The host rides along so the welded Agent 0 command routes at the
           // Enterprise host — a lightweight run never executes fetch-pr, the
-          // other writer of this fact.
-          ...(args.host !== undefined && args.host !== ''
-            ? { host: args.host }
-            : {}),
+          // other writer of this fact. Validated above (HOSTNAME_RE).
+          ...(host !== undefined ? { host } : {}),
         }
       : {}),
     // No `git show` is possible here — there is no ref to resolve a path
