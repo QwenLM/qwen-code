@@ -135,15 +135,29 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'Rule the class finding `fixed` only when the structural change lands',
     );
+    // The rule must govern BOTH sibling paths: the open-blocker re-check routes an
+    // unbounded family to the collapse rule instead of enumerating (R3-1/R3-5).
+    expect(body).toContain('apply the bounded/unbounded rule above instead');
+    // A resurfaced sibling of a collapsed family has its own disposition, so the
+    // re-check does not fall to still-stands / cannot-tell every round (R3-6).
+    expect(body).toContain('superseded by `<class-id>`');
   });
 
   it('pins the root-cause-as-one-finding rule against the pattern-merge', () => {
     // The root-cause family must NOT go through the pattern-aggregation merge
     // (severity promotion + per-location expansion → split ledger ids). A revert
     // to "merge them into a single finding" via the merge path must fail here.
-    expect(skillBody()).toContain(
+    const body = skillBody();
+    expect(body).toContain(
       'A root-cause family is one class-level finding, NOT a pattern-aggregation',
     );
+    // The load-bearing clauses, not just the heading: root risk (not symptom-max)
+    // and root confidence (not symptom-max) — harmonising to highest-severity must
+    // fail here (R3-8).
+    expect(body).toContain(
+      'its severity is the demonstrated risk of the **root** (not the highest symptom)',
+    );
+    expect(body).toContain("at the **root's own confidence**");
   });
 
   it('routes both remote-resolution paths through match-remote', () => {

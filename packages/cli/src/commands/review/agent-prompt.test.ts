@@ -290,13 +290,24 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     ).not.toContain('Modeled-executable-system lens — your territory');
   });
 
-  it('carries the enumeration-trap lens into both the 3b brief (3A) and the chunk brief (3B) — one source', () => {
-    // One exported constant, both delivery paths. A cleanup that drops the lens
-    // from either the whole-diff 3b brief or buildChunkAgentPrompt must fail here —
+  it('carries the enumeration-trap lens — with its operational clauses — into both the 3b brief (3A) and the chunk brief (3B)', () => {
+    // Delivery: one exported constant reaches both paths. A cleanup that drops the
+    // lens from either the whole-diff 3b brief or buildChunkAgentPrompt must fail —
     // otherwise a large chunked PR (the 3B path, where the bloat lives) silently
     // stops filing the class-closing shape finding.
     expect(BRIEFS['3b'].brief).toContain(ENUMERATION_TRAP_LENS);
     expect(buildChunkAgentPrompt(PLAN, 13)).toContain(ENUMERATION_TRAP_LENS);
+    // Content: the delivery assertions above are `toContain(constant)`, so they
+    // pass even if the constant is emptied or its operational clauses paraphrased
+    // away (both sites update together). Pin the load-bearing text literally, so a
+    // weakened lens fails independently of where it is delivered.
+    expect(ENUMERATION_TRAP_LENS).toContain('has **no last corner**');
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'file it ONCE, in place of enumerating cases',
+    );
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'can be fooled into a wrong result is **Critical**',
+    );
   });
 });
 
