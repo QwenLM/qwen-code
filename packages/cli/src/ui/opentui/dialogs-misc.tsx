@@ -316,23 +316,57 @@ export function OpenTuiSubagentCreateDialog({ onClose }: P) {
 
 export function OpenTuiSubagentListDialog({ config, onClose }: P) {
   useEsc(onClose);
-  const subagents = (
-    config as { getSubagents?: () => Array<{ name: string }> }
-  )?.getSubagents?.();
+  const [rows, setRows] = useState<Array<{ name: string; desc: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    const mgr = (
+      config as {
+        getSubagentManager?: () => {
+          listSubagents: () => Promise<Array<Record<string, unknown>>>;
+        };
+      }
+    )?.getSubagentManager?.();
+    if (!mgr) {
+      setLoading(false);
+      return;
+    }
+    mgr
+      .listSubagents()
+      .then((list) => {
+        if (!alive) return;
+        setRows(
+          (list ?? []).map((s) => ({
+            name: String(s['name'] ?? '(unnamed)'),
+            desc: String(s['description'] ?? ''),
+          })),
+        );
+        setLoading(false);
+      })
+      .catch(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [config]);
   return (
     <Shell title="Subagents" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        {subagents && subagents.length > 0 ? (
-          subagents.map((s) => (
-            <box key={s.name} flexDirection="row">
+      <scrollbox height={12} marginTop={1} stickyScroll={false}>
+        {loading ? (
+          <text fg={C.dim}>{'loading subagents…'}</text>
+        ) : rows.length === 0 ? (
+          <text fg={C.dim}>{'no subagents configured'}</text>
+        ) : (
+          rows.map((r) => (
+            <box key={r.name} flexDirection="row">
               <text fg={C.green}>{'• '}</text>
-              <text fg={C.text}>{s.name}</text>
+              <text fg={C.text}>{r.name}</text>
+              <text fg={C.dim}>{`  ${r.desc}`}</text>
             </box>
           ))
-        ) : (
-          <text fg={C.dim}>{'no subagents configured'}</text>
         )}
-      </box>
+      </scrollbox>
     </Shell>
   );
 }
