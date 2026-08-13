@@ -23,7 +23,8 @@ const repoRoot = resolve(
 );
 
 const MANIFEST_RELATIVE_PATH = '.qwen/review-context.json';
-const BUNDLED_SKILLS_ROOT = 'packages/core/src/skills/bundled';
+const SKILLS_ROOT = 'packages/core/src/skills';
+const BUNDLED_SKILLS_ROOT = `${SKILLS_ROOT}/bundled`;
 
 const expectedManifest = {
   version: 1,
@@ -255,6 +256,12 @@ describe('committed review context manifest', () => {
       expect(existsSync(join(repoRoot, sentinel))).toBe(true);
     }
 
+    const topLevelSources = readdirSync(join(repoRoot, SKILLS_ROOT), {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+      .map((entry) => `${SKILLS_ROOT}/${entry.name}`)
+      .sort();
     const bundledFiles = listFilesRecursively(BUNDLED_SKILLS_ROOT);
     const entrypoints = bundledFiles.filter((path) =>
       /^packages\/core\/src\/skills\/bundled\/[^/]+\/SKILL\.md$/.test(path),
@@ -262,8 +269,12 @@ describe('committed review context manifest', () => {
     const nestedFiles = bundledFiles.filter(
       (path) => !entrypoints.includes(path),
     );
+    expect(topLevelSources.length).toBeGreaterThan(1);
     expect(entrypoints.length).toBeGreaterThan(0);
     expect(nestedFiles).toEqual(expect.arrayContaining(nestedSentinels));
+    for (const source of topLevelSources) {
+      expect(context?.relatedPaths).toContain(source);
+    }
     for (const entrypoint of entrypoints) {
       expect(context?.relatedPaths).toContain(entrypoint);
     }
