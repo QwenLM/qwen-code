@@ -290,10 +290,12 @@ function createRemotePtyHostHandle({
       }).catch(() => {
         child?.kill(allowedSignal);
       });
-      // SIGINT is non-terminal (the worker can trap it and survive), so do
-      // not optimistically resolve the exit tracker for it — let the
+      // Only SIGKILL cannot be trapped, so it is the only kill that
+      // guarantees the worker is gone — resolve the exit tracker immediately
+      // for it. SIGINT/SIGTERM can be trapped and survived (the server-side
+      // kill op, unlike shutdown, has no SIGKILL escalation), so let the
       // remote exit poller observe whether the worker actually exits.
-      if (!child && allowedSignal !== 'SIGINT') {
+      if (!child && allowedSignal === 'SIGKILL') {
         exitTracker.resolve({ exitCode: 1 });
       }
     },

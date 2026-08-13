@@ -633,13 +633,13 @@ describe('Agent View PTY host process server', () => {
       socketPath,
     );
 
-    connected.kill('SIGTERM');
+    connected.kill('SIGKILL');
 
-    await waitFor(() => host.killedWith === 'SIGTERM');
+    await waitFor(() => host.killedWith === 'SIGKILL');
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
-  it('does not resolve exited on SIGINT for a connected (childless) handle', async () => {
+  it('only resolves exited on SIGKILL for a connected (childless) handle', async () => {
     const host = fakeHost();
     const socketPath = shortSocketPath();
     const server = createAgentViewPtyHostServer(host, socketPath);
@@ -651,18 +651,25 @@ describe('Agent View PTY host process server', () => {
       socketPath,
     );
 
+    const notSettledWithin = (ms: number) =>
+      Promise.race([
+        connected.exited.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+      ]);
+
+    // SIGINT is trappable — exited must not settle within a grace window.
     connected.kill('SIGINT');
     await waitFor(() => host.killedWith === 'SIGINT');
+    expect(await notSettledWithin(100)).toBe(false);
 
-    // SIGINT is non-terminal — exited must not settle within a grace window.
-    const settled = await Promise.race([
-      connected.exited.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
-    ]);
-    expect(settled).toBe(false);
-
-    // A terminal signal still resolves it.
+    // SIGTERM is trappable too (server kill has no SIGKILL escalation) —
+    // exited must likewise stay pending for the exit poller to observe.
     connected.kill('SIGTERM');
+    await waitFor(() => host.killedWith === 'SIGTERM');
+    expect(await notSettledWithin(100)).toBe(false);
+
+    // Only SIGKILL cannot be trapped, so it resolves immediately.
+    connected.kill('SIGKILL');
     await expect(connected.exited).resolves.toEqual({ exitCode: 1 });
   });
 
