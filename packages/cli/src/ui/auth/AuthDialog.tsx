@@ -22,6 +22,7 @@ import {
   findExistingProviderModels,
   getDefaultModelIds,
   normalizeBaseUrlForMatching,
+  resolveBaseUrl,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -155,9 +156,21 @@ export function getExistingProviderSetup(
   initialBaseUrl: string | undefined;
   customModelIds: string[];
   trimmedDefaultModelIds: string[];
+  modelIdsByBaseUrl: ReadonlyMap<string, readonly string[]>;
 } {
   const saved = findExistingProviderModels(providerConfig, modelProviders);
   const initialBaseUrl = saved?.models[0]?.baseUrl;
+  const modelIdsByBaseUrl = new Map<string, string[]>();
+  for (const model of saved?.models ?? []) {
+    const modelBaseUrl = model.baseUrl ?? initialBaseUrl;
+    if (modelBaseUrl === undefined) continue;
+    const resolvedBaseUrl = normalizeBaseUrlForMatching(
+      resolveBaseUrl(providerConfig, modelBaseUrl),
+    );
+    const modelIds = modelIdsByBaseUrl.get(resolvedBaseUrl) ?? [];
+    if (!modelIds.includes(model.id)) modelIds.push(model.id);
+    modelIdsByBaseUrl.set(resolvedBaseUrl, modelIds);
+  }
   // Scope built-ins to the restored endpoint: a saved model whose id collides
   // with a *sibling* endpoint's built-in is user data for this endpoint, and
   // dropping it here lets the prepend-and-remove-owned merge delete it on the
@@ -185,6 +198,7 @@ export function getExistingProviderSetup(
     trimmedDefaultModelIds: saved
       ? [...builtinIds].filter((id) => !restoredModelIdSet.has(id))
       : [],
+    modelIdsByBaseUrl,
   };
 }
 
@@ -266,6 +280,7 @@ export function AuthDialog({
       existingSetup.customModelIds,
       existingSetup.initialBaseUrl,
       existingSetup.trimmedDefaultModelIds,
+      existingSetup.modelIdsByBaseUrl,
     );
     pushView('provider-setup');
   };
@@ -342,6 +357,7 @@ export function AuthDialog({
           existingSetup.customModelIds,
           existingSetup.initialBaseUrl,
           existingSetup.trimmedDefaultModelIds,
+          existingSetup.modelIdsByBaseUrl,
         );
         pushView('provider-setup');
         break;

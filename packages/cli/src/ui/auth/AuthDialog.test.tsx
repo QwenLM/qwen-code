@@ -331,6 +331,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'kimi-k2.7-code-highspeed',
         'kimi-k2.6',
       ],
+      modelIdsByBaseUrl: new Map([['https://api.moonshot.ai/v1', ['kimi-k3']]]),
     });
   });
 
@@ -376,7 +377,52 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'kimi-for-coding',
         'kimi-for-coding-highspeed',
       ],
+      modelIdsByBaseUrl: new Map([
+        ['https://api.kimi.com/coding/v1', ['k3-256k', 'custom-code-model']],
+        ['https://api.moonshot.ai/v1', ['kimi-k3', 'custom-kimi-model']],
+      ]),
     });
+  });
+
+  it('restores saved model state for every Kimi endpoint', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'code-custom',
+          name: '[Kimi Code] code-custom',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-custom',
+          name: '[Kimi API] api-custom',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup.modelIdsByBaseUrl).toEqual(
+      new Map([
+        ['https://api.kimi.com/coding/v1', ['k3-256k', 'code-custom']],
+        ['https://api.moonshot.ai/v1', ['kimi-k3', 'api-custom']],
+      ]),
+    );
   });
 
   it('keeps restored models whose id collides with a sibling endpoint built-in', () => {
@@ -413,6 +459,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'kimi-for-coding',
         'kimi-for-coding-highspeed',
       ],
+      modelIdsByBaseUrl: new Map([
+        ['https://api.kimi.com/coding/v1', ['k3-256k', 'kimi-k3']],
+      ]),
     });
   });
 
@@ -456,6 +505,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         initialBaseUrl: undefined,
         customModelIds: [],
         trimmedDefaultModelIds: [],
+        modelIdsByBaseUrl: new Map(),
       });
     }
   });
@@ -491,6 +541,10 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       initialBaseUrl: 'https://y.example/v1',
       customModelIds: ['gpt-oss', 'y-alias'],
       trimmedDefaultModelIds: [],
+      modelIdsByBaseUrl: new Map([
+        ['https://y.example/v1', ['gpt-oss', 'y-alias']],
+        ['https://x.example/v1', ['llama', 'x-shared-env']],
+      ]),
     });
   });
 

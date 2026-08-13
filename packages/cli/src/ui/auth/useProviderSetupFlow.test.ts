@@ -5,7 +5,13 @@
  */
 
 import { act, renderHook } from '@testing-library/react';
-import { AuthType, type ProviderConfig } from '@qwen-code/qwen-code-core';
+import {
+  applyProviderInstallPlan,
+  AuthType,
+  buildInstallPlan,
+  type ModelProvidersConfig,
+  type ProviderConfig,
+} from '@qwen-code/qwen-code-core';
 import { describe, expect, it, vi } from 'vitest';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 
@@ -61,6 +67,170 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.baseUrl).toBe(secondUrl);
     expect(result.current.state.modelIds).toBe('second-model, custom-model');
     expect(result.current.state.apiKey).toBe('sk-second');
+  });
+
+  it('restores saved model selections for every endpoint', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'saved-endpoint-provider',
+      label: 'Saved Endpoint Provider',
+      description: 'Provider with saved models at sibling endpoints',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-a' }, { id: 'first-b' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-a' }, { id: 'second-b' }],
+        },
+      ],
+      envKey: () => 'SAVED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Saved',
+      mergeModelsByIdentity: true,
+    };
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        provider,
+        undefined,
+        undefined,
+        ['custom-first'],
+        firstUrl,
+        ['first-b'],
+        new Map([
+          [firstUrl, ['first-a', 'custom-first']],
+          [secondUrl, ['second-b', 'custom-second']],
+        ]),
+      );
+    });
+
+    expect(result.current.state.modelIds).toBe('first-a, custom-first');
+
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+
+    expect(result.current.state.modelIds).toBe('second-b, custom-second');
+  });
+
+  it('submits a saved sibling selection without deleting its custom model', async () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const provider: ProviderConfig = {
+      id: 'saved-submit-provider',
+      label: 'Saved Submit Provider',
+      description: 'Provider with persisted sibling model choices',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: firstUrl,
+          models: [{ id: 'first-a' }, { id: 'first-b' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: secondUrl,
+          models: [{ id: 'second-a' }, { id: 'second-b' }],
+        },
+      ],
+      envKey: () => 'SAVED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Saved',
+      mergeModelsByIdentity: true,
+      ownsModel: (model) => model.envKey === 'SAVED_API_KEY',
+    };
+    const firstCustom = {
+      id: 'custom-first',
+      name: '[Saved] custom-first',
+      baseUrl: firstUrl,
+      envKey: 'SAVED_API_KEY',
+    };
+    const secondCustom = {
+      id: 'custom-second',
+      name: '[Saved] custom-second',
+      baseUrl: secondUrl,
+      envKey: 'SAVED_API_KEY',
+    };
+    let modelProviders: ModelProvidersConfig = {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'first-a',
+          name: '[Saved] first-a',
+          baseUrl: firstUrl,
+          envKey: 'SAVED_API_KEY',
+        },
+        firstCustom,
+        {
+          id: 'second-b',
+          name: '[Saved] second-b',
+          baseUrl: secondUrl,
+          envKey: 'SAVED_API_KEY',
+        },
+        secondCustom,
+      ],
+    };
+    const setValue = vi.fn();
+    const onSubmit = vi.fn(async (_config, inputs) => {
+      const plan = buildInstallPlan(provider, inputs);
+      await applyProviderInstallPlan(plan, {
+        settings: {
+          getValue: vi.fn(),
+          setValue,
+          getModelProviders: () => modelProviders,
+          persist: vi.fn(),
+        },
+        reloadModelProviders: (next) => {
+          modelProviders = next;
+        },
+        doRefreshAuth: false,
+      });
+    });
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        provider,
+        undefined,
+        undefined,
+        ['custom-first'],
+        firstUrl,
+        ['first-b'],
+        new Map([
+          [firstUrl, ['first-a', 'custom-first']],
+          [secondUrl, ['second-b', 'custom-second']],
+        ]),
+      );
+    });
+    act(() => {
+      result.current.selectBaseUrl(secondUrl);
+    });
+
+    await act(async () => {
+      result.current.submit();
+    });
+
+    expect(modelProviders[AuthType.USE_OPENAI]).toEqual([
+      expect.objectContaining({ id: 'first-a', baseUrl: firstUrl }),
+      firstCustom,
+      expect.objectContaining({ id: 'second-b', baseUrl: secondUrl }),
+      expect.objectContaining({ id: 'custom-second', baseUrl: secondUrl }),
+    ]);
+    expect(
+      modelProviders[AuthType.USE_OPENAI]?.filter(
+        (model) => model.id === 'second-a',
+      ),
+    ).toEqual([]);
   });
 
   it('preserves typed ids colliding with a sibling endpoint built-in when switching', () => {

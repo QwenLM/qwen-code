@@ -305,14 +305,11 @@ describe('useProviderUpdates', () => {
     });
 
     const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
-    expect(reloaded[AuthType.USE_OPENAI]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: 'my-custom-model',
-          baseUrl: deepseekBaseUrl,
-        }),
-      ]),
-    );
+    expect(
+      reloaded[AuthType.USE_OPENAI].filter(
+        (model: typeof customModel) => model.id === 'my-custom-model',
+      ),
+    ).toEqual([customModel]);
     // The persisted version tracks the built-in template, never the
     // selection — a carried custom model must not poison the hash and
     // re-trigger the prompt on the next launch.
@@ -345,6 +342,9 @@ describe('useProviderUpdates', () => {
           envKey: deepseekEnvKey,
           name: '[DeepSeek] my-custom-model',
           baseUrl: 'https://corp-proxy.example/v1',
+          generationConfig: {
+            samplingParams: { temperature: 0.25 },
+          },
         },
       ],
     };
@@ -376,7 +376,15 @@ describe('useProviderUpdates', () => {
       ],
     ).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: 'my-custom-model' }),
+        {
+          id: 'my-custom-model',
+          envKey: deepseekEnvKey,
+          name: '[DeepSeek] my-custom-model',
+          baseUrl: 'https://corp-proxy.example/v1',
+          generationConfig: {
+            samplingParams: { temperature: 0.25 },
+          },
+        },
       ]),
     );
   });

@@ -430,19 +430,22 @@ export function useProviderUpdates(
         const defaultIds = getDefaultModelIds(providerCfg, resolved);
         const builtInIds = new Set(defaultIds);
         const installedOwnedModels = readInstalledModels(settings, providerCfg);
-        const customIds = installedOwnedModels
+        const customModels = installedOwnedModels
           .filter(
             (model) =>
               !providerCfg.mergeModelsByIdentity ||
               normalizeBaseUrlForMatching(model.baseUrl) ===
                 normalizeBaseUrlForMatching(resolved),
           )
-          .map((model) => model.id)
-          .filter((id) => !builtInIds.has(id));
+          .filter((model) => !builtInIds.has(model.id));
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: [...defaultIds, ...customIds],
+          modelIds: defaultIds,
+          prebuiltModels: [
+            ...buildProviderTemplate(providerCfg, resolved),
+            ...customModels,
+          ],
         });
         installPlan.providerState![
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`

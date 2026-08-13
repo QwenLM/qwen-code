@@ -11,6 +11,7 @@ import {
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
@@ -132,7 +133,7 @@ export function useProviderSetupFlow(
   );
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
-  const customModelIdsRef = useRef<string[]>([]);
+  const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
   const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
@@ -155,6 +156,7 @@ export function useProviderSetupFlow(
       existingModelIds?: string[],
       initialBaseUrl?: string,
       initialTrimmedDefaultModelIds?: string[],
+      existingModelIdsByBaseUrl?: ReadonlyMap<string, readonly string[]>,
     ) => {
       apiKeyDraftsRef.current.clear();
       protocolDraftsRef.current.clear();
@@ -198,9 +200,27 @@ export function useProviderSetupFlow(
       const defaultIds = getDefaultModelIds(config, resolved);
       const customIds = existingModelIds ?? [];
       const trimmedDefaultIds = new Set(initialTrimmedDefaultModelIds ?? []);
-      customModelIdsRef.current = customIds;
+      customModelIdsByBaseUrlRef.current.clear();
       trimmedDefaultModelIdsRef.current.clear();
-      trimmedDefaultModelIdsRef.current.set(resolved, [...trimmedDefaultIds]);
+      for (const [endpoint, savedIds] of existingModelIdsByBaseUrl ?? []) {
+        const normalizedEndpoint = normalizeBaseUrlForMatching(endpoint);
+        const endpointDefaults = getDefaultModelIds(config, normalizedEndpoint);
+        const endpointDefaultSet = new Set(endpointDefaults);
+        const savedIdSet = new Set(savedIds);
+        customModelIdsByBaseUrlRef.current.set(
+          normalizedEndpoint,
+          savedIds.filter((id) => !endpointDefaultSet.has(id)),
+        );
+        trimmedDefaultModelIdsRef.current.set(
+          normalizedEndpoint,
+          endpointDefaults.filter((id) => !savedIdSet.has(id)),
+        );
+      }
+      const normalizedResolved = normalizeBaseUrlForMatching(resolved);
+      customModelIdsByBaseUrlRef.current.set(normalizedResolved, customIds);
+      trimmedDefaultModelIdsRef.current.set(normalizedResolved, [
+        ...trimmedDefaultIds,
+      ]);
       setModelIds(
         [
           ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
@@ -223,6 +243,7 @@ export function useProviderSetupFlow(
   const reset = useCallback(() => {
     apiKeyDraftsRef.current.clear();
     protocolDraftsRef.current.clear();
+    customModelIdsByBaseUrlRef.current.clear();
     trimmedDefaultModelIdsRef.current.clear();
     setProvider(null);
     setVisibleSteps([]);
@@ -278,6 +299,8 @@ export function useProviderSetupFlow(
         setApiKeyError(null);
         setModelIdsError(null);
         const currentIds = normalizeModelIds(modelIds);
+        const previousEndpoint = normalizeBaseUrlForMatching(baseUrl);
+        const destinationEndpoint = normalizeBaseUrlForMatching(selectedUrl);
         const previousDefaults = getDefaultModelIds(provider, baseUrl);
         // Only the source and destination endpoints' defaults are
         // replaceable: a typed id colliding with some other sibling
@@ -287,25 +310,38 @@ export function useProviderSetupFlow(
         // user touched the field.
         const previousDefaultSet = new Set(previousDefaults);
         const trimmedNextDefaults = new Set(
-          trimmedDefaultModelIdsRef.current.get(selectedUrl) ?? [],
+          trimmedDefaultModelIdsRef.current.get(destinationEndpoint) ?? [],
         );
         const fieldSet = new Set(currentIds);
-        const customIds = [
+        const editedCustomIds = [
           ...new Set([
             // Same guard as changeModelIds, against the endpoint we leave:
             // a custom id colliding with its built-in may be absent from the
             // field only because it was shown as a (deselected) recommendation.
-            ...customModelIdsRef.current.filter(
-              (id) => fieldSet.has(id) || previousDefaultSet.has(id),
-            ),
+            ...(
+              customModelIdsByBaseUrlRef.current.get(previousEndpoint) ?? []
+            ).filter((id) => fieldSet.has(id) || previousDefaultSet.has(id)),
             ...currentIds.filter((id) => !previousDefaultSet.has(id)),
           ]),
         ];
-        customModelIdsRef.current = customIds;
+        customModelIdsByBaseUrlRef.current.set(
+          previousEndpoint,
+          editedCustomIds,
+        );
+        const destinationDefaults = getDefaultModelIds(provider, selectedUrl);
+        const destinationCustomIds =
+          customModelIdsByBaseUrlRef.current.get(destinationEndpoint);
+        const customIds = destinationCustomIds ?? editedCustomIds;
+        if (destinationCustomIds === undefined) {
+          customModelIdsByBaseUrlRef.current.set(
+            destinationEndpoint,
+            customIds,
+          );
+        }
         setModelIds(
           [
             ...new Set([
-              ...getDefaultModelIds(provider, selectedUrl).filter(
+              ...destinationDefaults.filter(
                 (id) => !trimmedNextDefaults.has(id),
               ),
               ...customIds.filter((id) => !trimmedNextDefaults.has(id)),
@@ -429,19 +465,20 @@ export function useProviderSetupFlow(
       const defaults = provider ? getDefaultModelIds(provider, baseUrl) : [];
       const defaultSet = new Set(defaults);
       const fieldSet = new Set(normalized);
-      customModelIdsRef.current = [
+      const endpoint = normalizeBaseUrlForMatching(baseUrl);
+      customModelIdsByBaseUrlRef.current.set(endpoint, [
         ...new Set([
           // An id that is this endpoint's built-in leaves the field when the
           // user deselects the recommendation; its custom provenance (possibly
           // a sibling endpoint's saved custom sharing the id) must survive.
-          ...customModelIdsRef.current.filter(
+          ...(customModelIdsByBaseUrlRef.current.get(endpoint) ?? []).filter(
             (id) => fieldSet.has(id) || defaultSet.has(id),
           ),
           ...normalized.filter((id) => !defaultSet.has(id)),
         ]),
-      ];
+      ]);
       trimmedDefaultModelIdsRef.current.set(
-        baseUrl,
+        endpoint,
         defaults.filter((id) => !fieldSet.has(id)),
       );
     },
