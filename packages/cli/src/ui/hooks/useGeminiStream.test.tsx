@@ -859,6 +859,7 @@ describe('useGeminiStream', () => {
         [toolRequest],
         expect.any(AbortSignal),
         selector,
+        undefined,
       );
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -8981,6 +8982,7 @@ describe('useGeminiStream', () => {
       expect(mockScheduleToolCalls).toHaveBeenCalledWith(
         [notificationRequest],
         expect.any(AbortSignal),
+        undefined,
         undefined,
       );
     });
