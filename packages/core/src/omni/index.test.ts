@@ -2000,6 +2000,58 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     );
   });
 
+  it('anchors URL media to the object store and records the URL as its source', async () => {
+    // The URL funnel stages its download under an opaque temp name and
+    // deletes it in `finally` the same turn — the same lifetime as
+    // tool-result media, missed when C9 fixed that funnel. Binding the
+    // staging path handed the model a handle that resolves to ENOENT for
+    // the rest of the session, and made cross-session recall report
+    // `artifact_unavailable` for bytes the object store still holds.
+    const runMock = vi
+      .fn()
+      .mockResolvedValue({ deliveries: [], records: [], fileDeliveries: [] });
+    const { mod } = await armPipeline(runMock);
+    const registry = new MediaResourceRegistry();
+    const stagingPath = await realFile('dl-3f9a.part');
+    const config = {
+      ...policyConfig({ policies: [] }),
+      getOmniMemoryConfig: () => ({ collection: { maxInlineTextBytes: 4096 } }),
+      getOmniMediaResourceRegistry: () => registry,
+    } as unknown as Config;
+
+    const delivery = await mod.processMediaForOmniDelivery(
+      stagingPath,
+      config,
+      {
+        displayName: 'clip.mp4',
+        sourceUrl: 'https://example.com/media/clip.mp4',
+      },
+    );
+
+    const binding = registry.resolve(delivery.resourceId!);
+    expect(binding).toBeDefined();
+    expect(binding!.fileRef).toBe(
+      path.join(tmpDir, 'objects', `${'a'.repeat(64)}.jpg`),
+    );
+    expect(binding!.fileRef).not.toBe(stagingPath);
+    // The durable identity of URL media is the URL itself — recorded as
+    // the version's source so provenance names where the bytes came from.
+    const snapshot = JSON.parse(
+      await fs.readFile(path.join(tmpDir, 'memory.json'), 'utf8'),
+    );
+    const version = Object.values(
+      snapshot.versions as Record<string, { source: unknown }>,
+    ).find(
+      (v) =>
+        JSON.stringify(v.source) ===
+        JSON.stringify({
+          protocol: 'url',
+          locator: 'https://example.com/media/clip.mp4',
+        }),
+    );
+    expect(version).toBeDefined();
+  });
+
   it('mounts memory-known deliveries into the session resource registry', async () => {
     const degradedPath = path.join(tmpDir, 'objects', 'deadbeef.jpg');
     const derivedBinding = {

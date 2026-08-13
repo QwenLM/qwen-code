@@ -365,6 +365,14 @@ export async function processMediaForOmniDelivery(
     /** Provenance for fixed-policy origin matching. Defaults to 'user';
      * the tool-result funnel passes 'tool'. */
     origin?: 'user' | 'tool';
+    /**
+     * The URL this media was downloaded from. Set by the URL funnel, whose
+     * `filePath` is a staging download it deletes in its `finally` THIS
+     * turn — so, exactly like tool-result media, its memory identity must
+     * anchor to the content-addressed object store, never to the staging
+     * path. The URL itself is recorded as the version's source locator.
+     */
+    sourceUrl?: string;
   },
 ): Promise<OmniMediaDelivery> {
   const { expectedModality, signal } = options ?? {};
@@ -518,13 +526,16 @@ export async function processMediaForOmniDelivery(
       // media), the ref dangles and recall says `artifact_unavailable`:
       // honest, because the bytes were genuinely not retained.
       const origin = options?.origin ?? 'user';
-      sourceFileRef =
-        origin === 'tool'
-          ? store.objectPathFor(
-              sourceSha256,
-              extensionForMime(recognized.detectedMimeType),
-            )
-          : filePath;
+      // URL media shares the tool-result lifetime: its local file is a
+      // staging download deleted this turn, so it anchors the same way.
+      const ephemeralSource =
+        origin === 'tool' || options?.sourceUrl !== undefined;
+      sourceFileRef = ephemeralSource
+        ? store.objectPathFor(
+            sourceSha256,
+            extensionForMime(recognized.detectedMimeType),
+          )
+        : filePath;
       sourceBinding = await memoryService.recordFileRecognized({
         fileRef: sourceFileRef,
         sha256: sourceSha256,
@@ -534,9 +545,11 @@ export async function processMediaForOmniDelivery(
         mimeType: recognized.detectedMimeType,
         origin,
         source:
-          origin === 'tool'
-            ? { protocol: 'managed', locator: `sha256/${sourceSha256}` }
-            : { protocol: 'local', locator: displayName },
+          options?.sourceUrl !== undefined
+            ? { protocol: 'url', locator: options.sourceUrl }
+            : origin === 'tool'
+              ? { protocol: 'managed', locator: `sha256/${sourceSha256}` }
+              : { protocol: 'local', locator: displayName },
         recognition: {
           ingestionConfigHash: '',
           detectorVersion: MEDIA_DETECTOR_VERSION,

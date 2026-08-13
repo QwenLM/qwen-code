@@ -8218,7 +8218,11 @@ export class Session implements SessionContext {
               batch: {
                 toolName,
                 invocationId: callId,
-                executionOrigin: { kind: 'client' },
+                // Same pin as the modelAccess gate above: every
+                // ACP-originated call is a model call. Recording 'client'
+                // here made the PolicyExecution provenance contradict the
+                // gate that admitted the very same call.
+                executionOrigin: { kind: 'model' },
                 artifacts: toolResult.artifacts,
               },
               descriptor: tool.mediaPolicyDescriptor,

@@ -661,8 +661,12 @@ export async function resolveAtCommandQuery({
           downloaded.partPath,
           config,
           // displayName: guard/error messages must name the URL's file, not
-          // the opaque staging path the download landed under.
-          { signal, displayName: urlBase },
+          // the opaque staging path the download landed under. sourceUrl:
+          // the staging path is deleted in the finally below, so memory
+          // must anchor this media's identity to the object store and
+          // record the URL as its source — a handle bound to the staging
+          // path would resolve to ENOENT for the rest of the session.
+          { signal, displayName: urlBase, sourceUrl: ref.url },
         );
         // §6.2/D8 ordering contract documented on buildTranscriptParts.
         const transcriptParts = core.buildTranscriptParts(
