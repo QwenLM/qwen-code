@@ -107,7 +107,9 @@ export interface WorkspaceManagementHandle {
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
     validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
-    validatePublished?: (runtime: WorkspaceRuntime) => void | Promise<void>,
+    validateBeforePublication?: (
+      runtime: WorkspaceRuntime,
+    ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime>;
 }
 
@@ -249,7 +251,7 @@ export function registerWorkspaceManagementRoutes(
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
     validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
-    validatePublished: (
+    validateBeforePublication: (
       runtime: WorkspaceRuntime,
     ) => void | Promise<void> = validate,
   ): Promise<WorkspaceRuntime> => {
@@ -267,6 +269,7 @@ export function registerWorkspaceManagementRoutes(
         throw new Error('Daemon-owned workspace runtime must not be primary');
       }
       await validate(runtime);
+      await validateBeforePublication(runtime);
       const publish = async () => {
         if (sealed) throw new Error('Daemon is shutting down');
         if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
@@ -289,30 +292,7 @@ export function registerWorkspaceManagementRoutes(
           throw new Error('Workspace registration limit reached');
         }
         workspaceRegistry.add(runtime!);
-        let registryDraining = false;
-        try {
-          registryDraining = workspaceRegistry.beginDrain(runtime!);
-          if (!registryDraining) {
-            throw new Error('Workspace runtime could not enter publication');
-          }
-          await validatePublished(runtime!);
-          if (sealed) throw new Error('Daemon is shutting down');
-          workspaceRegistry.cancelDrain(runtime!);
-          registryDraining = false;
-          if (workspaceRegistry.getByWorkspaceCwd(canonicalCwd) !== runtime) {
-            throw new Error('Workspace runtime publication was interrupted');
-          }
-          registered = true;
-        } catch (error) {
-          if (registryDraining) {
-            workspaceRegistry.commitDrain(runtime!);
-            workspaceRegistry.completeDrain(runtime!);
-          } else if (workspaceRegistry.beginDrain(runtime!)) {
-            workspaceRegistry.commitDrain(runtime!);
-            workspaceRegistry.completeDrain(runtime!);
-          }
-          throw error;
-        }
+        registered = true;
         try {
           await runtimeRemoval.runtimeAdded?.(runtime!);
         } catch (error) {

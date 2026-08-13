@@ -306,11 +306,11 @@ describe('owned workspace runtime publication', () => {
     );
   });
 
-  it('rolls back a candidate rejected after registry publication', async () => {
+  it('disposes a candidate rejected by final pre-publication validation', async () => {
     const registry = createMockRegistry([
       makeRuntime('/primary', { primary: true }),
     ]);
-    const runtime = makeRuntime('/owned-invalid-after-publication', {
+    const runtime = makeRuntime('/owned-invalid-before-publication', {
       provenance: 'live-conversation',
       removable: false,
     });
@@ -319,7 +319,7 @@ describe('owned workspace runtime publication', () => {
     const validate = vi
       .fn()
       .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('root changed after publication'));
+      .mockRejectedValueOnce(new Error('root changed before publication'));
     const { handle } = createApp({
       workspaceRegistry: registry,
       createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
@@ -332,7 +332,7 @@ describe('owned workspace runtime publication', () => {
         'live-conversation',
         validate,
       ),
-    ).rejects.toThrow('root changed after publication');
+    ).rejects.toThrow('root changed before publication');
 
     expect(validate).toHaveBeenCalledTimes(2);
     expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
@@ -345,11 +345,11 @@ describe('owned workspace runtime publication', () => {
     );
   });
 
-  it('keeps a candidate non-routable until post-publication validation passes', async () => {
+  it('keeps a candidate unpublished and the topology lock free during final validation', async () => {
     const registry = createMockRegistry([
       makeRuntime('/primary', { primary: true }),
     ]);
-    const runtime = makeRuntime('/owned-staged', {
+    const runtime = makeRuntime('/owned-pending-validation', {
       provenance: 'live-conversation',
       removable: false,
     });
@@ -361,10 +361,12 @@ describe('owned workspace runtime publication', () => {
       .fn()
       .mockResolvedValueOnce(undefined)
       .mockImplementationOnce(async () => validationGate);
+    const runWorkspaceTrustOperation = vi.fn(async (operation) => operation());
     const { handle } = createApp({
       workspaceRegistry: registry,
       createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
       runtimeRemoval: createRemovalController(),
+      runWorkspaceTrustOperation,
     });
 
     const publication = handle.publishOwnedRuntime(
@@ -374,9 +376,16 @@ describe('owned workspace runtime publication', () => {
     );
     await vi.waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
     expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBeUndefined();
+    expect(
+      registry.getManagedByWorkspaceCwd(runtime.workspaceCwd),
+    ).toBeUndefined();
+    expect(registry.add).not.toHaveBeenCalled();
+    expect(runWorkspaceTrustOperation).not.toHaveBeenCalled();
 
     releaseValidation?.();
     await expect(publication).resolves.toBe(runtime);
+    expect(registry.add).toHaveBeenCalledOnce();
+    expect(runWorkspaceTrustOperation).toHaveBeenCalledTimes(1);
     expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
   });
 });

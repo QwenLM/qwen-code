@@ -648,8 +648,9 @@ Suggested title: `refactor(cli): Generalize the Conversations runtime foundation
   ownership.
 - Introduce the one-flight `ConversationRuntimeManager` and split optional Live
   bindings from runtime lifetime.
-- Stage owned publication as non-routable until its post-registration root and
-  ownership validation passes; rollback and dispose a rejected candidate.
+- Revalidate root and ownership immediately before serialized registry
+  publication while the candidate remains unpublished; dispose a rejected
+  candidate.
 - Preserve Live behavior, provenance, managed-relocation token, storage
   namespace, and process sharing.
 - Do not add standalone source, public routes, capability advertisement, SDK, or
