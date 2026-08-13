@@ -1444,6 +1444,7 @@ describe('MemoryPressureMonitor', () => {
       const setHistory = vi.fn();
       const unloadSkills = vi.fn();
       const clearLoadedSkills = vi.fn();
+      const trackSkills = vi.fn();
       const toolHistory: Content[] = [
         {
           role: 'model',
@@ -1520,7 +1521,7 @@ describe('MemoryPressureMonitor', () => {
           toolRegistry: {
             getTool: (name: string) =>
               name === 'skill'
-                ? { unloadSkills, clearLoadedSkills }
+                ? { unloadSkills, clearLoadedSkills, trackSkills }
                 : undefined,
           },
         }),

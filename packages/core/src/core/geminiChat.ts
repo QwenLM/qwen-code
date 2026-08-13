@@ -1798,6 +1798,15 @@ export class GeminiChat {
   private manualPlanExitNoticesEnabled = false;
 
   /**
+   * True for forked/speculative chats built by `createForkedChat` on the
+   * parent's Config. They share the parent's ToolRegistry (and the single
+   * SkillTool tracking instance) while rewriting only a copy of a parent
+   * history slice, so their rewrites must not touch loaded-skill tracking —
+   * only the chat owning the authoritative session may.
+   */
+  isForkedChat = false;
+
+  /**
    * Reset both partial-push markers in lockstep. Every history-mutation
    * site uses this — single-field resets are a bug because the fields
    * are always paired by lifecycle.
@@ -2030,8 +2039,13 @@ export class GeminiChat {
       // The summary may or may not have retained any given skill body, so
       // blanket-clear the tracking — worst case a surviving body is
       // re-appended once, while a stale entry would leave the skill
-      // unreloadable behind the dedup guard.
-      clearLoadedSkillTracking(this.config.getToolRegistry(), 'tryCompress');
+      // unreloadable behind the dedup guard. Forked chats share the
+      // parent's tracker while compressing only a copy of a history
+      // slice; clearing there would disarm the parent's dedup guard with
+      // its bodies still resident.
+      if (!this.isForkedChat) {
+        clearLoadedSkillTracking(this.config.getToolRegistry(), 'tryCompress');
+      }
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,

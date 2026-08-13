@@ -3192,7 +3192,9 @@ describe('Gemini Client (client.ts)', () => {
         getTool: ReturnType<typeof vi.fn>;
       };
       reg.getTool.mockImplementation((name: string) =>
-        name === 'skill' ? { unloadSkills, clearLoadedSkills } : null,
+        name === 'skill'
+          ? { unloadSkills, clearLoadedSkills, trackSkills: vi.fn() }
+          : null,
       );
 
       // Skill body loaded first, then 5 newer read_file results
@@ -4214,7 +4216,9 @@ describe('Gemini Client (client.ts)', () => {
         getTool: ReturnType<typeof vi.fn>;
       };
       reg.getTool.mockImplementation((name: string) =>
-        name === 'skill' ? { unloadSkills, clearLoadedSkills } : null,
+        name === 'skill'
+          ? { unloadSkills, clearLoadedSkills, trackSkills: vi.fn() }
+          : null,
       );
       const compressFast = vi.fn().mockReturnValue({
         info: {
@@ -8897,6 +8901,90 @@ Other open files:
         ).rejects.toThrow('retry failed before first event');
 
         expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      });
+
+      it('re-tracks restored skill bodies after a pre-push retry failure', async () => {
+        // The strip cleared loaded-skill tracking; when the restore puts the
+        // skill body back into history the tracking must follow, or the
+        // dedup guard would let a duplicate body through.
+        const trackSkills = vi.fn();
+        const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'skill'
+            ? {
+                unloadSkills: vi.fn(),
+                clearLoadedSkills: vi.fn(),
+                trackSkills,
+              }
+            : null,
+        );
+
+        const strippedSkillBody: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'retry-skill-0',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent('/demo', 'skill body'),
+                },
+              },
+            },
+          ],
+        };
+        // The paired functionCall survives the strip (it lives in a model
+        // entry), so the restore can resolve the call id back to the name.
+        const historyWithSkillCall: Content[] = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'retry-skill-0',
+                  name: 'skill',
+                  args: { skill: 'demo' },
+                },
+              },
+            ],
+          },
+        ];
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue(historyWithSkillCall),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          // Send throws before the push, so the counter never advances → restore.
+          getUserContentPushCount: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([strippedSkillBody]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-skill-retrack',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed before first event');
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(strippedSkillBody);
+        expect(trackSkills).toHaveBeenCalledWith(['demo']);
       });
 
       it('does not re-add stripped retry entries when the chat already pushed them before failing', async () => {

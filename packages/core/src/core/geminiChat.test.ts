@@ -465,6 +465,7 @@ describe('GeminiChat', async () => {
     const mockSkillTool = () => ({
       unloadSkills: vi.fn(),
       clearLoadedSkills: vi.fn(),
+      trackSkills: vi.fn(),
     });
 
     it('blanket-clears skill tracking after a COMPRESSED result', async () => {
@@ -513,6 +514,35 @@ describe('GeminiChat', async () => {
 
       expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
       expect(skillTool.unloadSkills).not.toHaveBeenCalled();
+    });
+
+    it('leaves skill tracking untouched for forked chats sharing the parent registry', async () => {
+      const skillTool = mockSkillTool();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 30_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      // Forked chats compress a copy of a parent-history slice while
+      // sharing the parent's SkillTool tracker — clearing there would
+      // disarm the parent's dedup guard with its bodies still resident.
+      chat.isForkedChat = true;
+
+      await chat.tryCompress('prompt-skill-fork', true);
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
     });
   });
 

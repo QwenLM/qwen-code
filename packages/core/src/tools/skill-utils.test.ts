@@ -11,6 +11,7 @@ import {
   clearCollectedSkillEntriesCache,
   syncSkillEvictions,
   clearLoadedSkillTracking,
+  retrackSkills,
 } from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
@@ -164,13 +165,16 @@ describe('syncSkillEvictions / clearLoadedSkillTracking', () => {
     tool: unknown;
     unloadSkills: ReturnType<typeof vi.fn>;
     clearLoadedSkills: ReturnType<typeof vi.fn>;
+    trackSkills: ReturnType<typeof vi.fn>;
   } {
     const unloadSkills = vi.fn();
     const clearLoadedSkills = vi.fn();
+    const trackSkills = vi.fn();
     return {
-      tool: { unloadSkills, clearLoadedSkills },
+      tool: { unloadSkills, clearLoadedSkills, trackSkills },
       unloadSkills,
       clearLoadedSkills,
+      trackSkills,
     };
   }
 
@@ -242,5 +246,24 @@ describe('syncSkillEvictions / clearLoadedSkillTracking', () => {
     clearLoadedSkillTracking(registry, 'test');
 
     expect(clearLoadedSkills).toHaveBeenCalledOnce();
+  });
+
+  it('retrackSkills re-adds the given names via the registry', () => {
+    const { tool, trackSkills } = mockSkillTool();
+    const { registry } = mockRegistry(tool);
+
+    retrackSkills(['a', 'b'], registry, 'test');
+
+    expect(trackSkills).toHaveBeenCalledWith(['a', 'b']);
+  });
+
+  it('retrackSkills is a NOOP for an empty name list', () => {
+    const { tool, trackSkills } = mockSkillTool();
+    const { registry, getTool } = mockRegistry(tool);
+
+    retrackSkills([], registry, 'test');
+
+    expect(getTool).not.toHaveBeenCalled();
+    expect(trackSkills).not.toHaveBeenCalled();
   });
 });

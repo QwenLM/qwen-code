@@ -345,13 +345,19 @@ export function applySkillAllowedTools(
 interface LoadedSkillTracker {
   unloadSkills(names: Iterable<string>): void;
   clearLoadedSkills(): void;
+  trackSkills(names: Iterable<string>): void;
 }
 
 function getLoadedSkillTracker(
   toolRegistry: ToolRegistry | undefined,
 ): LoadedSkillTracker | undefined {
   const tool = toolRegistry?.getTool(ToolNames.SKILL);
-  if (tool && 'unloadSkills' in tool && 'clearLoadedSkills' in tool) {
+  if (
+    tool &&
+    'unloadSkills' in tool &&
+    'clearLoadedSkills' in tool &&
+    'trackSkills' in tool
+  ) {
     return tool as unknown as LoadedSkillTracker;
   }
   return undefined;
@@ -415,5 +421,31 @@ export function clearLoadedSkillTracking(
   tracker.clearLoadedSkills();
   debugLogger.debug(
     `[SKILL_TRACKING] cleared loaded-skill tracking after ${logTag}`,
+  );
+}
+
+/**
+ * Re-track loaded skills whose bodies were restored to history after a
+ * rewrite had cleared the tracking (client retry restore of stripped
+ * entries). Restores the body-resident ⇒ tracked invariant so the dedup
+ * guard does not let a duplicate body through.
+ */
+export function retrackSkills(
+  names: Iterable<string>,
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const list = Array.from(names);
+  if (list.length === 0) {
+    return;
+  }
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  tracker.trackSkills(list);
+  debugLogger.debug(
+    `[SKILL_TRACKING] re-tracked ${list.length} skill(s) after ${logTag}: ` +
+      list.join(', '),
   );
 }
