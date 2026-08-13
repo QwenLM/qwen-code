@@ -57,6 +57,7 @@ import {
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
+import { createHerdrReporter } from '../utils/herdr-reporter.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -100,6 +101,11 @@ export async function startInteractiveUI(
     config.markRuntimeStatusEnabled();
   } catch {
     // ignored: best-effort, never block UI startup.
+  }
+
+  const herdrReporter = createHerdrReporter();
+  if (herdrReporter) {
+    registerCleanup(() => herdrReporter.release());
   }
 
   const restoreTerminalRedrawOptimizer =
@@ -206,6 +212,7 @@ export async function startInteractiveUI(
                         initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
                         repaintViewport={resizeReflow.repaint}
+                        herdrReporter={herdrReporter}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
