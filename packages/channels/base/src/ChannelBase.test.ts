@@ -22,6 +22,7 @@ import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import {
+  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -8050,7 +8051,11 @@ describe('ChannelBase', () => {
 
       await ch.handleInbound(envelope({ text: '/schedule list' }));
 
-      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {});
+      expect(bridge.prompt).toHaveBeenCalledWith('s-1', '/schedule list', {
+        displayText: '/schedule list',
+        imageBase64: undefined,
+        imageMimeType: undefined,
+      });
       expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
     });
 
@@ -10230,6 +10235,63 @@ describe('ChannelBase', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const secondPrompt = (bridge.prompt as any).mock.calls[1][1] as string;
       expect(secondPrompt).not.toContain('Be concise.');
+    });
+
+    it('keeps all model-only context out of the user-facing prompt text', async () => {
+      const ch = createChannel({
+        instructions: 'Be concise.',
+        sessionScope: 'thread',
+        groupPolicy: 'open',
+      });
+
+      await ch.handleInbound(
+        envelope({
+          text: 'hello',
+          isGroup: true,
+          isMentioned: true,
+          referencedText: 'earlier message',
+          metadata: 'Issue: hidden metadata',
+          attachments: [
+            {
+              type: 'file',
+              filePath: '/tmp/hidden.txt',
+              mimeType: 'text/plain',
+            },
+          ],
+        }),
+      );
+
+      const [sessionId, modelText, options] = (
+        bridge.prompt as ReturnType<typeof vi.fn>
+      ).mock.calls[0]!;
+      expect(sessionId).toEqual(expect.any(String));
+      expect(modelText).toContain('Be concise.');
+      expect(modelText).toContain('[User 1]');
+      expect(modelText).toContain('earlier message');
+      expect(modelText).toContain('/tmp/hidden.txt');
+      expect(modelText).toContain('Issue: hidden metadata');
+      expect(options).toMatchObject({ displayText: 'hello' });
+    });
+
+    it('neutralizes display-unsafe controls in the raw-text display fallback', async () => {
+      const ch = createChannel();
+      const rlo = String.fromCharCode(0x202e); // bidi override (trojan-source)
+      const bel = String.fromCharCode(0x07); // C0 control
+      // Adapters that never set displayText fall back to the raw text; the
+      // projection must neutralize it before it reaches the session bus,
+      // transcript, and session previews.
+      await ch.handleInbound(
+        envelope({ text: `line1${rlo}${bel}\nline2${'A'.repeat(9000)}` }),
+      );
+
+      const [, , options] = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]!;
+      const displayText = (options as { displayText: string }).displayText;
+      // Controls are replaced, the real newline survives, and the projection
+      // is capped by code point.
+      expect(displayText.startsWith('line1  \nline2')).toBe(true);
+      expect(displayText).not.toContain(rlo);
+      expect(Array.from(displayText)).toHaveLength(8000);
     });
 
     it('prepends channel boundary metadata after custom instructions once per session', async () => {
@@ -14326,6 +14388,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '!echo hello' }));
 
       expect(bridge.prompt).toHaveBeenCalledWith('s-1', '!echo hello', {
+        displayText: '!echo hello',
         imageBase64: undefined,
         imageMimeType: undefined,
       });
@@ -14364,7 +14427,10 @@ describe('ChannelBase', () => {
         return Promise.resolve('coalesced response');
       });
 
-      const ch = createChannel({ dispatchMode: 'collect' });
+      const ch = createChannel({
+        dispatchMode: 'collect',
+        groupPolicy: 'open',
+      });
 
       // Send first message — starts processing
       const p1 = ch.handleInbound(envelope({ text: 'first' }));
@@ -14374,10 +14440,24 @@ describe('ChannelBase', () => {
 
       // Send two more messages while first is busy — these should buffer
       const p2 = ch.handleInbound(
-        envelope({ text: 'second', messageId: 'msg-2' }),
+        envelope({
+          text: 'second',
+          senderName: 'Alice',
+          isGroup: true,
+          isMentioned: true,
+          messageId: 'msg-2',
+          metadata: 'hidden policy second',
+        }),
       );
       const p3 = ch.handleInbound(
-        envelope({ text: 'third', messageId: 'msg-3' }),
+        envelope({
+          text: 'third',
+          senderName: 'Bob',
+          isGroup: true,
+          isMentioned: true,
+          messageId: 'msg-3',
+          metadata: 'hidden policy third',
+        }),
       );
 
       // p2 and p3 should resolve immediately (buffered, not queued)
@@ -14414,6 +14494,13 @@ describe('ChannelBase', () => {
         .calls[1][1] as string;
       expect(secondCallText).toContain('second');
       expect(secondCallText).toContain('third');
+      // Metadata stays model-facing; the coalesced projection carries only
+      // the raw user-authored texts.
+      expect(secondCallText).toContain('hidden policy second');
+      expect(secondCallText).toContain('hidden policy third');
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
+      ).toMatchObject({ displayText: '[Alice] second\n\n[Bob] third' });
 
       // Both responses should have been sent
       expect(ch.sent).toEqual(
@@ -16348,6 +16435,43 @@ describe('ChannelBase', () => {
         expect(prompt).toContain('Event:');
         expect(prompt).toContain('payload-survives');
       });
+
+      it('caps and sanitizes the webhook display text like the model prompt', () => {
+        const task: ChannelWebhookTask = {
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: `[forged] ${'T'.repeat(20_000)}\u202e`,
+          summary: `S\u0007${'S'.repeat(20_000)}`,
+          payload: {},
+        };
+
+        const displayText = buildChannelWebhookDisplayText(task);
+        const [title, summary] = displayText.split('\n\n');
+
+        // Same per-field caps as the model prompt path (500/1000 code points).
+        expect(Array.from(title!).length).toBeLessThanOrEqual(500);
+        expect(Array.from(summary!).length).toBeLessThanOrEqual(1000);
+        // sanitizePromptText strips the [tag] forgery prefix, bidi overrides,
+        // and C0 controls on both projections.
+        expect(displayText).not.toContain('[forged]');
+        expect(displayText).not.toContain('\u202e');
+        expect(displayText).not.toContain('\u0007');
+      });
+
+      it('omits absent webhook summary from the display text', () => {
+        const task: ChannelWebhookTask = {
+          channelName: 'dingtalk-main',
+          source: 'github-ci',
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed on main',
+          payload: {},
+        };
+
+        expect(buildChannelWebhookDisplayText(task)).toBe('CI failed on main');
+      });
     });
 
     describe('runWebhookTask', () => {
@@ -16391,7 +16515,7 @@ describe('ChannelBase', () => {
           expect.stringContaining(
             '[External event "ci_failed" from github-ci]',
           ),
-          {},
+          { displayText: 'CI failed' },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'group-1', text: 'CI failed because lint broke.' },
@@ -16997,6 +17121,11 @@ describe('ChannelBase', () => {
         const collectedPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
           .calls[1][1] as string;
         expect(collectedPrompt).toContain('follow-up while webhook runs');
+        expect(
+          (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1][2],
+        ).toMatchObject({
+          displayText: '[Webhook] follow-up while webhook runs',
+        });
       });
 
       it('waits for bridge recovery before resolving a webhook session', async () => {
@@ -17328,7 +17457,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
-        {},
+        { displayText: 'post summary' },
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
@@ -18647,7 +18776,7 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
           '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
-          {},
+          { displayText: 'post again' },
         );
         expect(ch.proactive).toEqual([
           { chatId: 'chat1', text: 'second response' },
@@ -19478,7 +19607,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
         'while loop runs',
-        expect.any(Object),
+        { displayText: 'while loop runs' },
       );
     });
 
