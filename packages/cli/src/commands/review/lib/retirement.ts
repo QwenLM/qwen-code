@@ -48,6 +48,7 @@ import {
   promptRecordDir,
   readRecordedPrompts,
 } from './prompt-record.js';
+import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
@@ -71,15 +72,6 @@ export interface RoundSchedule {
   /** Every chunk is retired and none is due: the audit has converged. */
   converged: boolean;
 }
-
-/**
- * The loop's hard cap, mirroring SKILL.md's Step 5 ("Stop after 5 rounds
- * regardless"). Enforcing it is the orchestrator's — the builder will build
- * a sixth round if asked — but the retirement note is the orchestrator's
- * only word about a skipped chunk, and it must not promise a cold check the
- * cap has already forbidden.
- */
-export const REVERSE_AUDIT_MAX_ROUNDS = 5;
 
 /**
  * The round part of a per-chunk reverse-audit record key, as `runAllChunks`
@@ -121,7 +113,7 @@ const REVERSE_AUDIT_MARKER = 'reverse-audit';
  * transcript classifies `unknown`, and no chunk retires — the territory is
  * never consulted.
  */
-function bakedRanges(
+export function bakedRanges(
   prompt: string,
   diffPath: string | undefined,
 ): Array<[number, number]> {
@@ -319,13 +311,39 @@ function classifyReturn(
       return 'yielded';
     }
   }
-  const receipt = DRY_RECEIPT_RE.exec(text);
+  // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
+  // failure modes bound this from opposite sides. An auditor's admission of
+  // what its soft ceiling cut short must not double as the receipt's
+  // substantive clause — stripped, a return whose only substance was its
+  // disclosures reads `unknown` and the chunk stays under audit. But a
+  // receipt that is substantive WITHOUT them — a real walk of the
+  // territory, proven by the same tool-call and territory-read bar as
+  // ever, that found nothing new and separately disclosed exploration it
+  // did not take — still retires: an earlier draft read any gap-bearing
+  // return as `unknown`, and since a reverse auditor's ceiling is routinely
+  // met (its brief orders a 65-82 KB findings list read in full), that made
+  // convergence impossible and ran every budgeted loop to the round cap —
+  // the exact never-retire failure this module's own docstrings warn
+  // about. The gap itself is not lost: coverage reports it and Step 3D
+  // rules on it; retirement certifies the audit that DID happen, not the
+  // exploration that did not.
+  const judged = stripBudgetGapLines(text);
+  const receipt = DRY_RECEIPT_RE.exec(judged);
+  // The clause is cut at any INLINE disclosure marker before its substance
+  // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
+  // slips past the line-based strip, and the `[\s\S]*` capture would
+  // otherwise absorb the gap text and get its substantiveness from it —
+  // the admission doubling as the receipt again, one line lower.
+  const clause = receipt?.[1] ?? '';
+  const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
+  const judgedClause =
+    inlineGap === null ? clause : clause.slice(0, inlineGap.index);
   if (
     rec.successfulToolCalls > 0 &&
     rec.diffToolCalls > 0 &&
     openedTheTerritory(rec.diffReads, territory) &&
     receipt !== null &&
-    substantiveClause(receipt[1] ?? '')
+    substantiveClause(judgedClause)
   ) {
     return 'dry';
   }
@@ -339,7 +357,7 @@ function classifyReturn(
  * single read holds it all. A read with no line range (a `read_file` with
  * no limit) proves no lines at all and overlaps nothing.
  */
-function openedTheTerritory(
+export function openedTheTerritory(
   diffReads: Array<[number, number]>,
   territory: Array<[number, number]>,
 ): boolean {
@@ -388,7 +406,8 @@ export function scheduleReverseAuditRound(
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
 ): RoundSchedule {
-  // Rounds 1 and 2 establish the record; there is nothing to retire on.
+  // Rounds 1 and 2 establish each chunk's record; retirement needs two
+  // consecutive dry audits, so nothing can retire before round 3.
   if (round < 3) {
     return {
       due: [...chunkIds],
@@ -540,8 +559,9 @@ export function scheduleReverseAuditRound(
         dryRounds: [lastTwo[0].round, lastTwo[1].round],
         // The next even round — this branch only runs on odd rounds, so
         // that is always round + 1. Whether the cap allows it is the note
-        // composer's question, not the schedule's (see
-        // REVERSE_AUDIT_MAX_ROUNDS).
+        // composer's question, not the schedule's: the plan's cap
+        // (`reverseAuditRoundCap` in budget.ts, floored at the huge-diff
+        // tier's 3) is what the admission gate enforces.
         nextColdCheck: round + 1,
       });
     }

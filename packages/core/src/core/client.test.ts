@@ -321,6 +321,10 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   addEvent: vi.fn(),
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
+const mockInteractionTelemetry = vi.hoisted(() => ({
+  getActiveInteractionSpan: vi.fn(),
+  addUserPromptAttributes: vi.fn(),
+}));
 vi.mock('../telemetry/tracer.js', () => ({
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
   API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
@@ -332,6 +336,8 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     ...actual,
     uiTelemetryService: mockUiTelemetryService,
     logMemoryRecallDelivery: mockLogMemoryRecallDelivery,
+    getActiveInteractionSpan: mockInteractionTelemetry.getActiveInteractionSpan,
+    addUserPromptAttributes: mockInteractionTelemetry.addUserPromptAttributes,
     // We keep the real implementations of logChatCompression, etc.
     // but we can spy on QwenLogger if needed
   };
@@ -582,6 +588,9 @@ describe('Gemini Client (client.ts)', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(32000),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
+      getTelemetryIncludeSensitiveSpanAttributes: vi
+        .fn()
+        .mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
       restorePendingManualPlanExitNotice: vi.fn(),
@@ -1326,6 +1335,9 @@ describe('Gemini Client (client.ts)', () => {
             {
               functionCall: { name: 'cron_create', args: {} },
             } as never,
+            {
+              functionCall: { name: 'removed_deferred_tool', args: {} },
+            } as never,
           ],
         },
       ]);
@@ -1333,6 +1345,33 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       // cron_list NOT in history → must NOT be revealed by the resume scan.
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+      // A historical call whose tool is no longer registered must stay absent.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith(
+        'removed_deferred_tool',
+      );
+      expect(mockClientDebugLogger.debug).toHaveBeenCalledWith(
+        '[DEFERRED_TOOLS] revealed from history: cron_create',
+      );
+    });
+
+    it('does not scan resumed history again from startChat setTools', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' ? ({} as never) : null,
+      );
+      const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'cron_create', args: {} } } as never],
+        },
+      ]);
+
+      expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1861,6 +1900,19 @@ describe('Gemini Client (client.ts)', () => {
       }
     }
 
+    it('avoids reading history without hidden deferred tools and resolves one summary', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      reg.getDeferredToolSummary.mockClear();
+
+      await client.setTools();
+
+      expect(getHistorySpy).not.toHaveBeenCalled();
+      expect(reg.getDeferredToolSummary).toHaveBeenCalledTimes(1);
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder =
         '<system-reminder>unfinished todo: run tests</system-reminder>';
@@ -2184,6 +2236,88 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('does not announce a still-registered tool as removed after history reveals it', async () => {
+      const reg = getRegistryMock();
+      const tool = {
+        name: 'mcp__calculator__add',
+        description: 'Add two numbers',
+        serverName: 'calculator',
+      };
+      let revealed = false;
+      let registered = true;
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' || (name === tool.name && registered)
+          ? ({} as never)
+          : null,
+      );
+      reg.getDeferredToolSummary.mockImplementation(() =>
+        registered ? [tool] : [],
+      );
+      reg.isDeferredToolRevealed.mockImplementation(
+        (name: string) => name === tool.name && revealed,
+      );
+      reg.revealDeferredTool.mockImplementation((name: string) => {
+        if (name === tool.name) revealed = true;
+      });
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      const reminderState = client as unknown as {
+        announcedDeferredToolNames: Set<string>;
+        announcedMcpToolNames: Set<string>;
+      };
+      reminderState.announcedDeferredToolNames = new Set([tool.name]);
+      reminderState.announcedMcpToolNames = new Set([tool.name]);
+
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { name: tool.name, args: { a: 1, b: 2 } },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: tool.name,
+                response: { output: '3' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      await client.setTools();
+      await runTurn();
+
+      expect(revealed).toBe(true);
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      registered = false;
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      addHistorySpy.mockClear();
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        [tool.name],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged mcp: added= removed=mcp__calculator__add\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
     it('keeps queued MCP changes when the reminder builder returns null', () => {
       const priv = client as unknown as {
         pendingAddedMcpTools: Map<
@@ -2200,6 +2334,58 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(priv.pendingRemovedMcpToolNames).toEqual(
         new Set(['mcp__gone__do']),
+      );
+    });
+
+    it('re-reveals MCP tools from resumed history after progressive discovery', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' ? ({} as never) : null,
+      );
+
+      // The resumed chat is constructed before progressive MCP discovery, so
+      // startChat() cannot match this historical call until the server's tools
+      // are registered. setTools() is the common refresh path once they are.
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-resumed-mcp',
+                name: 'mcp__calculator__add',
+                args: { a: 1, b: 2 },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-resumed-mcp',
+                name: 'mcp__calculator__add',
+                response: { output: '3' },
+              },
+            },
+          ],
+        },
+      ]);
+      reg.getDeferredToolSummary.mockReturnValue([
+        {
+          name: 'mcp__calculator__add',
+          description: 'Add two numbers',
+          serverName: 'calculator',
+        },
+      ]);
+      reg.revealDeferredTool.mockClear();
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(
+        'mcp__calculator__add',
       );
     });
 
@@ -9726,6 +9912,81 @@ Other open files:
         expect(hookRequest.input).toEqual({ prompt: 'Hi' });
       });
 
+      it('records clean user text separately from tagged hook context', async () => {
+        const recordUserMessage = vi.fn();
+        const interactionSpan = {};
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              hookSpecificOutput: {
+                additionalContext: '<hook-only context>',
+              },
+            },
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        vi.mocked(
+          mockConfig.getTelemetryIncludeSensitiveSpanAttributes,
+        ).mockReturnValue(true);
+        mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+          interactionSpan,
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'expanded model prompt' }],
+            new AbortController().signal,
+            'prompt-hook-display-text',
+            {
+              type: SendMessageType.UserQuery,
+              submittedPrompt: 'raw @file prompt',
+            },
+          ),
+        );
+
+        expect(recordUserMessage).toHaveBeenCalledWith(
+          [
+            { text: 'expanded model prompt' },
+            {
+              text: [
+                '<qwen:user-prompt-submit-context>',
+                '&lt;hook-only context&gt;',
+                '</qwen:user-prompt-submit-context>',
+              ].join('\n'),
+            },
+          ],
+          undefined,
+          {
+            displayText: 'raw @file prompt',
+            hookContext: '&lt;hook-only context&gt;',
+          },
+        );
+        expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+          '/test/project/root',
+          'expanded model prompt',
+          expect.any(Object),
+        );
+        expect(
+          mockInteractionTelemetry.addUserPromptAttributes,
+        ).toHaveBeenCalledWith(
+          mockConfig,
+          interactionSpan,
+          'expanded model prompt',
+        );
+      });
+
       it('passes a non-empty submitted prompt for UserQuery hooks', async () => {
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({ output: undefined }),
@@ -9813,7 +10074,10 @@ Other open files:
         expect(recordUserMessage).toHaveBeenCalledWith(
           [{ text: 'my prompt' }, { text: taggedContext }],
           undefined,
-          { displayText: 'my prompt' },
+          {
+            displayText: 'my prompt',
+            hookContext: 'extra hook context',
+          },
         );
       });
 

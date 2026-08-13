@@ -4,8 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { writeTerminalTitleSpy } = vi.hoisted(() => ({
-  writeTerminalTitleSpy: vi.fn(),
+const { writeTerminalTitleSpy, useWakeRepaintMock, buildWakeRepaintSpy } =
+  vi.hoisted(() => ({
+    writeTerminalTitleSpy: vi.fn(),
+    useWakeRepaintMock: vi.fn(),
+    buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
+      vi.fn(() => deps),
+    ),
+  }));
+
+vi.mock('./hooks/use-wake-repaint.js', () => ({
+  useWakeRepaint: useWakeRepaintMock,
+}));
+
+vi.mock('./utils/terminal-resize-reflow.js', () => ({
+  buildWakeRepaint: buildWakeRepaintSpy,
 }));
 
 vi.mock('../utils/windowTitle.js', async (importOriginal) => {
@@ -81,6 +94,7 @@ import {
   StreamingState,
   ToolCallStatus,
 } from './types.js';
+import { ICON } from './constants.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
 import type { Content } from '@google/genai';
@@ -232,6 +246,20 @@ describe('AppContainer State Management', () => {
   let restoreCiEnv = () => {};
   let mockClearPendingState: Mock;
   const mockedRestorePromptStash = vi.mocked(restorePromptStash);
+
+  // Shared helper to extract AppContainer's global keypress handler
+  // (handleGlobalKeypress) from the useKeypress mock. The handler stringifies
+  // to include TOGGLE_THINKING_EXPANDED, so that token is the stable
+  // discovery idiom. Used by the Ctrl+O and Cancel Handler describe blocks.
+  const getGlobalKeypress = (): ((key: Key) => void) | undefined =>
+    mockedUseKeypress.mock.calls
+      .map((call) => call[0])
+      .reverse()
+      .find(
+        (handler): handler is (key: Key) => void =>
+          typeof handler === 'function' &&
+          handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
+      );
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -940,7 +968,7 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
-    it('refreshStatic skips the physical clear in VP mode (#4891)', () => {
+    it('refreshStatic stays write-free in VP mode for ordinary callers (#8557)', () => {
       const vpSettings = {
         merged: {
           hideTips: false,
@@ -966,11 +994,62 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.refreshStatic();
 
-      // VP mode owns the viewport via the React tree, so refreshStatic must not
-      // emit a physical clear — the resize-settle path (#4891) strands nothing.
+      // Ordinary callers (/clear, model change, Ctrl+O, ...) must not
+      // trigger a physical clear-and-replay in VP: replaying the pre-change
+      // frame would flash stale content. Their refresh comes from the state
+      // change that triggered them; only the wake path repaints physically.
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearViewport,
+      );
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
+    });
+
+    // The wake/SIGCONT trigger itself is covered by use-wake-repaint.test.ts
+    // (SIGCONT/heartbeat-gap -> repaint callback); the VP/static selection is
+    // unit-covered by buildWakeRepaint tests. This test locks the AppContainer
+    // call site: the callback handed to the hook must be the wake repaint
+    // (repaintViewport + remount), not refreshStatic or a mis-wired memo.
+    it('wires the wake repaint (not refreshStatic) into useWakeRepaint', async () => {
+      useWakeRepaintMock.mockClear();
+      buildWakeRepaintSpy.mockClear();
+      const repaintSpy = vi.fn();
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          repaintViewport={repaintSpy}
+        />,
+      );
+
+      // Let ink-testing-library's scheduled initial render flush.
+      await Promise.resolve();
+      // The call site must build the wake callback via buildWakeRepaint with
+      // the repaint prop AND the static remount bump in its deps; inline
+      // repaint-only wrappers (the shape that drops the agent-tab <Static>
+      // re-emit) fail these.
+      const deps = buildWakeRepaintSpy.mock.calls.at(-1)?.[0];
+      expect(deps?.['isVP']).toBe(true);
+      expect(deps?.['repaintViewport']).toBe(repaintSpy);
+      expect(typeof deps?.['remountStaticHistory']).toBe('function');
+      const wakeCallback = useWakeRepaintMock.mock.calls.at(-1)?.[0];
+      expect(wakeCallback).toBe(buildWakeRepaintSpy.mock.results.at(-1)?.value);
     });
 
     it('defaults to VP mode when useTerminalBuffer is unset', () => {
@@ -2571,6 +2650,15 @@ describe('AppContainer State Management', () => {
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
     const ON_CANCEL_SUBMIT_ARG_INDEX = 15;
+    // Shared ESC key fixture for the Cancel Handler describe block.
+    const escKey: Key = {
+      name: 'escape',
+      sequence: '\u001b',
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+    };
     type CapturedCancelSubmit = (info?: {
       pendingItem: HistoryItemWithoutId | null;
       lastTurnUserItem: {
@@ -2670,28 +2758,75 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      const handleKeypress = mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('handleExit'),
-        ) as ((key: Key) => void) | undefined;
+      const handleKeypress = getGlobalKeypress();
       expect(handleKeypress).toBeDefined();
 
-      const escKey: Key = {
-        name: 'escape',
-        sequence: '\u001b',
-        ctrl: false,
-        meta: false,
-        shift: false,
-        paste: false,
-      };
       handleKeypress!(escKey);
 
       // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
       expect(cancelSpy).not.toHaveBeenCalled();
+    });
+
+    it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
+      // Positive counterpart to the vim-INSERT guard above: while the agent
+      // is Responding and the buffer is empty, one Esc must reach the
+      // cancel-work branch of the global handler. InputPrompt must NOT pop
+      // the queue into the buffer on that Esc (its Responding guard skips
+      // the pop; #8201). The global handler itself does not touch the
+      // queue either — end-to-end the cancel path drains it back into the
+      // buffer via the cancel handler, but that hop is severed here because
+      // cancelOngoingRequest is replaced by a spy.
+      const cancelSpy = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue(null);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: cancelSpy,
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued follow-up'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
+        popAllMessages: mockPopAllMessages,
+        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+
+      handleKeypress!(escKey);
+
+      // A single Esc cancels the in-flight request...
+      expect(cancelSpy).toHaveBeenCalledOnce();
+      // ...and the global keypress handler itself must not pop the queue
+      // (InputPrompt owns the ESC pop decision and skips it while Responding;
+      // #8201). End-to-end the cancel path then drains the queue back into
+      // the buffer via the cancel handler - that hop is severed here because
+      // cancelOngoingRequest is replaced by a spy.
+      expect(mockPopAllMessages).not.toHaveBeenCalled();
     });
 
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
@@ -4259,7 +4394,9 @@ describe('AppContainer State Management', () => {
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites[0][0]).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
       unmount();
     });
 
@@ -4326,7 +4463,7 @@ describe('AppContainer State Management', () => {
       // Mock the streaming state and thought
       const thoughtSubject = 'Confirm tool execution';
       mockedUseGeminiStream.mockReturnValue({
-        streamingState: 'waitingForConfirmation',
+        streamingState: StreamingState.WaitingForConfirmation,
         submitQuery: vi.fn(),
         initError: null,
         pendingHistoryItems: [],
@@ -4352,7 +4489,9 @@ describe('AppContainer State Management', () => {
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites[0][0]).toBe(
+        titleEscape(`${ICON.SPARKLE} Qwen - workspace`),
+      );
       unmount();
     });
 
@@ -4404,7 +4543,9 @@ describe('AppContainer State Management', () => {
       expect(calledWith).toContain('\x1b]0;');
       expect(calledWith).toContain('\x1b]2;');
       expect(calledWith).toContain('\x07');
-      expect(calledWith).toBe(titleEscape('Qwen - workspace'));
+      expect(calledWith).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
       unmount();
     });
 
@@ -4451,7 +4592,9 @@ describe('AppContainer State Management', () => {
         process.stdout.write as ReturnType<typeof vi.fn>
       ).mock.calls.filter((call: string[]) => call[0].includes('\x1b]2;'));
       expect(titleWrites).toHaveLength(1);
-      expect(titleWrites[0][0]).toBe(titleEscape('Qwen - workspace'));
+      expect(titleWrites[0][0]).toBe(
+        titleEscape(`${ICON.CIRCLE_LEFT_HALF} Qwen - workspace`),
+      );
       unmount();
     });
 
@@ -5415,16 +5558,6 @@ describe('AppContainer State Management', () => {
         sequence: '',
         ...overrides,
       }) as Key;
-
-    const getGlobalKeypress = () =>
-      mockedUseKeypress.mock.calls
-        .map((call) => call[0])
-        .reverse()
-        .find(
-          (handler): handler is (key: Key) => void =>
-            typeof handler === 'function' &&
-            handler.toString().includes('TOGGLE_THINKING_EXPANDED'),
-        ) as ((key: Key) => void) | undefined;
 
     const ctrlO = makeKey({ name: 'o', ctrl: true, sequence: '\x0f' });
 

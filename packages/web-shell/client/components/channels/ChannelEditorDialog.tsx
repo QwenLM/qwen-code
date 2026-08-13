@@ -93,6 +93,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   },
 };
 
+const COMMON_FIELD_LABEL_KEYS: Record<string, string> = {
+  sessionScope: 'channels.editor.field.sessionScope',
+};
+
 export interface ChannelEditorDialogProps {
   open: boolean;
   descriptor: DaemonChannelTypeDescriptor;
@@ -206,19 +210,36 @@ export function ChannelEditorDialog({
     setSubmitError(undefined);
   }, [descriptor, instance, open]);
 
+  const fieldLabelKey = (field: DaemonChannelConfigFieldDescriptor) =>
+    FIELD_LABEL_KEYS[descriptor.type]?.[field.key] ??
+    COMMON_FIELD_LABEL_KEYS[field.key];
+
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
-    const key = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    const key = fieldLabelKey(field);
     return key ? t(key) : field.label;
   };
 
   const fieldDescription = (field: DaemonChannelConfigFieldDescriptor) => {
-    const labelKey = FIELD_LABEL_KEYS[descriptor.type]?.[field.key];
+    const labelKey = fieldLabelKey(field);
     if (labelKey) {
       const descKey = `${labelKey}.description`;
       const translated = t(descKey);
       if (translated !== descKey) return translated;
     }
     return field.description;
+  };
+
+  const fieldOptionLabel = (
+    field: DaemonChannelConfigFieldDescriptor,
+    option: { value: string; label: string },
+  ) => {
+    const labelKey = fieldLabelKey(field);
+    if (labelKey) {
+      const optionKey = `${labelKey}.option.${option.value}`;
+      const translated = t(optionKey);
+      if (translated !== optionKey) return translated;
+    }
+    return option.label;
   };
 
   const validationMessage = (
@@ -232,6 +253,12 @@ export function ChannelEditorDialog({
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
+    if (code === 'outOfRange') {
+      return t('channels.editor.validation.outOfRange', {
+        min:
+          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+      });
+    }
     if (code === 'policy') return t('channels.editor.validation.policy');
     return t('channels.editor.validation.required', {
       label: field ? fieldLabel(field) : t('channels.editor.instanceName'),
@@ -387,6 +414,7 @@ export function ChannelEditorDialog({
   };
 
   const renderField = (field: DaemonChannelConfigFieldDescriptor) => {
+    if (field.kind === 'object') return null;
     if (field.kind === 'secret') return renderSecret(field);
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];
@@ -436,7 +464,7 @@ export function ChannelEditorDialog({
             <SelectContent>
               {field.options?.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
-                  {option.label}
+                  {fieldOptionLabel(field, option)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -523,6 +551,13 @@ export function ChannelEditorDialog({
     );
   };
 
+  const sessionScopeField = descriptor.fields.find(
+    (field) => field.key === 'sessionScope',
+  );
+  const platformFields = descriptor.fields.filter(
+    (field) => field.key !== 'sessionScope' && field.kind !== 'object',
+  );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[calc(100%-2rem)] p-5 sm:max-w-xl">
@@ -600,12 +635,23 @@ export function ChannelEditorDialog({
               </FieldShell>
             </section>
 
-            <section className={styles.section}>
-              <h3 className={styles.sectionHeading}>
-                {t('channels.editor.section.credentials')}
-              </h3>
-              {descriptor.fields.map(renderField)}
-            </section>
+            {platformFields.length > 0 ? (
+              <section className={styles.section}>
+                <h3 className={styles.sectionHeading}>
+                  {t('channels.editor.section.credentials')}
+                </h3>
+                {platformFields.map(renderField)}
+              </section>
+            ) : null}
+
+            {sessionScopeField ? (
+              <section className={styles.section}>
+                <h3 className={styles.sectionHeading}>
+                  {t('channels.editor.section.session')}
+                </h3>
+                {renderField(sessionScopeField)}
+              </section>
+            ) : null}
 
             {(() => {
               const descriptorPolicy = hasDescriptorSenderPolicy(descriptor);

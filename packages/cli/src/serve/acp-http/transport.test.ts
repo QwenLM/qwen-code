@@ -32,6 +32,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   SessionLimitExceededError,
+  SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   TotalSessionLimitExceededError,
@@ -75,6 +76,8 @@ import {
   type WorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -166,6 +169,7 @@ class FakeBridge {
     | undefined;
   lastSetModel: unknown;
   lastSpawnScope: string | undefined;
+  lastRequestedSessionId: string | undefined;
   closeShouldThrow = false;
   closeError: Error | undefined;
   killed: string[] = [];
@@ -177,6 +181,8 @@ class FakeBridge {
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
   spawnSessionId = 'sess-1';
+  honorRequestedSessionId = true;
+  spawnAttached = false;
   spawnClientId: string | undefined = 'client-1';
   loadRequests: Array<{
     sessionId: string;
@@ -190,13 +196,17 @@ class FakeBridge {
 
   closedSessions: string[] = [];
 
-  async spawnOrAttach(req: { sessionScope?: string }) {
+  async spawnOrAttach(req: { sessionScope?: string; sessionId?: string }) {
     this.lastSpawnScope = req?.sessionScope;
+    this.lastRequestedSessionId = req?.sessionId;
     if (this.gate) await this.gate;
     return {
-      sessionId: this.spawnSessionId,
+      sessionId:
+        this.honorRequestedSessionId && req.sessionId
+          ? req.sessionId
+          : this.spawnSessionId,
       workspaceCwd: TEST_WORKSPACE,
-      attached: false,
+      attached: this.spawnAttached,
       clientId: this.spawnClientId,
     };
   }
@@ -329,6 +339,22 @@ class FakeBridge {
             currentValue: 'qwen-max',
             options: [],
           },
+          {
+            id: 'reasoning_effort',
+            name: 'Reasoning effort',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'default',
+            options: [],
+          },
+          {
+            id: 'mode',
+            name: 'Mode',
+            category: 'mode',
+            type: 'select',
+            currentValue: 'default',
+            options: [],
+          },
         ],
       },
     };
@@ -358,7 +384,7 @@ class FakeBridge {
     if (sessionId === 'sess-1') {
       return { sessionId, workspaceCwd: TEST_WORKSPACE };
     }
-    throw new Error(`Session not found: ${sessionId}`);
+    throw new SessionNotFoundError(sessionId);
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
@@ -893,11 +919,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         return raw as Record<string, unknown>;
       },
     });
+    const archiveCoordinator = new SessionArchiveCoordinator();
     acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       workspaceRememberLane,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          {
+            workspaceCwd: boundWorkspace,
+            runtimeBaseDir: Storage.getRuntimeBaseDir(),
+          },
+        ],
+      }),
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -951,6 +989,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           generationGuard: opts.generationGuard,
         })
       : undefined;
+    const archiveCoordinator = new SessionArchiveCoordinator();
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
@@ -963,6 +1002,26 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workspaceRememberLane: new WorkspaceRememberTaskLane(
         bridge as unknown as HttpAcpBridge,
       ),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () =>
+          workspaceRegistry
+            ? workspaceRegistry.listManaged().map((runtime) => runtime.bridge)
+            : [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () =>
+          workspaceRegistry
+            ? workspaceRegistry.listManaged().map((runtime) => ({
+                workspaceCwd: runtime.workspaceCwd,
+                runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+              }))
+            : [
+                {
+                  workspaceCwd: boundWorkspace,
+                  runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                },
+              ],
+      }),
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -1275,10 +1334,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(ack.status).toBe(202);
     const [frame] = (await got) as Array<{
       id: number;
-      result: { sessionId: string };
+      result: {
+        sessionId: string;
+        configOptions: Array<{ id: string }>;
+      };
     }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
+    expect(frame.result.configOptions.map((option) => option.id)).toEqual([
+      'model',
+      'mode',
+    ]);
   });
 
   it('session/new rejects the daemon-owned Live Voice source namespace', async () => {
@@ -3191,6 +3257,136 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('cancels session/list without buffering an error when the connection is destroyed', async () => {
+    let loadSignal: AbortSignal | undefined;
+    const listSessionsSpy = vi
+      .spyOn(SessionService.prototype, 'listSessions')
+      .mockImplementation(async (options) => {
+        const signal = options?.signal;
+        expect(signal).toBeDefined();
+        loadSignal = signal;
+        await new Promise<void>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        });
+        return { items: [], nextCursor: undefined, hasMore: false };
+      });
+
+    try {
+      const connId = await initialize();
+      const conn = acpHandle?.registry.get(connId);
+      expect(conn).toBeDefined();
+      const bufferedBefore = conn!.getDiagnostic().bufferedConnectionFrames;
+      const logCallsBefore = stdioMocks.writeStderrLine.mock.calls.length;
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 130,
+        method: 'session/list',
+        params: { workspaceCwd: TEST_WORKSPACE, view: 'organized' },
+      });
+      await waitUntil(() => loadSignal !== undefined);
+
+      const deleted = await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': connId },
+      });
+      expect(deleted.status).toBe(202);
+      await waitUntil(() => loadSignal?.aborted === true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(conn!.abortSignal.aborted).toBe(true);
+      expect(conn!.getDiagnostic().bufferedConnectionFrames).toBe(
+        bufferedBefore,
+      );
+      const cancellationLogs = stdioMocks.writeStderrLine.mock.calls
+        .slice(logCallsBefore)
+        .flat();
+      expect(
+        cancellationLogs.some(
+          (line) =>
+            typeof line === 'string' && line.includes('/acp dispatch error'),
+        ),
+      ).toBe(false);
+    } finally {
+      listSessionsSpy.mockRestore();
+    }
+  });
+
+  it('keeps a shared session/list scan alive when one connection is destroyed', async () => {
+    let loadSignal: AbortSignal | undefined;
+    let resolveScan!: (value: {
+      items: [];
+      nextCursor: undefined;
+      hasMore: false;
+    }) => void;
+    let rejectScan!: (reason?: unknown) => void;
+    const scan = new Promise<{
+      items: [];
+      nextCursor: undefined;
+      hasMore: false;
+    }>((resolve, reject) => {
+      resolveScan = resolve;
+      rejectScan = reject;
+    });
+    const listSessionsSpy = vi
+      .spyOn(SessionService.prototype, 'listSessions')
+      .mockImplementation(async (options) => {
+        const signal = options?.signal;
+        expect(signal).toBeDefined();
+        loadSignal = signal;
+        signal?.addEventListener('abort', () => rejectScan(signal.reason), {
+          once: true,
+        });
+        return scan;
+      });
+
+    try {
+      const firstConnId = await initialize();
+      const secondConnId = await initialize();
+      const secondStream = await openStream(secondConnId);
+      const secondFrame = takeFrames(secondStream, 1);
+      await Promise.all([
+        post(firstConnId, {
+          jsonrpc: '2.0',
+          id: 131,
+          method: 'session/list',
+          params: { workspaceCwd: TEST_WORKSPACE, view: 'organized' },
+        }),
+        post(secondConnId, {
+          jsonrpc: '2.0',
+          id: 132,
+          method: 'session/list',
+          params: { workspaceCwd: TEST_WORKSPACE, view: 'organized' },
+        }),
+      ]);
+      await waitUntil(() => loadSignal !== undefined);
+      expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+
+      const deleted = await fetch(`${base}/acp`, {
+        method: 'DELETE',
+        headers: { 'acp-connection-id': firstConnId },
+      });
+      expect(deleted.status).toBe(202);
+      expect(loadSignal?.aborted).toBe(false);
+
+      resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      await expect(secondFrame).resolves.toEqual([
+        expect.objectContaining({
+          id: 132,
+          result: expect.objectContaining({ sessions: [] }),
+        }),
+      ]);
+    } finally {
+      resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      listSessionsSpy.mockRestore();
+    }
+  });
+
   it('_qwen/sessions/archive rejects invalid batch params', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -3998,6 +4194,71 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s normalizes mixed-case caller UUIDs before restore',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        const mixedCaseSessionId = sessionId.toUpperCase();
+        await writeStoredSession(sessionId);
+
+        let restoredSessionId: string | undefined;
+        bridge.loadSession = async (req) => {
+          restoredSessionId = req.sessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          restoredSessionId = req.sessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 216,
+          method,
+          params: { sessionId: mixedCaseSessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 216 });
+        reader.close();
+
+        expect(restoredSessionId).toBe(sessionId);
+
+        const sessionStream = await openStream(connId, mixedCaseSessionId);
+        expect(sessionStream.status).toBe(200);
+        const sessionReader = frameReader(sessionStream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 217,
+          method: 'session/prompt',
+          params: {
+            sessionId: mixedCaseSessionId,
+            prompt: [{ type: 'text', text: 'continue after restore' }],
+          },
+        });
+        expect(await sessionReader.next()).toMatchObject({
+          id: 217,
+          result: { stopReason: 'end_turn' },
+        });
+        sessionReader.close();
+      });
+    },
+  );
+
   it('session/prompt reports an archive conflict while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440127';
@@ -4705,6 +4966,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
 
+  it('session/set_config_option rejects ids outside the routable set', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 44,
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'reasoning_effort',
+        value: 'high',
+      },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain(
+      'ConfigId not supported by this transport: reasoning_effort',
+    );
+    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/set_config_option without an id writes no response for an unroutable configId', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      method: 'session/set_config_option',
+      params: {
+        sessionId: 'sess-1',
+        configId: 'reasoning_effort',
+        value: 'high',
+      },
+    });
+    expect(ack.status).toBe(202);
+    const frames = await takeFrames(sessStream, 1, 300);
+    expect(frames).toHaveLength(0);
+    expect(bridge.lastSetModel).toBeUndefined();
+    expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
     // ACP standard: session/new MUST create a new isolated session.
     // sessionScope param is ignored; bridge always gets 'thread'.
@@ -4728,6 +5039,149 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     expect(bridge.lastSpawnScope).toBe('thread');
+  });
+
+  it('session/new validates, normalizes, and forwards caller-supplied sessionId meta', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 440,
+      method: 'session/new',
+      params: {
+        _meta: {
+          'qwen-code/sessionId': '550E8400-E29B-41D4-A716-446655440000',
+        },
+      },
+    });
+
+    const [frame] = (await got) as Array<{
+      result: { sessionId: string };
+    }>;
+    expect(bridge.lastRequestedSessionId).toBe(
+      '550e8400-e29b-41d4-a716-446655440000',
+    );
+    expect(frame.result.sessionId).toBe('550e8400-e29b-41d4-a716-446655440000');
+  });
+
+  it('pins fallback sessionId persistence admission to the mount runtime base', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440004';
+    await writeStoredSession(sessionId);
+    const laterRuntimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-acp-later-runtime-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = laterRuntimeDir;
+
+    try {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 443,
+        method: 'session/new',
+        params: {
+          _meta: { 'qwen-code/sessionId': sessionId },
+        },
+      });
+
+      const [frame] = (await got) as Array<{
+        error: { code: number; data: Record<string, unknown> };
+      }>;
+      expect(frame.error).toMatchObject({
+        code: -32602,
+        data: {
+          httpStatus: 409,
+          errorKind: 'session_id_conflict',
+          conflict: 'persisted',
+        },
+      });
+      expect(bridge.lastRequestedSessionId).toBeUndefined();
+    } finally {
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      await fs.rm(laterRuntimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('session/new rejects invalid sessionId meta without spawning', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 441,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': '../../escape' } },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { httpStatus: 400, errorKind: 'invalid_session_id' },
+    });
+    expect(bridge.lastRequestedSessionId).toBeUndefined();
+  });
+
+  it('session/new removes a mismatched orphan and reports a protocol error', async () => {
+    bridge.honorRequestedSessionId = false;
+    bridge.spawnSessionId = '550e8400-e29b-41d4-a716-446655440999';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 442,
+      method: 'session/new',
+      params: {
+        _meta: {
+          'qwen-code/sessionId': '550e8400-e29b-41d4-a716-446655440000',
+        },
+      },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32603,
+      data: { httpStatus: 500, errorKind: 'session_id_not_honored' },
+    });
+    expect(bridge.killed).toContain('550e8400-e29b-41d4-a716-446655440999');
+  });
+
+  it('session/new rolls back a mismatched attach without killing it', async () => {
+    bridge.honorRequestedSessionId = false;
+    bridge.spawnSessionId = 'existing-session';
+    bridge.spawnAttached = true;
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 444,
+      method: 'session/new',
+      params: {
+        _meta: {
+          'qwen-code/sessionId': '550e8400-e29b-41d4-a716-446655440000',
+        },
+      },
+    });
+
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      code: -32603,
+      data: { httpStatus: 500, errorKind: 'session_id_not_honored' },
+    });
+    expect(bridge.detached).toContainEqual({
+      sessionId: 'existing-session',
+      clientId: 'client-1',
+    });
+    expect(bridge.killed).not.toContain('existing-session');
   });
 
   it('session/prompt with empty prompt → INVALID_PARAMS', async () => {
@@ -4827,6 +5281,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   it('connection cap → 503 on initialize', async () => {
     const app2 = express();
     app2.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
     mountAcpHttp(app2, bridge as unknown as HttpAcpBridge, {
       boundWorkspace: TEST_WORKSPACE,
       workspace: fakeWorkspace,
@@ -4835,6 +5290,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workspaceRememberLane: new WorkspaceRememberTaskLane(
         bridge as unknown as HttpAcpBridge,
       ),
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          {
+            workspaceCwd: TEST_WORKSPACE,
+            runtimeBaseDir: Storage.getRuntimeBaseDir(),
+          },
+        ],
+      }),
     });
     const srv = app2.listen(0, '127.0.0.1');
     await new Promise((r) => srv.once('listening', r));
@@ -7127,6 +7593,93 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('session mutations invalidate active and archived organized catalogs', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440017';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+
+        const list = async (
+          id: number,
+          archiveState: 'active' | 'archived',
+        ) => {
+          await post(connId, {
+            jsonrpc: '2.0',
+            id,
+            method: 'session/list',
+            params: {
+              workspaceCwd: TEST_WORKSPACE,
+              view: 'organized',
+              archiveState,
+            },
+          });
+          return reader.next();
+        };
+
+        await expect(list(75, 'active')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId }] },
+        });
+        await expect(list(76, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 77,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 77,
+          result: { archived: [sessionId], errors: [] },
+        });
+
+        await expect(list(78, 'active')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        await expect(list(79, 'archived')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId, isArchived: true }] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/sessions/unarchive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 80,
+          result: { unarchived: [sessionId], errors: [] },
+        });
+        await expect(list(81, 'active')).resolves.toMatchObject({
+          result: { sessions: [{ sessionId, isArchived: false }] },
+        });
+        await expect(list(82, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 83,
+          result: { removed: [sessionId], errors: [] },
+        });
+        await expect(list(84, 'active')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        await expect(list(85, 'archived')).resolves.toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
     it('_qwen/session/update_organization assigns a color echoed by session/list', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440011';
@@ -8581,6 +9134,7 @@ describe('ACP WebSocket transport security', () => {
       bridge = new FakeBridge();
       const app = express();
       app.use(express.json());
+      const archiveCoordinator = new SessionArchiveCoordinator();
       const handle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
         boundWorkspace: TEST_WORKSPACE,
         workspace: fakeWorkspace,
@@ -8591,6 +9145,17 @@ describe('ACP WebSocket transport security', () => {
         workspaceRememberLane: new WorkspaceRememberTaskLane(
           bridge as unknown as HttpAcpBridge,
         ),
+        archiveCoordinator,
+        requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+          archiveCoordinator,
+          getBridges: () => [bridge as unknown as HttpAcpBridge],
+          getPersistenceTargets: () => [
+            {
+              workspaceCwd: TEST_WORKSPACE,
+              runtimeBaseDir: Storage.getRuntimeBaseDir(),
+            },
+          ],
+        }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
         ...(opts.cdpTunnelOverWs

@@ -106,6 +106,8 @@ export interface Envelope {
   chatId: string;
   chatName?: string;
   text: string;
+  /** User-authored text to display when `text` contains model-only context. */
+  displayText?: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;
@@ -399,18 +401,83 @@ export type ChannelConfigFieldKind =
   | 'number'
   | 'enum'
   | 'string-list'
-  | 'record';
+  | 'record'
+  | 'object';
 
-export interface ChannelConfigFieldDescriptor {
+interface ChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  kind: ChannelConfigFieldKind;
-  required?: boolean;
-  envResolvable?: boolean;
   options?: ReadonlyArray<{ value: string; label: string }>;
   default?: string;
   description?: string;
 }
+
+export interface ChannelConfigValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'string' | 'secret';
+  required?: boolean;
+  envResolvable?: boolean;
+  properties?: never;
+}
+
+export interface ChannelConfigPlainValueFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'boolean' | 'string-list' | 'record';
+  required?: boolean;
+  envResolvable?: never;
+  properties?: never;
+}
+
+export interface ChannelConfigEnumFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'enum';
+  required?: boolean;
+  envResolvable?: never;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  properties?: never;
+}
+
+export interface ChannelConfigNumberFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'number';
+  required?: boolean;
+  envResolvable?: never;
+  exclusiveMinimum?: number;
+  properties?: never;
+}
+
+export interface ChannelConfigObjectFieldDescriptor
+  extends ChannelConfigFieldDescriptorBase {
+  kind: 'object';
+  required?: false;
+  envResolvable?: never;
+  properties: readonly ChannelConfigNestedFieldDescriptor[];
+}
+
+export type ChannelConfigNestedFieldDescriptor =
+  | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: Exclude<
+        ChannelConfigFieldKind,
+        'secret' | 'enum' | 'number' | 'object'
+      >;
+      envResolvable?: never;
+    })
+  | (Omit<ChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'enum';
+      envResolvable?: never;
+    })
+  | (Omit<ChannelConfigNumberFieldDescriptor, 'kind' | 'envResolvable'> & {
+      kind: 'number';
+      envResolvable?: never;
+    })
+  | ChannelConfigObjectFieldDescriptor;
+
+export type ChannelConfigFieldDescriptor =
+  | ChannelConfigValueFieldDescriptor
+  | ChannelConfigPlainValueFieldDescriptor
+  | ChannelConfigEnumFieldDescriptor
+  | ChannelConfigNumberFieldDescriptor
+  | ChannelConfigObjectFieldDescriptor;
 
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];

@@ -118,6 +118,10 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
   }>;
+  readonly getMidTurnMessagesCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   readonly removeMidTurnMessageCalls: Array<{
     sessionId: string;
     messageId: string;
@@ -387,6 +391,7 @@ function makeBridge(
   const recapCalls: FakeBridge['recapCalls'] = [];
   const btwCalls: FakeBridge['btwCalls'] = [];
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
+  const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
   const removeMidTurnMessageCalls: FakeBridge['removeMidTurnMessageCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
@@ -422,6 +427,7 @@ function makeBridge(
     recapCalls,
     btwCalls,
     midTurnMessageCalls,
+    getMidTurnMessagesCalls,
     removeMidTurnMessageCalls,
     taskCancelCalls,
     goalClearCalls,
@@ -441,6 +447,17 @@ function makeBridge(
     },
     get activePromptCount() {
       return 0;
+    },
+    get activeWork() {
+      return false;
+    },
+    get activeWorkCoverage() {
+      return {
+        total: 0,
+        covered: 0,
+        onNegotiatedChannel: 0,
+        oldestCoveredReportAt: null,
+      };
     },
     get pendingPromptTotal() {
       return 0;
@@ -623,6 +640,20 @@ function makeBridge(
         ...(workspaceCwd === SECONDARY_CWD
           ? { messageId: 'mid-secondary' }
           : {}),
+      };
+    },
+    getMidTurnMessages(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      getMidTurnMessagesCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return {
+        messages: [],
+        settledMessageIds: [],
+        promotedMessageIds: [],
       };
     },
     removeMidTurnMessage(
@@ -2842,6 +2873,10 @@ describe('multi-workspace session dispatch', () => {
         .set('Authorization', TEST_AUTHORIZATION)
         .send({ message: 'blocked' }),
       request(app)
+        .get('/session/secondary-session/mid-turn-messages')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION),
+      request(app)
         .post('/session/secondary-session/tasks/task-1/cancel')
         .set('Host', host())
         .set('Authorization', TEST_AUTHORIZATION)
@@ -2858,7 +2893,7 @@ describe('multi-workspace session dispatch', () => {
     ]);
 
     expect(responses.map((response) => response.status)).toEqual([
-      403, 403, 403, 403, 403, 403, 403,
+      403, 403, 403, 403, 403, 403, 403, 403,
     ]);
     for (const response of responses) {
       expect(response.body.code).toBe('untrusted_workspace');
@@ -2868,6 +2903,7 @@ describe('multi-workspace session dispatch', () => {
       expect(bridge.recapCalls).toEqual([]);
       expect(bridge.btwCalls).toEqual([]);
       expect(bridge.midTurnMessageCalls).toEqual([]);
+      expect(bridge.getMidTurnMessagesCalls).toEqual([]);
       expect(bridge.removeMidTurnMessageCalls).toEqual([]);
       expect(bridge.taskCancelCalls).toEqual([]);
       expect(bridge.goalClearCalls).toEqual([]);
@@ -5177,6 +5213,19 @@ describe('multi-workspace session dispatch', () => {
       const { app, primaryBridge, secondaryBridge } = makeHarness({
         secondarySummaries: [],
       });
+      const list = (archiveState: 'active' | 'archived') =>
+        request(app)
+          .get(
+            `/workspaces/secondary-id/sessions?view=organized&archiveState=${archiveState}&group=all`,
+          )
+          .set('Host', host());
+      const listedIds = async (archiveState: 'active' | 'archived') =>
+        (await list(archiveState)).body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        );
+
+      expect(await listedIds('active')).toEqual([deleteId, archiveId]);
+      expect(await listedIds('archived')).toEqual([]);
 
       const archived = await request(app)
         .post('/workspaces/secondary-id/sessions/archive')
@@ -5189,6 +5238,8 @@ describe('multi-workspace session dispatch', () => {
         notFound: [],
         errors: [],
       });
+      expect(await listedIds('active')).toEqual([deleteId]);
+      expect(await listedIds('archived')).toEqual([archiveId]);
 
       const unarchived = await request(app)
         .post('/workspaces/secondary-id/sessions/unarchive')
@@ -5201,6 +5252,8 @@ describe('multi-workspace session dispatch', () => {
         notFound: [],
         errors: [],
       });
+      expect(await listedIds('active')).toEqual([deleteId, archiveId]);
+      expect(await listedIds('archived')).toEqual([]);
 
       const deleted = await request(app)
         .post('/workspaces/secondary-id/sessions/delete')
@@ -5212,6 +5265,8 @@ describe('multi-workspace session dispatch', () => {
         notFound: [],
         errors: [],
       });
+      expect(await listedIds('active')).toEqual([archiveId]);
+      expect(await listedIds('archived')).toEqual([]);
       expect(primaryBridge.closeCalls).toEqual([]);
       expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
     });
