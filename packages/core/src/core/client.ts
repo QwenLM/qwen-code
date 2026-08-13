@@ -81,7 +81,11 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
-import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  accumulateExperienceSignals,
+  isSubstantiveToolCall,
+  type ExperienceSignalAccumulator,
+} from '../memory/experience-signals.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
@@ -352,6 +356,13 @@ export class GeminiClient {
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
+  /** Whether a steer message arrived since the last dispatched skill review. */
+  private userSteeredSinceReview = false;
+  private experienceSignalsSinceReview: ExperienceSignalAccumulator = {
+    retryArc: false,
+    hasSubstantiveWork: false,
+    failedToolNames: new Set(),
+  };
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
@@ -1062,6 +1073,8 @@ export class GeminiClient {
     }
 
     this.initializedSessionId = undefined;
+    // /clear starts a fresh session; the skill-review window must not leak.
+    this.resetSkillReviewWindow();
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2046,6 +2059,10 @@ export class GeminiClient {
       return;
     }
 
+    if (messageType === SendMessageType.Steer) {
+      this.userSteeredSinceReview = true;
+    }
+
     // autoSkill counts tool calls and can trigger on both UserQuery and
     // ToolResult turns so the threshold can fire mid-session.
     if (
@@ -2059,6 +2076,13 @@ export class GeminiClient {
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
       if (autoSkillEnabled) {
+        const { retryArc, hasSubstantiveWork } =
+          this.experienceSignalsSinceReview;
+        const experienceSignals = {
+          retryArc,
+          hasSubstantiveWork,
+          userSteer: this.userSteeredSinceReview,
+        };
         const skillReviewResult = mgr.scheduleSkillReview({
           projectRoot,
           sessionId,
@@ -2067,13 +2091,13 @@ export class GeminiClient {
           toolCallCount: this.toolCallCount,
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
-          threshold: AUTO_SKILL_THRESHOLD,
+          experienceSignals,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
-          // Reset tool-call counter when a review is dispatched so the next
-          // review only fires after a full new threshold worth of tool calls.
-          this.toolCallCount = 0;
+          // Reset the review window when a review is dispatched so the next
+          // review requires a fresh window of tool calls and signals.
+          this.resetSkillReviewWindow();
           if (skillReviewResult.promise) {
             this.pendingMemoryTaskPromises.push(
               skillReviewResult.promise
@@ -2092,13 +2116,12 @@ export class GeminiClient {
           }
         } else if (
           skillReviewResult.status === 'skipped' &&
-          skillReviewResult.skippedReason === 'already_running' &&
-          this.toolCallCount >= AUTO_SKILL_THRESHOLD
+          skillReviewResult.skippedReason === 'already_running'
         ) {
-          // A review is already in-flight; reset the counter so that when the
-          // current review completes the next call doesn't immediately trigger
-          // another review without accumulating a fresh threshold of tool calls.
-          this.toolCallCount = 0;
+          // The manager's trigger gate runs before its in-flight check, so
+          // already_running means this window would have triggered. Reset it
+          // so the next window starts fresh when the in-flight review ends.
+          this.resetSkillReviewWindow();
         }
         // Always reset the skills-modified flag after the scheduleSkillReview
         // check, regardless of whether a review was dispatched. This prevents
@@ -2179,6 +2202,16 @@ export class GeminiClient {
     return promises;
   }
 
+  private resetSkillReviewWindow(): void {
+    this.toolCallCount = 0;
+    this.userSteeredSinceReview = false;
+    this.experienceSignalsSinceReview = {
+      retryArc: false,
+      hasSubstantiveWork: false,
+      failedToolNames: new Set(),
+    };
+  }
+
   recordCompletedToolCall(
     toolName: string,
     args?: Record<string, unknown>,
@@ -2193,6 +2226,9 @@ export class GeminiClient {
       ) {
         this.skillsModifiedInSession = true;
       }
+    }
+    if (isSubstantiveToolCall(toolName)) {
+      this.experienceSignalsSinceReview.hasSubstantiveWork = true;
     }
     this.toolCallCount += 1;
   }
@@ -2528,6 +2564,21 @@ export class GeminiClient {
 
     const attachedSteerInput = options?.steerInput;
     const attachedSteerPushCount = currentPushCount();
+    let experienceInputRecorded = false;
+    const recordAcceptedExperienceInput = () => {
+      if (experienceInputRecorded) return;
+      if (messageType === SendMessageType.ToolResult) {
+        this.experienceSignalsSinceReview = accumulateExperienceSignals(
+          [createUserContent(request)],
+          this.experienceSignalsSinceReview,
+        );
+      } else if (messageType === SendMessageType.Steer) {
+        this.userSteeredSinceReview = true;
+      } else {
+        return;
+      }
+      experienceInputRecorded = true;
+    };
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -3428,6 +3479,9 @@ export class GeminiClient {
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
+            if (currentPushCount() > attachedSteerPushCount) {
+              recordAcceptedExperienceInput();
+            }
             // Settle the attached steer input as soon as the first stream
             // event arrives — the user-content push has landed by now.
             // Settling here (before model-response events are committed to
@@ -3626,6 +3680,9 @@ export class GeminiClient {
       agentOutput.commitResponse(
         hasToolCalls || turn.pendingToolCalls.length > 0,
       );
+      if (currentPushCount() > attachedSteerPushCount) {
+        recordAcceptedExperienceInput();
+      }
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -4186,6 +4243,9 @@ export class GeminiClient {
         await releaseGoalPermitOnInterruptedExit();
       }
       closeGoalStateEvents();
+      if (currentPushCount() > attachedSteerPushCount) {
+        recordAcceptedExperienceInput();
+      }
       settleSteerInput(attachedSteerInput, attachedSteerPushCount);
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any

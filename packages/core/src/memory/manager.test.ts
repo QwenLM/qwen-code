@@ -35,6 +35,15 @@ vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
 import { runAutoMemoryExtract } from './extract.js';
 import { runManagedAutoMemoryDream } from './dream.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
+import type { ExperienceSignals } from './experience-signals.js';
+
+/** Window with substantive work but no trial-and-error signal: only the count
+ * backstop can trigger. */
+const SUBSTANTIVE_WINDOW: ExperienceSignals = {
+  retryArc: false,
+  userSteer: false,
+  hasSubstantiveWork: true,
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -253,6 +262,7 @@ describe('MemoryManager', () => {
         toolCallCount: 1,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
       });
 
@@ -272,6 +282,7 @@ describe('MemoryManager', () => {
         toolCallCount: 20,
         threshold: 2,
         skillsModified: true,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
       });
 
@@ -298,6 +309,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
       };
 
@@ -335,6 +347,7 @@ describe('MemoryManager', () => {
         toolCallCount: 2,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         maxTurns: 3,
         timeoutMs: 30_000,
@@ -400,6 +413,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       });
@@ -436,6 +450,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       }).promise!;
@@ -460,6 +475,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: false,
       });
@@ -499,6 +515,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       }).promise!;
@@ -661,6 +678,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       });
@@ -761,6 +779,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: makeMockConfig(),
         confirmBeforePersist: true,
       }).promise!;
@@ -1003,6 +1022,7 @@ describe('MemoryManager', () => {
         threshold: 20,
         enabled: true,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 
@@ -1027,6 +1047,7 @@ describe('MemoryManager', () => {
         threshold: 20,
         enabled: true,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 
@@ -1588,6 +1609,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 
@@ -1620,6 +1642,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
       expect(first.status).toBe('scheduled');
@@ -1636,6 +1659,7 @@ describe('MemoryManager', () => {
         toolCallCount: 25,
         threshold: 2,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config,
       });
 

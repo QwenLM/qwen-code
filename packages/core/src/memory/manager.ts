@@ -87,6 +87,10 @@ import {
   rejectPendingSkill,
   type PendingSkill,
 } from './pending-skills.js';
+import {
+  hasExperienceSignal,
+  type ExperienceSignals,
+} from './experience-signals.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
@@ -143,6 +147,10 @@ export interface ScheduleSkillReviewParams {
   history: Content[];
   toolCallCount: number;
   skillsModified: boolean;
+  /** Deterministic trial-and-error signals detected over the unreviewed
+   * history window. Required so every caller makes an explicit decision about
+   * what fed the gate. */
+  experienceSignals: ExperienceSignals;
   now?: Date;
   config?: Config;
   enabled?: boolean;
@@ -160,6 +168,7 @@ export interface SkillReviewScheduleResult {
   taskId?: string;
   skippedReason?:
     | 'below_threshold'
+    | 'no_experience_signal'
     | 'skills_modified_in_session'
     | 'disabled'
     | 'already_running'
@@ -215,6 +224,9 @@ export const EXTRACT_TASK_TYPE = 'managed-auto-memory-extraction' as const;
 export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
 export const SKILL_REVIEW_TASK_TYPE = 'managed-skill-extractor' as const;
 export const AUTO_SKILL_THRESHOLD = 20;
+/** Minimum tool calls in the review window before experience signals alone can
+ * trigger a review — ensures the review agent has enough material to judge. */
+export const AUTO_SKILL_EXPERIENCE_FLOOR = 5;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
@@ -838,9 +850,28 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
     }
 
+    // Two trigger paths (see docs/design/2026-08-13-auto-skill-experience-trigger.md):
+    // a fast path for windows showing trial-and-error signals, and a count
+    // backstop that only fires when the window contained substantive
+    // (non-read-only) work, so a pile of bare file reads never triggers.
     const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
-    if (params.toolCallCount < threshold) {
-      return { status: 'skipped', skippedReason: 'below_threshold' };
+    const fastPath =
+      hasExperienceSignal(params.experienceSignals) &&
+      params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR;
+    const backstop =
+      params.experienceSignals.hasSubstantiveWork &&
+      params.toolCallCount >= threshold;
+    if (!fastPath && !backstop) {
+      return {
+        status: 'skipped',
+        skippedReason:
+          params.toolCallCount < AUTO_SKILL_EXPERIENCE_FLOOR ||
+          params.experienceSignals.hasSubstantiveWork
+            ? // Substantive work was present; only the count fell short of
+              // the backstop threshold.
+              'below_threshold'
+            : 'no_experience_signal',
+      };
     }
 
     if (!params.config) {

@@ -17,12 +17,32 @@ import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { MemoryManager, AUTO_SKILL_THRESHOLD } from './manager.js';
+import {
+  MemoryManager,
+  AUTO_SKILL_THRESHOLD,
+  AUTO_SKILL_EXPERIENCE_FLOOR,
+} from './manager.js';
+import type { ExperienceSignals } from './experience-signals.js';
 import { getProjectSkillsRoot } from '../skills/skill-paths.js';
 
 vi.mock('./skillReviewAgentPlanner.js', () => ({
   runSkillReviewByAgent: vi.fn().mockResolvedValue({ touchedSkillFiles: [] }),
 }));
+
+/** A window with substantive work but no trial-and-error signal: only the
+ * count backstop can trigger. */
+const SUBSTANTIVE_WINDOW: ExperienceSignals = {
+  retryArc: false,
+  userSteer: false,
+  hasSubstantiveWork: true,
+};
+
+/** A window with a completed retry arc: the fast path can trigger. */
+const RETRY_ARC_WINDOW: ExperienceSignals = {
+  retryArc: true,
+  userSteer: false,
+  hasSubstantiveWork: true,
+};
 
 describe('Skill Nudge E2E Integration Tests', () => {
   let tempDir: string;
@@ -58,13 +78,14 @@ describe('Skill Nudge E2E Integration Tests', () => {
   // ─── Test 1: Low Tool Call Density Not Trigger ───────────────────────────
 
   describe('Test 1: Low tool call density should not trigger skill review', () => {
-    it('should skip when toolCallCount < threshold', () => {
+    it('should skip as below_threshold when the window has almost no activity', () => {
       const result = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'test-session-1',
         history: sampleHistory,
-        toolCallCount: 5,
-        skillsModified: false, // Below default threshold of 20
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -75,20 +96,43 @@ describe('Skill Nudge E2E Integration Tests', () => {
       expect(result.taskId).toBeUndefined();
     });
 
-    it('should skip when exactly at threshold minus 1', () => {
+    it('should skip as below_threshold below the backstop threshold with only substantive work', () => {
       const result = mgr.scheduleSkillReview({
         projectRoot,
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
       });
 
       expect(result.status).toBe('skipped');
+      // Substantive work was present; only the count fell short.
       expect(result.skippedReason).toBe('below_threshold');
+    });
+
+    it('should skip as no_experience_signal below the backstop threshold without any signal', () => {
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'test-session-1',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_THRESHOLD - 1,
+        skillsModified: false,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        },
+        threshold: AUTO_SKILL_THRESHOLD,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(result.skippedReason).toBe('no_experience_signal');
     });
   });
 
@@ -102,6 +146,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -119,6 +164,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD + 10,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -136,13 +182,37 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: 30,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: customThreshold,
         enabled: true,
         config: mockConfig,
       });
 
       expect(result.status).toBe('skipped');
+      // Substantive work was present; only the count fell short of the
+      // custom backstop threshold.
       expect(result.skippedReason).toBe('below_threshold');
+    });
+
+    it('should not trigger on a read-only window even above threshold', () => {
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'test-session-1',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_THRESHOLD + 10,
+        skillsModified: false,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        },
+        threshold: AUTO_SKILL_THRESHOLD,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(result.skippedReason).toBe('no_experience_signal');
     });
   });
 
@@ -157,6 +227,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount: 30, // Well above threshold
         threshold: AUTO_SKILL_THRESHOLD,
         skillsModified: true,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -172,6 +243,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: 100,
         skillsModified: true,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -191,6 +263,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: false,
         config: mockConfig,
       });
@@ -206,6 +279,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         config: undefined,
       });
 
@@ -220,6 +294,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -239,6 +314,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -263,6 +339,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -275,6 +352,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -296,6 +374,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -324,6 +403,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         toolCallCount,
         threshold,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -349,6 +429,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -373,6 +454,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -388,6 +470,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -403,6 +486,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD + 1,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
         config: mockConfig,
@@ -422,6 +506,7 @@ describe('Skill Nudge E2E Integration Tests', () => {
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
         enabled: true,
         config: mockConfig,
       });
@@ -434,6 +519,88 @@ describe('Skill Nudge E2E Integration Tests', () => {
       // Use path.normalize-friendly comparison for cross-platform (Windows uses backslash)
       const normalizedPath = skillsRootPath.split(path.sep).join('/');
       expect(normalizedPath.includes('.qwen/skills')).toBe(true);
+    });
+  });
+
+  // ─── Test 9: Experience-signal fast path ───────────────────────────────────
+  // Per docs/design/2026-08-13-auto-skill-experience-trigger.md: a window with
+  // trial-and-error signals triggers at the low experience floor instead of
+  // waiting for the full count threshold.
+
+  describe('Test 9: experience-signal fast path', () => {
+    it('should schedule at the experience floor with a retry arc', () => {
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'test-session-1',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR,
+        skillsModified: false,
+        experienceSignals: RETRY_ARC_WINDOW,
+        threshold: AUTO_SKILL_THRESHOLD,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result.status).toBe('scheduled');
+    });
+
+    it('should schedule below the count threshold with a userSteer signal', () => {
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'test-session-1',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR,
+        skillsModified: false,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: true,
+          hasSubstantiveWork: false,
+        },
+        threshold: AUTO_SKILL_THRESHOLD,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result.status).toBe('scheduled');
+    });
+
+    it('should skip as below_threshold when a signal exists but the window is tiny', () => {
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'test-session-1',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        skillsModified: false,
+        experienceSignals: RETRY_ARC_WINDOW,
+        threshold: AUTO_SKILL_THRESHOLD,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(result.skippedReason).toBe('below_threshold');
+    });
+
+    it('should trigger via the fast path even without substantive work', () => {
+      // A read-only retry arc (e.g. a failed read followed by a successful
+      // read) is still an experience worth reviewing.
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'test-session-1',
+        history: sampleHistory,
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR,
+        skillsModified: false,
+        experienceSignals: {
+          retryArc: true,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        },
+        threshold: AUTO_SKILL_THRESHOLD,
+        enabled: true,
+        config: mockConfig,
+      });
+
+      expect(result.status).toBe('scheduled');
     });
   });
 });

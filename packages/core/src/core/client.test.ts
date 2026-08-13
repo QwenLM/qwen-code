@@ -8789,6 +8789,263 @@ hello
           expect.objectContaining({ confirmBeforePersist: true }),
         );
       });
+
+      it('should accumulate experience signals from tool results', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            pushCount += 1;
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'no_experience_signal',
+        });
+
+        client.recordCompletedToolCall('run_shell_command');
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'run_shell_command',
+                  response: { error: 'test failed' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-signal-failure',
+            { type: SendMessageType.ToolResult },
+          ),
+        );
+        client.recordCompletedToolCall('run_shell_command');
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: 'c2',
+                  name: 'run_shell_command',
+                  response: {
+                    output: 'Command: npm test\nExit Code: 0\nSignal: (none)',
+                  },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-signal-success',
+            { type: SendMessageType.ToolResult },
+          ),
+        );
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({
+            experienceSignals: {
+              retryArc: true,
+              userSteer: false,
+              hasSubstantiveWork: true,
+            },
+          }),
+        );
+      });
+
+      it('should reset the review window when a review is scheduled', async () => {
+        const promise = Promise.resolve({ metadata: {} });
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise,
+        });
+        client['toolCallCount'] = 7;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['read_file']),
+        };
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger review' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-window-reset',
+          ),
+        );
+
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
+        });
+
+        // A subsequent check starts with an empty signal accumulator.
+        mockMemoryManager.scheduleSkillReview.mockClear();
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'below_threshold',
+        });
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'next query' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-window-reset-2',
+          ),
+        );
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({
+            experienceSignals: {
+              retryArc: false,
+              userSteer: false,
+              hasSubstantiveWork: false,
+            },
+          }),
+        );
+      });
+
+      it('should count Steer turns into the userSteer signal', async () => {
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'no_experience_signal',
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'no, do it differently' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-steer',
+            { type: SendMessageType.Steer },
+          ),
+        );
+        expect(client['userSteeredSinceReview']).toBe(true);
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'continue' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-after-steer',
+          ),
+        );
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            experienceSignals: expect.objectContaining({ userSteer: true }),
+          }),
+        );
+      });
+
+      it('should count a Steer turn that returns a tool call', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementation(async function* (this: {
+          pendingToolCalls: unknown[];
+        }) {
+          pushCount += 1;
+          const call = {
+            callId: 'steer-tool-call',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+          };
+          this.pendingToolCalls.push(call);
+          yield { type: GeminiEventType.ToolCallRequest, value: call };
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'inspect this file instead' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-steer-tool-call',
+            { type: SendMessageType.Steer },
+          ),
+        );
+
+        expect(client['userSteeredSinceReview']).toBe(true);
+      });
+
+      it('should not count inputs rejected before history push', async () => {
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield {
+              type: GeminiEventType.Error,
+              value: new Error('failed before history push'),
+            };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { error: 'tool failed' },
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-id-autoskill-tool-result-rejected',
+            { type: SendMessageType.ToolResult },
+          ),
+        );
+
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'do this instead' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-steer-rejected',
+            { type: SendMessageType.Steer },
+          ),
+        );
+
+        expect(client['userSteeredSinceReview']).toBe(false);
+      });
+
+      it('should preserve substantive-work signals when history is compressed', async () => {
+        client.recordCompletedToolCall('run_shell_command');
+        client['chat'] = {
+          compressFast: vi.fn().mockReturnValue({
+            info: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          }),
+          getHistory: vi.fn().mockReturnValue([
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ok' }] },
+          ]),
+        } as unknown as GeminiChat;
+
+        await client.tryCompressChatFast();
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'no_experience_signal',
+        });
+        (
+          client as unknown as {
+            runManagedAutoMemoryBackgroundTasks: (
+              messageType: SendMessageType,
+            ) => void;
+          }
+        ).runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            experienceSignals: expect.objectContaining({
+              hasSubstantiveWork: true,
+            }),
+          }),
+        );
+      });
     });
 
     describe('recordCompletedToolCall', () => {
@@ -12575,7 +12832,14 @@ Other open files:
         await expect(
           fromAsync(
             client.sendMessageStream(
-              [{ text: 'tool result plus steer' }],
+              [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { error: 'tool failed' },
+                  },
+                },
+              ],
               new AbortController().signal,
               'prompt-attached-steer-restore',
               {
@@ -12592,6 +12856,9 @@ Other open files:
 
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(),
+        );
       });
 
       it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {
