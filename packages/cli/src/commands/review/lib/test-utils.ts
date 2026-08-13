@@ -5,7 +5,7 @@
  */
 
 import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PARSE_ARGS_REPORT } from './paths.js';
 import { DIGEST_FILE } from './stale-bundle.js';
@@ -17,6 +17,16 @@ export function* allFiles(dir: string): Generator<string> {
     if (entry.isDirectory()) yield* allFiles(full);
     else if (entry.isFile()) yield full;
   }
+}
+
+/** Normalize a host-native filesystem path for repository path matching. */
+export function toRepositoryPath(
+  filePath: string,
+  pathSeparator = sep,
+): string {
+  return pathSeparator === '/'
+    ? filePath
+    : filePath.split(pathSeparator).join('/');
 }
 
 /** Seed the report `parse-args` tees, so the effort fallback has something to read. */
