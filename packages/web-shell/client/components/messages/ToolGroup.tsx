@@ -1306,8 +1306,13 @@ export const ToolLine = memo(function ToolLine({
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
+  // A failed tool with no result text still gets the titled card so its
+  // title-row error icon remains visible when expanded.
   const showExpandedSummaryPanel =
-    !isTodo && expanded && !detailView && (showDescriptionInDetail || result);
+    !isTodo &&
+    expanded &&
+    !detailView &&
+    (showDescriptionInDetail || result || tool.status === 'failed');
 
   return (
     <div className={styles.line}>
@@ -1457,7 +1462,9 @@ export const ToolLine = memo(function ToolLine({
           }
         >
           {isRead ? (
-            <ExpandedReadContent tool={tool} />
+            <ToolExpandedCard title={displayName} status={tool.status}>
+              <ExpandedReadContent tool={tool} />
+            </ToolExpandedCard>
           ) : (
             <ToolExpandedCard
               title={displayName}

@@ -784,6 +784,7 @@ describe('tool row rendering', () => {
     const summary = container.querySelector('button');
     expect(summary?.textContent).toContain('Shell');
     expect(summary?.textContent).not.toContain('Failed');
+    expect(summary?.querySelector('[class*="iconError"]')).toBeNull();
   });
 
   it('shows the error icon in a failed tool line header', () => {
@@ -832,6 +833,46 @@ describe('tool row rendering', () => {
     expect(titleRow).not.toBeNull();
     expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
     expect(titleRow?.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon in the expanded failed todo card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'todo_write',
+        status: 'failed',
+        args: {
+          todos: [{ id: '1', content: 'Check UI', status: 'in_progress' }],
+        },
+      }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+  });
+
+  it('shows an error icon for a single failed read tool', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'read_file',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'Permission denied' } }],
+      }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+  });
+
+  it('shows an error icon for a single failed tool without result text', () => {
+    const container = renderToolGroup([
+      makeTool({ toolName: 'glob', status: 'failed' }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
   });
 
   it('renders ANSI shell output as styled spans instead of escape text', () => {

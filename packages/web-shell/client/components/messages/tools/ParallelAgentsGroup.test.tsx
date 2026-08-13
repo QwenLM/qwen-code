@@ -1293,6 +1293,34 @@ describe('ParallelAgentsGroup activity rendering', () => {
     expect(container.textContent).toContain('2/2 done');
     expect(container.textContent).toContain('1 failed');
     expect(container.textContent).not.toContain('Failed');
+    expect(
+      groupSummary(container).querySelector('[class*="iconError"]'),
+    ).toBeNull();
+    // The failed count must precede the done counter: summaryText truncates
+    // from the tail, so this order keeps failure evidence visible when the
+    // row is narrow.
+    const summaryText = groupSummary(container).textContent ?? '';
+    expect(summaryText.indexOf('1 failed')).toBeGreaterThanOrEqual(0);
+    expect(summaryText.indexOf('1 failed')).toBeLessThan(
+      summaryText.indexOf('2/2 done'),
+    );
+  });
+
+  it('counts a cancelled agent in the failed count', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'done', status: 'completed' }),
+      agent({
+        callId: 'cancelled',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'cancelled',
+          reason: 'Cancelled by user',
+        },
+      }),
+    ]);
+
+    expect(container.textContent).toContain('1 failed');
   });
 
   it('shows the failed count alongside live progress', () => {

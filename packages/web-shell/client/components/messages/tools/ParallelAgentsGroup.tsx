@@ -399,14 +399,16 @@ export function ParallelAgentsGroup({
         >
           {t('parallelAgents.title')}
           {runningDuration && <> {runningDuration}</>}
-          <span className={styles.summaryDot}>·</span>
-          {t('parallelAgents.done', { done: doneCount, total })}
+          {/* Ahead of the done counter so it survives the summaryText
+              tail truncation in narrow layouts. */}
           {failedCount > 0 && (
             <>
               <span className={styles.summaryDot}>·</span>
               {t('parallelAgents.failed', { count: failedCount })}
             </>
           )}
+          <span className={styles.summaryDot}>·</span>
+          {t('parallelAgents.done', { done: doneCount, total })}
         </span>
         <span
           className={showGroup ? styles.chevronDown : styles.chevronRight}

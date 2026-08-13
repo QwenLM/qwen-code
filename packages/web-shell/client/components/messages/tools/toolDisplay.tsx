@@ -1,3 +1,4 @@
+import { CircleXIcon } from 'lucide-react';
 import styles from './ToolChrome.module.css';
 import { useI18n } from '../../../i18n';
 export {
@@ -23,27 +24,7 @@ export function StatusIcon({ status }: { status: string }) {
           aria-label={t('tool.status.failed')}
           title={t('tool.status.failed')}
         >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 14 14"
-            fill="none"
-            aria-hidden="true"
-          >
-            <circle
-              cx="7"
-              cy="7"
-              r="5.5"
-              stroke="currentColor"
-              strokeWidth="1.25"
-            />
-            <path
-              d="M4.8 4.8l4.4 4.4M9.2 4.8l-4.4 4.4"
-              stroke="currentColor"
-              strokeWidth="1.25"
-              strokeLinecap="round"
-            />
-          </svg>
+          <CircleXIcon size={14} strokeWidth={1.25} aria-hidden="true" />
         </span>
       );
     case 'in_progress':
