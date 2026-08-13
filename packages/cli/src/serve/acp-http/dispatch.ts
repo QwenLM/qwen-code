@@ -113,6 +113,7 @@ import {
 import { MAX_REMEMBER_CONTENT_BYTES } from '../../runtime/workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
   createDaemonSubagentManager,
   toSummary as agentToSummary,
@@ -1711,9 +1712,8 @@ export class AcpDispatcher {
             },
           );
           try {
-            const restored = await this.archiveCoordinator.runSharedMany(
-              [sessionId],
-              async () => {
+            const restoreInRuntime = () =>
+              this.archiveCoordinator.runSharedMany([sessionId], async () => {
                 assertGenerationOpen?.();
                 await assertSessionLoadable(
                   cwd,
@@ -1816,7 +1816,10 @@ export class AcpDispatcher {
                   throw error;
                 }
                 return session;
-              },
+              });
+            const restored = await runWithWorkspaceRuntimeStorage(
+              sessionRuntime,
+              restoreInRuntime,
             );
             const rollbackRestore = async (): Promise<void> => {
               if (restored.attached) {
