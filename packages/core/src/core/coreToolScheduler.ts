@@ -37,6 +37,7 @@ import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
+  COMBINED_PASS_TOLERANCE_FACTOR,
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
@@ -61,7 +62,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './geminiChat.js';
 import * as fsSync from 'node:fs';
@@ -537,17 +538,6 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.NOTEBOOK_EDIT,
   ToolNames.DISPLAY_IMAGE,
 ]);
-
-/**
- * Resolve a tool name through the legacy-alias migration map (e.g.
- * `search_file_content` → `grep`) to its canonical form. Exported so callers
- * that classify tools by name/kind — the headless partitioner in
- * nonInteractiveCli — resolve the same registry entry the interactive
- * scheduler and executor do, instead of missing on an alias.
- */
-export function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
-}
 
 function isFilesystemPathTool(toolName: string): boolean {
   return FS_PATH_TOOL_NAMES.has(canonicalToolName(toolName));
@@ -4294,6 +4284,7 @@ export class CoreToolScheduler {
       prompt:
         reason ||
         `A PreToolUse hook requested confirmation before running ${toolName}.`,
+      renderPromptAsPlainText: true,
       hideAlwaysAllow: true,
       onConfirm: (outcome, payload) =>
         this.handleConfirmationResponse(
@@ -5171,7 +5162,7 @@ export class CoreToolScheduler {
             perToolMax !== undefined
               ? Number.POSITIVE_INFINITY
               : this.config.getTruncateToolOutputLines() * 2;
-          if (content.length > baseThreshold * 2) {
+          if (content.length > baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR) {
             try {
               const contentBeforeRecombination = content;
               const recombined = await truncateToolOutput(
@@ -5179,7 +5170,7 @@ export class CoreToolScheduler {
                 toolName,
                 content,
                 {
-                  threshold: baseThreshold * 2,
+                  threshold: baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR,
                   lines: combinedLines,
                   keep: perToolKeep,
                 },

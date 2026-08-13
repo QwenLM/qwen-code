@@ -44,12 +44,14 @@ import {
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createGoalRuntime,
+  GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
 import {
   runNonInteractive,
   skipHeadlessLoopSentinel,
+  TurnInterruptedError,
 } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import * as fs from 'node:fs/promises';
@@ -616,6 +618,54 @@ describe('runNonInteractive', () => {
       });
     },
   );
+
+  // `goalCommand` degrades a persistence-unavailable `status`/`clear` into a
+  // successful empty snapshot. The headless consumer then re-requests the
+  // very runtime that just failed, so without swallowing that rejection the
+  // degradation is defeated in this mode only (interactive and ACP were fine).
+  it.each([
+    { input: '/goal', expectedText: 'No Goal is set.' },
+    { input: '/goal clear', expectedText: 'Goal cleared.' },
+  ])(
+    'answers $input from the degraded snapshot when goals cannot be persisted',
+    async ({ input, expectedText }) => {
+      setupMetricsMock();
+      mockGetCommands.mockReturnValue([goalCommand]);
+      mockConfig.getChatRecordingService.mockReturnValue(undefined);
+      mockConfig.getGoalRuntimeReady = vi.fn(async () => {
+        throw new GoalPersistenceUnavailableError('chat recording is disabled');
+      });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        input,
+        `goal-degraded-${input}`,
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(`${expectedText}\n`);
+    },
+  );
+
+  it('still fails a Goal operation that genuinely needs persistence', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    mockConfig.getGoalRuntimeReady = vi.fn(async () => {
+      throw new GoalPersistenceUnavailableError('chat recording is disabled');
+    });
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal ship it',
+      'goal-degraded-set',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+  });
 
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
@@ -4518,6 +4568,54 @@ describe('runNonInteractive', () => {
       type: 'result',
       is_error: false,
       num_turns: 1,
+    });
+  });
+
+  it('returns from a recoverably interrupted stream-json turn without exiting', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    const turnAbortController = new AbortController();
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      (async function* () {
+        turnAbortController.abort(new TurnInterruptedError());
+        yield {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        } as ServerGeminiStreamEvent;
+      })(),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'interrupt me',
+      'prompt-recoverable-interrupt',
+      {
+        abortController: turnAbortController,
+        recoverableCancellation: true,
+      },
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(exitCode).toBe(130);
+    expect(process.exit).not.toHaveBeenCalled();
+    expect(envelopes.at(-1)).toMatchObject({
+      type: 'result',
+      is_error: true,
+      error: { message: 'Operation cancelled.' },
     });
   });
 

@@ -19,6 +19,7 @@ import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   hasBlockingBackgroundWork,
+  buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -32,6 +33,7 @@ export interface UseResumeCommandOptions {
     'addItem' | 'clearItems' | 'loadHistory'
   >;
   startNewSession: (sessionId: string) => void;
+  clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
@@ -80,6 +82,7 @@ export function useResumeCommand(
     settings,
     historyManager,
     startNewSession,
+    clearPendingState,
     setSessionName,
     remount,
   } = options;
@@ -94,7 +97,10 @@ export function useResumeCommand(
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
-          text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          text: buildBackgroundWorkBlockedMessage(
+            config,
+            BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+          ),
         };
         addItem(blockedMessage, Date.now());
         closeResumeDialog();
@@ -177,6 +183,7 @@ export function useResumeCommand(
         //    into the old JSONL (split-brain).
         startNewSession(sessionId);
         setSessionName?.(customTitle ?? null);
+        clearPendingState?.();
         clearItems();
         loadHistory(uiHistoryItems);
         if (recoveredBackgroundAgentsNotice) {
@@ -242,6 +249,7 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
+      clearPendingState,
       setSessionName,
       remount,
       settings.merged.ui?.history?.collapseOnResume,

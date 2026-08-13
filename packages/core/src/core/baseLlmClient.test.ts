@@ -684,6 +684,54 @@ describe('BaseLlmClient', () => {
       expect(result.hadToolCall).toBe(true);
     });
 
+    it('forwards the prompt-cache-sharing marker to the provider request', async () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      });
+      mockGenerateContentStream.mockImplementation(async () =>
+        mockTextStream(['summary']),
+      );
+
+      await client.generateText({
+        contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+        model: 'test-model',
+        abortSignal: abortController.signal,
+        stream: true,
+        promptCacheSharing: true,
+      });
+
+      expect(mockGenerateContentStream).toHaveBeenCalledWith(
+        expect.objectContaining({ promptCacheSharing: true }),
+        '',
+      );
+    });
+
+    it.each([false, undefined])(
+      'does not forward the prompt-cache-sharing marker when disabled (%s)',
+      async (promptCacheSharing) => {
+        mockConfig.getContentGeneratorConfig.mockReturnValue({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+        });
+        mockGenerateContentStream.mockImplementation(async () =>
+          mockTextStream(['summary']),
+        );
+
+        await client.generateText({
+          contents: [{ role: 'user', parts: [{ text: 'summarize' }] }],
+          model: 'test-model',
+          abortSignal: abortController.signal,
+          stream: true,
+          promptCacheSharing,
+        });
+
+        expect(mockGenerateContentStream.mock.calls[0]?.[0]).not.toHaveProperty(
+          'promptCacheSharing',
+        );
+      },
+    );
+
     it('drops thought parts and tolerates a stream that omits usage', async () => {
       async function* streamWithThought(): AsyncGenerator<GenerateContentResponse> {
         yield createMockTextResponse('answer');

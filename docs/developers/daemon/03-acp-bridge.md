@@ -15,7 +15,7 @@ Each active `WorkspaceRuntime` owns one `HttpAcpBridge` instance. Production att
 - Per-session FIFO for `setSessionModel` calls so concurrent attaches with different models do not race the agent.
 - Per-session `EventBus` that drives `GET /session/:id/events` (see [`10-event-bus.md`](./10-event-bus.md)).
 - Permission flow: `BridgeClient.requestPermission` → `MultiClientPermissionMediator.request` → fan-out → vote collection → ACP response (see [`04-permission-mediation.md`](./04-permission-mediation.md)).
-- File I/O: `BridgeFileSystem` adapter for ACP `readTextFile` / `writeTextFile` calls (see [`07-workspace-filesystem.md`](./07-workspace-filesystem.md)).
+- File I/O: `BridgeFileSystem` adapter for ACP reads and writes; same-host daemon runtimes advertise `readTextFile: false` so normal text reads stay in the child while final text writes remain delegated (see [`07-workspace-filesystem.md`](./07-workspace-filesystem.md)).
 - extMethod RPCs for workspace-level status (`/workspace/mcp`, `/workspace/skills`, `/workspace/providers`), MCP restart, and the optional private managed Tool Guard callback.
 - Lifecycle: graceful `shutdown()` with `KILL_HARD_DEADLINE_MS` (10s) per channel; synchronous `killAllSync()` for second-signal force-exit.
 
@@ -200,6 +200,7 @@ sequenceDiagram
 | `sessionScope`                                | `'single'`                                         | `'single'` shares one session across all clients; `'thread'` creates a separate session for each conversation thread.                                        |
 | `channelFactory`                              | `defaultSpawnChannelFactory`                       | Pluggable ACP child factory.                                                                                                                                 |
 | `initializeTimeoutMs`                         | `DEFAULT_INIT_TIMEOUT_MS = 10_000`                 | ACP `initialize` handshake timeout.                                                                                                                          |
+| `sessionRestoreTimeoutMs`                     | `60_000`                                           | ACP `loadSession` / `unstable_resumeSession` timeout; defaults to 60s, and an explicitly configured initialize timeout can raise it but never lower it.      |
 | `maxSessions`                                 | `DEFAULT_MAX_SESSIONS = 32`                        | Cap on `byId.size`. `0` / `Infinity` = unlimited; NaN/negative throws.                                                                                       |
 | `eventRingSize`                               | `DEFAULT_RING_SIZE` (from `eventBus.ts`)           | Per-session event ring; soft-capped at `MAX_EVENT_RING_SIZE`.                                                                                                |
 | `permissionResponseTimeoutMs`                 | `DEFAULT_PERMISSION_TIMEOUT_MS = 5 min`            | Per-request wallclock for the mediator.                                                                                                                      |
@@ -209,11 +210,14 @@ sequenceDiagram
 | `persistApprovalMode`, `persistDisabledTools` | —                                                  | Settings-write hooks for the Wave 4 mutation routes.                                                                                                         |
 | `contextFilename`                             | from `settings.json`'s `context.fileName`          | Overrides `getCurrentGeminiMdFilename`.                                                                                                                      |
 | `statusProvider`                              | (none)                                             | Daemon-host preflight cells (`DaemonStatusProvider`).                                                                                                        |
+| `delegateReadTextFileToClient`                | `true`                                             | Set `false` only for same-host runtimes so every child `FileSystemService.readTextFile` consumer uses the regular CLI filesystem service.                    |
 | `fileSystem`                                  | (none)                                             | `BridgeFileSystem` adapter for ACP `readTextFile` / `writeTextFile`.                                                                                         |
 | `permissionPolicy`                            | from `settings.json`'s `policy.permissionStrategy` | One of `first-responder` / `designated` / `consensus` / `local-only`.                                                                                        |
 | `permissionConsensusQuorum`                   | from `settings.json`                               | N for consensus policy.                                                                                                                                      |
 | `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`             | Wire to `PermissionAuditRing` for the audit trail.                                                                                                           |
 | `channelIdleTimeoutMs`                        | `0`                                                | Keep the ACP child alive for this many milliseconds after the last session closes.                                                                           |
+
+Timed-out restores are not cancellable in the current ACP SDK. The bridge therefore keeps a settlement fence and capacity admission until the real request settles or its transport closes. A late result is closed exactly once and never registered. Cleanup uncertainty quarantines only fresh session work on that workspace; existing session and workspace-control traffic continues until the channel drains and is recycled.
 
 ## Additional bridge methods
 
@@ -246,11 +250,14 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 `liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
 window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
 (default 4 MiB, hard ceiling 256 MiB). The in-flight `liveJournal` is
-separately capped by `BridgeOptions.maxJournalEvents` (default 10 000) and
-`BridgeOptions.maxJournalBytes` (default 8 MiB). If older retained replay was
-dropped, `compactedReplay[0]` is the id-less `history_truncated` marker; if
-journal entries were dropped, `liveJournal[0]` carries a `history_truncated`
-marker with `scope: 'live_journal'`. The full persisted transcript remains on
+separately capped by `BridgeOptions.maxJournalEvents` (default 10 000 replay
+entries) and `BridgeOptions.maxJournalBytes` (default 8 MiB of serialized
+source events). Consecutive compatible text or thought chunks share a replay
+entry, with at most 256 source events per entry; other event and attribution
+boundaries remain intact. If older retained replay was dropped,
+`compactedReplay[0]` is the id-less `history_truncated` marker; if journal
+entries were dropped, `liveJournal[0]` carries a `history_truncated` marker
+with `scope: 'live_journal'`. Its retained and truncated counts describe source events, not replay entries. The full persisted transcript remains on
 disk and is not exposed by this bridge response.
 `BridgeClientRequestContext` is the request context threaded through bridge
 calls; it carries `clientId`, `fromLoopback: boolean`, and `promptId`.

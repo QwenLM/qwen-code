@@ -634,6 +634,7 @@ export class LoadedSettings {
     key: string,
     value: unknown,
     assertCanCommit?: () => void,
+    opts: { throwOnWriteFailure?: boolean } = {},
   ): void {
     // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
     if (key === 'model.name' && typeof value === 'string') {
@@ -641,11 +642,23 @@ export class LoadedSettings {
     }
     assertCanCommit?.();
     const settingsFile = this.forScope(scope);
+    const replacePath = key === 'mcpServers' ? key.split('.') : [];
+    if (opts.throwOnWriteFailure) {
+      saveSettings(
+        settingsFile,
+        createSettingsUpdate(key, value),
+        replacePath,
+        {
+          throwOnWriteFailure: true,
+        },
+      );
+    }
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    const replacePath = key === 'mcpServers' ? key.split('.') : [];
-    saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+    if (!opts.throwOnWriteFailure) {
+      saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+    }
   }
 
   setValues(

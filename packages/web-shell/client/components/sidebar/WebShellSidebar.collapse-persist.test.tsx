@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
@@ -77,17 +78,79 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
       archived: makeSessions(),
     };
   });
+const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
+  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
   useSessions: (options?: { archiveState?: string; group?: string }) => {
     if (options?.archiveState === 'archived') return archived;
     if (options?.group === 'pinned') return pinned;
     return active;
   },
+}));
+
+vi.mock('../../session-catalog/session-catalog-hooks', () => ({
+  useWebShellSessions: (options?: {
+    enabled?: boolean;
+    archiveState?: string;
+    group?: string;
+  }) => {
+    const state =
+      options?.archiveState === 'archived'
+        ? archived
+        : options?.group === 'pinned'
+          ? pinned
+          : active;
+    const catalogQuery = {
+      routeKind: 'legacy',
+      workspaceCwd: connection.workspaceCwd,
+      options,
+    };
+    if (options?.enabled === false) {
+      return { ...state, sessions: [], data: undefined, catalogQuery };
+    }
+    return {
+      ...state,
+      data: state.data ?? state.sessions,
+      catalogQuery,
+    };
+  },
+  useSessionCatalogController: () => ({
+    refreshQueries: refreshSessionCatalogQueries,
+    invalidateWorkspace: vi.fn(),
+    renamed: vi.fn(),
+  }),
+  useSessionCatalogPolling: () => undefined,
+  useSessionCatalogQuery: (
+    client: typeof workspace.client,
+    query: { workspaceCwd: string; options?: Record<string, unknown> },
+    options: { autoLoad?: boolean; enabled?: boolean },
+  ) => {
+    const [snapshot, setSnapshot] = React.useState({
+      sessions: [] as DaemonSessionSummary[],
+      loading: false,
+      error: undefined as Error | undefined,
+    });
+    const reload = React.useCallback(async () => {
+      const sessions = await client
+        .workspaceByCwd(query.workspaceCwd)
+        .listWorkspaceSessions(query.options);
+      setSnapshot({ sessions, loading: false, error: undefined });
+      return { sessions };
+    }, [client, query.options, query.workspaceCwd]);
+    React.useEffect(() => {
+      if (options.enabled === false || !options.autoLoad) return;
+      void reload().catch((error: Error) => {
+        setSnapshot((current) => ({ ...current, loading: false, error }));
+      });
+    }, [options.autoLoad, options.enabled, reload]);
+    return { ...snapshot, reload };
+  },
+  useSessionCatalogQueries: () => [],
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -224,6 +287,7 @@ beforeEach(() => {
   pinned.data = pinned.sessions;
   archived.sessions = [];
   archived.data = archived.sessions;
+  refreshSessionCatalogQueries.mockReset();
 });
 
 afterEach(() => {
@@ -271,6 +335,35 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       '[title="Archived task"]',
     );
     expect(sessionName?.textContent).toContain('Archived task');
+  });
+
+  it('refreshes archived sessions each time the section expands', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+
+    renderSidebar();
+    await flushSidebar();
+
+    const archivedHeader = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((btn) => btn.textContent?.includes('Archived'));
+    expect(archivedHeader).not.toBeNull();
+
+    act(() => click(archivedHeader!));
+    expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(1);
+    expect(refreshSessionCatalogQueries).toHaveBeenLastCalledWith([
+      expect.objectContaining({
+        routeKind: 'legacy',
+        workspaceCwd: '/tmp/project',
+        options: expect.objectContaining({ archiveState: 'archived' }),
+      }),
+    ]);
+
+    act(() => click(archivedHeader!));
+    act(() => click(archivedHeader!));
+    expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(2);
   });
 
   it('writes collapsed section ids with the qwen-code-web-shell-* key', async () => {

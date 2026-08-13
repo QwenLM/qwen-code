@@ -60,6 +60,7 @@ export interface WebShellDaemonScenario {
   channels: DaemonChannelsSnapshot;
   pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals: Record<string, string[]>;
+  pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
@@ -114,6 +115,7 @@ type ScenarioOverrides = Partial<
     | 'channels'
     | 'pairingRequests'
     | 'pairingApprovals'
+    | 'pairingGroupApprovals'
     | 'sessions'
     | 'sessionGroups'
     | 'state'
@@ -131,6 +133,7 @@ type ScenarioOverrides = Partial<
   channels?: DaemonChannelsSnapshot;
   pairingRequests?: Record<string, DaemonChannelPairingRequest[]>;
   pairingApprovals?: Record<string, string[]>;
+  pairingGroupApprovals?: Record<string, string[]>;
   sessions?: DaemonSessionSummary[];
   sessionGroups?: DaemonSessionGroup[];
   state?: Partial<DaemonSessionState>;
@@ -346,6 +349,7 @@ export function createWebShellDaemonScenario(
     channels: overrides.channels ?? { revision: '1', instances: {} },
     pairingRequests: overrides.pairingRequests ?? {},
     pairingApprovals: overrides.pairingApprovals ?? {},
+    pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
@@ -537,6 +541,27 @@ function readRequestBody(raw: string | null): unknown {
   }
 }
 
+// Mirror production query modes: `group=pinned` is the pinned bucket;
+// `group=all` (and missing group) returns the full active list. The UI
+// excludes pinned rows from organized sections via `excludePinned`.
+function filterScenarioSessions(
+  scenario: WebShellDaemonScenario,
+  searchParams: URLSearchParams,
+): DaemonSessionSummary[] {
+  const group = searchParams.get('group');
+  const sourceType = searchParams.get('sourceType');
+  const sourceSessions = sourceType
+    ? scenario.sessions.filter(
+        (session) =>
+          session.sourceType === sourceType ||
+          (sourceType === 'default' && session.sourceType === undefined),
+      )
+    : scenario.sessions;
+  return group === 'pinned'
+    ? sourceSessions.filter((session) => Boolean(session.isPinned))
+    : sourceSessions;
+}
+
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
@@ -561,6 +586,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/pairing-approvals\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
@@ -632,7 +658,11 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
     return true;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
@@ -843,16 +873,14 @@ async function handleDaemonRoute(
     await json(route, workspaceMcpResources(scenario, serverName));
     return;
   }
-  if (method === 'GET' && /^\/workspace\/.+\/sessions\/?$/.test(path)) {
-    // Mirror production query modes: `group=pinned` is the pinned bucket;
-    // `group=all` (and missing group) returns the full active list. The UI
-    // excludes pinned rows from organized sections via `excludePinned`.
-    const group = searchParams.get('group');
-    const sessions =
-      group === 'pinned'
-        ? scenario.sessions.filter((session) => Boolean(session.isPinned))
-        : scenario.sessions;
-    await json(route, { sessions });
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    await json(route, {
+      sessions: filterScenarioSessions(scenario, searchParams),
+    });
     return;
   }
   if (method === 'GET' && /^\/workspace\/.+\/session-groups\/?$/.test(path)) {
@@ -896,15 +924,27 @@ async function handleDaemonRoute(
         ...scenario.pairingRequests,
         [name]: remaining,
       };
-      scenario.pairingApprovals = {
-        ...scenario.pairingApprovals,
-        [name]: Array.from(
-          new Set([
-            ...(scenario.pairingApprovals[name] ?? []),
-            approved.senderId,
-          ]),
-        ),
-      };
+      if (approved.subject?.type === 'group') {
+        scenario.pairingGroupApprovals = {
+          ...scenario.pairingGroupApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingGroupApprovals[name] ?? []),
+              approved.subject.id,
+            ]),
+          ),
+        };
+      } else {
+        scenario.pairingApprovals = {
+          ...scenario.pairingApprovals,
+          [name]: Array.from(
+            new Set([
+              ...(scenario.pairingApprovals[name] ?? []),
+              approved.senderId,
+            ]),
+          ),
+        };
+      }
       await json(route, { approved, requests: remaining });
       return;
     }
@@ -915,13 +955,18 @@ async function handleDaemonRoute(
   if (pairingApprovalsMatch) {
     const name = decodeURIComponent(pairingApprovalsMatch[1]);
     const senderIds = scenario.pairingApprovals[name] ?? [];
+    const groupIds = scenario.pairingGroupApprovals[name] ?? [];
     if (method === 'GET') {
-      await json(route, { senderIds });
+      await json(route, { senderIds, groupIds });
       return;
     }
     if (method === 'DELETE') {
       const senderId = String(getRecordValue(body, 'senderId') ?? '');
-      if (!senderIds.includes(senderId)) {
+      const groupId = String(getRecordValue(body, 'groupId') ?? '');
+      const known = senderId
+        ? senderIds.includes(senderId)
+        : groupIds.includes(groupId);
+      if (!known) {
         await json(
           route,
           {
@@ -932,12 +977,26 @@ async function handleDaemonRoute(
         );
         return;
       }
-      const remaining = senderIds.filter((item) => item !== senderId);
+      const remainingSenders = senderId
+        ? senderIds.filter((item) => item !== senderId)
+        : senderIds;
+      const remainingGroups =
+        groupId && !senderId
+          ? groupIds.filter((item) => item !== groupId)
+          : groupIds;
       scenario.pairingApprovals = {
         ...scenario.pairingApprovals,
-        [name]: remaining,
+        [name]: remainingSenders,
       };
-      await json(route, { revoked: senderId, senderIds: remaining });
+      scenario.pairingGroupApprovals = {
+        ...scenario.pairingGroupApprovals,
+        [name]: remainingGroups,
+      };
+      await json(route, {
+        revoked: senderId || groupId,
+        senderIds: remainingSenders,
+        groupIds: remainingGroups,
+      });
       return;
     }
   }
