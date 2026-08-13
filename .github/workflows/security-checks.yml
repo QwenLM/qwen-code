@@ -53,8 +53,8 @@ jobs:
             package_dir="${lockfile%/package-lock.json}"
             (
               cd "$package_dir"
-              npm ci --ignore-scripts --no-audit --progress=false
-              npm audit --omit=dev --audit-level=high
+              npm ci --ignore-scripts --no-audit --progress=false &&
+                npm audit --omit=dev --audit-level=high
             ) || status=$?
           done
           exit "$status"
