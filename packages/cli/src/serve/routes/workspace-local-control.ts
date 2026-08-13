@@ -13,6 +13,7 @@ import {
 } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import type { LocalControlService } from '../local-control/service.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export interface RegisterWorkspaceLocalControlRoutesDeps {
   service: LocalControlService;
@@ -92,7 +93,23 @@ export function registerWorkspaceLocalControlRoutes(
   app.post(
     '/workspace/local-control/disable',
     deps.mutate({ strict: true }),
-    async (_req, res) => {
+    async (req, res) => {
+      if (listenerIdentityOf(req).kind === 'local-control') {
+        let started = false;
+        const disable = () => {
+          if (started) return;
+          started = true;
+          void deps.service.disable().catch((error) => {
+            writeStderrLine(
+              `qwen serve: Local Control disable failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        };
+        res.once('finish', disable);
+        res.once('close', disable);
+        res.status(200).json({ active: false });
+        return;
+      }
       res.status(200).json(await deps.service.disable());
     },
   );
