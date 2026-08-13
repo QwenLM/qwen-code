@@ -101,8 +101,6 @@ describe('resolveDialogRequest', () => {
       { dialog: 'memory' },
       { dialog: 'auth' },
       { dialog: 'trust' },
-      { dialog: 'approval-mode' },
-      { dialog: 'effort' },
       { dialog: 'delete' },
       { dialog: 'resume' },
       { dialog: 'branch' },

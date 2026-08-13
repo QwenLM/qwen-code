@@ -48,6 +48,10 @@ import {
   OpenTuiSkillsDialog,
 } from './dialogs-stats-skills.js';
 import {
+  OpenTuiApprovalModeDialog,
+  OpenTuiEffortDialog,
+} from './dialogs-modes.js';
+import {
   addPermissionRule,
   applyModelSelection,
   applyThemeSelection,
@@ -357,6 +361,21 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       )}
       {dialog.dialog === 'skills_manage' && (
         <OpenTuiSkillsDialog config={config} onClose={onClose} />
+      )}
+      {dialog.dialog === 'approval-mode' && (
+        <OpenTuiApprovalModeDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+          onApprovalModeChanged={props.onApprovalModeChanged}
+        />
+      )}
+      {dialog.dialog === 'effort' && (
+        <OpenTuiEffortDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
       )}
     </box>
   );
