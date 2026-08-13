@@ -230,6 +230,7 @@ import {
   endSubagentSpan,
   runInSubagentSpanContext,
   getActiveInteractionSpan,
+  recordInteractionActivity,
   clearSessionTracingForTesting,
   runTTLSweepForTesting,
   truncateSpanError,
@@ -1909,6 +1910,39 @@ describe('session-tracing', () => {
       endLLMRequestSpan(llmSpan, { success: true });
     });
 
+    it('retains identity for one TTL after a long interaction ends', () => {
+      const startedAt = Date.now();
+      const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      startInteractionSpan(createMockConfig({ userId: 'long-lived-user' }), {
+        promptId: 'long-lived-prompt',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      const owner = getActiveInteractionSpan('long-lived-prompt')!;
+
+      now.mockReturnValue(startedAt + 29 * 60 * 1000);
+      expect(recordInteractionActivity('long-lived-prompt', owner)).toBe(true);
+      runTTLSweepForTesting(startedAt + 31 * 60 * 1000);
+      now.mockReturnValue(startedAt + 35 * 60 * 1000);
+      endInteractionSpan('ok', { promptId: 'long-lived-prompt' });
+
+      runTTLSweepForTesting(startedAt + 64 * 60 * 1000);
+      now.mockReturnValue(startedAt + 64 * 60 * 1000);
+      const retainedSpan = startLLMRequestSpan('m', 'long-lived-prompt');
+      const retainedRecord = mockSpans.at(-1)!;
+      expect(retainedRecord.attributes['gen_ai.user.id']).toBe(
+        'long-lived-user',
+      );
+      endLLMRequestSpan(retainedSpan, { success: true });
+
+      runTTLSweepForTesting(startedAt + 66 * 60 * 1000);
+      now.mockReturnValue(startedAt + 66 * 60 * 1000);
+      const expiredSpan = startLLMRequestSpan('m', 'long-lived-prompt');
+      const expiredRecord = mockSpans.at(-1)!;
+      expect(expiredRecord.attributes).not.toHaveProperty('gen_ai.user.id');
+      endLLMRequestSpan(expiredSpan, { success: true });
+    });
+
     it('keeps the creation-time user ID across failures and repeated endings', () => {
       startInteractionSpan(createMockConfig({ userId: 'stable-user' }), {
         promptId: 'failure-prompt',
@@ -2572,6 +2606,117 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.ended).toBe(true);
       expect(mockSpans[0]!.attributes['qwen-code.span.ttl_expired']).toBe(true);
       expect(getActiveInteractionSpan('stale-interaction')).toBeUndefined();
+    });
+
+    it('expires interactions after inactivity instead of absolute lifetime', () => {
+      const startedAt = Date.now();
+      const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      startInteractionSpan(createMockConfig(), {
+        promptId: 'active-interaction',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      const owner = getActiveInteractionSpan('active-interaction')!;
+
+      now.mockReturnValue(startedAt + 11 * 60 * 1000);
+      const llmSpan = startLLMRequestSpan('m', 'active-interaction');
+      endLLMRequestSpan(llmSpan, { success: true });
+      runTTLSweepForTesting(startedAt + 31 * 60 * 1000);
+      expect(getActiveInteractionSpan('active-interaction')).toBe(owner);
+
+      now.mockReturnValue(startedAt + 29 * 60 * 1000);
+      const toolSpan = startToolSpan(
+        'Read',
+        undefined,
+        undefined,
+        'active-interaction',
+      );
+      now.mockReturnValue(startedAt + 58 * 60 * 1000);
+      endToolSpan(toolSpan, { success: true });
+      runTTLSweepForTesting(startedAt + 60 * 60 * 1000);
+      expect(getActiveInteractionSpan('active-interaction')).toBe(owner);
+      expect(mockSpans[0]!.ended).toBe(false);
+
+      now.mockReturnValue(startedAt + 60 * 60 * 1000);
+      mockSpans[0]!.attributes['gen_ai.output.messages'] = 'final output';
+      endInteractionSpan('ok', { promptId: 'active-interaction' });
+      expect(getActiveInteractionSpan('active-interaction')).toBeUndefined();
+      expect(mockSpans[0]!.ended).toBe(true);
+      expect(mockSpans[0]!.attributes['interaction.duration_ms']).toBe(
+        60 * 60 * 1000,
+      );
+      expect(mockSpans[0]!.attributes['qwen-code.turn_status']).toBe('ok');
+      expect(mockSpans[0]!.attributes['gen_ai.output.messages']).toBe(
+        'final output',
+      );
+    });
+
+    it('expires an interaction after 30 minutes without activity', () => {
+      const startedAt = Date.now();
+      startInteractionSpan(createMockConfig(), {
+        promptId: 'idle-interaction',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      runTTLSweepForTesting(startedAt + 31 * 60 * 1000);
+
+      expect(getActiveInteractionSpan('idle-interaction')).toBeUndefined();
+      expect(mockSpans[0]!.ended).toBe(true);
+      expect(mockSpans[0]!.attributes['qwen-code.span.ttl_expired']).toBe(true);
+    });
+
+    it('does not let an old child refresh a replacement interaction', () => {
+      const startedAt = Date.now();
+      const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      startInteractionSpan(createMockConfig(), {
+        promptId: 'child-replacement',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      now.mockReturnValue(startedAt + 4 * 60 * 1000);
+      const oldChild = startLLMRequestSpan('m', 'child-replacement');
+
+      now.mockReturnValue(startedAt + 5 * 60 * 1000);
+      startInteractionSpan(createMockConfig(), {
+        promptId: 'child-replacement',
+        model: 'm',
+        messageType: 'retry',
+      });
+      now.mockReturnValue(startedAt + 34 * 60 * 1000);
+      endLLMRequestSpan(oldChild, { success: true });
+
+      runTTLSweepForTesting(startedAt + 36 * 60 * 1000);
+      expect(getActiveInteractionSpan('child-replacement')).toBeUndefined();
+      expect(mockSpans[2]!.ended).toBe(true);
+    });
+
+    it('does not let a replaced owner refresh the current interaction', () => {
+      const startedAt = Date.now();
+      const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      startInteractionSpan(createMockConfig(), {
+        promptId: 'replaced-interaction',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      const oldOwner = getActiveInteractionSpan('replaced-interaction')!;
+
+      now.mockReturnValue(startedAt + 5 * 60 * 1000);
+      startInteractionSpan(createMockConfig(), {
+        promptId: 'replaced-interaction',
+        model: 'm',
+        messageType: 'retry',
+      });
+      const currentOwner = getActiveInteractionSpan('replaced-interaction')!;
+      now.mockReturnValue(startedAt + 34 * 60 * 1000);
+      expect(recordInteractionActivity('replaced-interaction', oldOwner)).toBe(
+        false,
+      );
+
+      runTTLSweepForTesting(startedAt + 36 * 60 * 1000);
+      expect(getActiveInteractionSpan('replaced-interaction')).toBeUndefined();
+      expect(currentOwner).not.toBe(oldOwner);
+      expect(mockSpans[1]!.ended).toBe(true);
     });
     it('marks stale spans with ttl_expired + duration_ms before ending them', () => {
       const toolSpan = startToolSpan('staleTool');

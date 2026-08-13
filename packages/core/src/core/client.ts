@@ -94,6 +94,7 @@ import {
   startInteractionSpan,
   endInteractionSpan,
   getActiveInteractionSpan,
+  recordInteractionActivity,
   addAgentInputMessageAttributes,
   addUserPromptAttributes,
   AgentOutputMessageCapture,
@@ -2162,6 +2163,9 @@ export class GeminiClient {
     let interactionOwner = startsInteraction
       ? undefined
       : getActiveInteractionSpan(prompt_id);
+    if (interactionOwner) {
+      recordInteractionActivity(prompt_id, interactionOwner);
+    }
     const agentOutput = new AgentOutputMessageCapture(this.config);
     const endCurrentInteraction = (
       status: 'ok' | 'error' | 'cancelled',

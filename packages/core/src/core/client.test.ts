@@ -327,6 +327,7 @@ const mockInteractionTelemetry = vi.hoisted(() => ({
   startInteractionSpan: vi.fn(),
   endInteractionSpan: vi.fn(),
   getActiveInteractionSpan: vi.fn(),
+  recordInteractionActivity: vi.fn(),
   addAgentInputMessageAttributes: vi.fn(),
   addUserPromptAttributes: vi.fn(),
   outputCaptures: [] as Array<{
@@ -352,6 +353,8 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     startInteractionSpan: mockInteractionTelemetry.startInteractionSpan,
     endInteractionSpan: mockInteractionTelemetry.endInteractionSpan,
     getActiveInteractionSpan: mockInteractionTelemetry.getActiveInteractionSpan,
+    recordInteractionActivity:
+      mockInteractionTelemetry.recordInteractionActivity,
     addAgentInputMessageAttributes:
       mockInteractionTelemetry.addAgentInputMessageAttributes,
     addUserPromptAttributes: mockInteractionTelemetry.addUserPromptAttributes,
@@ -5515,6 +5518,11 @@ hello
 
     it('keeps one interaction open across multiple tool-result continuations', async () => {
       const promptId = 'prompt-tool-loop';
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockImplementation(
+        (id?: string) =>
+          id === undefined || id === promptId ? owner : undefined,
+      );
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield {
@@ -5546,7 +5554,6 @@ hello
         mockInteractionTelemetry.endInteractionSpan,
       ).not.toHaveBeenCalled();
 
-      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue({});
       mockTurnRunFn.mockReturnValueOnce(
         (async function* () {
           yield {
@@ -5570,6 +5577,10 @@ hello
           { type: SendMessageType.ToolResult },
         ),
       );
+
+      expect(
+        mockInteractionTelemetry.recordInteractionActivity,
+      ).toHaveBeenCalledWith(promptId, owner);
 
       expect(
         mockInteractionTelemetry.startInteractionSpan,

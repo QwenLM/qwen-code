@@ -156,6 +156,8 @@ export interface ToolSpanMetadata {
 interface SpanContext {
   span: Span;
   startTime: number;
+  lastActivityTime?: number;
+  interactionOwner?: SpanContext;
   attributes: Record<string, string | number | boolean>;
   ended?: boolean;
   type:
@@ -216,7 +218,10 @@ const activeInteractionsByPromptId = new Map<string, SpanContext>();
 // standalone span can still be attributed without parenting to an ended span.
 const interactionIdentityByPromptId = new Map<
   string,
-  Pick<SpanContext, 'startTime' | 'attributes'>
+  {
+    lastActivityTime: number;
+    attributes: Record<string, string | number | boolean>;
+  }
 >();
 
 export function isInNativeSubagentSpan(): boolean {
@@ -314,7 +319,7 @@ function ttlFor(ctx: SpanContext): number {
 
 function sweepStaleSpans(now: number): void {
   for (const [promptId, ctx] of interactionIdentityByPromptId) {
-    if (now - ctx.startTime >= SPAN_TTL_MS_DEFAULT) {
+    if (now - ctx.lastActivityTime >= SPAN_TTL_MS_DEFAULT) {
       interactionIdentityByPromptId.delete(promptId);
     }
   }
@@ -326,7 +331,11 @@ function sweepStaleSpans(now: number): void {
       strongSpans.delete(spanId);
       continue;
     }
-    if (now - ctx.startTime < ttlFor(ctx)) continue;
+    const ttlReferenceTime =
+      ctx.type === 'interaction'
+        ? (ctx.lastActivityTime ?? ctx.startTime)
+        : ctx.startTime;
+    if (now - ttlReferenceTime < ttlFor(ctx)) continue;
 
     if (!ctx.ended) {
       ctx.ended = true;
@@ -495,6 +504,8 @@ function finalizeInteractionContext(
     activeInteractionsByPromptId.get(promptId) === spanCtx
   ) {
     activeInteractionsByPromptId.delete(promptId);
+    const identity = interactionIdentityByPromptId.get(promptId);
+    if (identity) identity.lastActivityTime = Date.now();
   }
 
   try {
@@ -552,7 +563,8 @@ function registerInteractionContext(
   const userId = spanContextObj.attributes['gen_ai.user.id'];
   if (typeof userId === 'string' && userId) {
     interactionIdentityByPromptId.set(promptId, {
-      startTime: spanContextObj.startTime,
+      lastActivityTime:
+        spanContextObj.lastActivityTime ?? spanContextObj.startTime,
       attributes: { 'gen_ai.user.id': userId },
     });
   } else {
@@ -567,6 +579,23 @@ function getInteractionContext(promptId?: string): SpanContext | undefined {
   }
   const current = interactionContext.getStore();
   return current && !current.ended ? current : undefined;
+}
+
+function touchInteractionContext(spanCtx: SpanContext | undefined): boolean {
+  if (!spanCtx || spanCtx.type !== 'interaction' || spanCtx.ended) return false;
+  const promptId = spanCtx.attributes['qwen-code.prompt_id'];
+  if (
+    typeof promptId !== 'string' ||
+    activeInteractionsByPromptId.get(promptId) !== spanCtx
+  ) {
+    return false;
+  }
+
+  const now = Date.now();
+  spanCtx.lastActivityTime = now;
+  const identity = interactionIdentityByPromptId.get(promptId);
+  if (identity) identity.lastActivityTime = now;
+  return true;
 }
 
 function resolveGenAiParentContext(parent: SpanContext | undefined): Context {
@@ -596,6 +625,7 @@ export function startInteractionSpan(
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    lastActivityTime: Date.now(),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'interaction',
   };
@@ -655,6 +685,7 @@ export async function withInteractionSpan<T>(
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    lastActivityTime: Date.now(),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'interaction',
   };
@@ -721,6 +752,7 @@ export function startLLMRequestSpanWithContext(
   // foreground subagent nest under the subagent span instead of escaping
   // back to the outer interaction. wenshao @ #4410.
   const interactionParentCtx = getInteractionContext(promptId);
+  touchInteractionContext(interactionParentCtx);
   const parentCtx =
     subagentContext.getStore() ??
     toolContext.getStore() ??
@@ -766,6 +798,7 @@ export function startLLMRequestSpanWithContext(
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    ...(interactionParentCtx ? { interactionOwner: interactionParentCtx } : {}),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'llm_request',
   };
@@ -972,6 +1005,7 @@ export function endLLMRequestSpan(
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
+  touchInteractionContext(spanCtx.interactionOwner);
 }
 
 // --- Tool Spans ---
@@ -991,6 +1025,7 @@ export function startToolSpan(
     // Prefer subagentContext over interactionContext (see startLLMRequestSpan
     // for rationale; wenshao @ #4410).
     const interactionParentCtx = getInteractionContext(promptId);
+    touchInteractionContext(interactionParentCtx);
     const parentCtx =
       subagentContext.getStore() ??
       toolContext.getStore() ??
@@ -1035,6 +1070,9 @@ export function startToolSpan(
     const spanContextObj: SpanContext = {
       span,
       startTime: Date.now(),
+      ...(interactionParentCtx
+        ? { interactionOwner: interactionParentCtx }
+        : {}),
       attributes: attributes as Record<string, string | number | boolean>,
       type: 'tool',
     };
@@ -1143,6 +1181,7 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
+  touchInteractionContext(spanCtx.interactionOwner);
 }
 
 // --- Tool Execution Sub-Spans ---
@@ -1501,6 +1540,7 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
     subagentContext.getStore() ??
     interactionContext.getStore() ??
     undefined;
+  touchInteractionContext(interactionContext.getStore());
   const ctx = resolveParentContext(parentCtx);
   const sessionId = resolveSessionId(parentCtx);
 
@@ -1523,6 +1563,9 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
+    ...(interactionContext.getStore()
+      ? { interactionOwner: interactionContext.getStore() }
+      : {}),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'hook',
   };
@@ -1600,6 +1643,7 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
+  touchInteractionContext(spanCtx.interactionOwner);
 }
 
 // --- Subagent Spans (#3731 Phase 3) ---
@@ -1909,6 +1953,15 @@ export function endSubagentSpan(
 
 export function getActiveInteractionSpan(promptId?: string): Span | undefined {
   return getInteractionContext(promptId)?.span;
+}
+
+export function recordInteractionActivity(
+  promptId: string,
+  expectedOwner: Span,
+): boolean {
+  const spanCtx = getInteractionContext(promptId);
+  if (!spanCtx || spanCtx.span !== expectedOwner) return false;
+  return touchInteractionContext(spanCtx);
 }
 
 // --- Testing Utilities ---

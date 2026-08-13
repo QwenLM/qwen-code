@@ -175,6 +175,7 @@ export {
   endSubagentSpan,
   runInSubagentSpanContext,
   getActiveInteractionSpan,
+  recordInteractionActivity,
   truncateSpanError,
 } from './session-tracing.js';
 export type {
