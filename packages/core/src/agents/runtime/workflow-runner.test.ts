@@ -16,11 +16,15 @@ import { WorkflowRunner } from './workflow-runner.js';
 
 const {
   createProductionDispatchMock,
+  journalWrites,
   logWorkflowRunMock,
+  writeLineMock,
   writeWorkflowSnapshotMock,
 } = vi.hoisted(() => ({
   createProductionDispatchMock: vi.fn(),
+  journalWrites: [] as Array<() => void>,
   logWorkflowRunMock: vi.fn(),
+  writeLineMock: vi.fn(),
   writeWorkflowSnapshotMock: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -31,6 +35,12 @@ vi.mock('../../telemetry/loggers.js', () => ({
 vi.mock('../workflow-snapshot.js', () => ({
   writeWorkflowSnapshot: writeWorkflowSnapshotMock,
 }));
+
+vi.mock('../../utils/jsonl-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../utils/jsonl-utils.js')>();
+  return { ...actual, writeLine: writeLineMock };
+});
 
 vi.mock('./workflow-orchestrator.js', async (importOriginal) => {
   const actual =
@@ -78,8 +88,12 @@ function observeSettlement(registry: WorkflowRunRegistry): {
 describe('WorkflowRunner', () => {
   beforeEach(() => {
     createProductionDispatchMock.mockReset();
+    journalWrites.length = 0;
     logWorkflowRunMock.mockClear();
+    writeLineMock.mockReset();
+    writeLineMock.mockResolvedValue(undefined);
     writeWorkflowSnapshotMock.mockClear();
+    writeWorkflowSnapshotMock.mockResolvedValue(undefined);
   });
 
   it('passes the registry approval bridge only to production dispatch', async () => {
@@ -328,6 +342,57 @@ describe('WorkflowRunner', () => {
       expect.objectContaining({ status: 'cancelled' }),
     ]);
     expect(writeWorkflowSnapshotMock).toHaveBeenCalledWith(config, entry);
+  });
+
+  it('freezes snapshot and telemetry before late dispatches drain', async () => {
+    const { config, registry } = configWithRegistry();
+    Object.assign(config, {
+      storage: {
+        getWorkflowRunJournalPath: () => 'probe-journal.jsonl',
+      },
+    });
+    writeLineMock.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          journalWrites.push(resolve);
+        }),
+    );
+    let snapshotAgentsCompleted: number | undefined;
+    writeWorkflowSnapshotMock.mockImplementation((_config, entry) => {
+      snapshotAgentsCompleted = entry.agentsCompleted;
+      return Promise.resolve();
+    });
+    let finishDispatch: ((result: string) => void) | undefined;
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("fire and forget"); return "done"',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    });
+
+    await vi.waitFor(() => {
+      expect(registry.get(handle.runId)?.status).toBe('completed');
+      expect(journalWrites).toHaveLength(1);
+    });
+    finishDispatch?.('late result');
+    await vi.waitFor(() =>
+      expect(registry.get(handle.runId)?.agentsCompleted).toBe(1),
+    );
+    journalWrites[0]?.();
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    const telemetry = logWorkflowRunMock.mock.calls[0]?.[1] as
+      | { agents_completed: number }
+      | undefined;
+    expect(telemetry?.agents_completed).toBe(0);
+    expect(snapshotAgentsCompleted).toBe(0);
+    for (const resolve of journalWrites) resolve();
   });
 
   it('holds an in-flight agent result until a paused run resumes', async () => {

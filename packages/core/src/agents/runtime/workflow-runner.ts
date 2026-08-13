@@ -274,8 +274,8 @@ export class WorkflowRunner {
               tokens_spent: entry.tokensSpent,
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
             });
-            await journal?.drain();
             await writeWorkflowSnapshot(config, entry);
+            await journal?.drain();
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {
