@@ -543,6 +543,116 @@ describe('composeReview — the C/S table', () => {
   });
 });
 
+describe('composeReview — modeled-system defect-layer cap', () => {
+  const sentinel = (domains: string[]) => ({
+    version: 1,
+    provider: 'test',
+    label: 'guard',
+    domains,
+    relatedPaths: [],
+    recommendedTests: [],
+    requiredConfigurations: [],
+    requiredAgents: [],
+    unverifiedDimensions: [],
+    verificationNotes: [],
+  });
+  const IDENTITY =
+    'You are review agent `reverse-audit` — Reverse audit agent.';
+  const ALL = [
+    'lexing',
+    'expansion',
+    'scope-propagation',
+    'resolution-order',
+    'inheritance',
+    'toctou',
+  ];
+  const walked = (...ids: string[]) =>
+    ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
+  // A genuine reverse-audit auditor: the identity line, a real diff read
+  // (so `diffToolCalls > 0`), and the given receipts as its final text.
+  const auditor = (id: string, receipts: string) =>
+    transcript(id, `${IDENTITY}\nread_file(file_path="${DIFF}")`, {
+      toolCalls: 1,
+      range: [0, 100],
+      text: receipts,
+    });
+  const markedPlan = (domains: string[]) =>
+    coveredPlan(['verify', 'reverse-audit'], {
+      repositoryContext: sentinel(domains),
+    });
+  const compose = (p: string) =>
+    composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+
+  it('caps Approve to Comment when a marked diff leaves layers unwalked', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked('lexing', 'expansion')); // 2 of 6
+    const r = compose(p);
+    // Reverting the compose-review wiring line leaves this green as APPROVE.
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('scope-propagation');
+  });
+
+  it('leaves Approve intact when every layer is walked', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked(...ALL));
+    expect(compose(p).event).toBe('APPROVE');
+  });
+
+  it('does not count a parrot that never read the diff (diffToolCalls === 0)', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked('lexing', 'expansion')); // genuine: 4 owed
+    // Identity line and ALL six receipts, but a brief read, not a diff read:
+    // successfulToolCalls > 0, diffToolCalls === 0 — corroboration must drop it,
+    // or its six receipts would cover the four the genuine auditor left owed.
+    transcript('ra-parrot', `${IDENTITY}\nread_file(file_path="/x/brief.md")`, {
+      opens: ['/x/brief.md'],
+      text: walked(...ALL),
+    });
+    const r = compose(p);
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('scope-propagation');
+  });
+
+  it('does not count a verifier whose prompt merely mentions reverse-audit', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    auditor('ra-1', walked('lexing', 'expansion')); // genuine: 4 owed
+    // A verifier identity, a real diff read, and all six receipts quoted in its
+    // verdict: the substring `reverse-audit` appears, the identity line does not.
+    transcript(
+      'vr',
+      `You are review agent \`verify\` — Verification agent, ruling on reverse-audit findings.\nread_file(file_path="${DIFF}")`,
+      { toolCalls: 1, range: [0, 100], text: walked(...ALL) },
+    );
+    expect(compose(p).event).toBe('COMMENT');
+  });
+
+  it('does not count an auditor whose diff read misses its baked territory', () => {
+    const p = markedPlan(['modeled-executable-system']);
+    // A reverse auditor whose launch baked territory 3301-4000 but whose only diff
+    // read was lines 1-50: retirement's territory bar drops it, so its six parroted
+    // receipts do not count and the layers stay owed. `diffToolCalls > 0` alone
+    // would (wrongly) credit them and release Approve.
+    transcript(
+      'ra-off',
+      `${IDENTITY}\nread_file(file_path="${DIFF}", offset=3300, limit=700)`,
+      { toolCalls: 1, range: [0, 50], text: walked(...ALL) },
+    );
+    expect(compose(p).event).toBe('COMMENT');
+  });
+
+  it('is inert without the sentinel domain — an ordinary review is unaffected', () => {
+    const p = markedPlan(['some-other-domain']);
+    auditor('ra-1', ''); // zero receipts, but the domain is not armed
+    expect(compose(p).event).toBe('APPROVE');
+  });
+});
+
 describe('composeReview — the low-signal Approve disclosure', () => {
   // The coverage gate proves the agents READ the diff, not that the review had
   // discriminating power: a dogfooded weak-model run drafted nothing from all
