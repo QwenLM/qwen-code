@@ -371,6 +371,43 @@ describe('PermissionController', () => {
     });
   });
 
+  it('explains when ask_user_question has no interactive SDK', async () => {
+    const context = createContext();
+    vi.mocked(context.config.getInputFormat).mockReturnValue('text');
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-question-no-sdk',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage:
+          'The host could not present the required approval for "ask_user_question".',
+      });
+    });
+  });
+
   it('uses SDK canUseTool timeout for outgoing permission requests', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(
@@ -503,6 +540,9 @@ describe('PermissionController', () => {
         callId: 'tool-call-answers',
         name: 'ask_user_question',
         args: { questions: [] } as Record<string, unknown>,
+      },
+      invocation: {
+        requiresUserInteraction: () => true,
       },
       confirmationDetails: {
         type: 'ask_user_question',

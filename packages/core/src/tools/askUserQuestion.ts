@@ -158,6 +158,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
 > {
   private userAnswers: Record<string, string> = {};
   private wasAnswered = false;
+  private cancellationMessage: string | undefined;
 
   constructor(
     private readonly _config: Config,
@@ -169,6 +170,14 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     const questionCount = this.params.questions.length;
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
+  }
+
+  override requiresUserInteraction(): boolean {
+    return (
+      this._config.isInteractive() ||
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() === InputFormat.STREAM_JSON
+    );
   }
 
   /**
@@ -205,13 +214,16 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
           case ToolConfirmationOutcome.ProceedAlways:
             this.wasAnswered = true;
             this.userAnswers = payload?.answers ?? {};
+            this.cancellationMessage = undefined;
             break;
           case ToolConfirmationOutcome.Cancel:
             this.wasAnswered = false;
+            this.cancellationMessage = payload?.cancelMessage;
             break;
           default:
             this.wasAnswered = true;
             this.userAnswers = payload?.answers ?? {};
+            this.cancellationMessage = undefined;
             break;
         }
       },
@@ -239,7 +251,8 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       }
 
       if (!this.wasAnswered) {
-        const cancellationMessage = 'User declined to answer the questions.';
+        const cancellationMessage =
+          this.cancellationMessage ?? 'User declined to answer the questions.';
         return {
           llmContent: cancellationMessage,
           returnDisplay: cancellationMessage,
