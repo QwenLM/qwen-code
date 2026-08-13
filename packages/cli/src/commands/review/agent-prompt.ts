@@ -72,6 +72,7 @@ import {
 } from './lib/retirement.js';
 import {
   BRIEFS,
+  ENUMERATION_TRAP_LENS,
   isRepositoryContextRoleId,
   MODELED_SYSTEM_EXECUTION_LENS,
   type RoleId,
@@ -524,16 +525,8 @@ export function buildChunkAgentPrompt(
       'not conclude a deletion is unreplaced merely because its replacement is not in your range.',
     '',
     '**Shape check (part of code quality — the altitude lens, scoped to your ' +
-      'territory).** If the code in your chunk HAND-ROLLS parsing or matching of an ' +
-      'unbounded or adversarial surface — untrusted input, a rendered format (what a ' +
-      'viewer/renderer displays), or a spec/grammar — with per-corner special-cases ' +
-      '(`indexOf`/`slice`/regex over structured input, "match what the renderer ' +
-      'renders" logic, a re-implemented grammar, a growing hand-listed case set), the ' +
-      'finding is the SHAPE, not the current corner: such a surface has no last corner, ' +
-      'so enumerating cases never converges. Name the class-closing fix — defer to a ' +
-      "real parser, the tool's authoritative structured output, or a fail-closed " +
-      'decision — and file it ONCE (Critical when the shape can be fooled into a wrong ' +
-      'result), not case by case.',
+      'territory).** For the code in YOUR chunk: ' +
+      ENUMERATION_TRAP_LENS,
     '',
     FINDING_FORMAT,
     '',

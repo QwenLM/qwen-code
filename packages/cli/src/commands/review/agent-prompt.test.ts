@@ -58,7 +58,11 @@ import {
   findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { BRIEFS, MODELED_SYSTEM_EXECUTION_LENS } from './lib/agent-briefs.js';
+import {
+  BRIEFS,
+  ENUMERATION_TRAP_LENS,
+  MODELED_SYSTEM_EXECUTION_LENS,
+} from './lib/agent-briefs.js';
 import {
   MODELED_SYSTEM_DOMAIN,
   SHELL_MODEL_LAYERS,
@@ -284,6 +288,15 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(
       buildChunkAgentPrompt(chunkPlan([MODELED_SYSTEM_DOMAIN], 10_000_000), 1),
     ).not.toContain('Modeled-executable-system lens — your territory');
+  });
+
+  it('carries the enumeration-trap lens into both the 3b brief (3A) and the chunk brief (3B) — one source', () => {
+    // One exported constant, both delivery paths. A cleanup that drops the lens
+    // from either the whole-diff 3b brief or buildChunkAgentPrompt must fail here —
+    // otherwise a large chunked PR (the 3B path, where the bloat lives) silently
+    // stops filing the class-closing shape finding.
+    expect(BRIEFS['3b'].brief).toContain(ENUMERATION_TRAP_LENS);
+    expect(buildChunkAgentPrompt(PLAN, 13)).toContain(ENUMERATION_TRAP_LENS);
   });
 });
 

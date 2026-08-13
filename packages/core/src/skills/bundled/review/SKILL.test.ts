@@ -121,16 +121,28 @@ describe('bundled review skill', () => {
     expect(body).toContain('remove it now — this convergence supersedes');
   });
 
-  it('pins the unbounded-family escalation on the divergence-class ruling', () => {
-    // Escalating from enumerating siblings to one class-level Critical is the
-    // load-bearing ledger-ruling hunk this change adds — the whole point of it. A
-    // later edit paraphrasing or reverting the incremental re-review section (the
-    // "fixed only when the structural change lands" clause especially) must fail a
-    // test, not slip through.
+  it('pins the unbounded-family collapse and its load-bearing clauses', () => {
+    // Collapsing an unbounded family into one class-level finding is the whole
+    // point of the change. Each clause below carries a distinct obligation a
+    // "resolve the contradiction" follow-up is most likely to drop: the surface
+    // (not round-count) definition, the anti-enumeration collapse, and the
+    // structural-fix ruling. A paraphrase or revert of any must fail a test.
     const body = skillBody();
-    expect(body).toContain('one class-level Critical');
+    expect(body).toContain('Boundedness is a property of the SURFACE');
     expect(body).toContain(
-      'rule THAT Critical `fixed` only when the structural change lands',
+      'collapse the whole family into one class-level finding',
+    );
+    expect(body).toContain(
+      'Rule the class finding `fixed` only when the structural change lands',
+    );
+  });
+
+  it('pins the root-cause-as-one-finding rule against the pattern-merge', () => {
+    // The root-cause family must NOT go through the pattern-aggregation merge
+    // (severity promotion + per-location expansion → split ledger ids). A revert
+    // to "merge them into a single finding" via the merge path must fail here.
+    expect(skillBody()).toContain(
+      'A root-cause family is one class-level finding, NOT a pattern-aggregation',
     );
   });
 
