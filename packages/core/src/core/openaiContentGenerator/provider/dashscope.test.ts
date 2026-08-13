@@ -246,6 +246,39 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for alicloudapi.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for port-bearing alicloudapi.com URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alicloudapi.com:8443/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alicloudapi.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
     it('should return false for bare alibaba-inc.com domain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -276,6 +309,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://aliyun-inc.com.evil.com/v1',
         'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://notalicloudapi.com/v1',
+        'https://alicloudapi.com.evil.com/v1',
       ];
 
       configs.forEach((baseUrl) => {
