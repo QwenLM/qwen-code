@@ -12,7 +12,10 @@ import {
   UnknownLanInterfaceError,
 } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
-import type { LocalControlService } from '../local-control/service.js';
+import type {
+  LocalControlService,
+  LocalControlStatus,
+} from '../local-control/service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export interface RegisterWorkspaceLocalControlRoutesDeps {
@@ -20,6 +23,20 @@ export interface RegisterWorkspaceLocalControlRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   isDaemonDraining?: () => boolean;
+}
+
+async function withUiData(status: LocalControlStatus) {
+  let qrText: string | undefined;
+  if (status.url) {
+    const { default: qrcode } = (await import('qrcode-terminal')) as {
+      default: typeof import('qrcode-terminal');
+    };
+    qrcode.setErrorLevel('Q');
+    qrcode.generate(status.url, { small: true }, (code) => {
+      qrText = code.trimEnd();
+    });
+  }
+  return { ...status, qrText, interfaces: listLanCandidates() };
 }
 
 /**
@@ -50,14 +67,8 @@ export function registerWorkspaceLocalControlRoutes(
   app: Application,
   deps: RegisterWorkspaceLocalControlRoutesDeps,
 ): void {
-  app.get('/workspace/local-control', (_req, res) => {
-    res.status(200).json({
-      ...deps.service.status(),
-      // Always listed, active or not: the Web Shell needs the candidate set to
-      // render the interface picker before the first enable, which is exactly
-      // when the host may have several.
-      interfaces: listLanCandidates(),
-    });
+  app.get('/workspace/local-control', async (_req, res) => {
+    res.status(200).json(await withUiData(deps.service.status()));
   });
 
   app.post(
@@ -78,11 +89,13 @@ export function registerWorkspaceLocalControlRoutes(
       };
       try {
         res.status(200).json(
-          await deps.service.enable({
-            address:
-              typeof body.address === 'string' ? body.address : undefined,
-            target: typeof body.target === 'string' ? body.target : undefined,
-          }),
+          await withUiData(
+            await deps.service.enable({
+              address:
+                typeof body.address === 'string' ? body.address : undefined,
+              target: typeof body.target === 'string' ? body.target : undefined,
+            }),
+          ),
         );
       } catch (error) {
         sendEnableError(res, error);
@@ -110,7 +123,7 @@ export function registerWorkspaceLocalControlRoutes(
         res.status(200).json({ active: false });
         return;
       }
-      res.status(200).json(await deps.service.disable());
+      res.status(200).json(await withUiData(await deps.service.disable()));
     },
   );
 }

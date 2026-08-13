@@ -1,12 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop_state;
-mod local_control;
 mod runtime;
 
 use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, SettingsStore};
-use local_control::{LocalControlInfo, LocalControlSession};
 use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -15,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
@@ -76,9 +73,6 @@ impl PendingRuntime {
 struct ApplicationState {
     runtime: Mutex<Option<DesktopRuntime>>,
     pending_runtime: Mutex<Option<PendingRuntime>>,
-    local_control: Mutex<Option<LocalControlSession>>,
-    local_control_menu: MenuItem<tauri::Wry>,
-    local_control_off_menu: MenuItem<tauri::Wry>,
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
@@ -97,21 +91,9 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .on_menu_event(|app, event| {
-            if event.id() == "local-control" {
-                if let Err(error) = show_local_control_window(app) {
-                    eprintln!("{error}");
-                }
-            } else if event.id() == "local-control-off" {
-                stop_local_control(app);
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             bootstrap_state,
             choose_workspace,
-            local_control_status,
-            enable_local_control,
-            disable_local_control,
             open_logs,
             restart_runtime,
             install_update,
@@ -174,11 +156,6 @@ fn main() {
             WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
             _ => {}
         },
-        RunEvent::WindowEvent { label, event, .. } if label == "local-control" => {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                stop_local_control(app_handle);
-            }
-        }
         RunEvent::Exit | RunEvent::ExitRequested { .. } => {
             save_window_state(app_handle);
             stop_runtime(app_handle);
@@ -202,20 +179,6 @@ fn main() {
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
-    let menu = Menu::default(&handle)?;
-    let local_control_menu =
-        MenuItemBuilder::with_id("local-control", "Local Control: Off…").build(&handle)?;
-    let local_control_off_menu =
-        MenuItemBuilder::with_id("local-control-off", "Turn Off Local Control")
-            .enabled(false)
-            .build(&handle)?;
-    menu.append(
-        &SubmenuBuilder::new(&handle, "Control")
-            .item(&local_control_menu)
-            .item(&local_control_off_menu)
-            .build()?,
-    )?;
-    handle.set_menu(menu)?;
     let settings = SettingsStore::load(&handle).map_err(std::io::Error::other)?;
     let window_state = settings.window();
     let log_path = desktop_log_path(&handle).map_err(std::io::Error::other)?;
@@ -274,9 +237,6 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     handle.manage(ApplicationState {
         runtime: Mutex::new(None),
         pending_runtime: Mutex::new(None),
-        local_control: Mutex::new(None),
-        local_control_menu,
-        local_control_off_menu,
         settings,
         log_path,
         origin,
@@ -372,53 +332,6 @@ fn restart_runtime(webview: WebviewWindow, app: AppHandle) -> Result<(), String>
         None => initial_workspace(&app)?,
     };
     start_runtime_async(app, workspace, create_if_missing);
-    Ok(())
-}
-
-#[tauri::command]
-fn local_control_status(
-    webview: WebviewWindow,
-    state: State<'_, ApplicationState>,
-) -> Result<LocalControlInfo, String> {
-    require_bootstrap_origin(&webview)?;
-    Ok(lock(&state.local_control)
-        .as_ref()
-        .map(LocalControlSession::info)
-        .unwrap_or_else(LocalControlInfo::inactive))
-}
-
-#[tauri::command]
-fn enable_local_control(
-    webview: WebviewWindow,
-    app: AppHandle,
-) -> Result<LocalControlInfo, String> {
-    require_bootstrap_origin(&webview)?;
-    let state = app.state::<ApplicationState>();
-    let mut local_control = lock(&state.local_control);
-    if let Some(session) = local_control.as_ref() {
-        return Ok(session.info());
-    }
-    let (runtime_url, runtime_token) = lock(&state.runtime)
-        .as_ref()
-        .map(|runtime| (runtime.base_url().clone(), runtime.token().to_string()))
-        .ok_or_else(|| "Start a Desktop workspace before enabling Local Control.".to_string())?;
-    let current_url = app
-        .get_webview_window("main")
-        .and_then(|window| window.url().ok())
-        .filter(|url| is_same_origin(url, &runtime_url))
-        .unwrap_or_else(|| runtime_url.clone());
-    let session = LocalControlSession::start(&runtime_url, &runtime_token, &current_url)?;
-    let info = session.info();
-    *local_control = Some(session);
-    set_local_control_menu_state(&app, true);
-    let _ = app.emit("local-control-changed", &info);
-    Ok(info)
-}
-
-#[tauri::command]
-fn disable_local_control(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
-    require_bootstrap_origin(&webview)?;
-    stop_local_control(&app);
     Ok(())
 }
 
@@ -603,7 +516,6 @@ fn emit_runtime_failure(app: &AppHandle, generation: u64, error: String) {
 }
 
 fn stop_runtime(app: &AppHandle) {
-    stop_local_control(app);
     let state = app.state::<ApplicationState>();
     state.start_generation.fetch_add(1, Ordering::SeqCst);
     state.starting.store(0, Ordering::SeqCst);
@@ -625,24 +537,6 @@ fn clear_pending_runtime(state: &ApplicationState, generation: u64) {
     if pending.as_ref().map(|runtime| runtime.generation) == Some(generation) {
         pending.take();
     }
-}
-
-fn stop_local_control(app: &AppHandle) {
-    if let Some(mut session) = lock(&app.state::<ApplicationState>().local_control).take() {
-        session.stop();
-        set_local_control_menu_state(app, false);
-        let _ = app.emit("local-control-changed", LocalControlInfo::inactive());
-    }
-}
-
-fn set_local_control_menu_state(app: &AppHandle, active: bool) {
-    let state = app.state::<ApplicationState>();
-    let _ = state.local_control_menu.set_text(if active {
-        "Local Control: On…"
-    } else {
-        "Local Control: Off…"
-    });
-    let _ = state.local_control_off_menu.set_enabled(active);
 }
 
 // Resolves the initial workspace and whether it is the derived first-launch
@@ -751,28 +645,6 @@ fn take_pending_fullscreen_hide(generation: u64) -> bool {
 #[cfg(target_os = "macos")]
 fn should_restore_main_window(has_visible_windows: bool, main_needs_restore: bool) -> bool {
     !has_visible_windows || main_needs_restore || FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed)
-}
-
-fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("local-control") {
-        window.center().map_err(|error| error.to_string())?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    WebviewWindowBuilder::new(
-        app,
-        "local-control",
-        WebviewUrl::App("local-control.html".into()),
-    )
-    .title("Qwen Code Local Control")
-    .inner_size(440.0, 500.0)
-    .min_inner_size(400.0, 500.0)
-    .resizable(false)
-    .center()
-    .build()
-    .map(|_| ())
-    .map_err(|error| format!("Failed to open Local Control: {error}"))
 }
 
 fn navigate_to_bootstrap(app: &AppHandle) -> Result<(), String> {

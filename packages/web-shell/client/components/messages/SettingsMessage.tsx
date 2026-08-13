@@ -44,6 +44,7 @@ import {
   ModelManagementSection,
   type ModelManagementProps,
 } from './ModelManagementSection';
+import { LocalControlSettingsCard } from './LocalControlSettingsCard';
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -246,6 +247,7 @@ interface CategoryGroup {
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
   | { type: 'local'; localKey: 'chatWidth' }
+  | { type: 'local-control' }
   | { type: 'live' };
 
 interface SettingsPageCategory {
@@ -478,6 +480,16 @@ export function SettingsMessage({
           items: [{ type: 'live' }],
         });
       }
+    }
+    const daemon = groups.find((group) => group.id === 'Daemon');
+    if (daemon) {
+      daemon.items.unshift({ type: 'local-control' });
+    } else {
+      groups.push({
+        id: 'Daemon',
+        label: formatSettingCategory('Daemon', t),
+        items: [{ type: 'local-control' }],
+      });
     }
     return groups;
   }, [liveSetup, settings, t]);
@@ -816,6 +828,14 @@ export function SettingsMessage({
                               <LiveVoiceSettingsCard setup={liveSetup} />
                             </div>
                           ) : null;
+                        }
+                        if (item.type === 'local-control') {
+                          return (
+                            <div key="local-control">
+                              {separator}
+                              <LocalControlSettingsCard />
+                            </div>
+                          );
                         }
 
                         const setting = item.setting;
