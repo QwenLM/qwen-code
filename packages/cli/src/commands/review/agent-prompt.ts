@@ -505,7 +505,9 @@ export function buildChunkAgentPrompt(
     // block (dimensions, the shape lens, the finding format) — that is the
     // two-masters contradiction the modeled-system and tool-budget blocks already
     // guard against with `!unreachable`; returning here makes the whole ordinary
-    // contract do the same by construction.
+    // contract do the same by construction. The downstream `!unreachable` guards
+    // (modeled-system lens, tool-budget, Covered receipt) are now belt-and-braces
+    // — inert while this return stands, deliberate if it is ever removed.
     return parts.join('\n');
   } else if (chunk.oversized) {
     parts.push(

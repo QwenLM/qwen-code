@@ -175,6 +175,11 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     const p = buildChunkAgentPrompt(PLAN, 15);
     expect(p).not.toContain(ENUMERATION_TRAP_LENS);
     expect(p).not.toContain('## What to review');
+    // The finding-format / severity / exclusions blocks are the rest of the
+    // two-masters contract; none may reach an unreachable chunk either (R5-177).
+    expect(p).not.toContain('Format each finding');
+    expect(p).not.toContain('Apply the severity definitions');
+    expect(p).not.toContain('What is NOT a finding');
   });
 
   it('drops a malformed files[] entry instead of rendering "undefined"', () => {

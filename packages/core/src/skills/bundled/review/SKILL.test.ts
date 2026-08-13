@@ -136,11 +136,27 @@ describe('bundled review skill', () => {
       'Rule the class finding `fixed` only when the structural change lands',
     );
     // The rule must govern BOTH sibling paths: the open-blocker re-check routes an
-    // unbounded family to the collapse rule instead of enumerating (R3-1/R3-5).
+    // unbounded family to the collapse rule instead of enumerating (R3-1/R3-5), and
+    // so does the ledger `fixed` bullet's own routing clause (R5-140).
     expect(body).toContain('apply the bounded/unbounded rule above instead');
+    expect(body).toContain(
+      'apply the bounded/unbounded rule below instead of filing the sibling',
+    );
     // A resurfaced sibling of a collapsed family has its own disposition, so the
     // re-check does not fall to still-stands / cannot-tell every round (R3-6).
     expect(body).toContain('superseded by `<class-id>`');
+    // Supersession must not retire a proven blocker behind a weaker class finding:
+    // the strongest severity/confidence is preserved through the collapse (R5 R1-1).
+    expect(body).toContain('Supersession preserves the strongest evidence');
+    expect(body).toContain(
+      'at least the highest severity AND confidence any absorbed sibling demonstrated',
+    );
+  });
+
+  it('pins the enumeration-trap sentence in the 3b role-table row', () => {
+    // The role table is a digest, but the enumeration-trap sentence is this PR's
+    // stated purpose in the role contract; a revert/paraphrase must fail (R5-487).
+    expect(skillBody()).toContain('Also flags the **enumeration trap**');
   });
 
   it('pins the root-cause-as-one-finding rule against the pattern-merge', () => {
