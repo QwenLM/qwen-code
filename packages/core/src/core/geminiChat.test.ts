@@ -546,6 +546,64 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('history-rewrite loaded-skill tracking', () => {
+    const mockSkillTool = () => ({
+      unloadSkills: vi.fn(),
+      clearLoadedSkills: vi.fn(),
+      trackSkills: vi.fn(),
+    });
+    const wireRegistry = (skillTool: ReturnType<typeof mockSkillTool>) => {
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+    };
+    const skillCall = (id: string, name: string): Content => ({
+      role: 'model',
+      parts: [{ functionCall: { id, name: 'skill', args: { skill: name } } }],
+    });
+    const skillResponse = (id: string, output: string): Content => ({
+      role: 'user',
+      parts: [
+        { functionResponse: { id, name: 'skill', response: { output } } },
+      ],
+    });
+
+    it('strip un-tracks only the skill body it removes', () => {
+      const skillTool = mockSkillTool();
+      wireRegistry(skillTool);
+      chat.setHistory([
+        skillCall('s0', 'kept'),
+        skillResponse('s0', buildSkillLlmContent('/kept', 'kept body')),
+        { role: 'model', parts: [{ text: 'ack' }] },
+        skillCall('s1', 'dropped'),
+        skillResponse('s1', buildSkillLlmContent('/dropped', 'dropped body')),
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+      expect(skillTool.unloadSkills).toHaveBeenCalledWith(['dropped']);
+    });
+
+    it('truncate reconciles tracking to the surviving prefix', () => {
+      const skillTool = mockSkillTool();
+      wireRegistry(skillTool);
+      chat.setHistory([
+        skillCall('s0', 'kept'),
+        skillResponse('s0', buildSkillLlmContent('/kept', 'kept body')),
+        { role: 'model', parts: [{ text: 'ack' }] },
+        skillCall('s1', 'gone'),
+        skillResponse('s1', buildSkillLlmContent('/gone', 'gone body')),
+        { role: 'model', parts: [{ text: 'ack2' }] },
+      ]);
+
+      chat.truncateHistory(3);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
+      expect(skillTool.trackSkills).toHaveBeenCalledWith(['kept']);
+    });
+  });
+
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
       const isolatedChat = new GeminiChat(

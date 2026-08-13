@@ -60,7 +60,9 @@ import {
   clearLoadedSkillTracking,
   isSkillBodyOutput,
   isSkillDedupConfirmation,
+  reconcileLoadedSkillTracking,
   skillUnloadedPlaceholder,
+  unloadSkillsFromEntries,
 } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
@@ -2570,6 +2572,14 @@ export class GeminiChat {
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
+          // The verbatim restore makes residency knowable again — rebuild
+          // tracking from the restored history instead of leaving the
+          // blanket clear from the hard-rescue compression in place.
+          reconcileLoadedSkillTracking(
+            this.history,
+            this.config.getToolRegistry(),
+            'hardRescueRestore',
+          );
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4464,7 +4474,11 @@ export class GeminiChat {
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
     if (this.history.length < prevLen) {
-      clearLoadedSkillTracking(
+      // Truncation keeps a prefix of history, so residency is knowable:
+      // rebuild tracking from the surviving entries instead of a blanket
+      // clear that would un-track skills whose bodies are still resident.
+      reconcileLoadedSkillTracking(
+        this.history,
         this.config.getToolRegistry(),
         'truncateHistory',
       );
@@ -4526,13 +4540,33 @@ export class GeminiChat {
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
     if (strippedEntries.length > 0) {
-      clearLoadedSkillTracking(
+      // Targeted un-track: only skills whose bodies were provably in the
+      // stripped entries lose their tracking; resident bodies earlier in
+      // history keep theirs. Unresolvable entries are left tracked — a
+      // needless un-track self-heals, a wrong un-track deadlocks reload.
+      unloadSkillsFromEntries(
+        strippedEntries,
+        this.history,
         this.config.getToolRegistry(),
         'stripOrphanedUserEntries',
       );
     }
     this.clearPendingPartialState();
     return strippedEntries;
+  }
+
+  /**
+   * Instance wrapper around {@link reconcileLoadedSkillTracking} for
+   * callers that hold the chat but not the tool registry (ACP
+   * continuation strip, which removes orphan entries directly and has
+   * no restore step to re-track through).
+   */
+  reconcileLoadedSkillTracking(): void {
+    reconcileLoadedSkillTracking(
+      this.history,
+      this.config.getToolRegistry(),
+      'reconcileLoadedSkillTracking',
+    );
   }
 
   /**

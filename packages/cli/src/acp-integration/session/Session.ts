@@ -4000,6 +4000,12 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
+            // The continuation strip un-tracks any skill body it removes;
+            // once the continuation settles (re-push landed, or the catch
+            // block restored the orphan) residency is knowable again and
+            // tracking must be reconciled — this path has no client.ts-style
+            // restore hook to re-track through.
+            let orphanStrippedForContinuation = false;
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
@@ -4035,6 +4041,8 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
+                orphanStrippedForContinuation =
+                  (strippedOrphanEntries?.length ?? 0) > 0;
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4521,6 +4529,13 @@ export class Session implements SessionContext {
                   // turn proceeds, on every exit: normal end-of-stream,
                   // cancellation returns, and thrown stream errors alike.
                   await messageDisplay?.finish();
+                  // Every exit path leaves history in a final state (send
+                  // re-pushed the continuation, or catch restored the
+                  // orphan), so rebuild loaded-skill tracking from it.
+                  if (orphanStrippedForContinuation) {
+                    orphanStrippedForContinuation = false;
+                    this.#getCurrentChat().reconcileLoadedSkillTracking();
+                  }
                 }
 
                 commitChannelDeliveryResponseBlock(

@@ -9,6 +9,7 @@ import {
   saveCacheSafeParams,
   getCacheSafeParams,
   clearCacheSafeParams,
+  createForkedChat,
   runForkedAgent,
 } from './forkedAgent.js';
 import type { Content, GenerateContentConfig } from '@google/genai';
@@ -185,6 +186,26 @@ describe('CacheSafeParams', () => {
 
       expect(v2).toBe(v1);
     });
+  });
+});
+
+describe('createForkedChat', () => {
+  beforeEach(() => {
+    clearCacheSafeParams();
+    vi.mocked(GeminiChat).mockReset();
+  });
+
+  it('marks the fork so its history rewrites skip parent skill tracking', () => {
+    const forked = {} as unknown as GeminiChat;
+    vi.mocked(GeminiChat).mockImplementation(() => forked);
+
+    saveCacheSafeParams({ systemInstruction: 'si' }, [], 'test-model');
+    const chat = createForkedChat(
+      {} as unknown as Config,
+      getCacheSafeParams()!,
+    );
+
+    expect(chat.isForkedChat).toBe(true);
   });
 });
 

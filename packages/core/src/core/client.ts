@@ -23,7 +23,6 @@ import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import {
-  buildCallIdToSkillName,
   microcompactHistory,
   type MicrocompactMeta,
   type MicrocompactOptions,
@@ -86,7 +85,7 @@ import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import {
-  isSkillBodyOutput,
+  resolveLoadedSkillNames,
   retrackSkills,
   syncSkillEvictions,
 } from '../tools/skill-utils.js';
@@ -2334,41 +2333,19 @@ export class GeminiClient {
         for (const entry of strippedRetryEntries) {
           this.getChat().addHistory(entry);
         }
-        // The strip cleared loaded-skill tracking; re-track any skill body
-        // among the restored entries so the dedup guard matches the
-        // resident bodies again — otherwise the next invocation would pass
-        // the guard and inject a duplicate body.
-        const restoredSkillCallIds: string[] = [];
-        for (const entry of strippedRetryEntries) {
-          for (const part of entry.parts ?? []) {
-            const fr = part.functionResponse;
-            if (
-              fr?.id &&
-              fr.name === ToolNames.SKILL &&
-              isSkillBodyOutput(fr.response?.['output'])
-            ) {
-              restoredSkillCallIds.push(fr.id);
-            }
-          }
-        }
-        if (restoredSkillCallIds.length > 0) {
-          const callIdToSkillName = buildCallIdToSkillName(
-            this.getChat().getHistory(),
-          );
-          const names = new Set<string>();
-          for (const callId of restoredSkillCallIds) {
-            const resolved = callIdToSkillName.get(callId);
-            if (resolved?.length === 1) {
-              names.add(resolved[0]);
-            }
-          }
-          retrackSkills(
-            names,
-            this.config.getToolRegistry(),
-            'restoreStrippedRetryEntries',
-          );
-        }
       }
+      // Either the restore re-added the stripped bodies or the retry
+      // re-pushed them — they are resident again either way, so re-track
+      // the resolved skill names to keep the dedup guard in sync with
+      // history (the strip un-tracked them).
+      retrackSkills(
+        resolveLoadedSkillNames(
+          strippedRetryEntries,
+          this.getChat().getHistory(),
+        ),
+        this.config.getToolRegistry(),
+        'restoreStrippedRetryEntries',
+      );
       strippedRetryEntries = [];
     };
 

@@ -754,7 +754,10 @@ export function microcompactHistory(
     tool = sizePlan.toolRefs.filter((r) => r.contentIndex < history.length);
     keptPathHistory =
       pending.length > 0 ? [...history, ...pending] : keptPathHistory;
-    keptPathRefs = sizePlan.toolRefs;
+    // Use the pending-filtered refs: a result that only exists in pending
+    // content has not been committed to history, so a kept ref there cannot
+    // prove residency (matches buildKeepRefs' pending exclusion).
+    keptPathRefs = tool;
     keepRefs = sizePlan.keepToolRefs;
     clearRefs = sizePlan.clearRefs;
     toolResultCharsBefore = sizePlan.toolResultCharsBefore;

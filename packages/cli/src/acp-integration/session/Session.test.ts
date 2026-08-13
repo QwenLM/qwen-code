@@ -591,6 +591,8 @@ describe('Session', () => {
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+      reconcileLoadedSkillTracking: vi.fn(),
+      reconcileLoadedSkillTracking: vi.fn(),
       setTools: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
@@ -2310,6 +2312,9 @@ describe('Session', () => {
       mockChat.getHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
       // Force the continuation send to fail NON-cancelled (session token limit)
       // so it hits the `!responseStream` branch — the data-loss window.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
@@ -2338,6 +2343,9 @@ describe('Session', () => {
           ]),
         }),
       );
+      // The strip un-tracked any skill body it removed; once the orphan is
+      // preserved back, tracking must be rebuilt from the settled history.
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalled();
     });
 
     it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {
@@ -2375,6 +2383,7 @@ describe('Session', () => {
           ]),
         }),
       );
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalled();
     });
 
     it('rejects (accepted:false) when a prompt is already in flight', async () => {

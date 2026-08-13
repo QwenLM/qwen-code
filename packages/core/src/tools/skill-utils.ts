@@ -9,6 +9,8 @@ import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import type { MicrocompactMeta } from '../services/microcompaction/microcompact.js';
+import { buildCallIdToSkillName } from '../services/microcompaction/microcompact.js';
+import type { Content } from '@google/genai';
 import type { ToolRegistry } from './tool-registry.js';
 import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
@@ -406,9 +408,10 @@ export function syncSkillEvictions(
 
 /**
  * Blanket-clear loaded-skill tracking. Used when history is rewritten in
- * ways that may drop skill bodies without per-skill eviction meta: LLM
- * compression (`tryCompress`), truncation (`truncateHistory`), and
- * orphaned-entry stripping (`stripOrphanedUserEntriesFromHistory`).
+ * ways that may drop skill bodies without per-skill eviction meta and
+ * without a knowable residency afterwards: LLM compression
+ * (`tryCompress`). Truncation and orphan-entry stripping reconcile /
+ * un-track targeted instead.
  */
 export function clearLoadedSkillTracking(
   toolRegistry: ToolRegistry | undefined,
@@ -447,5 +450,91 @@ export function retrackSkills(
   debugLogger.debug(
     `[SKILL_TRACKING] re-tracked ${list.length} skill(s) after ${logTag}: ` +
       list.join(', '),
+  );
+}
+
+/**
+ * Resolve the skill names of the skill-body functionResponses in
+ * `entries` by pairing their call ids against the model-role
+ * functionCalls in `history`. Ambiguous or unresolvable ids are
+ * omitted (callers treat them as "not provable").
+ */
+export function resolveLoadedSkillNames(
+  entries: Content[],
+  history: Content[],
+): string[] {
+  const callIdToSkillName = buildCallIdToSkillName(history);
+  const names = new Set<string>();
+  for (const entry of entries) {
+    for (const part of entry.parts ?? []) {
+      const fr = part.functionResponse;
+      if (
+        fr?.id &&
+        fr.name === ToolNames.SKILL &&
+        isSkillBodyOutput(fr.response?.['output'])
+      ) {
+        const resolved = callIdToSkillName.get(fr.id);
+        if (resolved?.length === 1) {
+          names.add(resolved[0]!);
+        }
+      }
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Rebuild loaded-skill tracking to exactly match history: clear it, then
+ * re-track the skills whose bodies are resident in `history`. Used after
+ * rewrites where residency is KNOWABLE — truncation (the kept prefix),
+ * the hard-rescue verbatim restore, and the retry restore of stripped
+ * entries — where the blanket-clear uncertainty rationale does not apply.
+ */
+export function reconcileLoadedSkillTracking(
+  history: Content[],
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  const names = resolveLoadedSkillNames(history, history);
+  tracker.clearLoadedSkills();
+  if (names.length > 0) {
+    tracker.trackSkills(names);
+  }
+  debugLogger.debug(
+    `[SKILL_TRACKING] reconciled loaded-skill tracking after ${logTag} ` +
+      `(${names.length} resident skill(s))`,
+  );
+}
+
+/**
+ * Un-track only the skills whose bodies `entries` dropped from history —
+ * unlike a blanket clear, resident bodies elsewhere keep their tracking.
+ * Unresolvable skill results are deliberately left tracked: an unneeded
+ * un-track self-heals (one duplicate body on next invoke), while
+ * dropping a tracked name whose body was NOT actually removed leaves the
+ * skill unreloadable behind the dedup guard.
+ */
+export function unloadSkillsFromEntries(
+  entries: Content[],
+  history: Content[],
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const names = resolveLoadedSkillNames(entries, history);
+  if (names.length === 0) {
+    return;
+  }
+  const tracker = getLoadedSkillTracker(toolRegistry);
+  if (!tracker) {
+    return;
+  }
+  tracker.unloadSkills(names);
+  debugLogger.debug(
+    `[SKILL_TRACKING] un-tracked ${names.length} skill(s) after ${logTag}: ` +
+      names.join(', '),
   );
 }
