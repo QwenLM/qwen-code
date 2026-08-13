@@ -371,7 +371,7 @@ Every run ends with one machine-readable line (`Review complete: <target> — <d
 `/review` is interactive. When a script or CI job needs to run a review and act on its outcome, use the headless wrapper:
 
 ```bash
-qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--quiet]
+qwen review run [target] [--json] [--fail-on request-changes] [--comment] [--resume] [--quiet]
 ```
 
 `target` is a PR number, a PR URL, or a file path; omit it to review the local working tree. The command runs this build's own CLI non-interactively (with stdin closed, so slash-command detection survives), streams the child's progress to **stderr**, and prints the verdict to **stdout** — or, with `--json`, the full result object. The verdict is read from the artifact `compose-review` writes (the same JSON the skill treats as the verdict authority), never parsed from the model's prose.
@@ -385,6 +385,8 @@ The exit code is the contract a gate should read:
 | `3`  | It completed with `REQUEST_CHANGES` **and** `--fail-on request-changes` was set (opt-in blocking) |
 
 `3` (not `2`) lets a gate distinguish "the review is blocking" from "the tool broke" — yargs already uses `1` for usage errors — without parsing any output. `--timeout-minutes` (default 120, floored at 1) terminates a hung review and exits `1`, and cancelling the command (Ctrl+C / SIGTERM) terminates the review's process group rather than orphaning it.
+
+`--resume` continues an interrupted review of the same PR instead of starting over — the exact retry shape a CI wrapper hits: the first attempt dies on a transient error, and the retry would otherwise spend its remaining shared budget re-fetching, re-chunking and re-launching agents whose work is already on disk. It is safe to pass unconditionally on a retry: `fetch-pr` rules on the on-disk state itself (worktree still at the fetched SHA, diff bytes unchanged, PR head unmoved, resume cap unspent) and silently falls back to a fresh review whenever anything no longer matches, so the flag never fails a run that could start over. A continuation is pinned to the interrupted run's recorded effort — an explicitly different `--effort` refuses the resume and runs fresh at the requested level. PR targets only (a local review's diff is captured from a live working tree, which has no stable interrupted state to continue); the repository's own review workflow passes it on its second attempt.
 
 A time-budgeted run can also export a **soft** deadline so the review stops its open-ended reverse-audit loop while there is still time to verify, compose and post: `QWEN_REVIEW_DEADLINE_EPOCH` is the Unix-seconds moment the run will be killed, and `QWEN_REVIEW_DEADLINE_RESERVE_SECONDS` (default 3600; `0` keeps only the round estimate) is the tail that must remain for the last round's verification, `compose-review` and submission. When the remaining budget no longer fits another round plus that tail, the round builder refuses to build it, and the composed verdict discloses the truncated audit (an otherwise-Approve verdict is capped at Comment). A missing or malformed deadline leaves the review ungated — the outer timeout still bounds the run.
 

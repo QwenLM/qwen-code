@@ -385,6 +385,13 @@ describe('bundled review skill', () => {
     expect(body).toContain('`restartsSpent`');
     expect(body).toContain('`effort-mismatch`');
     expect(body).toContain('no effect in lightweight mode');
+    // The Step 7 half specifically: `restartsSpent` also appears in Step 1,
+    // so these anchor the restart-bound blockquote's own survival sentences —
+    // deleting or inverting them must fail here, not ship silently.
+    expect(body).toContain('One slice of this fact survives a resume');
+    expect(body).toContain(
+      "Only a never-resumed run's re-entry records nothing",
+    );
   });
 
   it('routes both remote-resolution paths through match-remote', () => {

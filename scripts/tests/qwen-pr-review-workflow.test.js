@@ -72,8 +72,10 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
     const bin = join(dir, 'bin');
     const attemptFile = join(dir, 'attempts');
     const durationFile = join(dir, 'durations');
+    const promptFile = join(dir, 'prompts');
     writeFileSync(attemptFile, '');
     writeFileSync(durationFile, '');
+    writeFileSync(promptFile, '');
     const write = (name, body) => {
       const p = join(bin, name);
       writeFileSync(p, body);
@@ -105,6 +107,10 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       [
         '#!/bin/bash',
         'n=$(( $(cat "$ATT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATT"',
+        // The full argv, one line per attempt: the retry loop's one behavioral
+        // change is WHICH prompt each attempt carries, and a stub that discards
+        // argv cannot see a broken `--resume` wiring.
+        'echo "$*" >> "$PRM"',
         'r(){ printf \'{"type":"result","subtype":"%s","is_error":%s,"result":"%s"}\\n\' "$1" "$2" "$3"; }',
         'case "$SCENARIO" in',
         '  success) r success false "Reviewed — no blockers." ;;',
@@ -154,6 +160,7 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           SCENARIO: scenario,
           ATT: attemptFile,
           DUR: durationFile,
+          PRM: promptFile,
         },
       });
     } catch (e) {
@@ -176,6 +183,7 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       raw: stdout,
       attempts: Number(readFileSync(attemptFile, 'utf8').trim()),
       durations,
+      prompts: readFileSync(promptFile, 'utf8').split('\n').filter(Boolean),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2606,6 +2614,27 @@ describe('review_requested burst coalescing (#8945)', () => {
     expect(cond).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );
+describe('qwen pr review retry --resume wiring', () => {
+  // The retry's one behavioral change: attempt 1 runs the PROMPT verbatim,
+  // attempt 2 carries `--resume` so fetch-pr can continue the dead attempt.
+  // Probe-verified failure modes this pins: flipping the guard to `-le 1`
+  // (resume lands on attempt 1, never the retry) and reverting to
+  // `--prompt "$PROMPT"` both shipped green before this assertion existed.
+  it('attempt 1 gets the verbatim prompt; only the retry carries --resume', () => {
+    const r = runScenario('transient_then_success');
+    expect(r.attempts).toBe(2);
+    expect(r.prompts).toHaveLength(2);
+    expect(r.prompts[0]).toContain('--prompt /review x --output-format');
+    expect(r.prompts[0]).not.toContain('--resume');
+    expect(r.prompts[1]).toContain(
+      '--prompt /review x --resume --output-format',
+    );
+  });
+
+  it('a single successful attempt never carries --resume', () => {
+    const r = runScenario('success');
+    expect(r.prompts).toHaveLength(1);
+    expect(r.prompts[0]).not.toContain('--resume');
   });
 });
 
