@@ -252,9 +252,11 @@ export function tmuxPlan(opts: {
   // silently corrupted a cwd or key token that legitimately ends in it.
   const escapeTrailingSemicolon = (s: string): string =>
     s.endsWith(';') ? `${s.slice(0, -1)}\\;` : s;
-  // readyFile is user-derived (--out) and re-parsed by the holder shell —
-  // it gets its own esc() (an apostrophe in --out broke the quoting and
-  // burned the full sentinel deadline, measured). And the hold is a LOOP,
+  // readyFile is re-parsed by the holder shell, so it keeps its own esc()
+  // even now that the caller derives it from the system temp dir rather
+  // than from --out: mkdtemp-style parents are not guaranteed
+  // apostrophe-free, and an unescaped one broke the quoting and burned the
+  // full sentinel deadline (measured, back when --out named it). And the hold is a LOOP,
   // not one sleep: after a one-shot command exits, a --keys C-c kills the
   // running sleep; the trap runs and a single-sleep script would simply
   // end — pane, session and server gone (measured 5/5). The loop re-enters

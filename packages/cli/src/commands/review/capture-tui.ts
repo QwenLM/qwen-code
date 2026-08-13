@@ -46,6 +46,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createContext, runInContext, type Context } from 'node:vm';
 import {
@@ -332,7 +333,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
-  const holderReadyPath = `${outBase}.holder-ready`;
+  // NOT beside --out: the sentinel is this tool's plumbing, and putting it
+  // in the user's chosen namespace meant unlinking a path we cannot verify
+  // is ours — a `report.holder-ready` holding user data was removed before
+  // a refusal that run was already headed for (probe-reproduced). A
+  // per-run name under the system temp dir cannot collide with anything of
+  // the user's, and cannot be stale either: the pid+nonce is this run's
+  // alone, which is what the unconditional clear used to be for.
+  const holderReadyPath = join(
+    tmpdir(),
+    `qwen-capture-ready-${process.pid}-${randomBytes(6).toString('hex')}`,
+  );
   // What sat at each artifact path after the clear phase, by identity.
   // `changed` answers the one question the evidence rung and every cleanup
   // both ask: did THIS run put it there?
@@ -454,11 +465,28 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         evidence?: unknown;
         pngPath?: unknown;
+        ansPath?: unknown;
+        settledBy?: unknown;
       };
+      // Ownership is the manifest naming THESE artifacts, not a field value
+      // that happens to read like ours. An evidence rung alone is a weak
+      // signature: a user's own `report.json` carrying `evidence: "png"`
+      // authorized deleting `report.ans` and `report.png` beside it
+      // (probe-reproduced — all three gone before the refusal that run was
+      // headed for). Every manifest this tool writes records the absolute
+      // `ansPath` it wrote and how the capture settled; requiring both, and
+      // requiring the path to be the one we are about to write, is what
+      // makes "a previous capture's own artifacts" mean that and nothing
+      // else.
       shaped =
         m !== null &&
         typeof m === 'object' &&
-        (m.evidence === 'png' || m.evidence === 'ans-only');
+        (m.evidence === 'png' || m.evidence === 'ans-only') &&
+        typeof m.ansPath === 'string' &&
+        resolve(m.ansPath) === ansPath &&
+        (m.settledBy === 'until-match' ||
+          m.settledBy === 'timeout' ||
+          m.settledBy === 'fixed-delay');
       // The png clear needs the manifest to have CLAIMED a png: either the
       // png rung itself or a recorded pngPath. An ans-only manifest says
       // this tool never wrote one, so whatever sits at <out>.png belongs to
@@ -482,16 +510,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       if (manifestHadPng) clearArtifact(pngPath);
       clearArtifact(manifestPath);
     }
-    // AFTER the clears, never before: this unlink is the one that may throw
-    // (a DIRECTORY at the sentinel path gives EISDIR, which `force` does not
-    // suppress) and its throw refuses. Run first, it stranded the previous
-    // run's artifacts beside the refusal (measured) — the exact wrong-
-    // evidence outcome the clear-first contract exists to prevent. The
-    // sentinel itself clears UNCONDITIONALLY and as a PLAIN file: this tool
-    // alone writes it, a stale one from a SIGKILL'd run would pass the ready
-    // gate before the new holder installs its trap, and a directory there is
-    // a user's — recursive removal would destroy it on every run (measured:
-    // a seeded content-bearing directory deleted even by successful runs).
+    // Belt only, and no longer load-bearing: the sentinel is minted per run
+    // under the system temp dir with 48 random bits, so nothing of a
+    // previous run — nor anything of the USER'S — can be sitting at this
+    // path. It used to be derived from --out, where all three hazards were
+    // live: a stale sentinel from a SIGKILL'd run passed the ready gate
+    // before the new holder installed its trap; a user's DIRECTORY at the
+    // name threw EISDIR (which `force` does not suppress) and refused the
+    // run; and recursive removal destroyed that directory on every run,
+    // successful ones included (all measured). Ordering still holds — after
+    // the clears, never before — so the one call here that can throw cannot
+    // strand the previous run's evidence:"png" manifest beside a refusal.
     rmSync(holderReadyPath, { force: true });
     // Anything still sitting at an artifact path is something this run did
     // not write and did not clear (an unverifiable manifest, an unrelated

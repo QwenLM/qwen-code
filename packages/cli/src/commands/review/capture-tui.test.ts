@@ -100,6 +100,33 @@ async function withStdio(
 // skipped, so it gets its own suite that runs EVERYWHERE, driving the probe
 // seam instead of the real binary: a refactor that inverts the probe must
 // fail here, not surface as a raw ENOENT on some tmux-less host.
+// The manifest a PREVIOUS run of this command actually wrote — the only
+// thing the clear phase now accepts as its own. A bare `{"evidence":"png"}`
+// no longer qualifies, and must not: a user's own JSON carrying that field
+// authorized deleting the files beside it (probe-reproduced).
+function staleManifest(outBase: string): string {
+  return JSON.stringify({
+    command: 'printf hi',
+    cwd: '/tmp',
+    cols: 80,
+    rows: 24,
+    ansPath: `${outBase}.ans`,
+    pngPath: `${outBase}.png`,
+    evidence: 'png',
+    settledBy: 'fixed-delay',
+  });
+}
+
+// `<out>.holder-ready` is no longer the sentinel — it lives per-pid under
+// the system temp dir — so asserting that path is absent proves nothing.
+// This is the assertion that still has teeth: nothing of ours outlives the
+// run where the sentinel really is.
+function leakedSentinels(): string[] {
+  return readdirSync(tmpdir()).filter((f) =>
+    f.startsWith(`qwen-capture-ready-${process.pid}-`),
+  );
+}
+
 describe('capture-tui without tmux (probe seam)', () => {
   const realTmux = probes.tmux;
   beforeEach(() => {
@@ -130,7 +157,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(process.exitCode).toBe(3);
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+      expect(leakedSentinels()).toEqual([]);
       // The reason pins the PATH taken: an inverted probe would fall through
       // to the mid-capture catch and say "tmux failed mid-capture" instead.
       expect(stderr).toContain('tmux is not installed');
@@ -188,7 +215,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
-      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       writeFileSync(join(dir, 'cap.holder-ready'), '');
       const binDir = join(dir, 'fakebin');
       mkdirSync(binDir, { recursive: true });
@@ -221,7 +248,10 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+      // A user file at this name is not ours: the sentinel lives under
+      // the system temp dir now. It used to be unlinked unconditionally,
+      // before any refusal the run was already headed for.
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(true);
       // The writability probe uses a unique sibling and removes it — it
       // must not outlive the run either.
       expect(readdirSync(dir).filter((f) => f.includes('write-probe'))).toEqual(
@@ -244,7 +274,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
-      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       writeFileSync(join(dir, 'cap.holder-ready'), '');
       const { stderr } = await withStdio(() =>
         runCaptureTui({
@@ -268,7 +298,10 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+      // A user file at this name is not ours: the sentinel lives under
+      // the system temp dir now. It used to be unlinked unconditionally,
+      // before any refusal the run was already headed for.
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -355,23 +388,79 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it('clears stale artifacts BEFORE the sentinel unlink can refuse', async () => {
-    // The sentinel unlink is the one clear that may THROW (a directory
-    // there gives EISDIR, which `force` does not suppress) and its throw
-    // refuses. Ordered first, it stranded the previous run's artifacts —
-    // manifest claiming "evidence":"png" — beside the refusal JSON, the
-    // wrong-evidence outcome the clear-first contract exists to prevent.
-    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+  // Probe-reproduced harm: a foreign `<out>.json` carrying nothing but
+  // `"evidence":"png"` authorized the clear phase to DELETE the user's
+  // .json, .ans and .png — before the collision gate this run was already
+  // headed for could refuse. `evidence` is a field any report-shaped JSON
+  // can plausibly hold; ownership has to be proved by the full signature a
+  // previous run of THIS command wrote, every rung of it.
+  for (const [label, manifest] of [
+    ['only the evidence rung', '{"evidence":"png"}'],
+    [
+      'a manifest naming a DIFFERENT capture',
+      JSON.stringify({
+        evidence: 'png',
+        ansPath: '/somewhere/else/other.ans',
+        settledBy: 'timeout',
+      }),
+    ],
+    [
+      'a manifest with no settledBy',
+      JSON.stringify({ evidence: 'png', ansPath: 'PLACEHOLDER' }),
+    ],
+  ] as const) {
+    it(`refuses instead of clearing a foreign manifest — ${label}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-foreignjson-'));
+      try {
+        const json = manifest.replace('PLACEHOLDER', join(dir, 'cap.ans'));
+        writeFileSync(join(dir, 'cap.json'), json);
+        writeFileSync(join(dir, 'cap.ans'), 'user file');
+        writeFileSync(join(dir, 'cap.png'), 'user file');
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('collides with a file this capture did not');
+        expect(readFileSync(join(dir, 'cap.json'), 'utf8')).toBe(json);
+        expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('user file');
+        expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it('never touches a user DIRECTORY at <out>.holder-ready, refusal or not', async () => {
+    // Was: the sentinel sat at this path and its unlink was the one clear
+    // that could THROW (EISDIR, which `force` does not suppress), so it had
+    // to be ordered last or it stranded the previous run's evidence:"png"
+    // manifest beside the refusal. The sentinel moved under the system temp
+    // dir, so the throw is gone at the source and nothing here is ours: the
+    // stale artifacts still clear, and the directory — content and all —
+    // outlives a run that refuses. A plain file at the same name is covered
+    // by the SHAPE-guard test above; a DIRECTORY is what used to throw.
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-sentinelorder-'));
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
-      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       mkdirSync(join(dir, 'cap.holder-ready'));
       writeFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'not ours');
-      const { stderr } = await withStdio(() =>
+      await withStdio(() =>
         runCaptureTui({
-          command: 'printf hi',
+          // Refuses at the shape guard — deterministic, and no tmux of any
+          // version is spawned, so this pins the clear phase alone.
+          command: ['a', 'b'],
           cwd: undefined,
           cols: 80,
           rows: 24,
@@ -383,13 +472,13 @@ describe('capture-tui without tmux (probe seam)', () => {
         } as never),
       );
       expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('not writable');
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      // Fail-closed preserved: the user's directory is still theirs.
       expect(statSync(join(dir, 'cap.holder-ready')).isDirectory()).toBe(true);
-      expect(existsSync(join(dir, 'cap.holder-ready', 'user-file'))).toBe(true);
+      expect(
+        readFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'utf8'),
+      ).toBe('not ours');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -404,7 +493,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     try {
       writeFileSync(join(dir, 'cap.ans'), 'old run');
       writeFileSync(join(dir, 'cap.png'), 'old run');
-      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       writeFileSync(join(dir, 'cap.holder-ready'), '');
       await withStdio(() =>
         runCaptureTui({
@@ -423,7 +512,10 @@ describe('capture-tui without tmux (probe seam)', () => {
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
       expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+      // A user file at this name is not ours: the sentinel lives under
+      // the system temp dir now. It used to be unlinked unconditionally,
+      // before any refusal the run was already headed for.
+      expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -505,7 +597,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
-        writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+        writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
         probes.tmux = probe;
         await withStdio(() =>
           runCaptureTui({
@@ -643,7 +735,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
-        writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+        writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
         const { stderr } = await withStdio(() =>
           runCaptureTui({
             command: 'printf hi',
@@ -864,7 +956,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       mkdirSync(join(dir, 'cap.ans'));
       writeFileSync(join(dir, 'cap.ans', 'user-file'), 'not ours');
       writeFileSync(join(dir, 'cap.png'), 'stale png');
-      writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       const { stderr } = await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
@@ -1029,7 +1121,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       try {
         writeFileSync(join(dir, 'cap.ans'), 'old run');
         writeFileSync(join(dir, 'cap.png'), 'old run');
-        writeFileSync(join(dir, 'cap.json'), '{"evidence":"png"}');
+        writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
         writeFileSync(join(dir, 'cap.holder-ready'), '');
         const driver = join(dir, 'driver-emfile.mts');
         writeFileSync(
@@ -1063,7 +1155,10 @@ describe('capture-tui without tmux (probe seam)', () => {
         expect(existsSync(join(dir, 'cap.json'))).toBe(true);
         // The sentinel is plumbing this tool alone writes — cleared even
         // here, by design, outside the signature guard.
-        expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+        // A user file at this name is not ours: the sentinel lives under
+        // the system temp dir now. It used to be unlinked unconditionally,
+        // before any refusal the run was already headed for.
+        expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(true);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -1122,7 +1217,7 @@ describe('capture-tui without tmux (probe seam)', () => {
     try {
       writeFileSync(join(dir, 'adir.ans'), 'old');
       writeFileSync(join(dir, 'adir.png'), 'old');
-      writeFileSync(join(dir, 'adir.json'), '{"evidence":"png"}');
+      writeFileSync(join(dir, 'adir.json'), staleManifest(join(dir, 'adir')));
       mkdirSync(join(dir, 'adir'));
       const { stderr } = await withStdio(() =>
         runCaptureTui({
@@ -1422,7 +1517,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(stderr).not.toContain('may still be running');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(leakedSentinels()).toEqual([]);
   });
 
   it('reaps a server whose START died on the belt — the flag precedes the call', async () => {
@@ -1493,7 +1588,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(statSync(join(dir, 'cap.ans')).isDirectory()).toBe(true);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(leakedSentinels()).toEqual([]);
   });
 
   it('refuses a FAILED manifest write and removes what it already wrote', async () => {
@@ -1517,23 +1612,24 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.png'))).toBe(false);
     expect(statSync(join(dir, 'cap.json')).isDirectory()).toBe(true);
-    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(leakedSentinels()).toEqual([]);
   });
 
-  it('a pre-existing DIRECTORY at the sentinel refuses — and survives', async () => {
-    // The sentinel clears as a PLAIN file: a directory at the path is a
-    // user's, so the unlink cannot remove it and the run refuses
-    // fail-closed — recursive removal deleted it on every run, fully
-    // successful ones included (measured).
+  it('a user DIRECTORY at <out>.holder-ready no longer breaks the run', async () => {
+    // Was: the sentinel sat at this path, so a user's directory there made
+    // the run refuse (`--out is not writable`) — a capture destroyed by a
+    // name collision in the user's own namespace. The sentinel moved under
+    // the system temp dir, so the directory is now simply none of our
+    // business: it survives untouched and the capture still succeeds.
     mkdirSync(join(dir, 'cap.holder-ready'));
     writeFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'content');
-    const { stderr } = await withStdio(() => run());
-    expect(process.exitCode).toBe(3);
-    expect(stderr).toContain('--out is not writable');
+    await withStdio(() => run());
+    expect(process.exitCode).toBeUndefined();
     expect(statSync(join(dir, 'cap.holder-ready')).isDirectory()).toBe(true);
     expect(
       readFileSync(join(dir, 'cap.holder-ready', 'user-file'), 'utf8'),
     ).toBe('content');
+    expect(leakedSentinels()).toEqual([]);
   });
 
   it('a pre-existing DIRECTORY at the png path survives the ans-only run', async () => {
@@ -1565,7 +1661,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     // NOT withStdio: it installs its own stderr spy, which would replace a
@@ -1617,7 +1713,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const callLogPath = join(dir, 'tmux-calls');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\necho "$@" >> "${callLogPath}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\necho "$@" >> "${callLogPath}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { sleep 5; echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     // The control-call belt through its SEAM: the fake kill HANGS (sleep 5)
@@ -1664,7 +1760,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     });
     // The sentinel is plumbing — removed on every exit path, including this
     // degraded one whose fixture is the only one that creates it.
-    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(leakedSentinels()).toEqual([]);
   });
 
   it('refuses when the holder never initializes — and sends NO key into the void', async () => {
@@ -1713,7 +1809,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "no server running on /tmp/x" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -1795,7 +1891,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     const marker = join(dir, 'kill-attempted');
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { if [ ! -e "${marker}" ]; then : > "${marker}"; echo "transient" >&2; exit 1; fi; exit 0; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'cap.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { if [ ! -e "${marker}" ]; then : > "${marker}"; echo "transient" >&2; exit 1; fi; exit 0; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const realPath = process.env['PATH'];
@@ -2082,7 +2178,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(process.exitCode).toBe(3);
     expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
     expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-    expect(existsSync(join(dir, 'cap.holder-ready'))).toBe(false);
+    expect(leakedSentinels()).toEqual([]);
     // The reason pins the path: validated up front, this reads "not a valid
     // regex"; thrown after tmux started, it would read "tmux failed
     // mid-capture: Invalid regular expression…" — a caller mistake blamed
@@ -2300,7 +2396,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     mkdirSync(binDir, { recursive: true });
     writeFileSync(
       join(binDir, 'tmux'),
-      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\nfor a in "$@"; do [ "$a" = "new-session" ] && : > "${join(dir, 'stdio.holder-ready')}"; done\necho ""\nexit 0\n`,
+      `#!/bin/sh\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\nfor a in "$@"; do [ "$a" = "kill-server" ] && { echo "wedged" >&2; exit 1; }; done\ns=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1); [ -n "$s" ] && : > "$s"\necho ""\nexit 0\n`,
       { mode: 0o755 },
     );
     const patch = join(dir, 'stdio-enospc.cjs');
