@@ -42,6 +42,7 @@ git checkout "${BRANCH}"
 
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
+rm -f "${GATE_LOG}.bite"
 reject_fix() {
   local label="${1}"
   local preexisting="${2:-false}"
@@ -312,6 +313,7 @@ if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   if [[ -s "${WORKDIR}/no-action.md" ]]; then
     echo "🟰 No action needed:"
     cat "${WORKDIR}/no-action.md"
+    echo "verified_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
     echo "outcome=noop" >> "${GITHUB_OUTPUT}"
     exit 0
   fi
@@ -368,7 +370,7 @@ sensitive_class_of() {
   local f="${1}"
   case "${f}" in
     .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml) echo 'autofix-loop' ;;
-    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs) echo 'autofix-loop' ;;
     .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
     .github/scripts/*) echo 'ci-scripts' ;;
     .github/*) echo 'gh-metadata' ;;
@@ -377,6 +379,8 @@ sensitive_class_of() {
     scripts/tests/*) ;;
     scripts/*) echo 'repo-scripts' ;;
     .npmrc | .nvmrc) echo 'toolchain-config' ;;
+    package-lock.json | npm-shrinkwrap.json | */package-lock.json | */npm-shrinkwrap.json | patches/*) echo 'supply-chain' ;;
+    .gitattributes | */.gitattributes) echo 'measurement-config' ;;
     *) case "${f##*/}" in
       eslint.config.* | vitest.config.* | tsconfig.json | tsconfig.*.json)
         # Workspace-root configs are machinery; a scaffold template deep in
@@ -398,8 +402,8 @@ manifest_scripts_changed() {
   # entry silently drops a package from build/typecheck). Missing file on
   # either side reads as {}.
   local f="${1}" from="${2}" to="${3}" filt a b
-  filt='.scripts // {}'
-  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // [])}'
+  filt='{s: (.scripts // {}), e: (.exports // {}), m: (.main // ""), t: (.types // "")}'
+  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // []), e: (.exports // {})}'
   a="$(git show "${from}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || a='{}'
   b="$(git show "${to}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || b='{}'
   [[ "${a}" != "${b}" ]]
@@ -502,7 +506,7 @@ fi
 # the agent's own prose. The gate writes its own advisory into the round
 # report so a maintainer always sees exactly which tests disappeared,
 # whoever suggested it.
-TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)integration-tests/**')
+TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
 DELETED_TESTS="$(git diff --name-only --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}")"
 NET_TEST_LINES="$(git diff --numstat "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
   awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }')"
