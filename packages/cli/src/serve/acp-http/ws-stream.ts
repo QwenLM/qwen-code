@@ -90,8 +90,13 @@ export class WsStream implements TransportStream {
             };
             const onSocketClose = () => settle('outcome_unknown');
             const callback = (err?: Error) => {
-              settle(err ? 'failed' : 'delivered');
+              settle(err ? 'outcome_unknown' : 'delivered');
+              if (err) this.close();
             };
+            if (this.ws.readyState !== this.ws.OPEN) {
+              settle('closed');
+              return;
+            }
             this.activeSendClosers.add(onSocketClose);
             try {
               if (options) this.ws.send(data, options, callback);

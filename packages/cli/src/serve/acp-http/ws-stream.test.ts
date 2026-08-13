@@ -118,6 +118,33 @@ describe('WsStream', () => {
     expect(stream.isClosed).toBe(true);
   });
 
+  it('marks an accepted send outcome unknown when peer loss wins the callback race', async () => {
+    const controlled = new ControlledWebSocket();
+    const stream = new WsStream(controlled as never);
+    const delivery = stream.sendSerialized(Buffer.from('{"ok":true}'));
+    await vi.waitFor(() => expect(controlled.callback).toBeDefined());
+
+    controlled.callback?.(new Error('socket closed'));
+    await expect(delivery).resolves.toBe('outcome_unknown');
+    expect(stream.isClosed).toBe(true);
+
+    controlled.readyState = 3;
+    controlled.emit('close');
+    expect(stream.isClosed).toBe(true);
+  });
+
+  it('does not submit a queued send after the socket stops being open', async () => {
+    const controlled = new ControlledWebSocket();
+    controlled.readyState = 3;
+    const stream = new WsStream(controlled as never);
+
+    await expect(
+      stream.sendSerialized(Buffer.from('{"ok":true}')),
+    ).resolves.toBe('closed');
+    expect(controlled.sent).toEqual([]);
+    stream.close();
+  });
+
   it('isClosed starts false, becomes true after close()', () => {
     const stream = new WsStream(ws as never);
     expect(stream.isClosed).toBe(false);

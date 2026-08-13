@@ -890,6 +890,38 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('preserves an active WebSocket receipt when peer loss reaches the send callback first', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const socket = new PendingWebSocket();
+      conn.attachConnStream(
+        new WsStream(socket as never, () => registry.delete(conn.connectionId)),
+      );
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const outcomeUnknown = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded, outcomeUnknown },
+      );
+      await vi.waitFor(() => expect(socket.callback).toBeDefined());
+
+      socket.callback?.(new Error('socket closed'));
+      socket.readyState = 3;
+      socket.emit('close');
+
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+      expect(registry.get(conn.connectionId)).toBeUndefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it.each([
     ['live', { value: 1n }],
     [
