@@ -16,13 +16,20 @@ import {
   getUserSettingsPath,
 } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
-import fs from 'fs';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import path from 'path';
 import stripJsonComments from 'strip-json-comments';
 
 const debugLogger = createDebugLogger('RELOAD_ENV');
 
-async function getCurrentCwd(config: Config | null): Promise<string> {
+function getCurrentCwd(config: Config | null): string {
+  if (config?.getCwd) {
+    const cwd = config.getCwd();
+    if (cwd) return cwd;
+  }
+  return process.cwd();
+}
   if (config?.getCwd) {
     const cwd = config.getCwd();
     if (cwd) return cwd;
@@ -34,8 +41,8 @@ function validateSettingsFile(filePath: string): boolean {
   try {
     if (!fs.existsSync(filePath)) return true;
     const content = fs.readFileSync(filePath, 'utf-8');
-    JSON.parse(stripJsonComments(content));
-    return true;
+    const parsed = JSON.parse(stripJsonComments(content));
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
   } catch {
     return false;
   }
@@ -48,7 +55,13 @@ export const reloadEnvCommand: SlashCommand = {
     return t(
       'Reload environment variables and API keys from settings.json and .env files without restarting',
     );
-  },
+// Add translation entries to en.js, zh.js, and zh-TW.js for:
+// - Command description (this line)
+// - 'Updated keys'
+// - 'Removed keys'
+// - 'No environment changes detected.'
+// - 'Environment reloaded and API client refreshed. New keys are live.'
+// - 'Environment reloaded. New API keys will take effect on the next request.'
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
@@ -68,7 +81,7 @@ export const reloadEnvCommand: SlashCommand = {
     }
     const workspaceSettingsPath = path.join(cwd, '.qwen', 'settings.json');
     if (!validateSettingsFile(workspaceSettingsPath)) {
-      settingsWarnings.push(workspaceSettingsPath);
+    const workspaceSettingsPath = new Storage(cwd).getWorkspaceSettingsPath();
     }
 
     settings.reloadScopeFromDisk(SettingScope.User);
@@ -84,7 +97,7 @@ export const reloadEnvCommand: SlashCommand = {
       (result.updatedKeys.length > 0 || result.removedKeys.length > 0) &&
       services.config
     ) {
-      const cgConfig = services.config.getContentGeneratorConfig?.();
+    if ((result.updatedKeys.length > 0 || result.removedKeys.length > 0) && services.config) {
       if (cgConfig?.authType) {
         try {
           // Re-resolve apiKey from process.env before refreshAuth.
@@ -118,6 +131,8 @@ export const reloadEnvCommand: SlashCommand = {
         const val = process.env[k];
         const preview =
           val && val.length > 8
+            ? val.slice(0, 4) + '...' + val.slice(-4)
+          val && val.length > 16
             ? val.slice(0, 4) + '...' + val.slice(-4)
             : '***';
         return `  ${k} → ${preview}`;

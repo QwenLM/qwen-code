@@ -55,7 +55,7 @@ describe('reloadEnvCommand', () => {
       getCwd: () => '/mock/cwd',
       getContentGeneratorConfig: () => ({ authType: 'gemini' }),
       getModelsConfig: () => ({
-        refreshApiKeyFromEnv: vi.fn(() => false),
+        refreshApiKeyFromEnv,
       }),
       refreshAuth: vi.fn(async () => {}),
     } as unknown as Config;
@@ -151,9 +151,9 @@ describe('reloadEnvCommand', () => {
 
     const ctx = makeContext({
       services: {
-        settings: { merged: {}, reloadScopeFromDisk: vi.fn() },
+        settings: { merged: {}, reloadScopeFromDisk: vi.fn() } as unknown as LoadedSettings,
         config: {
-          getCwd: () => '/mock/cwd',
+        settings: { merged: {}, reloadScopeFromDisk: vi.fn() } as unknown as LoadedSettings,
           getContentGeneratorConfig: () => ({ authType: undefined }),
           getModelsConfig: () => ({
             refreshApiKeyFromEnv: vi.fn(() => false),
