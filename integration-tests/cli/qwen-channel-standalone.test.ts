@@ -173,7 +173,15 @@ function runToCompletion(
   });
 }
 
-describe('qwen channel start standalone (#8975)', () => {
+// The suites below assert POSIX graceful-SIGTERM semantics (catchable
+// SIGTERM → exit code 0 → pidfile removal): on Windows Node cannot deliver
+// a catchable SIGTERM, the child's shutdown handler never runs and kill
+// force-terminates, so the code/pidfile assertions would fail. House
+// convention for POSIX-dependent suites (qwen-serve-baseline.test.ts,
+// daemon-invocation-context.test.ts) (#8975).
+const describePosix = process.platform === 'win32' ? describe.skip : describe;
+
+describePosix('qwen channel start standalone (#8975)', () => {
   it('keeps serving with 0 channels instead of exiting', async () => {
     testRoot = realpathSync(
       mkdtempSync(path.join(tmpdir(), 'qwen-channel-standalone-')),
@@ -243,94 +251,107 @@ describe('qwen channel start standalone (#8975)', () => {
   }, 60000);
 });
 
-describe('qwen serve --channel all with an empty channel config (#8975)', () => {
-  // End-to-end replay of the production shape from the issue: the ADA
-  // sandbox restart where `qwen serve --channel all` boots with zero
-  // configured channels. Serve must stay up, report the worker running and
-  // shut down cleanly — a regression re-adding "at least one channel"
-  // validation to the serve startup path fails here.
-  it('keeps serving, reports the worker running, and shuts down cleanly', async () => {
-    testRoot = realpathSync(
-      mkdtempSync(path.join(tmpdir(), 'qwen-channel-serve-')),
-    );
-    const qwenHome = path.join(testRoot, 'qwen-home');
-    const runtimeDir = path.join(testRoot, 'runtime');
-    const workspace = path.join(testRoot, 'workspace');
-    mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
-    mkdirSync(runtimeDir);
-    mkdirSync(qwenHome, { recursive: true });
-    // Nothing configured: the effective channel set is empty.
-    writeFileSync(
-      path.join(qwenHome, 'settings.json'),
-      JSON.stringify({}),
-      'utf-8',
-    );
-    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
-    writeFileSync(
-      trustedFoldersPath,
-      JSON.stringify({ [workspace]: 'TRUST_FOLDER' }),
-      'utf-8',
-    );
+describePosix(
+  'qwen serve --channel all with an empty channel config (#8975)',
+  () => {
+    // End-to-end replay of the production shape from the issue: the ADA
+    // sandbox restart where `qwen serve --channel all` boots with zero
+    // configured channels. Serve must stay up, report the worker running and
+    // shut down cleanly — a regression re-adding "at least one channel"
+    // validation to the serve startup path fails here.
+    it('keeps serving, reports the worker running, and shuts down cleanly', async () => {
+      testRoot = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'qwen-channel-serve-')),
+      );
+      const qwenHome = path.join(testRoot, 'qwen-home');
+      const runtimeDir = path.join(testRoot, 'runtime');
+      const workspace = path.join(testRoot, 'workspace');
+      mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      mkdirSync(runtimeDir);
+      mkdirSync(qwenHome, { recursive: true });
+      // Nothing configured: the effective channel set is empty.
+      writeFileSync(
+        path.join(qwenHome, 'settings.json'),
+        JSON.stringify({}),
+        'utf-8',
+      );
+      const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+      writeFileSync(
+        trustedFoldersPath,
+        JSON.stringify({ [workspace]: 'TRUST_FOLDER' }),
+        'utf-8',
+      );
 
-    child = spawn(
-      process.execPath,
-      [CLI_BIN, 'serve', '--channel', 'all', '--port', '0'],
-      {
-        cwd: workspace,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          QWEN_HOME: qwenHome,
-          QWEN_RUNTIME_DIR: runtimeDir,
-          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      child = spawn(
+        process.execPath,
+        [CLI_BIN, 'serve', '--channel', 'all', '--port', '0'],
+        {
+          cwd: workspace,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            // Strip the bearer-token env toggle: `qwen serve` resolves the
+            // token as `--token ?? env[QWEN_SERVER_TOKEN]`, so a token
+            // exported on the dev machine or CI runner would silently flip
+            // auth on and 401 the unauthenticated poll below — mirroring
+            // qwen-serve-routes.test.ts, which strips behavior-flipping
+            // env toggles for the same reason (#8975).
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([k]) => k !== 'QWEN_SERVER_TOKEN',
+              ),
+            ),
+            QWEN_HOME: qwenHome,
+            QWEN_RUNTIME_DIR: runtimeDir,
+            QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+          },
         },
-      },
-    );
+      );
 
-    const baseUrl = await waitForListeningUrl(child);
+      const baseUrl = await waitForListeningUrl(child);
 
-    await pollHttp(`${baseUrl}/health`, (status) => status === 200);
+      await pollHttp(`${baseUrl}/health`, (status) => status === 200);
 
-    interface ControlState {
-      enabled?: boolean;
-      transition?: string;
-      workers?: Array<{ state?: string; channels?: string[] }>;
-    }
-    const control = (await pollHttp(
-      `${baseUrl}/workspace/channel`,
-      (_status, body) => {
-        const state = body as ControlState;
-        return (
-          state.enabled === true &&
-          state.transition === 'idle' &&
-          Array.isArray(state.workers) &&
-          state.workers.length > 0 &&
-          state.workers[0]!.state === 'running'
-        );
-      },
-    )) as ControlState;
-    // Zero configured channels: the committed worker runs with no channels.
-    expect(control.workers?.[0]?.channels).toEqual([]);
+      interface ControlState {
+        enabled?: boolean;
+        transition?: string;
+        workers?: Array<{ state?: string; channels?: string[] }>;
+      }
+      const control = (await pollHttp(
+        `${baseUrl}/workspace/channel`,
+        (_status, body) => {
+          const state = body as ControlState;
+          return (
+            state.enabled === true &&
+            state.transition === 'idle' &&
+            Array.isArray(state.workers) &&
+            state.workers.length > 0 &&
+            state.workers[0]!.state === 'running'
+          );
+        },
+      )) as ControlState;
+      // Zero configured channels: the committed worker runs with no channels.
+      expect(control.workers?.[0]?.channels).toEqual([]);
 
-    // Liveness: the server process is still up after the checks.
-    expect(child.exitCode).toBeNull();
-    expect(child.signalCode).toBeNull();
+      // Liveness: the server process is still up after the checks.
+      expect(child.exitCode).toBeNull();
+      expect(child.signalCode).toBeNull();
 
-    const exited = new Promise<{
-      code: number | null;
-      signal: NodeJS.Signals | null;
-    }>((resolve) => {
-      child!.once('exit', (code, signal) => resolve({ code, signal }));
-    });
-    child.kill('SIGTERM');
-    const { code, signal } = await exited;
-    expect(signal).toBeNull();
-    expect(code).toBe(0);
-    child = undefined;
-  }, 120000);
-});
+      const exited = new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      }>((resolve) => {
+        child!.once('exit', (code, signal) => resolve({ code, signal }));
+      });
+      child.kill('SIGTERM');
+      const { code, signal } = await exited;
+      expect(signal).toBeNull();
+      expect(code).toBe(0);
+      child = undefined;
+    }, 120000);
+  },
+);
 
-describe('qwen channel stop → start round trip (#8975)', () => {
+describePosix('qwen channel stop → start round trip (#8975)', () => {
   // The PR's second core promise — explicit stops are remembered across
   // restarts — has no cross-process coverage in the unit suite: every
   // unit test mocks one half of the stop-write/start-read handoff. Run a

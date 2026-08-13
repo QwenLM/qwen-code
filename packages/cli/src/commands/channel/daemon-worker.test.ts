@@ -1324,7 +1324,12 @@ describe('runChannelDaemonWorker', () => {
         target: { type: 'chat', id: 'chat-1' },
         text: 'hello',
       }),
-    ).rejects.toThrow('Channel "telegram" is not running.');
+      // Pin the ChannelDeliveryError CODE, not just the message: the
+      // delivery classifier has no message fallback, so a plain Error
+      // with the same message would map to channel_delivery_failed (502)
+      // instead of the 503 channel_worker_unavailable the SDK documents
+      // as an expected outcome (#8975).
+    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
     // Webhooks must be rejected upfront too, not silently accepted and
     // dropped (#8975).
     const webhookTask = {
@@ -1377,6 +1382,14 @@ describe('runChannelDaemonWorker', () => {
     );
     expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
     expect(mockCreateChannel).not.toHaveBeenCalled();
+    // The all-stopped branch is exactly where every recorded state is
+    // 'stopped': a state WRITE added here (e.g. persisting the configured
+    // set as 'active') would flip the recorded stops and resurrect every
+    // explicitly stopped channel on the next `--channel all` — the #8975
+    // regression class. (prune IS called: pruning stale entries against
+    // the configured set is a read-side cleanup, not a state flip.)
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
   it('skips stopped channels when restoring --channel all (#8975)', async () => {
@@ -1511,7 +1524,11 @@ describe('runChannelDaemonWorker', () => {
 
   it('force-starts explicitly selected channels even when stopped (#8975)', async () => {
     const sdk = createSdk();
-    mockChannelStateStoreReadAll.mockReturnValueOnce({ telegram: 'stopped' });
+    // No state-setup mock here on purpose: an explicit names selection
+    // force-starts without consulting the restore filter, and an
+    // unconsumed mockReturnValueOnce leaks into the NEXT test because
+    // vi.clearAllMocks() does not clear Vitest's once-implementation
+    // queue (#8975).
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',

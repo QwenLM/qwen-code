@@ -14,10 +14,12 @@ import {
   asKnownDaemonEvent,
 } from '../../src/daemon/events.js';
 // Type-only imports also exercise the public entry: any name missing
-// from `src/index.ts` is a tsc compile error and the suite refuses to
-// build, which is the regression fence for the kind of "exists in
-// `src/daemon/index.ts` but not re-exported by the published entry"
-// gap that two-layer SDK re-exports are easy to drift on.
+// from `src/index.ts` is a tsc compile error under this package's
+// typecheck fence (tsconfig.typetest.json compiles this file — the
+// package tsconfig only includes src/), which is the regression fence
+// for the kind of "exists in `src/daemon/index.ts` but not re-exported
+// by the published entry" gap that two-layer SDK re-exports are easy
+// to drift on.
 import type {
   DaemonClient,
   DaemonClientEvictedData,
@@ -25,6 +27,8 @@ import type {
   DaemonChannelControlState,
   DaemonChannelControlTransition,
   DaemonChannelDelivery,
+  DaemonChannelInstanceSnapshot,
+  DaemonChannelsSnapshot,
   DaemonChannelNotifyRequest,
   DaemonChannelNotifyResult,
   DaemonChannelPairingApprovalsSnapshot,
@@ -245,7 +249,22 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
-    expectTypeOf<DaemonChannelStopInstanceResult>().not.toBeNever();
+    // #8975: pin the per-channel stop result's SHAPE, not just its
+    // existence — `not.toBeNever()` stays green if the type degrades to
+    // the plain mutation result and the `statePersisted` durability
+    // signal disappears from the typed surface. The runtime fence below
+    // (prototype check, same convention as setWorkspaceSkillsEnabled)
+    // executes under vitest, where type-only imports are erased; the
+    // package's tsconfig.typetest.json compiles this file under tsc, so
+    // dropping the re-export from src/index.ts fails typecheck too.
+    expectTypeOf<DaemonChannelStopInstanceResult>().toEqualTypeOf<{
+      snapshot: DaemonChannelsSnapshot;
+      instance: DaemonChannelInstanceSnapshot;
+      statePersisted?: boolean;
+    }>();
+    expect(typeof Public.DaemonClient.prototype.stopWorkspaceChannel).toBe(
+      'function',
+    );
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();

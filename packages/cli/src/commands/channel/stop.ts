@@ -77,6 +77,25 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
             error instanceof Error ? error.message : String(error)
           }`,
         );
+        // A failed stop can ALSO lose the torn-down record: the DELETE
+        // route reports that double failure via statePersisted: false on
+        // the DaemonHttpError body. Duck-type it (the SDK is dynamically
+        // imported above) and surface the loss like the success path does,
+        // or the stopped channels resurrect on the next `--channel all`
+        // with no trace (#8975).
+        const body: unknown =
+          error instanceof Error && typeof error === 'object'
+            ? (error as Error & { body?: unknown }).body
+            : undefined;
+        if (
+          body !== null &&
+          typeof body === 'object' &&
+          (body as Record<string, unknown>)['statePersisted'] === false
+        ) {
+          writeStdoutLine(
+            'Warning: could not persist the stopped record; --channel all may restart these channels.',
+          );
+        }
         process.exit(1);
       }
       return;

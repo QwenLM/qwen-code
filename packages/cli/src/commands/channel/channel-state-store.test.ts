@@ -112,13 +112,32 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
     });
-    // Pin the deliberate restrictive permissions on the adopted file and
-    // its directory: the legacy file was written by an older release at
-    // default umask, and adoption exists to normalize it (#8975).
-    expect(statSync(workspacePath).mode & 0o777).toBe(0o600);
-    expect(statSync(dirname(workspacePath)).mode & 0o777).toBe(0o700);
     expect(existsSync(legacyPath)).toBe(false);
   });
+
+  // POSIX permission bits never surface on Windows (statSync().mode does
+  // not carry them and mkdirSync's mode is a no-op), so the mode pins live
+  // in their own win32-skipped test — the merge queue's Windows job runs
+  // this file and must not fail on them (repo convention: skipIf, e.g.
+  // atomicFileWrite.test.ts).
+  it.skipIf(process.platform === 'win32')(
+    'adopts the legacy file with restrictive permissions (#8975)',
+    () => {
+      const legacyBody = JSON.stringify({
+        version: 1,
+        channels: { telegram: 'stopped' },
+      });
+      writeFileSync(channelRuntimeStatePath(), legacyBody, 'utf-8');
+
+      adoptLegacyChannelState(workspace);
+
+      // Pin the deliberate restrictive permissions on the adopted file and
+      // its directory: the legacy file was written by an older release at
+      // default umask, and adoption exists to normalize it (#8975).
+      expect(statSync(workspacePath).mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(workspacePath)).mode & 0o777).toBe(0o700);
+    },
+  );
 
   it('keeps an existing workspace file untouched', () => {
     writeFileSync(
@@ -318,6 +337,11 @@ describe('ChannelStateStore', () => {
     // discard branch; entry-wise filtering must NOT warn (#8975).
     ['[]', {}, 1],
     ['"stopped"', {}, 1],
+    // The readAll null guards: without them a literal `null` file passes
+    // the remaining shape checks and the `.channels` access throws outside
+    // the try/catch, breaking the never-fails contract (#8975).
+    ['null', {}, 1],
+    ['{"channels": null}', {}, 1],
     ['{"channels": "stopped"}', {}, 1],
     ['{"channels": ["telegram"]}', {}, 1],
     ['{"channels": {"telegram": "running"}}', {}, 0],
@@ -428,6 +452,7 @@ describe('ChannelStateStore', () => {
           return true;
         }) as typeof process.stderr.write);
 
+      const listenersBefore = new Set(process.stderr.listeners('error'));
       try {
         // No onWarning override: exercises the default stderr sink.
         expect(new ChannelStateStore(filePath).readAll()).toEqual({});
@@ -437,6 +462,63 @@ describe('ChannelStateStore', () => {
         await new Promise((resolve) => setImmediate(resolve));
       } finally {
         writeSpy.mockRestore();
+        // Drop exactly the guard listener this test attached, so the
+        // process-wide stderr state is the same as before the test.
+        for (const listener of process.stderr.listeners('error')) {
+          if (!listenersBefore.has(listener)) {
+            process.stderr.removeListener(
+              'error',
+              listener as (...args: unknown[]) => void,
+            );
+          }
+        }
+      }
+    });
+
+    it('attaches the stderr error listener only once across repeated warnings (#8975)', async () => {
+      writeFileSync(filePath, '{not json', 'utf-8');
+      const writeSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => {
+          setImmediate(() => {
+            process.stderr.emit('error', new Error('ENOSPC'));
+          });
+          return true;
+        }) as typeof process.stderr.write);
+
+      // Take over the stderr error-listener state for this test: the
+      // guard only attaches when NOTHING listens, and a guard listener
+      // attached by an earlier test persists on process.stderr (the
+      // exact long-lived-service condition this pin models).
+      const priorListeners = process.stderr.listeners('error');
+      for (const listener of priorListeners) {
+        process.stderr.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+      try {
+        expect(new ChannelStateStore(filePath).readAll()).toEqual({});
+        // A second warning must NOT attach another no-op listener:
+        // warnings fire precisely during sustained disk degradation
+        // (every failed trySet/trySetMany), and a per-warning attach
+        // grows the listener set without bound — MaxListenersExceeded
+        // noise after 10 in the long-lived channel service (#8975).
+        expect(new ChannelStateStore(filePath).readAll()).toEqual({});
+        expect(process.stderr.listenerCount('error')).toBe(1);
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        writeSpy.mockRestore();
+        for (const listener of process.stderr.listeners('error')) {
+          process.stderr.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+        }
+        for (const listener of priorListeners) {
+          process.stderr.on('error', listener as (...args: unknown[]) => void);
+        }
       }
     });
 
@@ -501,7 +583,55 @@ describe('ChannelStateStore', () => {
       });
       expect(statSync(filePath).ino).toBe(beforeInode);
     });
+
+    it('throws on write failure so callers can fall back to readAll (#8975)', () => {
+      // prune is deliberately NOT throw-safe on writes: both production
+      // callers (daemon-worker, start) catch the throw and fall back to
+      // readAll(), so a best-effort conversion that swallows the write
+      // error would silently drop stale entries from the returned map
+      // while they remain on disk (#8975).
+      const store = new ChannelStateStore(filePath, { onWarning: vi.fn() });
+      store.setMany(['telegram', 'feishu'], 'stopped');
+      const writeError = new Error('ENOSPC') as NodeJS.ErrnoException;
+      writeError.code = 'ENOSPC';
+      mockAtomicWriteFileSync.mockImplementationOnce(() => {
+        throw writeError;
+      });
+
+      expect(() => store.prune(['telegram'])).toThrow();
+      // The file is untouched: a fresh store reads back the pre-prune
+      // states, exactly what the callers' readAll() fallback relies on.
+      expect(new ChannelStateStore(filePath).readAll()).toEqual({
+        telegram: 'stopped',
+        feishu: 'stopped',
+      });
+    });
   });
+
+  // The restrictive permissions are pinned elsewhere only for the adoption
+  // call site; every production write goes through applyChange, so pin the
+  // same property on the file/dir it produces (win32 skip: POSIX permission
+  // bits never surface on Windows).
+  it.skipIf(process.platform === 'win32')(
+    'writes 0o600 files and 0o700 dirs on the production write path (#8975)',
+    () => {
+      // Pre-create the target dir LOOSER than 0o700: mkdirSync's mode only
+      // applies to newly created dirs, so here only the explicit chmod in
+      // applyChange keeps the dir restrictive.
+      const looseDir = join(dirname(filePath), 'loose');
+      mkdirSync(looseDir, { mode: 0o755 });
+      const target = join(looseDir, 'channel-state.json');
+      const store = new ChannelStateStore(target);
+
+      store.set('telegram', 'stopped');
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      expect(statSync(looseDir).mode & 0o777).toBe(0o700);
+
+      store.setMany(['feishu'], 'stopped');
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      expect(statSync(looseDir).mode & 0o777).toBe(0o700);
+    },
+  );
 
   it('round-trips a channel literally named __proto__ (#8975)', () => {
     const store = new ChannelStateStore(filePath);

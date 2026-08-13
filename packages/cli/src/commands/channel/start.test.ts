@@ -1473,6 +1473,10 @@ describe('startCommand.handler', () => {
         expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
         expect(mockAcpBridge).not.toHaveBeenCalled();
         expect(mockCreateChannel).not.toHaveBeenCalled();
+        // The empty-effective-set path must not write state either (twin
+        // of the all-stopped pin, #8975).
+        expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+        expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
         // Startup no longer exits on an empty channel set.
         expect(exitSpy).not.toHaveBeenCalled();
 
@@ -1519,12 +1523,21 @@ describe('startCommand.handler', () => {
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
           '[Channel] "feishu" skipped (stopped before restart)',
         );
+        // Pin the FULL message: the recovery-guidance suffix is the only
+        // user-visible way back out of the zero-channel serving state
+        // (otherwise indistinguishable from a hang), and a `--channel`
+        // style pointer would be rejected by the standalone parser
+        // (#8975).
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-          expect.stringContaining(
-            '[Channel] All configured channels are stopped; serving with 0 channels.',
-          ),
+          '[Channel] All configured channels are stopped; serving with 0 channels. Exit this process, then restart individual channels with "qwen channel start <name>".',
         );
         expect(mockCreateChannel).not.toHaveBeenCalled();
+        // The state file holds every channel as 'stopped' here: a state
+        // write added or hoisted on the empty-effective-set path would
+        // flip those records to active and resurrect exactly the channels
+        // the user explicitly stopped — the #8975 regression class.
+        expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+        expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
         // Startup no longer exits when every channel is stopped.
         expect(exitSpy).not.toHaveBeenCalled();
 
@@ -1607,6 +1620,13 @@ describe('startCommand.handler', () => {
       // The fallback read still drives the restore filter.
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '[Channel] "feishu" skipped (stopped before restart)',
+      );
+      // A silent fallback would hide that persistence is broken: stale
+      // entries survive and a re-added channel is skipped forever with
+      // no diagnostic tracing the cause — the daemon-side twin asserts
+      // this warning too (#8975).
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
       );
       expect(mockCreateChannel).toHaveBeenCalledTimes(1);
       expect(mockCreateChannel).toHaveBeenCalledWith(

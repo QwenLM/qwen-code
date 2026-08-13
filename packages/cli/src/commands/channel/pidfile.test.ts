@@ -237,18 +237,28 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
   });
 
-  it('rejects pidfiles with a malformed workspaceCwd', () => {
+  it.each([
+    // Empty string AND non-string values must both be rejected: a pidfile
+    // carrying `workspaceCwd: 123` would otherwise flow into
+    // channelRuntimeStatePath → hashDaemonWorkspace → createHash().update()
+    // and crash `qwen channel stop` with ERR_INVALID_ARG_TYPE outside
+    // trySetMany's try/catch (#8975).
+    ['empty string', ''],
+    ['non-string (number)', 123],
+    ['non-string (object)', {}],
+  ])('rejects pidfiles with a malformed workspaceCwd: %s', (_label, value) => {
     const filePath = getPidFilePath();
     fsStore[filePath] = JSON.stringify({
       owner: 'channel',
       pid: 1234,
       startedAt: new Date().toISOString(),
       channels: ['telegram'],
-      workspaceCwd: '',
+      workspaceCwd: value,
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
 
+    expect(peekServiceInfo()).toBeNull();
     expect(readServiceInfo()).toBeNull();
   });
 

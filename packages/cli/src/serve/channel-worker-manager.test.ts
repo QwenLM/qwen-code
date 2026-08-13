@@ -1093,6 +1093,52 @@ describe('createChannelWorkerManager', () => {
     expect(result.stoppedChannels).toBeUndefined();
   });
 
+  it('filters the phantom all placeholder out of a carried connected set (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // Defense-in-depth shape: a worker IPC ready message omitting the
+    // arrays makes completeReady fall back to the `['all']` placeholder
+    // and carry it into lastConnectedChannels. The capture filter must
+    // drop it, or a phantom `{names: ['all']}` group leaks into
+    // stoppedChannels and gets persisted into the state store (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['all'],
+        requestedChannels: undefined,
+        lastConnectedChannels: ['all'],
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toBeUndefined();
+  });
+
+  it('skips empty capture groups on guard-passing zero-channel shapes (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // The shape this PR's own zero-channel ready path commits:
+    // `requestedChannels: []` is truthy (passes the nothing-ever-confirmed
+    // guard) with an empty carried connected set; any later stopSelection
+    // intersects to empty. The empty group must be skipped entirely —
+    // leaking `[{workspaceCwd, names: []}]` attaches a non-empty array to
+    // both the success result and the failure error, riding the HTTP
+    // 200/500 bodies (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: [],
+        requestedChannels: ['telegram'],
+        lastConnectedChannels: [],
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toBeUndefined();
+  });
+
   it('records the carried connected set when a stop lands in the mode-all crash-restart window (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
@@ -1260,6 +1306,13 @@ describe('createChannelWorkerManager', () => {
         path.resolve(p),
       );
     }
+    // The degraded path must degrade to the resolved form AFTER a full
+    // tear-down, not return the capture without one: a stop that reports
+    // these names as torn down but never ran the tear-down would get them
+    // persisted as stopped while the workers stay alive — zombies skipped
+    // by every later `--channel all` (#8975).
+    expect(group.stop).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
   it('groups torn-down channels per workspace on stop (#8975)', async () => {
@@ -1291,6 +1344,40 @@ describe('createChannelWorkerManager', () => {
     ]);
   });
 
+  it('captures stopped channels under the canonical workspace form (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      }),
+    ]);
+    // Simulate a workspace whose canonical form diverges from the raw
+    // path (e.g. a symlinked cwd): the capture must carry the CANONICAL
+    // form, matching the daemon worker's canonical restore read — the
+    // expected value is computed from the literal canonical value, not
+    // through the mock, so dropping canonicalization from
+    // stoppedChannelsByWorkspace would carry the raw path and turn this
+    // red: stops persisted under the raw hash are missed by the restore
+    // read and the channels resurrect on `--channel all` (#8975).
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === PRIMARY ? `/canonical${PRIMARY}` : path.resolve(p),
+    );
+
+    try {
+      const result = await test.manager.stopSelection();
+      expect(result.stoppedChannels).toEqual([
+        { workspaceCwd: `/canonical${PRIMARY}`, names: ['telegram'] },
+      ]);
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+  });
+
   it('omits torn-down channels when only a lease was reserved (#8975)', async () => {
     const test = setup();
     test.createGroup.mockImplementationOnce(() => {
@@ -1309,6 +1396,12 @@ describe('createChannelWorkerManager', () => {
 
     expect(result.changed).toBe(true);
     expect(result.stoppedChannels).toBeUndefined();
+    // The stop must still release the lease held by the failed start: in
+    // production the lease is the channel-service pidfile reservation, so
+    // skipping release() here leaves a stale lease that refuses every
+    // later channel start until a daemon restart (#8975). Two calls: the
+    // failed rollback attempt plus the successful stop release.
+    expect(test.releaseLease).toHaveBeenCalledTimes(2);
   });
 
   it('rejects webhook work after shutdown latches', async () => {

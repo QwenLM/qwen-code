@@ -683,6 +683,67 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
+  it('persists the whole-selection tear-down set on the success path (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Disabling the LAST committed channel routes through the
+    // whole-selection stop, which tears down every workspace's workers
+    // and returns the per-workspace set. Persisting only the stopped name
+    // would leave the other workspaces' torn-down channels unrecorded,
+    // so they resurrect on the next `--channel all` start — the DELETE
+    // route records both, and this flow's error path persists the groups
+    // already (#8975).
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      stoppedChannels: [
+        { workspaceCwd: WORKSPACE, names: ['bot'] },
+        { workspaceCwd: '/ws/other', names: ['aux'] },
+      ],
+    });
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(WORKSPACE),
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath('/ws/other'),
+    );
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['bot'],
+      'stopped',
+    );
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['aux'],
+      'stopped',
+    );
+    // The group writes replace the single-name write, and every group
+    // persisted, so the happy-path shape stays unchanged.
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('statePersisted');
+  });
+
+  it('reports statePersisted false when a success-path group write fails (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    vi.mocked(manager.setChannelEnabled).mockResolvedValueOnce({
+      changed: true,
+      stoppedChannels: [
+        { workspaceCwd: WORKSPACE, names: ['bot'] },
+        { workspaceCwd: '/ws/other', names: ['aux'] },
+      ],
+    });
+    mockChannelStateStoreTrySetMany.mockReturnValueOnce(false);
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    // The second group must still be attempted before reporting the loss.
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
+    expect(result.statePersisted).toBe(false);
+  });
+
   it('does not record state when the stop itself fails (#8975)', async () => {
     const { service, manager } = setup({ committedNames: ['bot'] });
     manager.setChannelEnabled.mockRejectedValueOnce(new Error('stop failed'));
@@ -722,6 +783,120 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
+  it('persists every carried group when a failed stop spans workspaces (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Multi-workspace daemon: stopping the last committed channel tears
+    // down every group and the lease release fails; the error carries one
+    // group per workspace. A first-group-only regression leaves the other
+    // workspaces' torn-down channels unrecorded, so they resurrect on the
+    // next `--channel all` start (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        stoppedChannels: [
+          { workspaceCwd: WORKSPACE, names: ['bot'] },
+          { workspaceCwd: '/ws/other', names: ['aux'] },
+        ],
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+    });
+
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(WORKSPACE),
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath('/ws/other'),
+    );
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['bot'],
+      'stopped',
+    );
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['aux'],
+      'stopped',
+    );
+  });
+
+  it('persists carried groups under their captured canonical workspace form (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // The manager captures stoppedChannels in canonical form (see
+    // stoppedChannelsByWorkspace); the service must persist under exactly
+    // that form. Re-deriving from the service's raw workspace here would
+    // hash a different path than the daemon worker's canonical restore
+    // read, so the record is missed and the channel resurrects on the
+    // next `--channel all` start. The expected path is computed from the
+    // literal carried value, not through any mock (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        stoppedChannels: [
+          { workspaceCwd: `/canonical${WORKSPACE}`, names: ['bot'] },
+        ],
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+    });
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(`/canonical${WORKSPACE}`),
+    );
+  });
+
+  it('marks the rethrown error when carried-group persistence also fails (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Under the same disk condition that failed the lease release, the
+    // state write can also fail: the boolean must be aggregated like the
+    // DELETE route's recordChannelsStopped and ride the rethrown error,
+    // so the management route's 500 body can carry the loss — the client
+    // has no retry handle once the group is cleared (#8975). Two groups,
+    // FIRST write fails: a last-group-overwrites or early-return
+    // regression in the aggregation must not report the stop as fully
+    // persisted, and the second group must still be attempted.
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        stoppedChannels: [
+          { workspaceCwd: WORKSPACE, names: ['bot'] },
+          { workspaceCwd: '/ws/other', names: ['aux'] },
+        ],
+      }),
+    );
+    mockChannelStateStoreTrySetMany.mockReturnValueOnce(false);
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+      statePersisted: false,
+    });
+
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledTimes(2);
+    expect(mockChannelStateStoreTrySetMany).toHaveBeenCalledWith(
+      ['aux'],
+      'stopped',
+    );
+  });
+
+  it('keeps the rethrown error unmarked when every carried group persisted (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        stoppedChannels: [{ workspaceCwd: WORKSPACE, names: ['bot'] }],
+      }),
+    );
+
+    // toMatchObject cannot pin absence; assert on the rejection directly.
+    // The flag field exists on the error class but is only SET on loss,
+    // so the fully-persisted shape is undefined, never false (#8975).
+    const error = await service.stop('bot').catch((thrown) => thrown);
+    expect(error).toMatchObject({ code: 'channel_worker_stop_failed' });
+    expect(
+      (error as { statePersisted?: boolean }).statePersisted,
+    ).toBeUndefined();
+  });
+
   it('persists the stop when a failed disable leaves the channel confirmed dead (#8975)', async () => {
     const { service, manager } = setup({ committedNames: ['bot'] });
     // Per-channel disable routes through applySelection: the reconcile
@@ -745,6 +920,38 @@ describe('createChannelManagementService', () => {
     );
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
     expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
+  it('persists the confirmed-dead stop under the canonical workspace form (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+    // Diverging-canonical twin of the success-path test: the expected
+    // path is computed from the literal canonical value — replacing
+    // canonicalForGuard(opts.workspaceCwd) with the raw path only in the
+    // confirmed-dead branch would hash the raw form and turn this red,
+    // while the daemon worker's restore read stays canonical (#8975).
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === WORKSPACE ? `/canonical${WORKSPACE}` : path.resolve(p),
+    );
+
+    try {
+      await expect(service.stop('bot')).rejects.toMatchObject({
+        code: 'channel_worker_start_failed',
+      });
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(`/canonical${WORKSPACE}`),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
   it('does not persist the stop when the failed disable rolled back (#8975)', async () => {

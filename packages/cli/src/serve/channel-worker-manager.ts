@@ -87,6 +87,15 @@ export class ChannelWorkerControlError extends Error {
     workspaceCwd: string;
     names: string[];
   }>;
+  /**
+   * Set by callers that persist `stoppedChannels` best-effort after
+   * catching this error: `false` when at least one group's state write
+   * also failed, so the HTTP layer can carry the loss on the error body —
+   * the client has no retry handle once the group is cleared (#8975).
+   * Assigned post-construction on purpose: the manager throws before any
+   * persistence is attempted.
+   */
+  statePersisted?: boolean;
 
   constructor(
     code: ChannelWorkerControlError['code'],

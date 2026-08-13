@@ -368,8 +368,15 @@ export function registerWorkspaceChannelControlRoutes(
         try {
           const result = await deps.stopChannelWorker!();
           const statePersisted = recordChannelsStopped(result.stoppedChannels);
+          // Strip the internal manager→route persistence plumbing before
+          // responding: `stoppedChannels` (per-workspace tear-down
+          // grouping) is not part of the documented response shape, and a
+          // raw API client must not start depending on it — the PUT route
+          // establishes the same stripping convention for `created`
+          // (#8975).
+          const { stoppedChannels: _stoppedChannels, ...response } = result;
           res.status(200).json({
-            ...result,
+            ...response,
             // Only on failure: the happy-path response shape stays
             // unchanged, but an API client must be able to tell that the
             // stop record did not persist and the stop is not durable

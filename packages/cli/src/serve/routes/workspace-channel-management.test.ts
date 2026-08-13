@@ -474,6 +474,46 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('channel_worker_starting');
   });
 
+  it('carries statePersisted on the failed stop body when the record was lost (#8975)', async () => {
+    const { app, primaryService } = mount();
+    // A per-channel stop that already tore down workers before failing:
+    // the service persists the carried set best-effort and marks the
+    // rethrown error when that write also fails. The client has no retry
+    // handle (the group is cleared), so the 500 body must carry the loss
+    // — mirroring the DELETE route's statePersisted field (#8975).
+    vi.mocked(primaryService.stop).mockRejectedValueOnce(
+      Object.assign(new Error('Stop failed after tear-down.'), {
+        code: 'channel_worker_stop_failed',
+        statePersisted: false,
+      }),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_worker_stop_failed');
+    expect(response.body.statePersisted).toBe(false);
+  });
+
+  it('keeps the failed stop body shape when the record persisted (#8975)', async () => {
+    const { app, primaryService } = mount();
+    vi.mocked(primaryService.stop).mockRejectedValueOnce(
+      Object.assign(new Error('Stop failed after tear-down.'), {
+        code: 'channel_worker_stop_failed',
+      }),
+    );
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_worker_stop_failed');
+    expect(response.body).not.toHaveProperty('statePersisted');
+  });
+
   it('rejects requests with an invalid client ID', async () => {
     const { app, primaryService } = mount();
     const invalidClient = (test: request.Test) =>

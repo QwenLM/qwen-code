@@ -126,6 +126,13 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
+    // A response WITHOUT statePersisted (e.g. a long-running pre-#8975
+    // daemon) must not print the durability warning: only an explicit
+    // `false` means the record was lost.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('reports when daemon-managed channels are already stopped', async () => {
@@ -138,6 +145,7 @@ describe('stopCommand', () => {
       'Daemon-managed channels are already stopped.',
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('warns when the daemon stop record failed to persist (#8975)', async () => {
@@ -158,6 +166,45 @@ describe('stopCommand', () => {
       'Daemon-managed channels stopped.',
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('warns when a failed daemon stop also lost the stopped record (#8975)', async () => {
+    // The DELETE route reports a failed stop whose torn-down record ALSO
+    // failed to persist via statePersisted: false on the DaemonHttpError
+    // body. The CLI must surface the loss before exiting non-zero, or the
+    // stopped channels resurrect on the next `--channel all` with no
+    // trace (#8975).
+    mockStopChannelWorker.mockRejectedValueOnce(
+      Object.assign(new Error('stop failed'), {
+        status: 500,
+        body: { error: 'Stop failed', statePersisted: false },
+      }),
+    );
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop({ 'daemon-url': 'http://daemon:9' });
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('stop failed'),
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('keeps a plain failed daemon stop quiet about persistence (#8975)', async () => {
+    // No statePersisted on the error body (ordinary stop failure, or a
+    // pre-#8975 daemon): the durability warning would be a false alarm.
+    mockStopChannelWorker.mockRejectedValueOnce(new Error('stop failed'));
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop({ 'daemon-url': 'http://daemon:9' });
+
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
   });
@@ -195,6 +242,15 @@ describe('stopCommand', () => {
     );
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
+    // The record persisted, so the exit message must be the durable-stop
+    // guidance (the only user-visible way back out of the stopped state),
+    // NOT the durability warning (#8975).
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
   });
 
   it('persists the stopped record before signalling the service (#8975)', async () => {
@@ -329,6 +385,56 @@ describe('stopCommand', () => {
     await invokeStop();
 
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+  });
+
+  it('does not record a crashed zero-channel service as stopped (#8975)', async () => {
+    // A zero-channel standalone service is a legitimate state this PR
+    // introduces (serveWithoutChannels writes a `channels: []` pidfile);
+    // when that process dies, stop must not claim it recorded stops for a
+    // service that had no channels (#8975).
+    mockPeekServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: [],
+      workspaceCwd: '/workspace/a',
+    });
+    mockReadServiceInfo.mockReturnValue(null);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'No channel service is running.',
+    );
+  });
+
+  it('falls back to the legacy global file for crashed older pidfiles (#8975)', async () => {
+    // Crash-path twin of the live-path legacy test: pidfiles from older
+    // releases carry no workspaceCwd, so the recorded stops must land in
+    // the legacy global file, where the next start's adoption finds them.
+    mockPeekServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    mockReadServiceInfo.mockReturnValue(null);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(undefined);
+    // And the store is constructed with the path the helper returns — a
+    // split here writes the stop to a different file than start reads.
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'stopped',
+    );
   });
 
   it('falls back to the legacy global state file for older pidfiles (#8975)', async () => {

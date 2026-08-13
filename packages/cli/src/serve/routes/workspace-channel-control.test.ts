@@ -135,6 +135,11 @@ describe('DELETE /workspace/channel', () => {
     // The record persisted, so the happy-path response shape stays
     // unchanged (the flag only appears on failure) (#8975).
     expect(response.body).not.toHaveProperty('statePersisted');
+    // The internal manager→route persistence plumbing must not leak into
+    // the HTTP body: the SDK types this response without it, and a raw
+    // API client must not start depending on an undocumented field
+    // (#8975).
+    expect(response.body).not.toHaveProperty('stoppedChannels');
   });
 
   it('records stops per workspace when the manager reports multiple workspaces (#8975)', async () => {
@@ -166,6 +171,56 @@ describe('DELETE /workspace/channel', () => {
     expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
       ['telegram'],
       'stopped',
+    );
+    expect(mockChannelStateStoreInstances[1]!.setMany).toHaveBeenCalledWith(
+      ['feishu'],
+      'stopped',
+    );
+  });
+
+  it('persists remaining workspaces and reports the loss on partial persistence failure (#8975)', async () => {
+    const { app } = setup({
+      stop: vi.fn(async () => ({
+        changed: true,
+        state: controlState(),
+        stoppedChannels: [
+          { workspaceCwd: '/workspace/a', names: ['telegram'] },
+          { workspaceCwd: '/workspace/b', names: ['feishu'] },
+        ],
+      })),
+    });
+    // FIRST workspace write fails (disk full / read-only ~/.qwen), second
+    // succeeds: the accumulation must still report the stop as NOT fully
+    // persisted and keep writing the remaining groups — a
+    // last-group-overwrites or early-return-false regression would report
+    // full persistence, omit statePersisted:false, and silently resurrect
+    // the first workspace's channels on `--channel all` (#8975).
+    mockChannelStateStore.mockImplementationOnce((path: string) => {
+      const instance: MockStateStoreInstance = {
+        path,
+        setMany: vi.fn(() => {
+          throw new Error('disk full');
+        }),
+        trySetMany: (names: string[], state: 'active' | 'stopped') => {
+          try {
+            instance.setMany(names, state);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+      mockChannelStateStoreInstances.push(instance);
+      return instance;
+    });
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(200);
+    expect(response.body.statePersisted).toBe(false);
+    expect(mockChannelStateStoreInstances).toHaveLength(2);
+    expect(mockChannelStateStoreInstances[1]!.path).toBe(
+      daemonChannelRuntimeStatePath('/workspace/b'),
     );
     expect(mockChannelStateStoreInstances[1]!.setMany).toHaveBeenCalledWith(
       ['feishu'],

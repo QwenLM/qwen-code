@@ -233,6 +233,15 @@ function errorCode(error: unknown): string | undefined {
   }
 }
 
+function statePersistedFalse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  try {
+    return Reflect.get(error, 'statePersisted') === false;
+  } catch {
+    return false;
+  }
+}
+
 const ERROR_STATUS = new Map<string, number>([
   ['invalid_channel_instance_name', 400],
   ['channel_settings_invalid_name', 400],
@@ -265,6 +274,12 @@ function sendManagementError(res: Response, error: unknown): void {
     res.status(status).json({
       error: sanitizeLogText(redactLogCredentials(raw), MAX_ERROR_LENGTH),
       code,
+      // A failed per-channel stop can still have torn down channels, and
+      // the service marks the error when that record ALSO failed to
+      // persist: the client has no retry handle, so the loss must ride
+      // the error body — mirroring the DELETE route's statePersisted
+      // field (#8975).
+      ...(statePersistedFalse(error) ? { statePersisted: false } : {}),
     });
     return;
   }

@@ -158,7 +158,16 @@ export interface ChannelManagementWorkerManager {
   setChannelEnabled(
     owner: ChannelWorkerRequiredOwner,
     enabled: boolean,
-  ): Promise<{ changed: boolean }>;
+  ): Promise<{
+    changed: boolean;
+    /**
+     * Present when the disable routed through the whole-selection stop
+     * (disabling the LAST committed channel): the per-workspace tear-down
+     * set captured at stop time. Callers persisting `stopped` state
+     * (#8975) must record from here instead of the single name.
+     */
+    stoppedChannels?: Array<{ workspaceCwd: string; names: string[] }>;
+  }>;
   reloadWorkspace(
     workspaceCwd: string,
     name: string,
@@ -191,6 +200,34 @@ function diagnostic(error: unknown): string {
 
 function usesEnvironment(value: unknown): boolean {
   return typeof value === 'string' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+}
+
+/**
+ * Best-effort per-group persistence of the channels a stop tore down,
+ * mirroring the whole-selection route's recordChannelsStopped: returns
+ * whether EVERY group was persisted, so the caller can surface the loss —
+ * under the same disk condition that failed the stop (ENOSPC), the state
+ * write can also fail, and a swallowed boolean resurrects the torn-down
+ * channels on the next `--channel all` start (#8975). The groups'
+ * workspaceCwd is already canonical (captured inside the manager lane).
+ */
+function persistStoppedGroups(
+  groups: ReadonlyArray<{
+    workspaceCwd: string;
+    names: readonly string[];
+  }>,
+): boolean {
+  let persisted = true;
+  for (const group of groups) {
+    if (
+      !new ChannelStateStore(
+        daemonChannelRuntimeStatePath(group.workspaceCwd),
+      ).trySetMany(group.names, 'stopped')
+    ) {
+      persisted = false;
+    }
+  }
+  return persisted;
 }
 
 export function createChannelManagementService(
@@ -566,7 +603,9 @@ export function createChannelManagementService(
         );
       }
       assertWorkspaceConfig(persisted.channels[name]!);
-      let result: { changed: boolean };
+      let result: Awaited<
+        ReturnType<ChannelManagementWorkerManager['setChannelEnabled']>
+      >;
       try {
         result = await opts.manager.setChannelEnabled(
           { name, workspaceCwd: opts.workspaceCwd },
@@ -583,10 +622,16 @@ export function createChannelManagementService(
           error instanceof ChannelWorkerControlError &&
           error.stoppedChannels
         ) {
-          for (const group of error.stoppedChannels) {
-            new ChannelStateStore(
-              daemonChannelRuntimeStatePath(group.workspaceCwd),
-            ).trySetMany(group.names, 'stopped');
+          // Aggregate the persistence boolean like the DELETE route's
+          // recordChannelsStopped and surface the loss on the rethrown
+          // error: under the same disk condition that failed the lease
+          // release, the state write can also fail, and the client gets a
+          // 500 with no retry handle (the group is already cleared) — the
+          // management route's error body must carry the loss, or the
+          // torn-down channels silently resurrect on `--channel all`
+          // (#8975).
+          if (!persistStoppedGroups(error.stoppedChannels)) {
+            error.statePersisted = false;
           }
         } else if (
           error instanceof ChannelWorkerControlError &&
@@ -623,10 +668,18 @@ export function createChannelManagementService(
       // An explicit stop must persist, so a later `--channel all` restart
       // does not bring this channel back (#8975). The stop already succeeded
       // at this point, so a degraded workspace path must not escape as a raw
-      // fs error and skip the persistence — use the throw-safe form.
-      const statePersisted = new ChannelStateStore(
-        daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
-      ).trySet(name, 'stopped');
+      // fs error and skip the persistence — use the throw-safe form. When
+      // the disable routed through the whole-selection stop (disabling the
+      // LAST committed channel), the result carries the per-workspace
+      // tear-down set: persist it group-by-group like the catch branch and
+      // the DELETE route do — persisting only this one name would leave the
+      // other torn-down workspaces unrecorded, and they would resurrect on
+      // the next `--channel all` start (#8975).
+      const statePersisted = result.stoppedChannels
+        ? persistStoppedGroups(result.stoppedChannels)
+        : new ChannelStateStore(
+            daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
+          ).trySet(name, 'stopped');
       diagnostics.delete(name);
       return {
         ...(await resultFor(name, persisted)),
