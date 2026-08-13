@@ -358,6 +358,13 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
+  // The brief's codename line names the agent wherever it sits: launchers
+  // prepend context lines, and a first-line-only read has labelled twelve
+  // finders with one shared PR-summary sentence — every disclosure then
+  // rendered the same truncated PR quote instead of a name a reader can act
+  // on. (The pattern is the brief opener `agent-prompt` writes.)
+  const codename = /You are review agent `([^`\n]+)`/.exec(rec.launchPrompt);
+  if (codename) return `agent ${codename[1]}`;
   const first = rec.launchPrompt.split('\n')[0]?.trim() ?? '';
   if (first) return first.replace(/\s+/g, ' ');
   return rec.agentName || rec.agentId;

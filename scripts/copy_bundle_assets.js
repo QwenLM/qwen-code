@@ -17,7 +17,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import {
   dirname,
   join,
@@ -402,6 +409,22 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   // cannot tell and neither can its reader. Compared, not trusted: the check
   // reads this and re-derives the digest from the tree.
   stampReviewSourceDigest(root, distDir);
+
+  // Make dist/cli.js directly executable: shellContextEnv blanks a
+  // QWEN_CODE_CLI whose entry a POSIX shell cannot exec (no shebang, or no
+  // execute bit), and the `"${QWEN_CODE_CLI:-qwen}"` fallback then silently
+  // runs whatever `qwen` the PATH resolves — a different install for every
+  // `review` subcommand of a session launched from this bundle. Measured on
+  // three live `review run`s: every agent-issued subcommand ran the machine's
+  // global install instead of the freshly bundled tree.
+  const cliEntry = join(distDir, 'cli.js');
+  if (existsSync(cliEntry)) {
+    const source = readFileSync(cliEntry, 'utf8');
+    if (!source.startsWith('#!')) {
+      writeFileSync(cliEntry, `#!/usr/bin/env node\n${source}`);
+    }
+    fs.chmodSync(cliEntry, 0o755);
+  }
 
   console.log('\n✅ All bundle assets copied to dist/');
 }

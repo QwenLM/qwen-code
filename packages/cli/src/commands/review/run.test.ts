@@ -50,6 +50,9 @@ const {
   exitCodeFor,
   killProcessGroup,
   runCommand,
+  prNumberFromTarget,
+  composedPatternFor,
+  reportPatternFor,
 } = await import('./run.js');
 const { REVIEW_TMP_DIR, REVIEWS_DIR } = await import('./lib/paths.js');
 // The real cleanup, not a mock: the regression test below must prove the parent
@@ -139,6 +142,47 @@ describe('newestArtifactSince', () => {
     expect(
       newestArtifactSince(join(dir, 'absent'), /composed/, Date.now()),
     ).toBeNull();
+  });
+});
+
+describe('target-pinned artifact patterns', () => {
+  it('extracts the PR number from a bare number and a PR URL', () => {
+    expect(prNumberFromTarget('9014')).toBe('9014');
+    expect(prNumberFromTarget('https://github.com/o/r/pull/9014')).toBe('9014');
+    expect(prNumberFromTarget('https://github.com/o/r/pull/9014/')).toBe(
+      '9014',
+    );
+    expect(prNumberFromTarget('src/foo.ts')).toBeNull();
+    expect(prNumberFromTarget(undefined)).toBeNull();
+  });
+
+  it('pins a PR run to its own composed artifact', () => {
+    // Two concurrent `review run`s share `.qwen/tmp`; the generic
+    // newest-composed scan republished the OTHER run's verdict on two of
+    // three live parallel reviews.
+    const p = composedPatternFor('9014');
+    expect(p.test('qwen-review-pr-9014-composed.json')).toBe(true);
+    expect(p.test('qwen-review-pr-9013-composed.json')).toBe(false);
+    expect(p.test('qwen-review-local-composed.json')).toBe(false);
+  });
+
+  it('keeps a local/file run away from PR-scoped artifacts', () => {
+    const p = composedPatternFor(null);
+    expect(p.test('qwen-review-local-composed.json')).toBe(true);
+    expect(p.test('qwen-review-pr-9013-composed.json')).toBe(false);
+  });
+
+  it('pins the saved report the same way', () => {
+    expect(reportPatternFor('9014').test('2026-08-13-071500-pr-9014.md')).toBe(
+      true,
+    );
+    expect(reportPatternFor('9014').test('2026-08-13-162336-pr-9013.md')).toBe(
+      false,
+    );
+    expect(reportPatternFor(null).test('review.md')).toBe(true);
+    expect(reportPatternFor(null).test('2026-08-13-1622-pr-9045.md')).toBe(
+      false,
+    );
   });
 });
 
@@ -351,6 +395,83 @@ describe('review run (handler)', () => {
     expect(result.event).toBe('APPROVE');
     expect(result.composedPath).toContain('qwen-review-local-composed.json');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('ignores a concurrent run’s other-PR verdict and captures its own', async () => {
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      // A NEIGHBOUR review composes first — the shape that made two of three
+      // live parallel runs republish the wrong PR's verdict.
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-pr-9013-composed.json'),
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler({ target: '9014' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    // This run's own verdict lands later.
+    writeFileSync(
+      join(REVIEW_TMP_DIR, 'qwen-review-pr-9014-composed.json'),
+      JSON.stringify({
+        event: 'COMMENT',
+        verdictLine: 'Verdict: Comment',
+      }),
+      'utf8',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
+    expect(result.composedPath).toContain('qwen-review-pr-9014-composed.json');
+  });
+
+  it('republishes the newest recompose, not the first snapshot', async () => {
+    // A coverage re-check can recompose the verdict minutes after the first
+    // write (measured live); the first snapshot would republish a superseded
+    // verdict.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+      writeFileSync(
+        path,
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      utimesSync(path, Date.now() / 1000, Date.now() / 1000);
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler({ target: '7' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        event: 'REQUEST_CHANGES',
+        verdictLine: 'Verdict: Request changes',
+      }),
+      'utf8',
+    );
+    // A strictly newer mtime, independent of filesystem clock granularity.
+    utimesSync(path, Date.now() / 1000 + 60, Date.now() / 1000 + 60);
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.event).toBe('REQUEST_CHANGES');
   });
 
   it('closes the child stdin so piped input cannot defeat slash detection', async () => {

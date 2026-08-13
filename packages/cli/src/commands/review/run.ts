@@ -80,8 +80,39 @@ export interface RunReviewResult {
   durationMs: number;
 }
 
-/** The composed verdict `compose-review` writes and Step 9 cleanup sweeps. */
-const COMPOSED_PATTERN = /^qwen-review-.*composed\.json$/;
+/**
+ * The PR number a `review run` target names, or null for local/file targets.
+ * Used to pin the artifact scan to THIS run's files: two concurrent
+ * `review run`s in one repo share `.qwen/tmp`, and a generic newest-composed
+ * scan has captured the OTHER run's verdict the moment it appeared (measured:
+ * two of three parallel PR reviews republished a neighbour's `composedPath`).
+ */
+export function prNumberFromTarget(target?: string): string | null {
+  if (!target) return null;
+  if (/^\d+$/.test(target)) return target;
+  const m = /\/pull\/(\d+)\/?(?:[?#]|$)/.exec(target);
+  return m ? m[1] : null;
+}
+
+/**
+ * The composed-verdict filenames this run can claim. A PR target owns exactly
+ * its own `qwen-review-pr-<n>-…composed.json`; a local/file target owns any
+ * composed artifact EXCEPT a PR-scoped one, so a concurrent PR review cannot
+ * be mistaken for the local run (the reverse direction is already covered by
+ * the PR pin).
+ */
+export function composedPatternFor(prNumber: string | null): RegExp {
+  return prNumber
+    ? new RegExp(`^qwen-review-pr-${prNumber}-.*composed\\.json$`)
+    : /^qwen-review-(?!pr-\d+-).*composed\.json$/;
+}
+
+/** Same pinning for the saved report under `.qwen/reviews/`. */
+export function reportPatternFor(prNumber: string | null): RegExp {
+  return prNumber
+    ? new RegExp(`-pr-${prNumber}\\.md$`)
+    : /^(?!.*-pr-\d+\.md$).*\.md$/;
+}
 
 // How often to poll for the composed verdict while the child runs. The verdict
 // sits on disk from Step 6 (compose-review) until Step 9 (cleanup) — a window
@@ -315,23 +346,31 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // every `.qwen/tmp/qwen-review-<target>-*` file — including it — before the
   // child exits. Reading it only AFTER `close` therefore sees nothing and
   // reports a review that completed as one that failed. Snapshot it the moment
-  // compose-review writes it: the first verdict newer than the run start is
-  // this run's, and caching it in memory survives the sweep.
+  // compose-review writes it, and keep re-reading while the child runs: a
+  // coverage re-check can legitimately recompose the verdict (measured: a live
+  // run rewrote its composed artifact twelve minutes after the first write),
+  // and the FIRST snapshot would republish the superseded one.
+  const prNumber = prNumberFromTarget(args.target);
+  const composedPattern = composedPatternFor(prNumber);
   let capturedPath: string | null = null;
   let capturedVerdict: ComposedVerdict | null = null;
+  let capturedMtime = -Infinity;
   const captureTimer = setInterval(() => {
-    if (capturedVerdict !== null) return;
-    const path = newestArtifactSince(
-      REVIEW_TMP_DIR,
-      COMPOSED_PATTERN,
-      cutoffMs,
-    );
+    const path = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
     if (path === null) return;
+    let mtime: number;
+    try {
+      mtime = statSync(path).mtimeMs;
+    } catch {
+      return; // swept between scan and stat; keep the captured verdict
+    }
+    if (mtime <= capturedMtime) return;
     // A half-written file fails to parse; the next tick retries it.
     const verdict = readComposed(path);
     if (verdict !== null) {
       capturedPath = path;
       capturedVerdict = verdict;
+      capturedMtime = mtime;
     }
   }, COMPOSED_POLL_MS);
 
@@ -405,12 +444,16 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   if (composed === null) {
     composedPath = newestArtifactSince(
       REVIEW_TMP_DIR,
-      COMPOSED_PATTERN,
+      composedPattern,
       cutoffMs,
     );
     composed = composedPath ? readComposed(composedPath) : null;
   }
-  const reportPath = newestArtifactSince(REVIEWS_DIR, /\.md$/, cutoffMs);
+  const reportPath = newestArtifactSince(
+    REVIEWS_DIR,
+    reportPatternFor(prNumber),
+    cutoffMs,
+  );
 
   const completed = composed !== null;
   const result: RunReviewResult = {
