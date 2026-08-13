@@ -25,6 +25,7 @@ import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
+  GoalPersistenceUnavailableError,
   Storage,
   promptIdContext,
 } from '@qwen-code/qwen-code-core';
@@ -155,6 +156,16 @@ describe('Session review-worktree lease sweep', () => {
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      // The Session constructor and Session.prompt both reach for the
+      // canonical Goal runtime. A real Config throws this exact error when
+      // Goal persistence is off, and both call sites are written to fall
+      // through on it — which is the shape these lease-sweep tests want.
+      getGoalRuntime: vi.fn(() => {
+        throw new GoalPersistenceUnavailableError();
+      }),
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new GoalPersistenceUnavailableError()),
     } as unknown as Config;
 
     mockClient = {

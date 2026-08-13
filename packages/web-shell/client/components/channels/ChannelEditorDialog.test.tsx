@@ -34,6 +34,22 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
       required: true,
     },
     {
+      key: 'sessionScope',
+      // Descriptor labels intentionally differ from the i18n values so a
+      // missing i18n key surfaces the untranslated fallback instead of
+      // passing the copy assertions below.
+      label: 'Session scope (descriptor)',
+      kind: 'enum',
+      required: true,
+      default: 'user',
+      options: [
+        { value: 'user', label: 'Descriptor per user' },
+        { value: 'thread', label: 'Descriptor per thread' },
+        { value: 'chat_thread', label: 'Descriptor per chat' },
+        { value: 'single', label: 'Descriptor shared' },
+      ],
+    },
+    {
       key: 'interactiveCards',
       label: 'Interactive Cards',
       kind: 'object',
@@ -217,6 +233,14 @@ describe('ChannelEditorDialog', () => {
     expect(clear).toBeDefined();
   });
 
+  it('shows the effective session scope in its own section', async () => {
+    await renderDialog({ instance: INSTANCE });
+
+    expect(document.body.textContent).toContain('Session');
+    expect(document.body.textContent).toContain('Session scope');
+    expect(document.body.textContent).toContain('Per user and chat');
+  });
+
   it('submits a new instance with typed fields and the current revision', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ onSave });
@@ -246,6 +270,7 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'dingtalk',
         clientId: 'ding-client-id',
+        sessionScope: 'user',
         senderPolicy: 'pairing',
       },
       secrets: {
@@ -390,6 +415,7 @@ describe('ChannelEditorDialog', () => {
         type: 'dingtalk',
         clientId: 'stored-id',
         senderPolicy: 'open',
+        sessionScope: 'user',
         interactiveCards: { enabled: true, statusCard: { enabled: true } },
       },
       secrets: { clientSecret: { operation: 'preserve' } },

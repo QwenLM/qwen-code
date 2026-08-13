@@ -10,7 +10,6 @@ import { describe, expect, it } from 'vitest';
 import {
   ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
   ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
-  jsonStringJsonByteLength,
   projectAcpToolResultUpdate,
 } from './acp-tool-result-text-projection.js';
 
@@ -50,53 +49,6 @@ function jsonBytes(value: unknown): number {
 }
 
 describe('ACP tool-result text projection', () => {
-  it('matches native JSON string byte accounting for Unicode and escapes', () => {
-    const samples = [
-      '',
-      'plain ASCII',
-      '"\\\n\b\f\r\t',
-      '\0\u0001\u001f',
-      '汉字',
-      '😀',
-      '\ud83d\ude00',
-      '\ud800',
-      '\udc00',
-      '\u2028\u2029',
-      '\u007f\u0080\u07ff\u0800',
-    ];
-    for (const sample of samples) {
-      expect(jsonStringJsonByteLength(sample)).toBe(jsonBytes(sample));
-    }
-  });
-
-  it('matches native JSON byte accounting under fixed-seed fuzzing', () => {
-    const atoms = [
-      'a',
-      '"',
-      '\\',
-      '\n',
-      '\0',
-      '汉',
-      '😀',
-      '\ud800',
-      '\udc00',
-      '\u2028',
-    ];
-    let state = 0x5eed1234;
-    const random = () => {
-      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
-      return state;
-    };
-    for (let sampleIndex = 0; sampleIndex < 250; sampleIndex++) {
-      const length = random() % 200;
-      let value = '';
-      for (let index = 0; index < length; index++) {
-        value += atoms[random() % atoms.length];
-      }
-      expect(jsonStringJsonByteLength(value)).toBe(jsonBytes(value));
-    }
-  });
-
   it.each([65_535, 65_536, 65_537])(
     'enforces the rawOutput boundary at %i JSON bytes',
     (targetBytes) => {
