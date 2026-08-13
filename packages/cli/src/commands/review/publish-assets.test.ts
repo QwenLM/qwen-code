@@ -48,8 +48,9 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 // The handler resolves `review.comment` through `operatorReviewSettings` —
 // pin the view it reads so the wiring leg below does not depend on the
-// running developer's settings.json. The refusal assertions call
-// runPublishAssets directly and never touch this mock.
+// running developer's settings.json. The direct refusal assertions call
+// runPublishAssets and never touch this mock; the handler-path tests below
+// do.
 const reviewSettingsMock = vi.hoisted(() =>
   vi.fn((): Record<string, unknown> => ({})),
 );
@@ -61,9 +62,10 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
     // The production call carries `{ skipWorkspaceSettings: true }` — the
     // authorisation default resolves from operator scopes only. A caller that
     // forgets the flag reads the workspace-polluted view instead; the guards
-    // that redden are submit.test.ts's handler-level refusal test and
-    // review-settings.test.ts's direct assertion. This file's own refusals
-    // bypass the handler, so only the wiring leg below exercises the mock.
+    // that redden are submit.test.ts's handler-level refusal test,
+    // review-settings.test.ts's direct assertion, and this file's
+    // handler-level refusal test. The direct runPublishAssets refusals
+    // bypass the handler.
     loadSettings: vi.fn((...callArgs: unknown[]) => {
       const opts = callArgs[1] as
         | { skipWorkspaceSettings?: boolean }

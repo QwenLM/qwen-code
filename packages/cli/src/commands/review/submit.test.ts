@@ -263,6 +263,19 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     const byFlag = reviewWriteAuthorization(base);
     expect(byFlag.ok).toBe(false);
     expect(byFlag.why).toContain('cannot show that `--comment` was requested');
+
+    // Both production callers pass a strict boolean (destructured default /
+    // the resolved setting), so pin the flag branch with the explicit false
+    // they actually send — a presence-check mutation of the ternary must not
+    // survive.
+    const byFlagExplicit = reviewWriteAuthorization({
+      ...base,
+      defaultComment: false,
+    });
+    expect(byFlagExplicit.ok).toBe(false);
+    expect(byFlagExplicit.why).toContain(
+      'cannot show that `--comment` was requested',
+    );
   });
 });
 
