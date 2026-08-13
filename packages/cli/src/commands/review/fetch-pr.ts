@@ -64,9 +64,25 @@ import {
 } from './lib/report.js';
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
-import { hasReviewDeadline } from './lib/deadline.js';
-import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import {
+  appendRunSession,
+  readResumeMarker,
+  recordResume,
+  recordRestart,
+  RESUME_MAX,
+} from './lib/run-ledger.js';
+import {
+  assessResume,
+  type PreviousReport,
+  type ResumeRefusal,
+} from './lib/resume.js';
+import {
+  hasReviewDeadline,
+  readBudgetStop,
+  clearBudgetStop,
+  clearRoundStamps,
+} from './lib/deadline.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -95,6 +111,15 @@ interface FetchPrArgs {
    * array and the recovery flow can produce one; `runFetchPr` normalizes.
    */
   since?: string | string[];
+  /**
+   * Continue the interrupted run at this plan path when its state still
+   * matches (worktree at `fetchedSha`, diff bytes unhashed-unchanged, live
+   * head unmoved): keep the worktree, do NOT rewrite the plan — its mtime is
+   * the run epoch every fence keys on — and re-announce the existing report.
+   * When the state does not match, fall through to a fresh fetch; the flag
+   * never fails a run that could start over.
+   */
+  resume?: boolean;
 }
 
 type FetchPrResult = PlanReport & {
@@ -584,6 +609,89 @@ function cleanStale(prNumber: string): void {
   }
 }
 
+/** sha256 of a file's raw bytes, or null when it cannot be read. */
+function sha256OfFile(path: string): string | null {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+type ResumeOutcome =
+  | { resumed: true }
+  | { resumed: false; reason: ResumeRefusal; priorFetchedSha: string | null };
+
+/**
+ * The `--resume` fast path: rule on the interrupted attempt's state and, when
+ * it holds, continue it — every probe is a fact this command gathers itself
+ * (git, gh, file hashes, the CLI-written marker), never the orchestrator's
+ * account. On a continuation the plan file is NOT touched: its mtime is the
+ * run epoch that keeps the first attempt's records, stamps and transcripts
+ * inside every reader's fence.
+ */
+function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
+  const { pr_number: prNumber, owner_repo: ownerRepo, out } = args;
+  let prev: PreviousReport | null = null;
+  try {
+    prev = JSON.parse(readFileSync(out, 'utf8')) as PreviousReport;
+  } catch {
+    prev = null;
+  }
+  // An unreachable forge reads as "unmoved": the worktree and diff hashes pin
+  // the content, and presubmit's headDrift re-checks before anything posts.
+  let liveHeadSha: string | null = null;
+  try {
+    const oid = (
+      JSON.parse(
+        gh('pr', 'view', prNumber, '--repo', ownerRepo, '--json', 'headRefOid'),
+      ) as { headRefOid?: unknown }
+    ).headRefOid;
+    liveHeadSha = typeof oid === 'string' && oid !== '' ? oid : null;
+  } catch {
+    liveHeadSha = null;
+  }
+  const marker = readResumeMarker(out);
+  const ruling = assessResume(prev, {
+    prNumber,
+    worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
+    diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
+    liveHeadSha,
+    resumeCount: marker.resumes.length,
+  });
+  if (!ruling.ok) {
+    return {
+      resumed: false,
+      reason: ruling.reason as ResumeRefusal,
+      priorFetchedSha:
+        prev !== null && typeof prev.fetchedSha === 'string'
+          ? prev.fetchedSha
+          : null,
+    };
+  }
+
+  // Budget hygiene: the continuation runs under a fresh deadline, so a
+  // time-budget stop is the dead attempt's, not this run's — a round-cap
+  // stop is about rounds, not time, and stands. The admission stamps span
+  // the death gap and would price a round at hours; without them the gate
+  // falls back to its conservative constant.
+  const stop = readBudgetStop(out);
+  if (stop !== null && stop.cause !== 'round-cap') clearBudgetStop(out);
+  clearRoundStamps(out);
+  appendRunSession(out);
+  recordResume(out);
+  const attempt = marker.resumes.length + 1;
+  writeStdoutLine(
+    JSON.stringify({ resumed: true, resumeAttempt: attempt, out }),
+  );
+  writeStderrLine(
+    `Resumed PR #${prNumber} review (resume ${attempt} of ${RESUME_MAX}): ` +
+      `worktree, plan and the interrupted attempt's agent evidence are reused; ` +
+      `the report at ${out} is unchanged.`,
+  );
+  return { resumed: true };
+}
+
 async function runFetchPr(args: FetchPrArgs): Promise<void> {
   const { pr_number: prNumber, owner_repo: ownerRepo, remote, out } = args;
 
@@ -603,6 +711,26 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     worktreePath: wt,
     branch: ref,
   });
+
+  // 0. A `--resume` rules first: a continuation must reach neither the
+  // cleanup below (the worktree is the state being resumed) nor the plan
+  // write (its mtime is the run epoch). A refused resume falls through to
+  // the fresh path and announces why; head movement is recorded AFTER the
+  // fresh plan lands, so the marker entry postdates the new epoch.
+  let resumeRefusal: ResumeRefusal | null = null;
+  let priorFetchedSha: string | null = null;
+  if (args.resume) {
+    const outcome = tryResume(args, wt);
+    if (outcome.resumed) return;
+    resumeRefusal = outcome.reason;
+    priorFetchedSha = outcome.priorFetchedSha;
+    writeStdoutLine(
+      JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
+    );
+    writeStderrLine(
+      `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.`,
+    );
+  }
 
   // 1. Clean any stale worktree / branch from an earlier run.
   cleanStale(prNumber);
@@ -1200,6 +1328,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // reads the ledger to find this attempt's transcripts. After the plan
   // write, so the entry sits inside the run-epoch fence it is read through.
   appendRunSession(out);
+  if (resumeRefusal === 'head-moved') {
+    // The once-per-review restart bound, now a fact on disk. Recorded after
+    // the plan write for the same fence reason as the session entry.
+    recordRestart(
+      out,
+      `head-moved ${priorFetchedSha?.slice(0, 7) ?? 'unknown'}->${fetchedSha.slice(0, 7)}`,
+    );
+  }
   writeStdoutLine(`Wrote fetch-pr report to ${out}`);
   if (diffPath) writeStdoutLine(`Wrote review diff to ${diffPath}`);
   // Surface diff stats to stderr so a human running the command interactively
@@ -1350,6 +1486,12 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', {
         type: 'string',

@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
 import { resolve } from 'node:path';
 import {
@@ -308,6 +309,14 @@ vi.mock('./lib/merge-base.js', () => ({
 // later --resume find no prior sessions and re-run everything.
 vi.mock('./lib/run-ledger.js', () => ({
   appendRunSession: vi.fn(),
+  readResumeMarker: vi.fn(() => ({
+    schemaVersion: 1,
+    resumes: [],
+    restarts: [],
+  })),
+  recordResume: vi.fn(),
+  recordRestart: vi.fn(),
+  RESUME_MAX: 2,
 }));
 vi.mock('./lib/diff-plan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/diff-plan.js')>();
@@ -3089,5 +3098,168 @@ describe('fetch-pr run-session ledger wiring', () => {
     const writeOrder =
       producerMocks.writeFileSync.mock.invocationCallOrder[writeIndex];
     expect(appendOrder).toBeGreaterThan(writeOrder);
+  });
+});
+
+describe('fetch-pr --resume', () => {
+  const OUT = '/tmp/fetch-report.json';
+  const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+
+  function prevReport(over: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      prNumber: '42',
+      fetchedSha: 'f00df00df00d',
+      diffSha256: createHash('sha256')
+        .update(Buffer.from(DIFF_BYTES))
+        .digest('hex'),
+      worktreePath: '.qwen/tmp/review-pr-42',
+      fetchedAt: '2026-08-13T00:00:00.000Z',
+      ...over,
+    });
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // The path-switched fs: the previous report and the diff exist; every
+    // other read (resume marker, session ledger) is ENOENT.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+        headRefOidOnly: undefined,
+      }),
+    );
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockReturnValue('f00df00df00d');
+  });
+
+  async function run(extraArgs: Record<string, unknown> = {}) {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: OUT,
+      maxChunkLines: 400,
+      resume: true,
+      ...extraArgs,
+    } as unknown as Parameters<typeof handler>[0]);
+  }
+
+  function reportWritten(): boolean {
+    return producerMocks.writeFileSync.mock.calls.some(
+      ([path]) => path === OUT,
+    );
+  }
+
+  async function stdoutJsonLines(): Promise<Array<Record<string, unknown>>> {
+    const { writeStdoutLine } = await import('../../utils/stdioHelpers.js');
+    return vi
+      .mocked(writeStdoutLine)
+      .mock.calls.map((c) => String(c[0]))
+      .filter((l) => l.startsWith('{'))
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  it('resumes without touching the report when every probe matches', async () => {
+    await run();
+    expect(reportWritten()).toBe(false);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: true, resumeAttempt: 1, out: OUT }]);
+    const { recordResume, appendRunSession } = await import(
+      './lib/run-ledger.js'
+    );
+    expect(vi.mocked(recordResume)).toHaveBeenCalledWith(OUT);
+    expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(OUT);
+  });
+
+  it('falls through to a fresh fetch when the head moved, and says so', async () => {
+    producerMocks.gh.mockImplementation((...args: string[]) => {
+      if (args.includes('headRefOid') && !args.includes('headRefName')) {
+        return JSON.stringify({ headRefOid: 'aaaa1111bbbb' });
+      }
+      return JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'aaaa1111bbbb',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'head-moved' }]);
+    // The once-per-review restart bound becomes a fact on disk here.
+    const { recordRestart } = await import('./lib/run-ledger.js');
+    expect(vi.mocked(recordRestart)).toHaveBeenCalledWith(
+      OUT,
+      expect.stringContaining('head-moved'),
+    );
+  });
+
+  it('falls through when the diff bytes changed — the content key', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from('tampered') as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'diff-hash-mismatch' },
+    ]);
+  });
+
+  it('falls through when there is no previous report at all', async () => {
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'no-report' }]);
+  });
+
+  it('without --resume the flag path never runs', async () => {
+    await run({ resume: false });
+    expect(reportWritten()).toBe(true);
+    expect(await stdoutJsonLines()).toEqual([]);
+  });
+
+  it('falls through when the worktree is not at the fetched SHA', async () => {
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockReturnValue('someothersha');
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'worktree-sha-mismatch' },
+    ]);
   });
 });
