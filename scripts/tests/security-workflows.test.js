@@ -58,6 +58,12 @@ describe('security workflows', () => {
     expect(workflow).toContain('pull_request:');
     expect(workflow).toContain('push:');
     expect(workflow).toContain(
+      "group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'",
+    );
+    expect(workflow).toContain(
+      'cancel-in-progress: "${{ github.event_name == \'pull_request\' }}"',
+    );
+    expect(workflow).toContain(
       'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
     );
     expect(workflow).toContain(
@@ -80,7 +86,10 @@ describe('security workflows', () => {
     expect(auditStep).toContain('[ -f "$lockfile" ] || continue');
     expect(auditStep).toContain('cd "$package_dir"');
     expect(auditStep).toContain(
-      'npm ci --ignore-scripts --no-audit --progress=false &&',
+      'npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&',
+    );
+    expect(auditStep).toContain(
+      'npm audit --omit=dev --audit-level=high --workspaces=false',
     );
     expect(trufflehogStep).toContain('continue-on-error: true');
     expect(trufflehogStep).toContain("version: '3.96.0'");
