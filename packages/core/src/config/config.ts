@@ -2344,6 +2344,8 @@ export class Config {
     this.truncateToolOutputThreshold =
       params.truncateToolOutputThreshold ??
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
+    // Preserve whether the raw setting was provided: Shell uses its own
+    // fallback when it is absent, so producers must not pass a defaulted value.
     this.truncateToolOutputThresholdExplicit =
       params.truncateToolOutputThreshold != null;
     this.truncateToolOutputLines =
