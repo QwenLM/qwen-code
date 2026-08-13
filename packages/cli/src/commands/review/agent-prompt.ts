@@ -144,6 +144,7 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
+  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
@@ -1330,7 +1331,20 @@ export function buildRoleBrief(
           `\`${wt}\`. Do not \`cd\` elsewhere and do not build the user's main checkout.`,
       );
     }
-    const base = report.mergeBaseSha;
+    // On a delta-scoped incremental round the probe's range must match the
+    // round's scope: test-efficacy recomputes its own diff as base..HEAD, and
+    // handed the merge base it would reverse hunks and delete mutants from
+    // commits an earlier round already reviewed — spending the probe budget
+    // out of scope and reporting survivors this round's diff never contains.
+    const inc = report.incremental as
+      | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
+      | undefined;
+    const base =
+      inc?.effective === true &&
+      inc.upToDate !== true &&
+      typeof inc.diffBase === 'string'
+        ? inc.diffBase
+        : report.mergeBaseSha;
     const pr = report.prNumber;
 
     // The tree build-test builds in. A PR review has a worktree; a **local** review

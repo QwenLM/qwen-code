@@ -198,6 +198,9 @@ describe('fetchPrCommand builder', () => {
     } as unknown as Argv;
     ((fetchPrCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
     expect(opts).toContain('host');
+    // The incremental anchor is a flag too — SKILL Step 1 passes it, so a
+    // dropped registration would break every incremental review at parse time.
+    expect(opts).toContain('since');
   });
 });
 
@@ -219,6 +222,14 @@ const producerMocks = vi.hoisted(() => ({
   }),
   gh: vi.fn(),
   git: vi.fn(),
+  gitOpt: vi.fn((..._args: string[]): string | null => null),
+  gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
+  resolveMergeBase: vi.fn(
+    (): { sha: string | null; baseFetchFailed: boolean } => ({
+      sha: null,
+      baseFetchFailed: false,
+    }),
+  ),
   writeStderrLine: vi.fn(),
 }));
 
@@ -268,14 +279,14 @@ vi.mock('./lib/gh.js', () => ({
 
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
-  gitOpt: vi.fn(() => null),
-  gitRaw: vi.fn(() => Buffer.from('')),
+  gitOpt: producerMocks.gitOpt,
+  gitRaw: producerMocks.gitRaw,
   refExists: vi.fn(() => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
 }));
 
 vi.mock('./lib/merge-base.js', () => ({
-  resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
+  resolveMergeBase: producerMocks.resolveMergeBase,
 }));
 
 // The ledger append is the wiring under test here, not the ledger itself
@@ -299,6 +310,12 @@ describe('fetch-pr report assembly', () => {
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
+    producerMocks.gitOpt.mockImplementation(() => null);
+    producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
+    producerMocks.resolveMergeBase.mockImplementation(() => ({
+      sha: null,
+      baseFetchFailed: false,
+    }));
     producerMocks.gh.mockReturnValue(
       JSON.stringify({
         headRefName: 'feat/x',
@@ -397,6 +414,125 @@ describe('fetch-pr report assembly', () => {
       .map((c) => String(c[0]))
       .some((l) => l.includes('not valid JSON'));
     expect(warned).toBe(true);
+  });
+
+  // ---- the --since incremental branches, driven through the real handler ----
+
+  const ANCHOR = 'a'.repeat(40);
+  const BASE = 'b'.repeat(40);
+  const DELTA_DIFF = [
+    'diff --git a/a.ts b/a.ts',
+    '--- a/a.ts',
+    '+++ b/a.ts',
+    '@@ -1,2 +1,3 @@',
+    ' line',
+    '+added',
+    ' line2',
+    '',
+  ].join('\n');
+
+  /** gitOpt that vouches for ANCHOR as a commit behind the head. */
+  function anchorIsValid() {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' || args[0] === 'merge-base'
+        ? ''
+        : args[0] === 'rev-parse'
+          ? ANCHOR
+          : null,
+    );
+  }
+
+  it('scopes the plan to a valid anchor and suppresses the full-range flags', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${ANCHOR}..f00df00df00d`)
+        ? Buffer.from(DELTA_DIFF)
+        : Buffer.from(''),
+    );
+    // Advertised stat large enough that an ungated collapse ratio WOULD fire
+    // on the tiny delta: the flag's absence below is what kills the mutant
+    // that drops the !scopedDelta gate.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 400,
+        deletions: 100,
+        changedFiles: 9,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
+    expect(report.diffPath).not.toBeNull();
+    expect(report.emptyDiff).toBeUndefined();
+    expect(report.collapsedFromUpstream).toBeUndefined();
+  });
+
+  it('demotes to capture-failed when the delta capture throws', async () => {
+    anchorIsValid();
+    producerMocks.gitRaw.mockImplementation((...args: string[]) => {
+      if (args.includes('diff')) throw new Error('git timed out');
+      return Buffer.from('');
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'capture-failed',
+    });
+  });
+
+  it('upgrades an empty delta to upToDate and recaptures the FULL range', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${BASE}..f00df00df00d`)
+        ? Buffer.from(DELTA_DIFF)
+        : Buffer.from(''),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      upToDate: true,
+    });
+    // upToDate promises the FULL-range plan for the flows that continue.
+    expect(report.diffPath).not.toBeNull();
+    expect(report.diffLines).toBeGreaterThan(0);
+    expect(report.emptyDiff).toBeUndefined();
+  });
+
+  it('does not let an empty delta leak into emptyDiff when no full range exists', async () => {
+    // The shipped Critical: the empty-delta capture set diffPath, the
+    // merge-base fallback never ran (sha: null), and
+    // isEmptyDiff({diffPath: non-null, baseFetchFailed: false, diffText: ''})
+    // recommended a LIVE PR for closure. The reset before the fallback and
+    // the upToDate demotion are both pinned here.
+    anchorIsValid();
+    producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.emptyDiff).toBeUndefined();
+    expect(report.diffPath).toBeNull();
+    // upToDate without the full-range plan would overclaim; it demotes.
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'capture-failed',
+    });
   });
 
   it('stays silent on ENOENT (a genuine first attempt)', async () => {

@@ -71,9 +71,10 @@ export interface Ledger {
  * A usable anchor: abbreviated-to-full hex, matching what `git rev-parse`
  * emits. The parser drops a field that fails this rather than the ledger —
  * the findings are still a work list even when the anchor is garbage — and
- * Step 1 additionally verifies the anchor is an ancestor of the fetched head
- * before scoping to it, so a tampered sha costs a full-range review, never a
- * mis-scoped one.
+ * `fetch-pr --since` additionally verifies the anchor is an ancestor of the
+ * fetched head before scoping to it (in the CLI; the orchestrator never runs
+ * git against an anchor), so a tampered sha costs a full-range review, never
+ * a mis-scoped one.
  *
  * Sibling check, deliberately not shared: `repo-context.ts` validates
  * `plan.mergeBaseSha` as a FULL 40/64-char object id and hard-throws — that

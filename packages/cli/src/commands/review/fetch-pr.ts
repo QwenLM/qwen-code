@@ -176,6 +176,16 @@ export interface IncrementalDecision {
   effective: boolean;
   upToDate?: boolean;
   reason?: 'unknown-commit' | 'not-an-ancestor' | 'capture-failed';
+  /**
+   * The scoped range's left side as a FULL sha, present exactly when the
+   * report's diff is the delta (`effective` and not `upToDate`). Downstream
+   * consumers that recompute their own ranges read it instead of
+   * `mergeBaseSha` — Agent 7's test-efficacy probe welds `--base` into its
+   * brief, and probing the full range on a delta-scoped round would spend
+   * the probe budget on already-reviewed hunks and report survivors from
+   * outside this round's scope.
+   */
+  diffBase?: string;
 }
 
 /** The git questions the anchor ruling asks, injectable for tests. */
@@ -429,6 +439,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
   }
   if (!scopedDelta) {
+    // The delta branch may have SUCCESSFULLY captured an empty delta, which
+    // set `diffPath` to that file. `isEmptyDiff`'s invariant is that
+    // `diffPath` is set only on a successful capture OF THE DIFF BEING
+    // JUDGED, and the full-range capture below can fail or never run (no
+    // merge base) — a leaked delta path would then read as "captured the
+    // full range, and it is empty": a live PR recommended for closure on an
+    // infrastructure state. Reset; `captureRange` re-sets both on success.
+    diffPath = null;
+    diffPathAbsolute = null;
     if (mergeBaseSha) {
       diffText = captureRange(mergeBaseSha) ?? '';
     } else {
@@ -437,6 +456,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           `agents will have to fall back to running \`git diff\` themselves.`,
       );
     }
+    // `upToDate` promises the report carries the FULL-range diff and plan
+    // (the flows that continue past it — a model change, --comment — run
+    // full). A full-range capture that failed or never ran breaks that
+    // promise, so the ruling is demoted rather than left overclaiming.
+    if (anchor?.incremental.upToDate && diffPath === null) {
+      anchor.incremental = {
+        since: anchor.incremental.since,
+        effective: false,
+        reason: 'capture-failed',
+      };
+    }
+  } else if (anchor?.diffBase) {
+    // The scoped range's left side, full-sha, for downstream consumers that
+    // recompute their own diffs (Agent 7's test-efficacy probe welds
+    // --base into its brief) — without it they would probe the full
+    // merge-base range on a delta-scoped round.
+    anchor.incremental.diffBase = anchor.diffBase;
   }
   if (anchor) {
     const inc = anchor.incremental;
