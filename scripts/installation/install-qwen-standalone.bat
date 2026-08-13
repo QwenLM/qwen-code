@@ -784,45 +784,9 @@ if "!EXPECTED_HASH!"=="" (
 
 set "ACTUAL_HASH="
 set "QWEN_HASH_FILE=!ARCHIVE_FILE!"
-REM Keep the hashing logic readable without adding a second distributed file.
-REM A temporary script also avoids fragile nested cmd.exe/PowerShell escaping.
-call :CreateTempFile "qwen-hash" ".ps1"
-if !ERRORLEVEL! NEQ 0 (
-    set "QWEN_HASH_FILE="
-    if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
-    exit /b 1
+for /f "delims=" %%H in ('powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $stream = $null; $sha256 = $null; try { $stream = [IO.File]::OpenRead($env:QWEN_HASH_FILE); $sha256 = [Security.Cryptography.SHA256]::Create(); if ($null -eq $sha256) { throw 'SHA-256 provider unavailable.' }; $hash = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', ''); if ($hash -cnotmatch '\A[0-9A-F]{64}\z') { throw 'Invalid SHA-256 result.' } } catch { [Console]::Error.WriteLine('SHA-256 calculation failed: ' + $_.Exception.Message); exit 1 } finally { if ($null -ne $stream) { $stream.Dispose() }; if ($null -ne $sha256) { $sha256.Dispose() } }; [Console]::Write($hash)"') do (
+    if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
 )
-set "QWEN_HASH_SCRIPT=!TEMP_FILE!"
-set "QWEN_HASH_OUTPUT=!QWEN_HASH_SCRIPT!.out"
-
-> "!QWEN_HASH_SCRIPT!" echo $ErrorActionPreference = 'Stop'
->> "!QWEN_HASH_SCRIPT!" echo $stream = $null
->> "!QWEN_HASH_SCRIPT!" echo $sha256 = $null
->> "!QWEN_HASH_SCRIPT!" echo try {
->> "!QWEN_HASH_SCRIPT!" echo   $stream = [IO.File]::OpenRead($env:QWEN_HASH_FILE)
->> "!QWEN_HASH_SCRIPT!" echo   $sha256 = [Security.Cryptography.SHA256]::Create()
->> "!QWEN_HASH_SCRIPT!" echo   if ($null -eq $sha256) { throw 'SHA-256 provider unavailable.' }
->> "!QWEN_HASH_SCRIPT!" echo   $hashBytes = $sha256.ComputeHash($stream)
->> "!QWEN_HASH_SCRIPT!" echo   $hash = [BitConverter]::ToString($hashBytes).Replace('-', '')
->> "!QWEN_HASH_SCRIPT!" echo   if ($hash -cnotmatch '\A[0-9A-F]{64}\z') { throw 'Invalid SHA-256 result.' }
->> "!QWEN_HASH_SCRIPT!" echo } catch {
->> "!QWEN_HASH_SCRIPT!" echo   [Console]::Error.WriteLine('SHA-256 calculation failed: ' + $_.Exception.Message)
->> "!QWEN_HASH_SCRIPT!" echo   exit 1
->> "!QWEN_HASH_SCRIPT!" echo } finally {
->> "!QWEN_HASH_SCRIPT!" echo   if ($null -ne $stream) { $stream.Dispose() }
->> "!QWEN_HASH_SCRIPT!" echo   if ($null -ne $sha256) { $sha256.Dispose() }
->> "!QWEN_HASH_SCRIPT!" echo }
->> "!QWEN_HASH_SCRIPT!" echo [Console]::Write($hash)
-
-powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "!QWEN_HASH_SCRIPT!" > "!QWEN_HASH_OUTPUT!"
-set "PS_STATUS=!ERRORLEVEL!"
-if !PS_STATUS! EQU 0 (
-    for /f "usebackq delims=" %%H in ("!QWEN_HASH_OUTPUT!") do if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
-)
-del /F /Q "!QWEN_HASH_SCRIPT!" >nul 2>&1
-del /F /Q "!QWEN_HASH_OUTPUT!" >nul 2>&1
-set "QWEN_HASH_SCRIPT="
-set "QWEN_HASH_OUTPUT="
 set "QWEN_HASH_FILE="
 
 if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1

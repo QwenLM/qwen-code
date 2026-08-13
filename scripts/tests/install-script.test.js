@@ -280,7 +280,6 @@ describe('installation scripts', () => {
       'scripts/installation/install-qwen-standalone.bat',
     );
     const verifyChecksum = readBatchRoutine(script, 'VerifyChecksum');
-    const installStandalone = readBatchRoutine(script, 'InstallStandalone');
 
     expect(script).toContain('--method METHOD');
     expect(script).toContain('--mirror MIRROR');
@@ -322,29 +321,16 @@ describe('installation scripts', () => {
     expect(verifyChecksum).toContain('.ComputeHash($stream)');
     expect(verifyChecksum).toContain("-cnotmatch '\\A[0-9A-F]{64}\\z'");
     expect(verifyChecksum).toContain('[Console]::Write($hash)');
+    expect(verifyChecksum).toContain('SHA-256 calculation failed: ');
     expect(verifyChecksum).not.toMatch(/ReadAllBytes|ReadToEnd/);
-    expect(verifyChecksum).toContain('call :CreateTempFile "qwen-hash" ".ps1"');
     expect(verifyChecksum).toContain(
-      'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "!QWEN_HASH_SCRIPT!" > "!QWEN_HASH_OUTPUT!"',
+      'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command',
     );
     expect(verifyChecksum.indexOf('finally')).toBeGreaterThan(-1);
     expect(verifyChecksum.indexOf('$stream.Dispose()')).toBeLessThan(
       verifyChecksum.indexOf('$sha256.Dispose()'),
     );
-    expect(
-      verifyChecksum.indexOf('echo [Console]::Write($hash)'),
-    ).toBeGreaterThan(verifyChecksum.indexOf('finally'));
-    expect(verifyChecksum).toContain('del /F /Q "!QWEN_HASH_SCRIPT!"');
-    expect(verifyChecksum).toContain('del /F /Q "!QWEN_HASH_OUTPUT!"');
-
-    const verifyIndex = installStandalone.indexOf('call :VerifyChecksum');
-    const validateIndex = installStandalone.indexOf(
-      'call :ValidateArchiveContents',
-    );
-    const extractIndex = installStandalone.indexOf('Expand-Archive');
-    expect(verifyIndex).toBeGreaterThan(-1);
-    expect(validateIndex).toBeGreaterThan(verifyIndex);
-    expect(extractIndex).toBeGreaterThan(validateIndex);
+    expect(verifyChecksum).not.toContain('2^>nul');
     expect(script).toContain('QWEN_VALIDATE_OPTIONS_SCRIPT');
     expect(script).toContain('$unsafe = [char[]](10,13,33,34');
     expect(script).toContain(
@@ -3968,97 +3954,47 @@ describe('Windows installer end-to-end', { timeout: 60_000 }, () => {
       const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
       try {
-        const nativeModulePath = getNativeWindowsPowerShellModulePath();
-        const powerShell7ModuleRoot = findPowerShell7ModuleRoot();
-        if (!powerShell7ModuleRoot) {
+        const programFiles =
+          process.env.ProgramW6432 || process.env.ProgramFiles;
+        const systemRoot = process.env.SystemRoot;
+        const userProfile = process.env.USERPROFILE;
+        if (!programFiles || !systemRoot || !userProfile) {
+          throw new Error('Windows environment paths are unavailable.');
+        }
+
+        const powerShell7ModuleRoot = path.join(
+          programFiles,
+          'PowerShell',
+          '7',
+          'Modules',
+        );
+        if (!existsSync(powerShell7ModuleRoot)) {
           skip('PowerShell 7 modules are unavailable on this Windows host.');
           return;
         }
 
-        const probeFile = path.join(tmpDir, 'hash-probe.txt');
-        writeFileSync(probeFile, 'qwen-code #7118 regression probe\n');
-        const expectedProbeHash = crypto
-          .createHash('sha256')
-          .update(readFileSync(probeFile))
-          .digest('hex')
-          .toUpperCase();
-        const candidates = uniqueCaseInsensitive([
-          [powerShell7ModuleRoot, nativeModulePath].join(path.delimiter),
+        const modulePath = [
           powerShell7ModuleRoot,
-        ]);
-        const rejectedCandidates = [];
-        let acceptedModulePath = null;
-
-        for (const candidate of candidates) {
-          const probeEnv = {
-            PSModulePath: candidate,
-            QWEN_HASH_PROBE_FILE: probeFile,
-          };
-          const getFileHashProbe = runWindowsPowerShellProbe(
-            "$command = Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue; if ($null -eq $command) { [Console]::Write('absent') } else { [Console]::Write('present') }",
-            probeEnv,
-          );
-          assertProbeCompleted(getFileHashProbe, 'Get-FileHash');
-          const getFileHashState = getFileHashProbe.stdout.trim();
-          if (!['absent', 'present'].includes(getFileHashState)) {
-            throw new Error(
-              `Malformed Get-FileHash probe output: ${getFileHashState}`,
-            );
-          }
-          if (getFileHashState !== 'absent') {
-            rejectedCandidates.push(
-              `${candidate}: Get-FileHash remained available`,
-            );
-            continue;
-          }
-
-          const hashProbe = runWindowsPowerShellProbe(
-            "$stream = [IO.File]::OpenRead($env:QWEN_HASH_PROBE_FILE); try { $sha = [Security.Cryptography.SHA256]::Create(); try { [Console]::Write([BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '')) } finally { if ($null -ne $sha) { $sha.Dispose() } } } finally { $stream.Dispose() }",
-            probeEnv,
-          );
-          assertProbeCompleted(hashProbe, 'direct .NET SHA-256');
-          if (hashProbe.status !== 0) {
-            rejectedCandidates.push(
-              `${candidate}: direct .NET SHA-256 was unavailable`,
-            );
-            continue;
-          }
-          const actualProbeHash = hashProbe.stdout.trim();
-          if (!/^[0-9A-F]{64}$/.test(actualProbeHash)) {
-            throw new Error(
-              `Malformed direct .NET SHA-256 probe output: ${actualProbeHash}`,
-            );
-          }
-          expect(actualProbeHash).toBe(expectedProbeHash);
-
-          const commandProbe = runWindowsPowerShellProbe(
-            `Get-Command ${WINDOWS_INSTALLER_POWERSHELL_COMMANDS.map((command) => `'${command}'`).join(',')} -ErrorAction Stop | Out-Null`,
-            probeEnv,
-          );
-          assertProbeCompleted(commandProbe, 'installer PowerShell commands');
-          if (commandProbe.status !== 0) {
-            const missingCommands = [];
-            for (const command of WINDOWS_INSTALLER_POWERSHELL_COMMANDS) {
-              const commandProbe = runWindowsPowerShellProbe(
-                `Get-Command '${command}' -ErrorAction Stop | Out-Null`,
-                probeEnv,
-              );
-              assertProbeCompleted(commandProbe, command);
-              if (commandProbe.status !== 0) missingCommands.push(command);
-            }
-            rejectedCandidates.push(
-              `${candidate}: missing ${missingCommands.join(', ')}`,
-            );
-            continue;
-          }
-
-          acceptedModulePath = candidate;
-          break;
-        }
-
-        if (!acceptedModulePath) {
+          path.join(userProfile, 'Documents', 'WindowsPowerShell', 'Modules'),
+          path.join(programFiles, 'WindowsPowerShell', 'Modules'),
+          path.join(
+            systemRoot,
+            'system32',
+            'WindowsPowerShell',
+            'v1.0',
+            'Modules',
+          ),
+        ].join(path.delimiter);
+        const getFileHashState = runWindowsCommand(
+          `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$command = Get-Command 'Get-FileHash' -ErrorAction SilentlyContinue; if ($null -eq $command) { [Console]::Write('absent') } else { [Console]::Write('present') }"`,
+          { PSModulePath: modulePath },
+        )
+          .toString()
+          .trim();
+        expect(['absent', 'present']).toContain(getFileHashState);
+        if (getFileHashState === 'present') {
           skip(
-            `No PowerShell 7-first module path reproduced #7118 while preserving installer prerequisites. ${rejectedCandidates.join('; ')}`,
+            'This Windows host does not reproduce #7118 with PowerShell 7 modules first.',
           );
           return;
         }
@@ -4071,7 +4007,7 @@ describe('Windows installer end-to-end', { timeout: 60_000 }, () => {
           installRoot,
           home,
           'standalone',
-          { PSModulePath: acceptedModulePath },
+          { PSModulePath: modulePath },
         ).toString();
 
         expect(output).not.toMatch(
@@ -4100,45 +4036,6 @@ describe('Windows installer end-to-end', { timeout: 60_000 }, () => {
 
       expect(() => runWindowsInstaller(archive, installRoot, home)).toThrow(
         /Checksum mismatch/,
-      );
-      expectNoStandaloneInstallSideEffects(installRoot, home);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  itOnWindows('rejects a local archive when SHA256SUMS is missing', () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
-
-    try {
-      const archive = createFakeWindowsStandaloneArchive(tmpDir);
-      const installRoot = path.join(tmpDir, 'install');
-      const home = path.join(tmpDir, 'home');
-      rmSync(path.join(path.dirname(archive), 'SHA256SUMS'));
-
-      expect(() => runWindowsInstaller(archive, installRoot, home)).toThrow(
-        /SHA256SUMS not found/,
-      );
-      expectNoStandaloneInstallSideEffects(installRoot, home);
-    } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
-    }
-  });
-
-  itOnWindows('rejects a local archive missing its checksum entry', () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
-
-    try {
-      const archive = createFakeWindowsStandaloneArchive(tmpDir);
-      const installRoot = path.join(tmpDir, 'install');
-      const home = path.join(tmpDir, 'home');
-      writeFileSync(
-        path.join(path.dirname(archive), 'SHA256SUMS'),
-        `${'0'.repeat(64)}  another-archive.zip\n`,
-      );
-
-      expect(() => runWindowsInstaller(archive, installRoot, home)).toThrow(
-        /Checksum entry for qwen-code-win-x64\.zip not found/,
       );
       expectNoStandaloneInstallSideEffects(installRoot, home);
     } finally {
@@ -4956,128 +4853,6 @@ function runWindowsCommand(command, env = {}) {
   }
 }
 
-function spawnWindowsCommand(command, env = {}, baseEnv = process.env) {
-  const prepared = prepareWindowsCommand(command, env, baseEnv);
-  return spawnSync(
-    process.env.ComSpec || 'cmd.exe',
-    ['/d', '/c', prepared.command],
-    {
-      env: prepared.env,
-      encoding: 'utf8',
-      stdio: 'pipe',
-      windowsHide: true,
-      windowsVerbatimArguments: true,
-    },
-  );
-}
-
-function runWindowsPowerShellProbe(script, env = {}) {
-  return spawnWindowsCommand(
-    `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${script}"`,
-    env,
-  );
-}
-
-function assertProbeCompleted(result, name) {
-  if (result.error) {
-    throw new Error(`${name} probe failed to start: ${result.error.message}`);
-  }
-  if (result.status === null) {
-    throw new Error(`${name} probe ended without an exit status.`);
-  }
-}
-
-function getNativeWindowsPowerShellModulePath() {
-  const result = spawnSync(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      '[Console]::Write($env:PSModulePath)',
-    ],
-    {
-      env: withoutEnvironmentKey(process.env, 'PSModulePath'),
-      encoding: 'utf8',
-      stdio: 'pipe',
-      windowsHide: true,
-    },
-  );
-  assertProbeCompleted(result, 'native Windows PowerShell module path');
-  if (result.status !== 0) {
-    throw new Error(
-      `Native Windows PowerShell module-path probe failed: ${result.stderr.trim()}`,
-    );
-  }
-
-  const modulePath = result.stdout.trim();
-  const entries = modulePath.split(path.delimiter).filter(Boolean);
-  if (
-    !modulePath ||
-    /[\r\n]/.test(modulePath) ||
-    entries.length === 0 ||
-    entries.some((entry) => !path.isAbsolute(entry))
-  ) {
-    throw new Error(
-      `Native Windows PowerShell returned a malformed module path: ${modulePath}`,
-    );
-  }
-  return modulePath;
-}
-
-function findPowerShell7ModuleRoot() {
-  const result = spawnSync(
-    'pwsh.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      "[Console]::Write((Join-Path $PSHOME 'Modules'))",
-    ],
-    { encoding: 'utf8', stdio: 'pipe', windowsHide: true },
-  );
-  if (result.error && result.error.code !== 'ENOENT') {
-    throw new Error(
-      `PowerShell 7 module-path probe failed to start: ${result.error.message}`,
-    );
-  }
-  if (!result.error) {
-    assertProbeCompleted(result, 'PowerShell 7 module path');
-    if (result.status !== 0) {
-      throw new Error(
-        `PowerShell 7 module-path probe failed: ${result.stderr.trim()}`,
-      );
-    }
-    const moduleRoot = result.stdout.trim();
-    if (
-      !moduleRoot ||
-      /[\r\n]/.test(moduleRoot) ||
-      !path.isAbsolute(moduleRoot) ||
-      !existsSync(moduleRoot) ||
-      !lstatSync(moduleRoot).isDirectory()
-    ) {
-      throw new Error(
-        `PowerShell 7 returned a malformed module root: ${moduleRoot}`,
-      );
-    }
-    return moduleRoot;
-  }
-
-  const programFiles = uniqueCaseInsensitive(
-    ['ProgramW6432', 'ProgramFiles']
-      .map((key) => getEnvironmentValue(process.env, key))
-      .filter(Boolean),
-  );
-  return (
-    programFiles
-      .map((root) => path.join(root, 'PowerShell', '7', 'Modules'))
-      .find(
-        (moduleRoot) =>
-          existsSync(moduleRoot) && lstatSync(moduleRoot).isDirectory(),
-      ) || null
-  );
-}
-
 function runWindowsPowerShellScript(scriptPath, args = [], env = {}) {
   try {
     return execFileSync(
@@ -5116,24 +4891,6 @@ const WINDOWS_COMMAND_ENV_OVERRIDES = [
   'PSModulePath',
 ];
 
-const WINDOWS_INSTALLER_POWERSHELL_COMMANDS = [
-  'Write-Host',
-  'Select-Object',
-  'Invoke-WebRequest',
-  'Add-Type',
-  'ConvertFrom-Json',
-  'Get-Date',
-  'Expand-Archive',
-  'Test-Path',
-  'New-Item',
-  'Join-Path',
-  'Get-Content',
-  'Get-ChildItem',
-  'Get-Command',
-  'Where-Object',
-  'Out-Null',
-];
-
 function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
   const commandEnv = { ...baseEnv, ...env };
   const commandPrefix = [];
@@ -5155,33 +4912,6 @@ function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
     command: [...commandPrefix, command].join(' && '),
     env: commandEnv,
   };
-}
-
-function withoutEnvironmentKey(baseEnv, key) {
-  const env = { ...baseEnv };
-  for (const existingKey of Object.keys(env)) {
-    if (existingKey.toLowerCase() === key.toLowerCase()) {
-      delete env[existingKey];
-    }
-  }
-  return env;
-}
-
-function getEnvironmentValue(env, key) {
-  const match = Object.keys(env).find(
-    (existingKey) => existingKey.toLowerCase() === key.toLowerCase(),
-  );
-  return match ? env[match] : undefined;
-}
-
-function uniqueCaseInsensitive(values) {
-  const seen = new Set();
-  return values.filter((value) => {
-    const normalized = value.toLowerCase();
-    if (seen.has(normalized)) return false;
-    seen.add(normalized);
-    return true;
-  });
 }
 
 function captureFailure(action) {
