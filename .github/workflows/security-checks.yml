@@ -57,6 +57,7 @@ jobs:
           npm audit --omit=dev --audit-level=high || status=$?
           for lockfile in packages/*/package-lock.json; do
             [ -f "$lockfile" ] || continue
+            # Covered by the root workspace audit; this vendored lockfile is not installed directly.
             [ "$lockfile" != "packages/mobile-mcp/package-lock.json" ] || continue
             package_dir="${lockfile%/package-lock.json}"
             (
