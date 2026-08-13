@@ -142,6 +142,14 @@ describe('agent session commands', () => {
     });
   });
 
+  it('rejects respawn with both <id> and --all', async () => {
+    await expect(parseCommand('respawn --all session-1')).rejects.toThrow(
+      'qwen agents respawn accepts <id> or --all, not both.',
+    );
+
+    expect(mockSupervisor.respawn).not.toHaveBeenCalled();
+  });
+
   it('routes respawn --all to the supervisor and prints JSON', async () => {
     await parseCommand('respawn --all');
 

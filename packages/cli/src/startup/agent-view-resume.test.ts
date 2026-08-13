@@ -50,6 +50,21 @@ describe('routeManagedAgentViewResume', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('rejects one-shot input for managed Agent View resumes', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
+
+    await expect(
+      routeManagedAgentViewResume('session-1', process.env, true),
+    ).resolves.toBe(true);
+
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+    expect(mockAttach).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Cannot use one-shot input'),
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
   it('marks managed Agent View resume failures as unsuccessful', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed'));
     mockAttach.mockRejectedValueOnce(new Error('attach failed'));

@@ -110,8 +110,11 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
         description: 'Respawn all Agent View sessions',
       })
       .check((argv) => {
+        if (argv.all === true && typeof argv['id'] === 'string') {
+          return 'qwen agents respawn accepts <id> or --all, not both.';
+        }
         if (argv.all === true || typeof argv['id'] === 'string') return true;
-        return 'qwen respawn requires <id> or --all.';
+        return 'qwen agents respawn requires <id> or --all.';
       }),
   handler: async (argv) => {
     const supervisor = await getSessionSupervisor();
@@ -120,7 +123,7 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
       return;
     }
     if (typeof argv['id'] !== 'string') {
-      throw new Error('qwen respawn requires <id> or --all.');
+      throw new Error('qwen agents respawn requires <id> or --all.');
     }
     writeJsonResult(await supervisor.respawn(argv['id']));
   },

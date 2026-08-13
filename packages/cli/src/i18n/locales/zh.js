@@ -2286,6 +2286,7 @@ export default {
   '[{{label}}] failed: {{error}}': '[{{label}}] 失败：{{error}}',
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
+  'Detach the current Agent View session.': '分离当前 Agent View 会话。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
   'Record a CPU profile for Chrome DevTools analysis':
     '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',

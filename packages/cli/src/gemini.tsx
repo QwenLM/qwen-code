@@ -392,8 +392,8 @@ export async function main() {
     const { runAgentViewPtyHostProcess } = await import(
       './agent-view/pty-host-process.js'
     );
-    await runAgentViewPtyHostProcess({ launchPath, socketPath });
-    process.exit(0);
+    const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
+    process.exit(exit.exitCode);
   }
 
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
@@ -864,7 +864,18 @@ export async function main() {
     const { routeManagedAgentViewResume } = await import(
       './startup/agent-view-resume.js'
     );
-    if (await routeManagedAgentViewResume(argv.resume)) {
+    const hasOneShotInput =
+      argv.prompt !== undefined ||
+      argv.promptInteractive !== undefined ||
+      argv.query !== undefined ||
+      !process.stdin.isTTY;
+    if (
+      await routeManagedAgentViewResume(
+        argv.resume,
+        process.env,
+        hasOneShotInput,
+      )
+    ) {
       process.exit(process.exitCode ?? 0);
     }
   }
@@ -905,6 +916,20 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    // --continue resolves the last session inside loadCliConfig, past the
+    // --resume startup guard above; mirror that guard here so a managed
+    // background session is never resumed by a second foreground runtime.
+    if (argv.continue) {
+      const {
+        isManagedAgentViewResumeBlocked,
+        MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+      } = await import('./startup/agent-view-resume-guard.js');
+      if (await isManagedAgentViewResumeBlocked(config.getSessionId())) {
+        writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        process.exit(1);
+      }
+    }
 
     {
       const {

@@ -15,6 +15,15 @@ import type {
 } from '../agent-view/protocol.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  attachCommand,
+  killCommand,
+  logsCommand,
+  respawnCommand,
+  rmCommand,
+  stopCommand,
+} from './agent-session.js';
+import { agentDaemonCommand } from './agent-daemon.js';
 
 interface AgentsArgs {
   cwd?: string;
@@ -31,8 +40,8 @@ export async function handleAgentViewBackgroundPrompt(
   const shortId = formatSessionShortId(sessionId);
   writeStdoutLine(`Started background agent ${shortId}.`);
   writeStdoutLine(`Open with qwen agents.`);
-  writeStdoutLine(`Attach with qwen attach ${shortId}.`);
-  writeStdoutLine(`View logs with qwen logs ${shortId}.`);
+  writeStdoutLine(`Attach with qwen agents attach ${shortId}.`);
+  writeStdoutLine(`View logs with qwen agents logs ${shortId}.`);
 }
 
 function formatAgentsText(snapshots: AgentViewSessionSnapshot[]): string {
@@ -53,8 +62,8 @@ function formatAgentsText(snapshots: AgentViewSessionSnapshot[]): string {
     .join('\n');
 }
 
-export const agentsCommand: CommandModule<unknown, AgentsArgs> = {
-  command: 'agents',
+export const agentsListCommand: CommandModule<unknown, AgentsArgs> = {
+  command: '$0',
   describe: 'List background agents',
   builder: (yargs: Argv) =>
     yargs
@@ -91,6 +100,25 @@ export const agentsCommand: CommandModule<unknown, AgentsArgs> = {
     const snapshots = toSnapshots(await supervisor.list(listCwd));
     writeStdoutLine(formatAgentsText(snapshots));
   },
+};
+
+export const agentsCommand: CommandModule = {
+  command: 'agents',
+  describe: 'Manage Agent View background agents',
+  builder: (yargs: Argv) =>
+    yargs
+      // Session verbs are subcommands of `qwen agents` so they cannot
+      // hijack natural-language prompts at the top level.
+      .command(agentsListCommand)
+      .command(attachCommand)
+      .command(logsCommand)
+      .command(stopCommand)
+      .command(killCommand)
+      .command(respawnCommand)
+      .command(rmCommand)
+      .command(agentDaemonCommand)
+      .version(false),
+  handler: () => {},
 };
 
 function formatAgentsJson(

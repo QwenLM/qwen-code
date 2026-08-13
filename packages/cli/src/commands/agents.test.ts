@@ -6,7 +6,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { agentsCommand, handleAgentViewBackgroundPrompt } from './agents.js';
+import * as path from 'node:path';
+import {
+  agentsCommand,
+  agentsListCommand,
+  handleAgentViewBackgroundPrompt,
+} from './agents.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockSupervisor = vi.hoisted(() => ({
@@ -85,9 +90,9 @@ interface AgentsArgs {
 }
 
 function buildParser(): Argv<AgentsArgs> {
-  const builder = agentsCommand.builder;
+  const builder = agentsListCommand.builder;
   if (typeof builder !== 'function') {
-    throw new Error('agents command builder must be a function');
+    throw new Error('agents list command builder must be a function');
   }
   return builder(
     yargs([]).exitProcess(false).fail(false).locale('en'),
@@ -105,7 +110,7 @@ describe('agents command', () => {
 
   it('has the command definition', () => {
     expect(agentsCommand.command).toBe('agents');
-    expect(agentsCommand.describe).toBe('List background agents');
+    expect(agentsCommand.describe).toBe('Manage Agent View background agents');
     expect(typeof agentsCommand.builder).toBe('function');
     expect(typeof agentsCommand.handler).toBe('function');
   });
@@ -123,8 +128,8 @@ describe('agents command', () => {
   });
 
   it('prints active agents as a JSON array', async () => {
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync('--cwd /tmp/workspace --json') as Parameters<
@@ -150,12 +155,14 @@ describe('agents command', () => {
         summary: 'write tests',
       }),
     ]);
-    expect(mockSupervisor.list).toHaveBeenCalledWith('/tmp/workspace');
+    expect(mockSupervisor.list).toHaveBeenCalledWith(
+      path.resolve('/tmp/workspace'),
+    );
   });
 
   it('lists all projects by default for JSON output', async () => {
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync('--json') as Parameters<typeof handler>[0],
@@ -165,8 +172,8 @@ describe('agents command', () => {
   });
 
   it('includes completed agents in JSON output with --all', async () => {
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync(
@@ -197,8 +204,8 @@ describe('agents command', () => {
   });
 
   it('prints a text list when --json is not set', async () => {
-    const handler = agentsCommand.handler;
-    if (!handler) throw new Error('agents command handler missing');
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
       buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
@@ -209,7 +216,9 @@ describe('agents command', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'session-1 working alive /tmp/workspace Write Tests write tests',
     );
-    expect(mockSupervisor.list).toHaveBeenCalledWith('/tmp/workspace');
+    expect(mockSupervisor.list).toHaveBeenCalledWith(
+      path.resolve('/tmp/workspace'),
+    );
   });
 
   it('dispatches a background prompt through the supervisor', async () => {
@@ -222,8 +231,8 @@ describe('agents command', () => {
     expect(mockWriteStdoutLine.mock.calls.map((call) => call[0])).toEqual([
       'Started background agent session-2.',
       'Open with qwen agents.',
-      'Attach with qwen attach session-2.',
-      'View logs with qwen logs session-2.',
+      'Attach with qwen agents attach session-2.',
+      'View logs with qwen agents logs session-2.',
     ]);
   });
 });

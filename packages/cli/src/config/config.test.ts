@@ -381,14 +381,14 @@ describe('parseArguments', () => {
 
   it.each([
     ['agents', ['agents']],
-    ['daemon stop --any', ['daemon', 'stop', '--any']],
-    ['attach <id>', ['attach', 'session-1']],
-    ['logs <id>', ['logs', 'session-1']],
-    ['stop <id>', ['stop', 'session-1']],
-    ['kill <id>', ['kill', 'session-1']],
-    ['respawn <id>', ['respawn', 'session-1']],
-    ['respawn --all', ['respawn', '--all']],
-    ['rm <id>', ['rm', 'session-1']],
+    ['agents daemon stop --any', ['agents', 'daemon', 'stop', '--any']],
+    ['agents attach <id>', ['agents', 'attach', 'session-1']],
+    ['agents logs <id>', ['agents', 'logs', 'session-1']],
+    ['agents stop <id>', ['agents', 'stop', 'session-1']],
+    ['agents kill <id>', ['agents', 'kill', 'session-1']],
+    ['agents respawn <id>', ['agents', 'respawn', 'session-1']],
+    ['agents respawn --all', ['agents', 'respawn', '--all']],
+    ['agents rm <id>', ['agents', 'rm', 'session-1']],
   ])(
     'exits after `%s` instead of continuing to main CLI flow',
     async (_label, args) => {
@@ -483,6 +483,46 @@ describe('parseArguments', () => {
       ['--bg', 'background task', '--json-schema', '{}'],
       'Cannot use --bg/--background with --json-schema',
     ],
+    [
+      ['--bg', 'background task', '-i'],
+      'Cannot use --bg/--background with --prompt-interactive (-i)',
+    ],
+    [
+      ['--bg', 'background task', '--resume', 'some-session-id'],
+      'Cannot use --bg/--background with --resume, --continue, or --session-id',
+    ],
+    [
+      ['--bg', 'background task', '--continue'],
+      'Cannot use --bg/--background with --resume, --continue, or --session-id',
+    ],
+    [
+      ['--bg', 'background task', '--session-id', 'some-session-id'],
+      'Cannot use --bg/--background with --resume, --continue, or --session-id',
+    ],
+    [
+      ['--bg', 'background task', '--worktree', 'my-feature'],
+      'Cannot use --bg/--background with --worktree',
+    ],
+    [
+      ['--bg', 'background task', '--model', 'some-model'],
+      'Cannot use --bg/--background with --model',
+    ],
+    [
+      ['--bg', 'background task', '--approval-mode', 'yolo'],
+      'Cannot use --bg/--background with --approval-mode',
+    ],
+    [
+      ['--bg', 'background task', '--include-directories', '/extra'],
+      'Cannot use --bg/--background with --include-directories',
+    ],
+    [
+      ['--bg', 'background task', '--experimental-acp'],
+      'Cannot use --bg/--background with ACP mode',
+    ],
+    [
+      ['--bg', 'background task', '--output-format', 'stream-json'],
+      'Cannot use --bg/--background with JSON output',
+    ],
   ])('rejects %s', async (args, message) => {
     process.argv = ['node', 'script.js', ...args];
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
@@ -504,14 +544,43 @@ describe('parseArguments', () => {
     async (flag) => {
       process.argv = ['node', 'script.js', flag, 'background task'];
 
-      const argv = await parseArguments();
+      const originalIsTTY = process.stdin.isTTY;
+      process.stdin.isTTY = true;
+      try {
+        const argv = await parseArguments();
 
-      expect(argv.background).toBe(true);
-      expect(argv.query).toBe('background task');
-      expect(argv.prompt).toBeUndefined();
-      expect(argv.promptInteractive).toBeUndefined();
+        expect(argv.background).toBe(true);
+        expect(argv.query).toBe('background task');
+        expect(argv.prompt).toBeUndefined();
+        expect(argv.promptInteractive).toBeUndefined();
+      } finally {
+        process.stdin.isTTY = originalIsTTY;
+      }
     },
   );
+
+  it('rejects --bg when stdin is piped', async () => {
+    process.argv = ['node', 'script.js', '--bg', 'background task'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Cannot use --bg/--background with piped stdin',
+        ),
+      );
+    } finally {
+      mockExit.mockRestore();
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
 
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
