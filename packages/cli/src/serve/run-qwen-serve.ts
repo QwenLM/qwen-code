@@ -79,8 +79,8 @@ import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
   allowOriginCors,
   bearerAuth,
-  denyBrowserOriginCors,
   hostAllowlist,
+  MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
 import {
@@ -1476,6 +1476,13 @@ function createBootstrapServeApp(input: {
   >;
   getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
   onHealthServed?: () => void;
+  /**
+   * CORS allowlist to install. Callers that run Local Control pass the one
+   * they hold so the LAN origin can be added and removed at runtime; the
+   * middleware itself is installed once, here, because Express middleware
+   * order is fixed after the app is built.
+   */
+  originAllowlist?: MutableOriginAllowlist;
 }): Application {
   const {
     opts,
@@ -1492,15 +1499,24 @@ function createBootstrapServeApp(input: {
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
     onHealthServed,
+    originAllowlist,
   } = input;
   const app = express();
 
   installSameOriginOriginStrip(app, getPort);
-  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
-    app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
-  } else {
-    app.use(denyBrowserOriginCors);
-  }
+  // One middleware for both deployments. With an empty allowlist this is
+  // byte-for-byte the `denyBrowserOriginCors` behavior it replaces — every
+  // Origin-bearing request gets the same `Vary: Origin` + 403 body — so the
+  // no-`--allow-origin` posture is unchanged. The difference is that the set
+  // behind it can now gain the LAN origin when Local Control turns on.
+  app.use(
+    allowOriginCors(
+      originAllowlist ??
+        new MutableOriginAllowlist(
+          parseAllowOriginPatterns(opts.allowOrigins ?? []),
+        ),
+    ),
+  );
   app.use(hostAllowlist(opts.hostname, getPort));
 
   const healthHandler = (req: Request, res: Response): void => {

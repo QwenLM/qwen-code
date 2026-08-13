@@ -1,0 +1,111 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { networkInterfaces } from 'node:os';
+
+export interface LanCandidate {
+  /** OS interface name, e.g. `en0` / `wlan0`. */
+  readonly interfaceName: string;
+  /** IPv4 literal to bind and advertise. */
+  readonly address: string;
+}
+
+/**
+ * Only RFC 1918 private space and RFC 3927 link-local are advertised.
+ *
+ * `localControlUrls` (`serve.ts:57-75`) accepted every non-internal IPv4,
+ * which meant a QR could point at a VPN address or — on a host with a routable
+ * address — the public internet. Local Control is scoped to "same physical
+ * network"; a public address is out of scope by definition, not merely
+ * inadvisable, so it is refused rather than warned about.
+ */
+function isLanIpv4(address: string): boolean {
+  const octets = address.split('.').map((part) => Number(part));
+  if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o))) {
+    return false;
+  }
+  const [a, b] = octets;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+/** Every private/link-local IPv4 the host currently has, sorted for stable output. */
+export function listLanCandidates(
+  interfaces = networkInterfaces(),
+): LanCandidate[] {
+  const candidates: LanCandidate[] = [];
+  for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
+    for (const address of addresses ?? []) {
+      if (address.family !== 'IPv4' || address.internal) continue;
+      if (!isLanIpv4(address.address)) continue;
+      candidates.push({ interfaceName, address: address.address });
+    }
+  }
+  return candidates;
+}
+
+export class NoLanInterfaceError extends Error {
+  readonly code = 'no_lan_interface';
+  constructor() {
+    super(
+      'No private IPv4 address is available. Local Control needs the host to ' +
+        'be on a local network (Wi-Fi or Ethernet).',
+    );
+    this.name = 'NoLanInterfaceError';
+  }
+}
+
+export class AmbiguousLanInterfaceError extends Error {
+  readonly code = 'ambiguous_lan_interface';
+  readonly candidates: readonly LanCandidate[];
+  constructor(candidates: readonly LanCandidate[]) {
+    super(
+      'Multiple local networks are available; choose which one to expose: ' +
+        candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', '),
+    );
+    this.name = 'AmbiguousLanInterfaceError';
+    this.candidates = candidates;
+  }
+}
+
+export class UnknownLanInterfaceError extends Error {
+  readonly code = 'unknown_lan_interface';
+  constructor(requested: string) {
+    super(
+      `${requested} is not a private IPv4 address on this host right now. ` +
+        'The network may have changed since the list was fetched.',
+    );
+    this.name = 'UnknownLanInterfaceError';
+  }
+}
+
+/**
+ * Pick the address to bind.
+ *
+ * Ambiguity is surfaced, not resolved. The Rust implementation failed outright
+ * when a host had more than one LAN address (`local_control.rs:478-496`) and
+ * the CLI printed a QR for every one, leaving the user to guess. Neither is
+ * right: the caller gets {@link AmbiguousLanInterfaceError} carrying the
+ * candidates so the Web Shell can ask, and can then pass `preferredAddress` to
+ * commit to an answer.
+ */
+export function selectLanAddress(
+  preferredAddress?: string,
+  interfaces = networkInterfaces(),
+): LanCandidate {
+  const candidates = listLanCandidates(interfaces);
+  if (candidates.length === 0) throw new NoLanInterfaceError();
+  if (preferredAddress !== undefined) {
+    const match = candidates.find((c) => c.address === preferredAddress);
+    if (!match) throw new UnknownLanInterfaceError(preferredAddress);
+    return match;
+  }
+  if (candidates.length > 1) throw new AmbiguousLanInterfaceError(candidates);
+  return candidates[0];
+}

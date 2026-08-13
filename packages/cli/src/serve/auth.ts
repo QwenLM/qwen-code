@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { isLoopbackBind } from './loopback-binds.js';
+import {
+  singleTokenCredentials,
+  type ListenerScopedCredentials,
+} from './local-control/credentials.js';
+import { listenerIdentityOf } from './local-control/listener-identity.js';
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
@@ -112,6 +116,69 @@ export function parseAllowOriginPatterns(
 }
 
 /**
+ * The read side of the CORS allowlist, so the middleware can be built once at
+ * app construction over a set that changes later.
+ */
+export interface OriginMatcher {
+  allows(origin: string): boolean;
+}
+
+/**
+ * A CORS allowlist that accepts runtime additions.
+ *
+ * `--allow-origin` entries are fixed at boot, but a Local Control session
+ * advertises a LAN origin that does not exist until it is enabled and must
+ * stop being honored the moment it is disabled. Registering a second CORS
+ * middleware at that point would not work — Express middleware order is fixed
+ * once the app is built — so the middleware is installed once over this
+ * object and the set behind it moves instead.
+ *
+ * Dynamic entries are keyed so a caller revokes exactly what it added,
+ * without needing to know whether the same origin was also configured
+ * statically (in which case removing it must not revoke the operator's entry).
+ */
+export class MutableOriginAllowlist implements OriginMatcher {
+  readonly #allowAny: boolean;
+  readonly #static: ReadonlySet<string>;
+  readonly #dynamic = new Map<string, string>();
+
+  constructor(base: ParsedAllowOriginPatterns) {
+    this.#allowAny = base.allowAny;
+    this.#static = new Set(base.origins);
+  }
+
+  allows(origin: string): boolean {
+    if (this.#allowAny) return true;
+    const normalized = origin.toLowerCase();
+    if (this.#static.has(normalized)) return true;
+    for (const value of this.#dynamic.values()) {
+      if (value === normalized) return true;
+    }
+    return false;
+  }
+
+  /** Add a runtime origin under `key`; re-adding the same key replaces it. */
+  add(key: string, origin: string): void {
+    this.#dynamic.set(key, origin.toLowerCase());
+  }
+
+  remove(key: string): void {
+    this.#dynamic.delete(key);
+  }
+}
+
+function toMatcher(
+  patterns: ParsedAllowOriginPatterns | OriginMatcher,
+): OriginMatcher {
+  return 'allows' in patterns
+    ? patterns
+    : {
+        allows: (origin: string) =>
+          patterns.allowAny || patterns.origins.has(origin.toLowerCase()),
+      };
+}
+
+/**
  * Build the CORS allowlist middleware. Replaces
  * `denyBrowserOriginCors` when `--allow-origin` is configured — owns both
  * halves of the policy (match → allow with CORS headers, unmatched →
@@ -133,8 +200,9 @@ export function parseAllowOriginPatterns(
  * (CORS spec forbids `*` with credentials).
  */
 export function allowOriginCors(
-  patterns: ParsedAllowOriginPatterns,
+  patterns: ParsedAllowOriginPatterns | OriginMatcher,
 ): RequestHandler {
+  const matcher = toMatcher(patterns);
   const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
   // `X-Qwen-Event-Epoch` pairs with `Last-Event-ID` on SSE reconnects
   // (DAEMON-001): it must survive preflight AND be readable from the
@@ -163,8 +231,7 @@ export function allowOriginCors(
       res.status(403).json({ error: 'Request denied by CORS policy' });
       return;
     }
-    const matched =
-      patterns.allowAny || patterns.origins.has(origin.toLowerCase());
+    const matched = matcher.allows(origin);
     if (matched) {
       // Echo the request's origin verbatim (not literal `*`) even under
       // the any-origin pattern. Browser caches use the echo paired with
@@ -207,6 +274,35 @@ export function allowOriginCors(
  * and only learn the actual port once `listen()` has resolved.
  */
 export function hostAllowlist(
+  bind: string,
+  getPort: () => number,
+): RequestHandler {
+  const primaryGate = buildPrimaryHostGate(bind, getPort);
+  return (req: Request, res: Response, next: NextFunction) => {
+    const listener = listenerIdentityOf(req);
+    if (listener.kind !== 'local-control') {
+      primaryGate(req, res, next);
+      return;
+    }
+    // The LAN listener always carries a real Host gate, whatever the primary
+    // bind is. This is the DNS-rebinding defense the CLI path lacked: it bound
+    // the daemon itself to `0.0.0.0`, which took the non-loopback opt-out
+    // below and left the LAN with no Host check at all, while the Rust proxy
+    // enforced one per request (`local_control.rs:347-350`).
+    //
+    // Exactly one value is accepted — the authority the QR advertises. There
+    // is no default-port shorthand to honor because the daemon's port is
+    // always explicit in the paired URL.
+    const host = (req.headers.host || '').toLowerCase();
+    if (listener.authority === undefined || host !== listener.authority) {
+      res.status(403).json({ error: 'Invalid Host header' });
+      return;
+    }
+    next();
+  };
+}
+
+function buildPrimaryHostGate(
   bind: string,
   getPort: () => number,
 ): RequestHandler {
@@ -269,15 +365,23 @@ export function hostAllowlist(
  * token configured, so this no-token branch is reachable only on loopback
  * developer setups that opted out of `--require-auth`.
  */
-export function bearerAuth(token: string | undefined): RequestHandler {
-  if (!token) {
-    return (_req: Request, _res: Response, next: NextFunction) => next();
-  }
-  // Pre-hash the configured token once. Per-request we hash the candidate and
-  // constant-time compare; this avoids leaking byte positions through string
-  // inequality short-circuiting.
-  const expected = createHash('sha256').update(token, 'utf8').digest();
+export function bearerAuth(
+  source: string | undefined | ListenerScopedCredentials,
+): RequestHandler {
+  const credentials =
+    typeof source === 'object' && source !== null
+      ? source
+      : singleTokenCredentials(source);
   return (req: Request, res: Response, next: NextFunction) => {
+    // Resolved per request rather than once at construction: the same app is
+    // served by both the primary listener and, while Local Control is on, the
+    // LAN listener — and they accept different credentials. See
+    // `local-control/credentials.ts` for the scoping table.
+    const listener = listenerIdentityOf(req);
+    if (credentials.isOpen(listener)) {
+      next();
+      return;
+    }
     const header = req.headers.authorization;
     if (!header) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -319,13 +423,12 @@ export function bearerAuth(token: string | undefined): RequestHandler {
     ) {
       credStart++;
     }
-    const credentials = header.slice(credStart);
-    if (credentials.length === 0) {
+    const presented = header.slice(credStart);
+    if (presented.length === 0) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const candidate = createHash('sha256').update(credentials, 'utf8').digest();
-    if (!timingSafeEqual(candidate, expected)) {
+    if (!credentials.verify(presented, listener)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
