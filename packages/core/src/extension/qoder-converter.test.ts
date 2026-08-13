@@ -113,6 +113,35 @@ describe('convertQoderPlugin', () => {
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
+  it('preserves hook root variables for installation-time hydration', async () => {
+    writeManifest({
+      name: 'sample-qoder-plugin',
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: '${CLAUDE_PLUGIN_ROOT}/scripts/start.sh',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const result = await convertQoderPlugin(root);
+
+    expect(
+      (
+        result.config.hooks?.['SessionStart']?.[0]?.hooks?.[0] as {
+          command?: string;
+        }
+      )?.command,
+    ).toBe('${CLAUDE_PLUGIN_ROOT}/scripts/start.sh');
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
   it('defaults the version and reports Qoder as the origin', async () => {
     writeManifest({ name: 'sample-qoder-plugin' });
     fs.writeFileSync(

@@ -1372,6 +1372,27 @@ describe('git extension helpers', () => {
       }
     });
 
+    it('does not refetch external content selected by an archive URL marketplace', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'archive-url',
+          source: 'https://example.com/catalog.zip',
+          pluginName: 'remote-child',
+          pluginSourceKind: 'marketplace-entry',
+          externalContent: true,
+        },
+      });
+      const mockManager = {
+        loadExtensionConfig: vi.fn(),
+      } as unknown as ExtensionManager;
+
+      await expect(
+        checkForExtensionUpdate(extension, mockManager),
+      ).resolves.toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockHttpsGet).not.toHaveBeenCalled();
+      expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+    });
+
     it('should convert an archive URL Gemini archive before checking for updates', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'archive-url-update-test-'),

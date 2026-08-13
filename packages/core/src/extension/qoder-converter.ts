@@ -204,7 +204,7 @@ export async function convertQoderPlugin(
   const converted = await buildQwenExtensionFromPlugin(
     extensionDir,
     config as ClaudePluginConfig,
-    false,
+    true,
     signal,
   );
   const contextFileName = resolveContextFiles(

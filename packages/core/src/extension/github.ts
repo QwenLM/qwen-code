@@ -394,6 +394,9 @@ export async function checkForExtensionUpdate(
     return checkNpmUpdate(installMetadata, signal);
   }
   if (installMetadata?.type === 'archive-url') {
+    if (installMetadata.externalContent === true) {
+      return ExtensionUpdateState.NOT_UPDATABLE;
+    }
     let tempDir: string | undefined;
     let convertedDir: string | undefined;
     try {

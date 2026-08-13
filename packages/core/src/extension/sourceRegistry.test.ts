@@ -440,6 +440,43 @@ describe('discoverPlugins', () => {
     });
   });
 
+  it.each([
+    ['a structured GitHub source without repo', { source: 'github' }],
+    ['a structured URL source without url', { source: 'url' }],
+  ])('keeps valid siblings when %s is malformed', async (_, source) => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        {
+          name: 'malformed',
+          version: '1.0.0',
+          source: source as never,
+        },
+        {
+          name: 'valid',
+          version: '1.0.0',
+          source: 'https://example.com/valid.tgz',
+        },
+      ]),
+    );
+
+    const discovered = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set(),
+    );
+
+    expect(discovered).toHaveLength(2);
+    expect(
+      discovered.find((plugin) => plugin.name === 'malformed'),
+    ).toMatchObject({
+      installSource: '',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(discovered.find((plugin) => plugin.name === 'valid')).toMatchObject({
+      installSource: 'https://example.com/valid.tgz',
+      pluginSourceKind: 'extension-root',
+    });
+  });
+
   it('keeps a structured GitHub Qoder plugin installable as a direct root', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Remote', [
