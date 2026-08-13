@@ -133,6 +133,9 @@ import {
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
+  addAgentInputMessageAttributes,
+  AgentOutputMessageCapture,
+  getActiveInteractionSpan,
   withInteractionSpan,
   SessionWriterError,
   startToolSpan,
@@ -1170,25 +1173,30 @@ interface PromptChannelDelivery {
   target: CronTaskDelivery['target'];
 }
 
-interface ChannelDeliveryCapture {
-  finalText: string;
+interface AgentResponseCapture {
+  channelDelivery?: {
+    finalText: string;
+  };
+  agentOutput: AgentOutputMessageCapture;
 }
 
 function beginChannelDeliveryResponseBlock(
-  capture: ChannelDeliveryCapture | undefined,
+  capture: AgentResponseCapture | undefined,
 ): string[] | undefined {
-  if (!capture) return undefined;
-  capture.finalText = '';
+  capture?.agentOutput.beginResponse();
+  if (!capture?.channelDelivery) return undefined;
+  capture.channelDelivery.finalText = '';
   return [];
 }
 
 function commitChannelDeliveryResponseBlock(
-  capture: ChannelDeliveryCapture | undefined,
+  capture: AgentResponseCapture | undefined,
   responseBlock: string[] | undefined,
   hasFunctionCalls: boolean,
 ): void {
-  if (capture && responseBlock && !hasFunctionCalls) {
-    capture.finalText = responseBlock.join('');
+  capture?.agentOutput.commitResponse(hasFunctionCalls);
+  if (capture?.channelDelivery && responseBlock && !hasFunctionCalls) {
+    capture.channelDelivery.finalText = responseBlock.join('');
   }
 }
 
@@ -3567,9 +3575,10 @@ export class Session implements SessionContext {
 
     this.duplicateProviderToolCallResponseIds.clear();
     const channelDelivery = parsePromptChannelDelivery(params);
-    const channelDeliveryCapture = channelDelivery
-      ? { finalText: '' }
-      : undefined;
+    const responseCapture: AgentResponseCapture = {
+      ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
+      agentOutput: new AgentOutputMessageCapture(this.config),
+    };
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3583,7 +3592,7 @@ export class Session implements SessionContext {
       const result = await this.#executePrompt(
         params,
         pendingSend,
-        channelDeliveryCapture,
+        responseCapture,
         invocationContext,
         modelPrompt,
         goalTurn,
@@ -3601,7 +3610,7 @@ export class Session implements SessionContext {
           source: 'prompt',
           target: channelDelivery.target,
           text: normalizeChannelDeliveryText(
-            channelDeliveryCapture?.finalText ?? '',
+            responseCapture.channelDelivery?.finalText ?? '',
           ),
           promptId: channelDelivery.deliveryId,
         });
@@ -3810,7 +3819,7 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture: AgentResponseCapture,
     invocationContext?: InvocationContextV1,
     modelPrompt?: string,
     goalTurn?: AcpGoalTurn,
@@ -3835,7 +3844,7 @@ export class Session implements SessionContext {
           this.#executePromptInner(
             params,
             pendingSend,
-            channelDeliveryCapture,
+            responseCapture,
             modelPrompt,
             goalTurn,
           ),
@@ -3849,7 +3858,7 @@ export class Session implements SessionContext {
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture: AgentResponseCapture,
     modelPrompt?: string,
     goalTurn?: AcpGoalTurn,
   ): Promise<PromptResponse> {
@@ -3940,6 +3949,16 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_CONTINUE_META_KEY
               ] === true;
+            if (!isRetry && !isContinue && goalTurn?.origin !== 'runtime') {
+              const interactionSpan = getActiveInteractionSpan();
+              if (interactionSpan) {
+                addAgentInputMessageAttributes(
+                  this.config,
+                  interactionSpan,
+                  promptDisplayText ?? promptText,
+                );
+              }
+            }
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -4279,6 +4298,7 @@ export class Session implements SessionContext {
                   pendingSend.signal,
                 );
                 let channelDeliveryResponseBlock: string[] | undefined;
+                let channelDeliveryCheckpoint = 0;
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -4316,8 +4336,8 @@ export class Session implements SessionContext {
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
-                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
-                  const channelDeliveryCheckpoint =
+                    beginChannelDeliveryResponseBlock(responseCapture);
+                  channelDeliveryCheckpoint =
                     channelDeliveryResponseBlock?.length ?? 0;
 
                   let streamFailed = false;
@@ -4345,10 +4365,14 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
+                            responseCapture.agentOutput.appendText(part.text);
                             channelDeliveryResponseBlock?.push(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
+                        responseCapture.agentOutput.observeFinishReason(
+                          candidate.finishReason,
+                        );
                       }
 
                       if (
@@ -4369,6 +4393,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.RETRY ||
                         resp.type === StreamEventType.MODEL_FALLBACK
                       ) {
+                        responseCapture.agentOutput.restartAttempt(
+                          resp.type === StreamEventType.RETRY &&
+                            resp.isContinuation === true,
+                        );
                         if (
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
@@ -4471,7 +4499,7 @@ export class Session implements SessionContext {
                 }
 
                 commitChannelDeliveryResponseBlock(
-                  channelDeliveryCapture,
+                  responseCapture,
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
@@ -4556,15 +4584,21 @@ export class Session implements SessionContext {
 
               // Fire Stop hook loop (aligned with core path in client.ts)
               // This is triggered after model response completes with no pending tool calls
-              return await this.#handleStopHookLoop(
+              const result = await this.#handleStopHookLoop(
                 pendingSend,
                 promptId,
                 hooksEnabled,
                 messageBus,
                 true,
                 fullTurnModelOverride,
-                channelDeliveryCapture,
+                responseCapture,
               );
+              if (result.stopReason !== 'cancelled') {
+                responseCapture.agentOutput.writeToSpan(
+                  getActiveInteractionSpan(),
+                );
+              }
+              return result;
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -4602,7 +4636,7 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture?: AgentResponseCapture,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -4667,7 +4701,7 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
-              channelDeliveryCapture,
+              responseCapture,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -4766,7 +4800,7 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
-                channelDeliveryCapture,
+                responseCapture,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -4900,7 +4934,7 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
-          channelDeliveryCapture,
+          responseCapture,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -4925,7 +4959,7 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
-      channelDeliveryCapture?: ChannelDeliveryCapture;
+      responseCapture?: AgentResponseCapture;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -4996,6 +5030,7 @@ export class Session implements SessionContext {
         pendingSend.signal,
       );
       let channelDeliveryResponseBlock: string[] | undefined;
+      let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
 
@@ -5294,10 +5329,9 @@ export class Session implements SessionContext {
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
-          options.channelDeliveryCapture,
+          options.responseCapture,
         );
-        const channelDeliveryCheckpoint =
-          channelDeliveryResponseBlock?.length ?? 0;
+        channelDeliveryCheckpoint = channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -5337,10 +5371,14 @@ export class Session implements SessionContext {
                 part.thought,
               );
               if (!part.thought) {
+                options.responseCapture?.agentOutput.appendText(part.text);
                 channelDeliveryResponseBlock?.push(part.text);
                 messageDisplay?.addChunk(part.text);
               }
             }
+            options.responseCapture?.agentOutput.observeFinishReason(
+              candidate.finishReason,
+            );
           }
 
           if (
@@ -5360,6 +5398,10 @@ export class Session implements SessionContext {
             response.type === StreamEventType.RETRY ||
             response.type === StreamEventType.MODEL_FALLBACK
           ) {
+            options.responseCapture?.agentOutput.restartAttempt(
+              response.type === StreamEventType.RETRY &&
+                response.isContinuation === true,
+            );
             if (
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
@@ -5443,7 +5485,7 @@ export class Session implements SessionContext {
       }
 
       commitChannelDeliveryResponseBlock(
-        options.channelDeliveryCapture,
+        options.responseCapture,
         channelDeliveryResponseBlock,
         functionCalls.length > 0,
       );
@@ -6634,9 +6676,10 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
         let cronCompleted = false;
-        const channelDeliveryCapture = item.delivery
-          ? { finalText: '' }
-          : undefined;
+        const responseCapture: AgentResponseCapture = {
+          ...(item.delivery ? { channelDelivery: { finalText: '' } } : {}),
+          agentOutput: new AgentOutputMessageCapture(this.config),
+        };
         await withInteractionSpan(
           this.config,
           {
@@ -6813,7 +6856,6 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
-
                 const sendResult =
                   await this.#sendMessageStreamWithAutoCompression(
                     promptId,
@@ -6833,7 +6875,7 @@ export class Session implements SessionContext {
                 }
                 const responseStream = sendResult.responseStream;
                 const channelDeliveryResponseBlock =
-                  beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                  beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.length ?? 0;
                 if (loopTick && turnCount === 1) {
@@ -6870,10 +6912,14 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          responseCapture.agentOutput.appendText(part.text);
                           channelDeliveryResponseBlock?.push(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
+                      responseCapture.agentOutput.observeFinishReason(
+                        candidate.finishReason,
+                      );
                     }
 
                     if (
@@ -6894,6 +6940,10 @@ export class Session implements SessionContext {
                       resp.type === StreamEventType.RETRY ||
                       resp.type === StreamEventType.MODEL_FALLBACK
                     ) {
+                      responseCapture.agentOutput.restartAttempt(
+                        resp.type === StreamEventType.RETRY &&
+                          resp.isContinuation === true,
+                      );
                       if (
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
@@ -6929,7 +6979,7 @@ export class Session implements SessionContext {
                 }
 
                 commitChannelDeliveryResponseBlock(
-                  channelDeliveryCapture,
+                  responseCapture,
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
@@ -6983,7 +7033,7 @@ export class Session implements SessionContext {
                   undefined,
                   false,
                   undefined,
-                  channelDeliveryCapture,
+                  responseCapture,
                 );
                 stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
@@ -7020,6 +7070,11 @@ export class Session implements SessionContext {
                 ),
               );
             }
+            if (!ac.signal.aborted && !cronHadError) {
+              responseCapture.agentOutput.writeToSpan(
+                getActiveInteractionSpan(),
+              );
+            }
           },
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
@@ -7036,7 +7091,7 @@ export class Session implements SessionContext {
             source: 'scheduled',
             target: item.delivery.target,
             text: normalizeChannelDeliveryText(
-              channelDeliveryCapture?.finalText ?? '',
+              responseCapture.channelDelivery?.finalText ?? '',
             ),
             taskId: item.taskId,
             firedAt: item.firedAt,

@@ -437,18 +437,19 @@ export class LoggingContentGenerator implements ContentGenerator {
       const observedFinishReasons = exchange.controller.finalize(false);
       // End the span BEFORE the (potentially-throwing) logging block, so a
       // logging-side rejection cannot prevent span finalization. Mirrors the
-      // streaming path order. Use abort-specific status message when the
-      // caller's abortSignal fired, so trace backends can distinguish user
-      // cancellations from real upstream failures.
-      const aborted = req.config?.abortSignal?.aborted ?? false;
+      // streaming path order. A caller-driven abort is a cancellation, while
+      // a real upstream failure that merely races an abort remains an error.
+      const cancelled =
+        (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
       endLLMRequestSpan(llmSpan, {
         success: false,
+        cancelled,
         durationMs,
-        error: aborted
+        error: cancelled
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-        errorType: getErrorType(error),
-        errorStatusCode: getErrorStatus(error),
+        errorType: cancelled ? undefined : getErrorType(error),
+        errorStatusCode: cancelled ? undefined : getErrorStatus(error),
         finishReasons: observedFinishReasons,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
@@ -565,15 +566,17 @@ export class LoggingContentGenerator implements ContentGenerator {
           req.config?.abortSignal,
         ),
       );
-      const aborted = req.config?.abortSignal?.aborted ?? false;
+      const cancelled =
+        (req.config?.abortSignal?.aborted ?? false) && isAbortError(error);
       endLLMRequestSpan(llmSpan, {
         success: false,
+        cancelled,
         durationMs,
-        error: aborted
+        error: cancelled
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-        errorType: getErrorType(error),
-        errorStatusCode: getErrorStatus(error),
+        errorType: cancelled ? undefined : getErrorType(error),
+        errorStatusCode: cancelled ? undefined : getErrorStatus(error),
         finishReasons: observedFinishReasons,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
@@ -680,6 +683,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     };
     let errorOccurred = false;
     let streamCompleted = false;
+    let abortedBeforeStreamCompletion = abortSignal?.aborted ?? false;
+    const markStreamAborted = () => {
+      if (!streamCompleted) abortedBeforeStreamCompletion = true;
+    };
+    abortSignal?.addEventListener('abort', markStreamAborted, { once: true });
     const finishReasons = new Map<number, string>();
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
@@ -879,6 +887,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
+      abortSignal?.removeEventListener('abort', markStreamAborted);
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
       }
@@ -888,20 +897,23 @@ export class LoggingContentGenerator implements ContentGenerator {
       // own ended guard, but we want to avoid pretending the final token
       // counts were recorded — they weren't, the span is the timeout one.
       if (span && !spanEndedByTimeout) {
-        const aborted = abortSignal?.aborted ?? false;
+        const cancelled =
+          abortedBeforeStreamCompletion &&
+          (lastError === undefined || isAbortError(lastError));
         const observedFinishReasons = exchangeController?.finalize(
-          !errorOccurred && streamCompleted,
+          !errorOccurred && !cancelled && streamCompleted,
         );
         endLLMRequestSpan(span, {
-          success: !errorOccurred,
+          success: !errorOccurred && !cancelled,
+          cancelled,
           ...usageSpanMetadata(lastUsageMetadata),
           ttftMs,
           durationMs: Date.now() - startTime,
-          error: errorOccurred
-            ? aborted
-              ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
-              : API_CALL_FAILED_SPAN_STATUS_MESSAGE
-            : undefined,
+          error: cancelled
+            ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+            : errorOccurred
+              ? API_CALL_FAILED_SPAN_STATUS_MESSAGE
+              : undefined,
           responseId: firstResponseId || undefined,
           responseModel: firstModelVersion || undefined,
           finishReasons:
@@ -913,8 +925,10 @@ export class LoggingContentGenerator implements ContentGenerator {
               : undefined),
           thoughtsTokenCount: lastUsageMetadata?.thoughtsTokenCount,
           subagentName: subagentName || undefined,
-          errorType: lastError ? getErrorType(lastError) : undefined,
-          errorStatusCode: lastError ? getErrorStatus(lastError) : undefined,
+          errorType:
+            lastError && !cancelled ? getErrorType(lastError) : undefined,
+          errorStatusCode:
+            lastError && !cancelled ? getErrorStatus(lastError) : undefined,
           ...retrySnapshot,
           config: this.config,
         });

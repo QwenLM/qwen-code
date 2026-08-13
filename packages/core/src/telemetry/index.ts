@@ -240,6 +240,9 @@ export {
   registerAcpEventLoopLagGauge,
 } from './event-loop-lag-metrics.js';
 export {
+  addAgentInputMessageAttributes,
+  addAgentOutputMessageAttributes,
+  AgentOutputMessageCapture,
   addUserPromptAttributes,
   addSystemPromptAttributes,
   addToolSchemaAttributes,
