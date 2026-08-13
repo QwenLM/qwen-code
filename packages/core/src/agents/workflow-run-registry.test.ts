@@ -975,6 +975,30 @@ describe('WorkflowRunRegistry', () => {
     ]);
   });
 
+  it('records empty dispatch errors as failures', () => {
+    const r = new WorkflowRunRegistry();
+    const entry = r.register(reg('wf_empty_dispatch_error'));
+    r.onDispatchQueued(entry.runId, {
+      id: 'dispatch-1',
+      label: 'Empty failure',
+      prompt: 'Fail without a message',
+      dependsOn: [],
+      queuedAt: 1_100,
+    });
+    r.onDispatchStarted(entry.runId, 'dispatch-1', 1_120);
+
+    r.onDispatchSettled(entry.runId, 'dispatch-1', '', 1_180);
+
+    expect(entry.dispatches[0]).toMatchObject({
+      status: 'failed',
+      error: '',
+    });
+    expect(entry.events.at(-1)).toMatchObject({
+      type: 'dispatch-failed',
+      error: 'Dispatch failed.',
+    });
+  });
+
   it('cancels unfinished dispatches before the workflow terminal event', () => {
     const r = new WorkflowRunRegistry();
     const entry = r.register(reg('wf_late_dispatch'));
@@ -1220,6 +1244,17 @@ describe('WorkflowRunRegistry', () => {
     expect(e.recentLogs).toHaveLength(100);
     expect(e.recentLogs[0]).toBe('line 150');
     expect(e.recentLogs[99]).toBe('line 249');
+  });
+
+  it('setRecentLogs sanitizes the mirrored sandbox tail', () => {
+    const r = new WorkflowRunRegistry();
+    r.register(reg('wf_sanitized_logs'));
+
+    r.setRecentLogs('wf_sanitized_logs', [
+      '\u001b[2J\u001b[Hchecks\u0000 passed',
+    ]);
+
+    expect(r.get('wf_sanitized_logs')?.recentLogs).toEqual(['checks passed']);
   });
 
   it('complete settles the entry and ignores subsequent transitions', () => {

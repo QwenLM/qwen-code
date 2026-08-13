@@ -927,13 +927,14 @@ export class WorkflowRunRegistry {
     dispatch.status =
       entry.status === 'cancelled'
         ? 'cancelled'
-        : error
+        : error !== undefined
           ? 'failed'
           : dispatch.status === 'cached'
             ? 'cached'
             : 'completed';
     dispatch.endedAt = at;
-    if (error) dispatch.error = stripAnsiAndControl(error).slice(0, 4_096);
+    if (error !== undefined)
+      dispatch.error = stripAnsiAndControl(error).slice(0, 4_096);
     if (!shouldRecordEvent) {
       this.emitStatusChange(entry);
       return;
@@ -943,7 +944,7 @@ export class WorkflowRunRegistry {
         type: 'dispatch-failed',
         at,
         dispatchId,
-        error: dispatch.error ?? 'Dispatch failed.',
+        error: dispatch.error || 'Dispatch failed.',
       });
     } else {
       this.appendEvent(entry, {
@@ -1062,7 +1063,7 @@ export class WorkflowRunRegistry {
     if (!isActiveWorkflowStatus(entry.status) && entry.status !== 'cancelled')
       return;
     const tail = logs.length > 100 ? logs.slice(-100) : Array.from(logs);
-    entry.recentLogs = tail;
+    entry.recentLogs = tail.map(stripAnsiAndControl);
     this.emitStatusChange(entry);
   }
 
