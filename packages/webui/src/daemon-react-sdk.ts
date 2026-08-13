@@ -211,6 +211,7 @@ export type {
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
   DaemonPromptStatus,
+  DaemonReasoningControls,
   /** Hook return value for daemon follow-up suggestions. */
   UseDaemonFollowupSuggestionReturn,
   /** Image attachment (base64 data + MIME type) for prompt submission. */
