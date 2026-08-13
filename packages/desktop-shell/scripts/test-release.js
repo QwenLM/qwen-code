@@ -68,6 +68,32 @@ async function testBootstrapWorkspaceVisibility() {
     'The bootstrap splash mark must ship with the frontendDist directory.',
   );
   assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
+  const reducedMotionBlock = bootstrapHtml.match(
+    /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)(?:@media|<\/style>)/,
+  );
+  assert.ok(
+    reducedMotionBlock,
+    'The bootstrap splash must keep a reduced-motion media block.',
+  );
+  for (const centeringRule of [
+    /body\[data-state='starting'\] \.brand \{[^}]*justify-content: center;[^}]*\}/,
+    /body\[data-state='starting'\] \.status \{[^}]*text-align: center;[^}]*\}/,
+  ]) {
+    assert.match(
+      reducedMotionBlock[1],
+      centeringRule,
+      'The reduced-motion startup view must keep the logo and status text on the same horizontal center.',
+    );
+  }
+  const runtimeSource = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'runtime.rs'),
+    'utf8',
+  );
+  assert.match(
+    runtimeSource,
+    /let mut child = spawn_runtime_group\(&mut command\)/,
+    'DesktopRuntime::start must spawn the runtime through the hidden-console helper.',
+  );
   const primary = await createBootstrapHarness();
   const { body, commands, element, listeners, resolveBootstrapState } = primary;
 
