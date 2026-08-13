@@ -19,6 +19,8 @@ import {
   computeModelListVersion,
   deepseekProvider,
   kimiProvider,
+  KIMI_API_ENV_KEY,
+  KIMI_CODE_ENV_KEY,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
 import { useProviderUpdates } from './useProviderUpdates.js';
@@ -85,6 +87,7 @@ describe('useProviderUpdates', () => {
     vi.clearAllMocks();
     mockSettings.merged['modelProviders'] = {};
     mockSettings.merged[PROVIDER_METADATA_NS] = {};
+    mockSettings.merged['env'] = {};
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       authType: AuthType.USE_OPENAI,
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
@@ -93,6 +96,8 @@ describe('useProviderUpdates', () => {
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
     mockModelsConfig.syncAfterAuthRefresh.mockReset();
     delete process.env[CODING_PLAN_ENV_KEY];
+    delete process.env[KIMI_API_ENV_KEY];
+    delete process.env[KIMI_CODE_ENV_KEY];
   });
 
   it('does not show update prompt when no version is stored', () => {
@@ -317,6 +322,63 @@ describe('useProviderUpdates', () => {
       deepseekVersion,
     );
     delete process.env[deepseekEnvKey];
+  });
+
+  it('preserves owned custom models using a proxy URL during an update', async () => {
+    const deepseekBaseUrl = 'https://api.deepseek.com';
+    const deepseekEnvKey = 'DEEPSEEK_API_KEY';
+    const deepseekTemplate = buildProviderTemplate(
+      deepseekProvider,
+      deepseekBaseUrl,
+    );
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'deepseek'
+    ] = {
+      baseUrl: deepseekBaseUrl,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [
+        ...deepseekTemplate,
+        {
+          id: 'my-custom-model',
+          envKey: deepseekEnvKey,
+          name: '[DeepSeek] my-custom-model',
+          baseUrl: 'https://corp-proxy.example/v1',
+        },
+      ],
+    };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: deepseekBaseUrl,
+      apiKeyEnvKey: deepseekEnvKey,
+    });
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+    expect(
+      mockConfig.reloadModelProvidersConfig.mock.calls[0][0][
+        AuthType.USE_OPENAI
+      ],
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'my-custom-model' }),
+      ]),
+    );
   });
 
   it('does not re-prompt when the stored version matches the template but the selection differs', () => {
@@ -655,6 +717,134 @@ describe('useProviderUpdates', () => {
       expect.anything(),
       `${PROVIDER_METADATA_NS}.kimi--api-international.version`,
       computeModelListVersion(apiTemplate),
+    );
+  });
+
+  it('does not infer metadata for a provider after its credentials are cleared', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: buildProviderTemplate(
+        kimiProvider,
+        codingUrl,
+      ).slice(0, -1),
+    };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(new RegExp(`^${PROVIDER_METADATA_NS}\\.kimi--`)),
+      expect.anything(),
+    );
+  });
+
+  it('does not infer metadata from a stale process credential after sign-out', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: buildProviderTemplate(
+        kimiProvider,
+        codingUrl,
+      ).slice(0, -1),
+    };
+    process.env[KIMI_CODE_ENV_KEY] = 'sk-stale';
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(new RegExp(`^${PROVIDER_METADATA_NS}\\.kimi--`)),
+      expect.anything(),
+    );
+  });
+
+  it('infers endpoint metadata when its credential is still configured', async () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: buildProviderTemplate(
+        kimiProvider,
+        codingUrl,
+      ).slice(0, -1),
+    };
+    mockSettings.merged['env'] = { [KIMI_CODE_ENV_KEY]: 'sk-live' };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    expect(result.current.providerUpdateRequest?.entries[0]?.metadataKey).toBe(
+      'kimi--coding-plan',
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      `${PROVIDER_METADATA_NS}.kimi--coding-plan.version`,
+      expect.any(String),
+    );
+  });
+
+  it('does not infer coding metadata from a sibling endpoint credential', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: buildProviderTemplate(
+        kimiProvider,
+        codingUrl,
+      ).slice(0, -1),
+    };
+    mockSettings.merged['env'] = { [KIMI_API_ENV_KEY]: 'sk-sibling' };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api.moonshot.ai/v1',
+      apiKeyEnvKey: KIMI_API_ENV_KEY,
+    });
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    expect(result.current.providerUpdateRequest).toBeUndefined();
+    expect(mockSettings.setValue).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(new RegExp(`^${PROVIDER_METADATA_NS}\\.kimi--`)),
+      expect.anything(),
     );
   });
 

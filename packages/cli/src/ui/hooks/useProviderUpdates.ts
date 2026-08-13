@@ -246,6 +246,13 @@ function getInstalledOwnedModelIds(
 function resolveUpdateTargets(
   settings: LoadedSettings,
   provider: ProviderConfig,
+  activeConfig:
+    | {
+        authType?: string;
+        baseUrl?: string;
+        apiKeyEnvKey?: string;
+      }
+    | undefined,
 ): Array<{
   metadataKey: string;
   baseUrl: string;
@@ -296,6 +303,28 @@ function resolveUpdateTargets(
         },
       ];
     }
+    const configuredEnv = (settings.merged.env ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const hasStoredCredential = endpointModels.some(
+      (model) =>
+        typeof model.envKey === 'string' &&
+        typeof configuredEnv[model.envKey] === 'string' &&
+        configuredEnv[model.envKey] !== '',
+    );
+    const isActiveProvider =
+      activeConfig?.authType === provider.protocol &&
+      normalizeBaseUrlForMatching(activeConfig.baseUrl) ===
+        normalizeBaseUrlForMatching(option.url) &&
+      providerMatchesCredentials(
+        provider,
+        activeConfig.baseUrl,
+        activeConfig.apiKeyEnvKey,
+      );
+    if (!legacyMetadata.version && !hasStoredCredential && !isActiveProvider) {
+      return [];
+    }
     const builtinIds = new Set(getDefaultModelIds(provider, option.url));
     const installedBuiltins = endpointModels.filter((model) =>
       builtinIds.has(model.id),
@@ -317,12 +346,20 @@ function resolveUpdateTargets(
 function findAllPendingUpdates(
   settings: LoadedSettings,
   currentModel: string,
+  activeConfig:
+    | {
+        authType?: string;
+        baseUrl?: string;
+        apiKeyEnvKey?: string;
+      }
+    | undefined,
 ): PendingUpdate[] {
   const results: PendingUpdate[] = [];
   for (const provider of ALL_PROVIDERS) {
     for (const { metadataKey, baseUrl, metadata } of resolveUpdateTargets(
       settings,
       provider,
+      activeConfig,
     )) {
       const currentTemplate = buildProviderTemplate(provider, baseUrl);
       const currentVersion = computeModelListVersion(currentTemplate);
@@ -396,8 +433,7 @@ export function useProviderUpdates(
         const customIds = installedOwnedModels
           .filter(
             (model) =>
-              (!providerCfg.mergeModelsByIdentity &&
-                model.baseUrl === undefined) ||
+              !providerCfg.mergeModelsByIdentity ||
               normalizeBaseUrlForMatching(model.baseUrl) ===
                 normalizeBaseUrlForMatching(resolved),
           )
@@ -513,7 +549,11 @@ export function useProviderUpdates(
     }
 
     const currentModel = config.getModel();
-    const pendingList = findAllPendingUpdates(settings, currentModel);
+    const pendingList = findAllPendingUpdates(
+      settings,
+      currentModel,
+      config.getContentGeneratorConfig(),
+    );
 
     if (pendingList.length === 0) return;
 
