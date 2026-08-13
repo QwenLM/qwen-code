@@ -25,6 +25,9 @@ import {
   isSourceFailureLine,
   mavenExecutable,
   mavenToolchainAdapter,
+  NOTE_CORRELATE_ERRORS,
+  NOTE_INFRASTRUCTURE_EVIDENCE,
+  NOTE_MAVEN_TEST_PASSED,
   reportPaths,
   shellSelector,
 } from './maven-toolchain.js';
@@ -400,7 +403,7 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Could not resolve dependencies for project example:core',
         }),
     });
-    expect(resolution.note).toContain('infrastructure evidence');
+    expect(resolution.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(resolution.test[0]).toMatchObject({ infrastructure: true });
     expect(timeout.test[0]?.infrastructure).toBeUndefined();
   });
@@ -422,8 +425,8 @@ describe('maven toolchain adapter', () => {
           }),
       });
 
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -447,8 +450,8 @@ describe('maven toolchain adapter', () => {
           }),
       });
 
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -487,7 +490,7 @@ describe('maven toolchain adapter', () => {
         exec: (command) => result(command, { exitCode, output }),
       });
 
-      expect(report.note).toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -505,8 +508,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -523,39 +526,39 @@ describe('maven toolchain adapter', () => {
         });
 
       const denied = runWith(126, '/bin/sh: ./mvnw: Permission denied');
-      expect(denied.note).toContain('infrastructure evidence');
+      expect(denied.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
       // A CRLF-committed wrapper dies at shebang resolution on Linux.
       const crlf = runWith(
         126,
         '/bin/sh: ./mvnw: /bin/sh^M: bad interpreter: No such file or directory',
       );
-      expect(crlf.note).toContain('infrastructure evidence');
+      expect(crlf.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
       // Some shells report the same death with exit 127.
       const crlf127 = runWith(
         127,
         '/bin/sh: ./mvnw: /usr/bin/env: bad interpreter: No such file or directory',
       );
-      expect(crlf127.note).toContain('infrastructure evidence');
+      expect(crlf127.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
       // bash >= 5.2 reports the same death with new wording.
       const bash52 = runWith(
         127,
         '/bin/sh: line 1: ./mvnw: cannot execute: required file not found',
       );
-      expect(bash52.note).toContain('infrastructure evidence');
+      expect(bash52.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
       // dash's bare wording.
       const dash = runWith(127, 'sh: ./mvnw: not found');
-      expect(dash.note).toContain('infrastructure evidence');
+      expect(dash.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
       // A CRLF `#!/usr/bin/env sh` shebang names env, not the wrapper.
       const envCrlf = runWith(
         127,
         "/usr/bin/env: 'sh\\r': No such file or directory",
       );
-      expect(envCrlf.note).toContain('infrastructure evidence');
+      expect(envCrlf.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -568,8 +571,8 @@ describe('maven toolchain adapter', () => {
       const report = runAdapter([changed], {
         exec: (command) => result(command, { exitCode: 1, output }),
       });
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     }
 
     // No executable wrapper exists on disk, so the run used the system
@@ -583,7 +586,7 @@ describe('maven toolchain adapter', () => {
       const report = runAdapter([changed], {
         exec: (command) => result(command, { exitCode: 1, output }),
       });
-      expect(report.note).toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
       expect(report.note).toContain('wrapper change itself was not exercised');
     }
   });
@@ -600,8 +603,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('attributes dependency wording beside fresh reports to the PR, not the environment', () => {
@@ -630,8 +633,8 @@ describe('maven toolchain adapter', () => {
 
     expect(report.test[0]?.output).toContain('[maven-test-report]');
     expect(report.test[0]?.infrastructure).toBeUndefined();
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('keeps fresh failing tests as source evidence despite infrastructure words', () => {
@@ -657,8 +660,8 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(report.test[0]?.output).toContain('[maven-test-failure]');
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -687,7 +690,7 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.swallowedReports).toBe(true);
     expect(report.note).toContain('exited 0');
     expect(report.note).toContain('test failures, not a pass');
-    expect(report.note).not.toContain('Maven test passed');
+    expect(report.note).not.toContain(NOTE_MAVEN_TEST_PASSED);
   });
 
   it('skips malformed report directories without aborting Maven', () => {
@@ -1111,8 +1114,8 @@ describe('maven toolchain adapter', () => {
           output: 'java.net.ConnectException: Connection refused',
         }),
     });
-    expect(unframed.note).toContain('Correlate compiler or test errors');
-    expect(unframed.note).not.toContain('infrastructure evidence');
+    expect(unframed.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(unframed.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
     const framed = runAdapter(['core/src/Main.java'], {
       exec: (command) =>
@@ -1122,7 +1125,7 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Failed to execute goal on project core: Could not transfer artifact org.example:dep:jar:1: Connection refused',
         }),
     });
-    expect(framed.note).toContain('infrastructure evidence');
+    expect(framed.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not launder a compile failure into infrastructure when dependency words share the output', () => {
@@ -1144,8 +1147,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -1167,13 +1170,13 @@ describe('maven toolchain adapter', () => {
       '[ERROR] There are test failures.',
     ]) {
       const report = runWith(`${dependencyLine}\n${marker}`);
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     }
 
     // ...but the same words in a test's own stdout do not.
     const unframed = runWith(`${dependencyLine}\nCOMPILATION ERROR`);
-    expect(unframed.note).toContain('infrastructure evidence');
+    expect(unframed.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(unframed.test[0]).toMatchObject({ infrastructure: true });
   });
 
@@ -1187,7 +1190,7 @@ describe('maven toolchain adapter', () => {
     expect(report.ok).toBe(false);
     expect(report.timedOut).toEqual([]);
     expect(report.note).toContain('without an exit code');
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('discloses successful tests without fresh XML', () => {
@@ -1267,8 +1270,8 @@ describe('maven toolchain adapter', () => {
           }),
       });
 
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -1288,8 +1291,8 @@ describe('maven toolchain adapter', () => {
           result(command, { exitCode: 127, output: 'sh: 1: mvn: not found' }),
       });
 
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
       expect(report.test[0]?.infrastructure).toBeUndefined();
     },
   );
@@ -1345,7 +1348,7 @@ describe('maven toolchain adapter', () => {
       },
     );
 
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('reports insufficient disk space instead of running Maven on a full disk', () => {
@@ -1526,7 +1529,7 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.infrastructure).toBeUndefined();
     expect(report.note).toContain('exited 0');
     expect(report.note).toContain('fail-never');
-    expect(report.note).not.toContain('Maven test passed');
+    expect(report.note).not.toContain(NOTE_MAVEN_TEST_PASSED);
   });
 
   it('classifies a fail-never dependency failure as infrastructure', () => {
@@ -1545,7 +1548,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.infrastructure).toBe(true);
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.note).toContain('fail-never');
   });
 
@@ -1570,7 +1573,7 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.infrastructure).toBeUndefined();
     expect(report.test[0]?.swallowedFailure).toBe(true);
     expect(report.note).toContain('fail-never');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('keeps Kotlin compile failures source-attributed beside dependency words', () => {
@@ -1587,8 +1590,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -1644,8 +1647,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('fails closed past the read cap for .mvn/maven.config', () => {
@@ -1672,7 +1675,7 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Could not resolve dependencies for project example:core',
         }),
     });
-    expect(oversized.note).toContain('infrastructure evidence');
+    expect(oversized.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
     // ...and under the cap the identical config suppresses it.
     writeFileSync(join(root, '.mvn', 'maven.config'), '-s\nsettings.xml\n');
@@ -1684,8 +1687,8 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Could not resolve dependencies for project example:core',
         }),
     });
-    expect(undersized.note).toContain('Correlate compiler or test errors');
-    expect(undersized.note).not.toContain('infrastructure evidence');
+    expect(undersized.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(undersized.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('leaves no Maven target when only the other platform wrapper changed', () => {
@@ -1723,7 +1726,7 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Could not resolve dependencies for project example:core',
         }),
     });
-    expect(mixed.note).toContain('infrastructure evidence');
+    expect(mixed.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(mixed.note).toContain('wrapper change itself was not exercised');
   });
 
@@ -1929,8 +1932,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -1951,8 +1954,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -2041,7 +2044,7 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     expect(report.test[0]?.infrastructure).toBeUndefined();
   });
 
@@ -2225,8 +2228,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('quotes the deadline the lifecycle actually ran under in its timeout note', () => {
@@ -2476,7 +2479,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.infrastructure).toBe(true);
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not read forged framing as swallowed failure over green fresh reports', () => {
@@ -2568,7 +2571,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.infrastructure).toBe(true);
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('discloses the unscopable npm half of a mixed root', () => {
@@ -2661,7 +2664,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.infrastructure).toBe(true);
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('classifies colored Maven output exactly like plain output', () => {
@@ -2839,8 +2842,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('treats every -Dmaven.repo.local.tail entry as a dependency input', () => {
@@ -2864,8 +2867,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('fails closed to reactor-wide for a real module nested under a non-root aggregator src/ path', () => {
@@ -3292,7 +3295,7 @@ describe('maven toolchain adapter', () => {
 
       expect(report.ok).toBe(false);
       expect(report.test[0]?.infrastructure).toBe(true);
-      expect(report.note).toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     }
   });
 
@@ -3372,7 +3375,7 @@ describe('maven toolchain adapter', () => {
         const report = runAdapter(['core/src/Main.java'], {
           exec: (command) => result(command, { exitCode, output }),
         });
-        expect(report.note).toContain('infrastructure evidence');
+        expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
       }
     },
   );
@@ -3430,7 +3433,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(true);
     expect(report.test[0]?.neverRan).toBeUndefined();
-    expect(report.note).toContain('Maven test passed');
+    expect(report.note).toContain(NOTE_MAVEN_TEST_PASSED);
   });
 
   it('does not fail a green run when a test echoes a failing Surefire summary', () => {
@@ -3460,7 +3463,7 @@ describe('maven toolchain adapter', () => {
     });
     expect(green.ok).toBe(true);
     expect(green.test[0]?.swallowedFailure).toBeUndefined();
-    expect(green.note).toContain('Maven test passed');
+    expect(green.note).toContain(NOTE_MAVEN_TEST_PASSED);
 
     // The relocated-reports twin keeps its defense: with no visible
     // reports, the stdout summary is the only signal.
@@ -3528,7 +3531,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(true);
     expect(report.test[0]?.evidenceCapped).toBeUndefined();
-    expect(report.note).toContain('Maven test passed');
+    expect(report.note).toContain(NOTE_MAVEN_TEST_PASSED);
   });
 
   it('reads a log-file run with no reports as never run, not green', () => {
@@ -3569,7 +3572,7 @@ describe('maven toolchain adapter', () => {
         }),
     });
     expect(afterTests.test[0]?.infrastructure).toBe(true);
-    expect(afterTests.note).toContain('infrastructure evidence');
+    expect(afterTests.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
     // The same wording BEFORE any test phase is Maven's own, unchanged.
     const genuine = runAdapter(['core/src/Main.java'], {
@@ -3580,7 +3583,7 @@ describe('maven toolchain adapter', () => {
         }),
     });
     expect(genuine.test[0]?.infrastructure).toBe(true);
-    expect(genuine.note).toContain('infrastructure evidence');
+    expect(genuine.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not launder a compile failure into infrastructure when upstream test stdout echoes infrastructure words', () => {
@@ -3606,10 +3609,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
     expect(echoedDependency.test[0]?.infrastructure).toBeUndefined();
-    expect(echoedDependency.note).toContain(
-      'Correlate compiler or test errors',
-    );
-    expect(echoedDependency.note).not.toContain('infrastructure evidence');
+    expect(echoedDependency.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(echoedDependency.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
     // The disk arm's twin: an upstream test exercising an ENOSPC path
     // prints the framed disk wording; the changed module's genuine
@@ -3626,8 +3627,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
     expect(echoedDisk.test[0]?.infrastructure).toBeUndefined();
-    expect(echoedDisk.note).toContain('Correlate compiler or test errors');
-    expect(echoedDisk.note).not.toContain('infrastructure evidence');
+    expect(echoedDisk.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(echoedDisk.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not discard a green run on a forged selector rejection', () => {
@@ -3657,7 +3658,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.toolchain).toBe('maven');
     expect(report.ok).toBe(true);
-    expect(report.note).toContain('Maven test passed');
+    expect(report.note).toContain(NOTE_MAVEN_TEST_PASSED);
   });
 
   it('keeps fresh failing reports on a run with forged selector-rejection wording', () => {
@@ -3767,8 +3768,8 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(report.test[0]?.infrastructure).toBeUndefined();
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -3830,12 +3831,12 @@ describe('maven toolchain adapter', () => {
     };
 
     const paired = withConfig('-settings\nci/conf.xml\n');
-    expect(paired.note).toContain('Correlate compiler or test errors');
-    expect(paired.note).not.toContain('infrastructure evidence');
+    expect(paired.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(paired.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
     const attached = withConfig('-settings=ci/conf.xml\n');
-    expect(attached.note).toContain('Correlate compiler or test errors');
-    expect(attached.note).not.toContain('infrastructure evidence');
+    expect(attached.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(attached.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('splits -Dmaven.repo.local.tail on comma only, never on |', () => {
@@ -3858,8 +3859,8 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Could not resolve dependencies for project example:core',
         }),
     });
-    expect(own.note).toContain('Correlate compiler or test errors');
-    expect(own.note).not.toContain('infrastructure evidence');
+    expect(own.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(own.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
 
     // The phantom half of the old split must NOT record as an input: a
     // change under `cache/` alone keeps the carve-out.
@@ -3872,7 +3873,7 @@ describe('maven toolchain adapter', () => {
             '[ERROR] Could not resolve dependencies for project example:core',
         }),
     });
-    expect(phantom.note).toContain('infrastructure evidence');
+    expect(phantom.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('widens the run to the full reactor for a root-level miscellaneous file', () => {
@@ -4064,8 +4065,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not read maven.config comment lines as arguments', () => {
@@ -4086,7 +4087,7 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not read -legacy-local-repository as a log-file flag', () => {
@@ -4144,8 +4145,8 @@ describe('maven toolchain adapter', () => {
           }),
       });
 
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -4205,8 +4206,8 @@ describe('maven toolchain adapter', () => {
           }),
       });
 
-      expect(report.note).toContain('Correlate compiler or test errors');
-      expect(report.note).not.toContain('infrastructure evidence');
+      expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+      expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
     },
   );
 
@@ -4225,8 +4226,8 @@ describe('maven toolchain adapter', () => {
         }),
     });
 
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -4484,8 +4485,8 @@ describe('maven toolchain adapter', () => {
     expect(report.ok).toBe(false);
     expect(report.test[0]?.infrastructure).toBeUndefined();
     expect(report.test[0]?.swallowedFailure).toBeUndefined();
-    expect(report.note).toContain('Correlate compiler or test errors');
-    expect(report.note).not.toContain('infrastructure evidence');
+    expect(report.note).toContain(NOTE_CORRELATE_ERRORS);
+    expect(report.note).not.toContain(NOTE_INFRASTRUCTURE_EVIDENCE);
   });
 
   it('does not launder a swallowed stdout test failure into infrastructure', () => {

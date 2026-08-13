@@ -46,6 +46,17 @@ export interface MavenOwnership {
 // eslint-disable-next-line no-control-regex -- ESC is the character under test
 export const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
 
+/**
+ * Stable note markers, asserted by the test oracle. The prose around them
+ * may be reworded freely; changing a marker is a deliberate contract edit —
+ * one constant here, and every test that imports it follows. Each branch's
+ * marker is distinct, so the assertions still discriminate which branch
+ * produced the note (they only decouple from the surrounding wording).
+ */
+export const NOTE_INFRASTRUCTURE_EVIDENCE = 'infrastructure evidence';
+export const NOTE_CORRELATE_ERRORS = 'Correlate compiler or test errors';
+export const NOTE_MAVEN_TEST_PASSED = 'Maven test passed';
+
 const REACTOR_WIDE_FILES = new Set(['pom.xml', 'mvnw', 'mvnw.cmd']);
 /**
  * `failsafe-reports` is forward-looking today: this adapter only ever runs
@@ -2093,14 +2104,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // exit code and nothing to correlate — infrastructure, like a timeout.
     report.note =
       `\`${result.command}\` ended without an exit code (a spawn failure or signal outside the deadline). ` +
-      'This is infrastructure evidence, not a source finding.';
+      `This is ${NOTE_INFRASTRUCTURE_EVIDENCE}, not a source finding.`;
   } else if (acquisitionFailure) {
     report.note =
       `\`${result.command}\` failed while acquiring or starting Maven, Java, plugins, or dependencies` +
       (result.exitCode === 0
         ? ' — a fail-never setting masked the failure with exit 0'
         : '') +
-      '. This is infrastructure evidence, not a source finding.';
+      `. This is ${NOTE_INFRASTRUCTURE_EVIDENCE}, not a source finding.`;
   } else if (!ok && result.exitCode === 0 && freshFailures) {
     const totals = summaryTotals(summaries);
     report.note =
@@ -2169,7 +2180,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       `not fail on — ${distrustedCause}. Treat this as a failed run, not a pass.`;
   } else if (!ok) {
     report.note =
-      `\`${result.command}\` failed. Correlate compiler or test errors with the changed files; ` +
+      `\`${result.command}\` failed. ${NOTE_CORRELATE_ERRORS} with the changed files; ` +
       'fresh module-qualified Surefire/Failsafe summaries are appended when available.';
   } else if (args.buildOnly) {
     report.note =
@@ -2183,7 +2194,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   } else {
     const totals = summaryTotals(summaries);
     report.note =
-      `Maven test passed with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
+      `${NOTE_MAVEN_TEST_PASSED} with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
       `${totals.errors} errors, ${totals.skipped} skipped across ${summaries.length} report(s).`;
   }
   if (!reactorWide) {
