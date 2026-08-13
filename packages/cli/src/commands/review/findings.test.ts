@@ -24,6 +24,7 @@ import {
   type Finding,
   type FindingsReport,
   holdCriticalsFailingOnBase,
+  holdUnwitnessedCriticals,
   sharedFailingFilesOf,
 } from './findings.js';
 
@@ -787,6 +788,68 @@ describe('findings (command boundary)', () => {
         print: false,
       }),
     ).toThrow(/is not valid JSON/);
+  });
+});
+
+describe('holdUnwitnessedCriticals — the witness rule has a machine half', () => {
+  const critical = {
+    id: 'w1',
+    severity: 'Critical' as const,
+    confidence: 'high' as const,
+    source: 'review' as const,
+    summary: 'double-executes the shell command',
+    shortSummary: 'double execute',
+    failureScenario: 'run !git push → sendShellCommand fires twice',
+    locations: [{ file: 'src/pay.ts', line: 42 }],
+  };
+
+  it('files an unwitnessed high-confidence review Critical at low confidence, and says why', () => {
+    // The demotion the SKILL promises as mechanical: without this, the sort
+    // exists only as Step 4 prose, and an omitted `confidence` even defaults
+    // to `high` — the fail-open direction (dogfood review of the witness PR).
+    const { findings, unwitnessed } = holdUnwitnessedCriticals([critical]);
+    expect(findings[0].confidence).toBe('low');
+    expect(findings[0].severity).toBe('Critical');
+    expect(findings[0].failureScenario).toContain('witness rule');
+    // The original evidence survives — the rule is appended, not substituted.
+    expect(findings[0].failureScenario).toContain('fires twice');
+    expect(unwitnessed).toEqual(['w1']);
+  });
+
+  it('leaves a witnessed Critical alone — either form of the field counts', () => {
+    for (const witness of [
+      'BASE: 2 calls / PR: 1 call — probe flipped',
+      'not run — needs a live OAuth endpoint this harness lacks',
+    ]) {
+      const { findings, unwitnessed } = holdUnwitnessedCriticals([
+        { ...critical, witness },
+      ]);
+      expect(findings[0].confidence).toBe('high');
+      expect(unwitnessed).toEqual([]);
+    }
+  });
+
+  it('exempts deterministic sources — their witness is constitutive', () => {
+    // A [build]/[test]/[probe] finding IS a run's output; demanding a second
+    // witness would demote findings the pipeline treats as pre-confirmed.
+    for (const source of ['build', 'test', 'probe', 'lint'] as const) {
+      const { unwitnessed } = holdUnwitnessedCriticals([
+        { ...critical, source },
+      ]);
+      expect(unwitnessed).toEqual([]);
+    }
+  });
+
+  it('is idempotent — a demoted finding re-fed is not touched again', () => {
+    const once = holdUnwitnessedCriticals([critical]).findings[0];
+    const twice = holdUnwitnessedCriticals([once]).findings[0];
+    expect(twice).toEqual(once);
+    // Suggestions are never judged: the rule targets the severity that posts
+    // as a blocker.
+    expect(
+      holdUnwitnessedCriticals([{ ...critical, severity: 'Suggestion' }])
+        .unwitnessed,
+    ).toEqual([]);
   });
 });
 
