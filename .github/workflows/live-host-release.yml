@@ -38,6 +38,7 @@ on:
         type: 'boolean'
 
 permissions:
+  actions: 'read'
   contents: 'read'
 
 concurrency:
@@ -148,8 +149,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
           if [ -z "$identity" ]; then echo '::error::Developer ID Application identity was not found.'; exit 1; fi
+          identity_name="${identity#Developer ID Application: }"
           {
-            echo "CSC_NAME=$identity"
+            echo "CSC_NAME=$identity_name"
             echo 'CSC_IDENTITY_AUTO_DISCOVERY=true'
           } >> "$GITHUB_ENV"
 
@@ -344,3 +346,18 @@ jobs:
             echo "Version: $RELEASE_VERSION"
             echo "Release: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-oss:
+    name: 'Mirror stable Qwen Live Host release to Aliyun OSS'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    uses: './.github/workflows/sync-live-host-to-oss.yml'
+    with:
+      version: '${{ needs.prepare.outputs.version }}'
+      source: 'artifact'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+      ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

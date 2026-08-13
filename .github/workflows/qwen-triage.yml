@@ -112,7 +112,66 @@ jobs:
       # maintainer's /verify comment approves the code that exists now, not
       # whatever the author pushes while the job queues.
       verify_head_oid: '${{ steps.perm.outputs.verify_head_oid }}'
+      # The triage job's timeout-minutes, SANITIZED: that field is evaluated
+      # before any step of the consuming job runs, so a malformed repository
+      # variable would kill triage at expression time — no steps, no
+      # always() finalize, no status comment: a silent stop. And the knob
+      # exists to be changed WITHOUT a PR, so no reviewer ever sees a bad
+      # value. This job can run bash, so it validates and clamps instead.
+      triage_timeout_minutes: '${{ steps.budget.outputs.triage_timeout_minutes }}'
     steps:
+      - name: 'Sanitize the triage budget'
+        id: 'budget'
+        env:
+          RAW: '${{ vars.QWEN_TRIAGE_TIMEOUT_MINUTES }}'
+        run: |-
+          set -euo pipefail
+          # Bare positive integer minutes only — no units, quotes or
+          # decimals. Floor 10: below that the agent cannot finish even a
+          # trivial pass and every run becomes an instant kill. Ceiling 600:
+          # a runaway value would hold a scarce ECS runner and the per-PR
+          # concurrency group for days — though only the self-hosted pool
+          # can actually reach it: GitHub-hosted runners hard-cap any job
+          # at 360 minutes, so runs routed to ubuntu-latest die there
+          # whatever this validates. Anything unparsable warns, names the
+          # variable (the run log otherwise blames fromJSON), and falls
+          # back to the 60-minute default.
+          # Hand-maintained sibling of the QWEN_TIMEOUT_MS clamp in
+          # qwen-autofix.yml's review-address step; the failure modes
+          # deliberately differ (that one clamps garbage to its ceiling,
+          # this one falls back to the default), so a boundary-bug fix in
+          # one must be re-derived in the other.
+          MINUTES=60
+          if [[ -n "${RAW}" ]]; then
+            if [[ "${RAW}" =~ ^[0-9]+$ ]]; then
+              # Strip leading zeros so the width test counts SIGNIFICANT
+              # digits: 000000000000000000060 is 60, not a ceiling
+              # violation, and an all-zero value is 0.
+              TRIMMED="${RAW#"${RAW%%[!0]*}"}"
+              TRIMMED="${TRIMMED:-0}"
+              # Over 18 significant digits, bash's 64-bit arithmetic
+              # wraps, and the residue can land inside [10,600], silently
+              # skipping both clamps. Any such value is above the ceiling
+              # by construction.
+              if (( ${#TRIMMED} > 18 )); then
+                echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} exceeds the 600-minute ceiling; clamping to 600."
+                MINUTES=600
+              else
+                MINUTES=$((10#${TRIMMED}))
+                if (( MINUTES < 10 )); then
+                  echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} is below the 10-minute floor; clamping to 10."
+                  MINUTES=10
+                elif (( MINUTES > 600 )); then
+                  echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES=${RAW} exceeds the 600-minute ceiling; clamping to 600."
+                  MINUTES=600
+                fi
+              fi
+            else
+              echo "::warning::QWEN_TRIAGE_TIMEOUT_MINUTES='${RAW}' is not a bare positive integer of minutes; using the 60-minute default."
+            fi
+          fi
+          echo "triage_timeout_minutes=${MINUTES}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Check principal write permission'
         id: 'perm'
         env:
@@ -370,7 +429,23 @@ jobs:
 
   triage:
     needs: ['authorize']
-    timeout-minutes: 30
+    # TUNABLE WITHOUT A CODE CHANGE: set the repository variable in
+    # Settings → Variables. Why the fallback is 60: the fixed 30 was
+    # measurably clipping the distribution — 22 successful triage jobs
+    # sampled on 2026-08-09 ran median 5.8m / p90 22.3m / max 29.5m, and
+    # five substantial PRs (8723, 8726, 8731, 8764, 8801) died at exactly
+    # the cap, each discarding a full agent run. Triage is advisory, so
+    # the worst case a longer budget risks is one held runner; a killed
+    # run wastes the same runner AND the work. The value arrives via the
+    # authorize job's sanitize step (validated, clamped 10..600 — but
+    # GitHub-hosted runners hard-cap any job at 360 minutes, so values
+    # above 360 only take effect on the self-hosted pool): a
+    # malformed variable in a raw fromJSON(vars.X) would kill this job at
+    # expression time with no status comment. The || 60 covers the events
+    # where authorize is skipped (issues, plain-number dispatch) and its
+    # outputs are empty. Expression-valued timeout-minutes is
+    # probe-verified on a live runner (see #8731).
+    timeout-minutes: '${{ fromJSON(needs.authorize.outputs.triage_timeout_minutes || 60) }}'
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
       # Keep non-runnable PR/comment triggers out of the shared per-number
@@ -540,10 +615,13 @@ jobs:
       # The agent runs as one long step, but its output streams live to the
       # Actions log. Post a status comment up front carrying that run link so a
       # maintainer can watch progress instead of waiting silently until the
-      # first stage comment lands; "Finalize triage status comment" flips it to
-      # a terminal state at the end. Upsert by marker so a re-run reuses the one
-      # comment (no clutter). Best-effort: never fail the job over a status post.
+      # first stage comment lands. Upsert by marker so a re-run reuses the one
+      # comment (no clutter), and export the comment id: "Finalize triage
+      # status comment" PATCHes exactly that id to flip it to a terminal state,
+      # so the two steps cannot disagree about which comment this run owns.
+      # Best-effort: never fail the job over a status post.
       - name: 'Post triage status comment'
+        id: 'status'
         if: "steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
@@ -567,16 +645,24 @@ jobs:
                 jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
             )" || EXISTING_ID=''
+            COMMENT_ID=''
             if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
+              if gh api --method PATCH \
                 "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
+                -f body="$BODY" >/dev/null; then
+                COMMENT_ID="$EXISTING_ID"
+              else
                 echo "::warning::Failed to update triage status comment; continuing." >&2
+              fi
             else
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
+              COMMENT_ID="$(
+                gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                  -f body="$BODY" --jq '.id'
+              )" || COMMENT_ID=''
+              [ -n "$COMMENT_ID" ] ||
                 echo "::warning::Failed to post triage status comment; continuing." >&2
             fi
+            echo "comment_id=$COMMENT_ID" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Inject model name into triage signature'
@@ -950,47 +1036,54 @@ jobs:
       # Flip the early status comment to a terminal state so a lingering
       # "running" line doesn't outlive the run. Neutral wording — the verdict
       # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. Same marker → edits the one comment, no second
-      # post. Best-effort, on both success and failure.
+      # and keeps the run link. PATCHes exactly the comment id the claim step
+      # exported. An empty id means this run never ended up owning a comment:
+      # a cancel landing before the claim posted, or a transient failure of the
+      # claim's write (both the fresh-POST and PATCH arms export an empty id on
+      # failure). Either way nothing is flipped and a previous run's terminal
+      # wording stays untouched. A failed claim therefore leaves no lifecycle
+      # breadcrumb even when the comments API recovers during the minutes-long
+      # agent run — accepted: the verdict still lands in the stage comments,
+      # and a list-then-POST recovery here would reintroduce exactly the
+      # selection this coupling removes. Best-effort, on success, failure, AND
+      # cancellation: always() (not success() || failure()) because
+      # cancellation — cancel-in-progress superseding this run on a newer push
+      # or comment, job timeout, or manual cancel — would skip this step and
+      # leave the comment claiming the run is still in progress — the verify
+      # lane has publish-verify to catch that case, this lane only has us.
       - name: 'Finalize triage status comment'
-        if: "(success() || failure()) && steps.resolve.outputs.number != ''"
+        if: "always() && steps.resolve.outputs.number != ''"
         shell: 'bash'
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
+          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+          JOB_STATUS: '${{ job.status }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage lifecycle -->'
-          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
-          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
-            echo "::warning::Cannot resolve bot identity; skipping final status comment upsert."
+          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
+            echo "This run claimed no status comment; nothing to finalize." >&2
           else
-            if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
+            # A step success is not a green job: 'Check triage response' exits
+            # 1 on an empty summary while steps.triage.outcome stays 'success',
+            # and a later step can still fail. Only a non-failed job may claim
+            # "finished".
+            if [ "${TRIAGE_OUTCOME:-}" = 'success' ] && [ "${JOB_STATUS:-}" != 'failure' ]; then
               EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
               ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
+              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
+              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
             else
               EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
-              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
+              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
             fi
-            printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
-            EXISTING_ID="$(
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
-            )" || EXISTING_ID=''
-            if [ -n "$EXISTING_ID" ]; then
-              gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to finalize triage status comment; continuing." >&2
-            else
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to post final triage status comment; continuing." >&2
-            fi
+            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
           fi
 
   # On-demand real-user testing: a write-permission user comments
@@ -1181,7 +1274,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
-          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'npm-ci-'
 
       - name: 'Report npm cache hit'
@@ -2647,7 +2740,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/npm-cache'
-          key: 'npm-ci-${{ hashFiles(''package-lock.json'') }}'
+          key: "npm-ci-${{ hashFiles('package-lock.json') }}"
           restore-keys: 'npm-ci-'
 
       - name: 'Report npm cache hit'

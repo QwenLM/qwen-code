@@ -12,10 +12,13 @@ import {
   type Config,
   createDebugLogger,
   getSubagentsRootDir,
+  resolveOpenAILogDir,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import { DEFAULT_OPENAI_LOG_RETENTION_DAYS } from '../../config/settingsSchema.js';
 import {
   cleanupOldFileHistoryBackups,
+  cleanupOldOpenAILogs,
   cleanupOldSubagentTranscripts,
   getCutoffDate,
 } from './cleanup.js';
@@ -37,11 +40,30 @@ const RECENT_INTERACTION_MS = 60 * 1000;
 // the typical sporadic user still gets periodic cleanup".
 const CATCHUP_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const STARTUP_DELAY_CATCHUP_MS = 60 * 1000;
+const NON_INTERACTIVE_LOCK_RETRY_MS = 60 * 1000;
+const NON_INTERACTIVE_FAILURE_RETRY_MS = 10 * 60 * 1000;
+const NON_INTERACTIVE_STOP_GRACE_MS = 250;
 
 const FILE_HISTORY_MARKER = '.file-history-cleanup';
 const SUBAGENT_MARKER = '.subagent-cleanup';
+const OPENAI_LOGS_MARKER = '.openai-logs-cleanup';
 
 let started = false;
+
+interface NonInteractiveOpenAILogJob {
+  target: OpenAILogCleanupTarget;
+  markerPath: string;
+  queued: boolean;
+  timer?: NodeJS.Timeout;
+}
+
+const nonInteractiveJobs = new Map<string, NonInteractiveOpenAILogJob>();
+const nonInteractiveQueue: NonInteractiveOpenAILogJob[] = [];
+let activeNonInteractiveJob: NonInteractiveOpenAILogJob | undefined;
+let activeNonInteractiveAbortController: AbortController | undefined;
+let nonInteractiveWorker: Promise<void> | undefined;
+let nonInteractiveStopping = false;
+let nonInteractiveStopPromise: Promise<void> | undefined;
 
 export function startBackgroundHousekeeping(
   config: Config,
@@ -67,12 +89,25 @@ async function scheduleFirstPass(
   config: Config,
   settings: LoadedSettings,
 ): Promise<void> {
-  const markerPath = join(Storage.getGlobalQwenDir(), FILE_HISTORY_MARKER);
-  const delay = (await needsCatchUp(markerPath))
-    ? STARTUP_DELAY_CATCHUP_MS
-    : STARTUP_DELAY_MS;
+  const delay = await getFirstPassDelay(config, settings);
   debugLogger.debug(`first pass in ${delay / 1000}s`);
   setTimeout(() => scheduleNextPass(config, settings), delay).unref();
+}
+
+async function getFirstPassDelay(
+  config: Config,
+  settings: LoadedSettings,
+): Promise<number> {
+  const qwenDir = Storage.getGlobalQwenDir();
+  const markerPaths = [join(qwenDir, FILE_HISTORY_MARKER)];
+  const openaiTarget = getOpenAILogCleanupTarget(config, settings);
+  if (openaiTarget) {
+    markerPaths.push(getOpenAILogsMarkerPath(qwenDir, openaiTarget.logDir));
+  }
+  const catchUpStates = await Promise.all(markerPaths.map(needsCatchUp));
+  return catchUpStates.some(Boolean)
+    ? STARTUP_DELAY_CATCHUP_MS
+    : STARTUP_DELAY_MS;
 }
 
 async function needsCatchUp(markerPath: string): Promise<boolean> {
@@ -90,6 +125,251 @@ function getSubagentMarkerPath(qwenDir: string, projectDir: string): string {
     .digest('hex')
     .slice(0, 16);
   return join(qwenDir, `${SUBAGENT_MARKER}-${projectKey}`);
+}
+
+// OpenAI logs live per-CWD by default but become a single shared dir when
+// openAILoggingDir is configured — key the marker on the resolved log dir
+// so both layouts throttle correctly.
+function getOpenAILogsMarkerPath(qwenDir: string, logDir: string): string {
+  const logDirKey = createHash('sha256')
+    .update(logDir)
+    .digest('hex')
+    .slice(0, 16);
+  return join(qwenDir, `${OPENAI_LOGS_MARKER}-${logDirKey}`);
+}
+
+interface OpenAILogCleanupTarget {
+  logDir: string;
+  retentionDays: number;
+}
+
+function getOpenAILogCleanupTarget(
+  config: Config,
+  settings: LoadedSettings,
+): OpenAILogCleanupTarget | undefined {
+  try {
+    const customLogDir =
+      config.getContentGeneratorConfig?.()?.openAILoggingDir ??
+      config.getModelsConfig?.()?.getGenerationConfig?.().openAILoggingDir ??
+      settings.merged.model?.openAILoggingDir;
+    const systemRetention =
+      settings.system?.settings.model?.openAILogRetentionDays;
+    const workspaceRetention = settings.isTrusted
+      ? settings.workspace?.settings.model?.openAILogRetentionDays
+      : undefined;
+    if (
+      customLogDir &&
+      workspaceRetention !== undefined &&
+      systemRetention === undefined
+    ) {
+      debugLogger.error(
+        'workspace-scoped openAILogRetentionDays is unsafe with a custom openAILoggingDir; skipping cleanup',
+      );
+      return undefined;
+    }
+    const retentionDays = customLogDir
+      ? (systemRetention ??
+        settings.user?.settings.model?.openAILogRetentionDays ??
+        settings.systemDefaults?.settings.model?.openAILogRetentionDays ??
+        DEFAULT_OPENAI_LOG_RETENTION_DAYS)
+      : (settings.merged.model?.openAILogRetentionDays ??
+        DEFAULT_OPENAI_LOG_RETENTION_DAYS);
+    return {
+      logDir: resolveOpenAILogDir(customLogDir, config.getWorkingDir()),
+      retentionDays,
+    };
+  } catch (err) {
+    debugLogger.error(
+      'failed to resolve OpenAI log cleanup target; skipping',
+      err,
+    );
+    return undefined;
+  }
+}
+
+export function startNonInteractiveOpenAILogHousekeeping(
+  config: Config,
+  settings: LoadedSettings,
+): void {
+  if (nonInteractiveStopping) return;
+
+  try {
+    const target = getOpenAILogCleanupTarget(config, settings);
+    if (!target || nonInteractiveJobs.has(target.logDir)) return;
+
+    const markerPath = getOpenAILogsMarkerPath(
+      Storage.getGlobalQwenDir(),
+      target.logDir,
+    );
+    const job: NonInteractiveOpenAILogJob = {
+      target,
+      markerPath,
+      queued: false,
+    };
+    nonInteractiveJobs.set(target.logDir, job);
+    enqueueNonInteractiveJob(job);
+  } catch (err) {
+    debugLogger.error(
+      'failed to start non-interactive OpenAI log cleanup; skipping',
+      err,
+    );
+  }
+}
+
+export function stopNonInteractiveOpenAILogHousekeeping(): Promise<void> {
+  if (nonInteractiveStopPromise) return nonInteractiveStopPromise;
+
+  nonInteractiveStopping = true;
+  for (const job of nonInteractiveJobs.values()) {
+    if (job.timer) {
+      clearTimeout(job.timer);
+      job.timer = undefined;
+    }
+    job.queued = false;
+  }
+  nonInteractiveQueue.length = 0;
+  activeNonInteractiveAbortController?.abort();
+
+  nonInteractiveStopPromise = waitForNonInteractiveWorkerToStop();
+  return nonInteractiveStopPromise;
+}
+
+function enqueueNonInteractiveJob(job: NonInteractiveOpenAILogJob): void {
+  if (nonInteractiveStopping || job.queued || activeNonInteractiveJob === job) {
+    return;
+  }
+
+  job.queued = true;
+  nonInteractiveQueue.push(job);
+  startNonInteractiveWorker();
+}
+
+function startNonInteractiveWorker(): void {
+  if (nonInteractiveWorker || nonInteractiveStopping) return;
+
+  nonInteractiveWorker = drainNonInteractiveQueue()
+    .catch((err) => {
+      debugLogger.error('non-interactive OpenAI log worker failed', err);
+    })
+    .finally(() => {
+      nonInteractiveWorker = undefined;
+      if (nonInteractiveQueue.length > 0 && !nonInteractiveStopping) {
+        startNonInteractiveWorker();
+      }
+    });
+}
+
+async function drainNonInteractiveQueue(): Promise<void> {
+  while (!nonInteractiveStopping) {
+    const job = nonInteractiveQueue.shift();
+    if (!job) return;
+
+    job.queued = false;
+    activeNonInteractiveJob = job;
+    const abortController = new AbortController();
+    activeNonInteractiveAbortController = abortController;
+
+    try {
+      const result = await runOpenAILogCleanup(
+        job.target,
+        job.markerPath,
+        abortController.signal,
+      );
+      if (nonInteractiveStopping) continue;
+
+      switch (result.status) {
+        case 'completed':
+          scheduleNonInteractiveJob(job, RECURRING_INTERVAL_MS);
+          break;
+        case 'fresh':
+          scheduleNonInteractiveJob(
+            job,
+            Math.min(
+              RECURRING_INTERVAL_MS,
+              Math.max(NON_INTERACTIVE_LOCK_RETRY_MS, result.retryAfterMs),
+            ),
+          );
+          break;
+        case 'locked':
+          scheduleNonInteractiveJob(job, NON_INTERACTIVE_LOCK_RETRY_MS);
+          break;
+        case 'incomplete':
+          break;
+        default:
+          break;
+      }
+    } catch (err) {
+      debugLogger.error(
+        `non-interactive OpenAI log cleanup failed for ${job.target.logDir}`,
+        err,
+      );
+      if (!nonInteractiveStopping) {
+        scheduleNonInteractiveJob(job, NON_INTERACTIVE_FAILURE_RETRY_MS);
+      }
+    } finally {
+      activeNonInteractiveJob = undefined;
+      activeNonInteractiveAbortController = undefined;
+    }
+  }
+}
+
+async function runOpenAILogCleanup(
+  target: OpenAILogCleanupTarget,
+  markerPath: string,
+  signal?: AbortSignal,
+) {
+  return runThrottledOnce(
+    {
+      name: 'openai-logs-cleanup',
+      markerPath,
+      lockPath: markerPath + '.lock',
+    },
+    async () => {
+      const r = await cleanupOldOpenAILogs({
+        logDir: target.logDir,
+        cutoffDate: getCutoffDate(target.retentionDays),
+        signal,
+      });
+      debugLogger.debug(
+        `openai-logs: removed=${r.removed} errors=${r.errors} completed=${r.completed}`,
+      );
+      return r.completed ? undefined : false;
+    },
+  );
+}
+
+function scheduleNonInteractiveJob(
+  job: NonInteractiveOpenAILogJob,
+  delayMs: number,
+): void {
+  if (nonInteractiveStopping) return;
+
+  job.timer = setTimeout(() => {
+    job.timer = undefined;
+    enqueueNonInteractiveJob(job);
+  }, delayMs);
+  job.timer.unref();
+}
+
+async function waitForNonInteractiveWorkerToStop(): Promise<void> {
+  const worker = nonInteractiveWorker;
+  if (!worker) {
+    nonInteractiveJobs.clear();
+    return;
+  }
+
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      worker,
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, NON_INTERACTIVE_STOP_GRACE_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    nonInteractiveJobs.clear();
+  }
 }
 
 async function runPass(
@@ -134,8 +414,8 @@ function scheduleNextPass(config: Config, settings: LoadedSettings): void {
   });
 }
 
-// Serial pipeline of cleanup tasks. Future cleaners (image cache, debug log,
-// paste store) get added here as additional runThrottledOnce calls — no
+// Serial pipeline of cleanup tasks. Future cleaners (image cache, paste
+// store) get added here as additional runThrottledOnce calls — no
 // other plumbing needed.
 async function runHousekeeping(
   config: Config,
@@ -195,6 +475,19 @@ async function runHousekeeping(
       },
     );
   }
+
+  // Sweeps even when enableOpenAILogging is currently off, so residue from
+  // earlier debugging sessions still gets cleaned up. The cutoff uses its
+  // own retention setting: these logs grow far faster than file-history
+  // backups (one JSON file per API call), so sharing cleanupPeriodDays'
+  // 30-day default would retain tens of GB for heavy users.
+  const openaiTarget = getOpenAILogCleanupTarget(config, settings);
+  if (openaiTarget) {
+    await runOpenAILogCleanup(
+      openaiTarget,
+      getOpenAILogsMarkerPath(qwenDir, openaiTarget.logDir),
+    );
+  }
 }
 
 // Test-only exports — individual underscore-prefixed names matching the
@@ -204,8 +497,26 @@ async function runHousekeeping(
 export function _resetForTesting(): void {
   started = false;
 }
+export async function _resetNonInteractiveForTesting(): Promise<void> {
+  nonInteractiveStopping = true;
+  for (const job of nonInteractiveJobs.values()) {
+    if (job.timer) clearTimeout(job.timer);
+  }
+  nonInteractiveQueue.length = 0;
+  activeNonInteractiveAbortController?.abort();
+  await nonInteractiveWorker;
+
+  nonInteractiveJobs.clear();
+  activeNonInteractiveJob = undefined;
+  activeNonInteractiveAbortController = undefined;
+  nonInteractiveWorker = undefined;
+  nonInteractiveStopping = false;
+  nonInteractiveStopPromise = undefined;
+}
 export const _needsCatchUpForTesting = needsCatchUp;
+export const _getFirstPassDelayForTesting = getFirstPassDelay;
 export const _runHousekeepingForTesting = runHousekeeping;
 export const _runPassForTesting = runPass;
 export const _FILE_HISTORY_MARKER_FOR_TESTING = FILE_HISTORY_MARKER;
 export const _getSubagentMarkerPathForTesting = getSubagentMarkerPath;
+export const _getOpenAILogsMarkerPathForTesting = getOpenAILogsMarkerPath;

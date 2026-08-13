@@ -113,6 +113,7 @@ export * from './tools/mcp-client-manager.js';
 // Shared MCP resource content formatter (used by the `@` injection path and
 // the read_mcp_resource tool).
 export * from './tools/mcp-resource-content.js';
+export { runWithTimeout } from './tools/mcp-discovery-timeout.js';
 // pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
@@ -240,6 +241,10 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export {
+  resolveSlimmingConfig,
+  type ResolvedSlimmingConfig,
+} from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export type {
@@ -263,6 +268,7 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
+export * from './services/tool-write-origin.js';
 export {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,
@@ -275,7 +281,12 @@ export {
 export type { ReadTextRangeResult } from './utils/read-text-range.js';
 export { isUtf8CompatibleEncoding } from './utils/encoding.js';
 export * from './services/gitWorktreeService.js';
-export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
+export {
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  GLOBAL_DUPLICATE_THRESHOLD,
+  getToolCallRepeatKey,
+  shouldHaltOnTurnToolCallCap,
+} from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -288,9 +299,12 @@ export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
+  findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
+  isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
+  SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -458,6 +472,7 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logLoopDetected,
+  logRepeatedToolFailureGuard,
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
@@ -474,6 +489,7 @@ export {
   IdeConnectionType,
   LoopDetectedEvent,
   LoopType,
+  RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
@@ -539,6 +555,7 @@ export {
 export type { QwenIgnoreFilter } from './utils/qwenIgnoreParser.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
+export * from './utils/tool-result-retention.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/modelId.js';
 export * from './utils/runtimeDiagnostics.js';
@@ -639,10 +656,10 @@ export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
   USER_PROMPT_SUBMIT_CONTEXT_CLOSE_TAG,
-  wrapUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
   stripTrailingUserPromptSubmitContextPart,
 } from './hooks/user-prompt-submit-context.js';
+export { wrapUserPromptSubmitContext } from './utils/transcript-records.js';
 
 // ============================================================================
 // Goals (/goal command runtime)
