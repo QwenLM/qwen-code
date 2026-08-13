@@ -5320,8 +5320,16 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
-                for (const update of streamGoalUpdates) {
-                  await createdSession.sendUpdate(update);
+                try {
+                  for (const update of streamGoalUpdates) {
+                    await createdSession.sendUpdate(update);
+                  }
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to publish recovered Goal state: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
                 }
               }
               await profiler.time('post_replay_services', async () => {
