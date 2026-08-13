@@ -57,6 +57,37 @@ const debugLogger = createDebugLogger('COMPRESSION');
  */
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
+/**
+ * Safety margin subtracted from the remaining window when computing the
+ * compression side-query's output budget. The side-query input size is a
+ * char/4 estimate — real tokenizers vary ±30% and under-count CJK-dense
+ * content — so a small pad keeps `prompt + max_tokens <= window` honest.
+ */
+export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
+
+/**
+ * Output budget for the compression side-query: the fixed ceiling clamped to
+ * the window's remaining room (contextLimit - estimated input - safety
+ * margin). Providers validate `prompt_tokens + max_tokens <= window` before
+ * generating, so on small-window deployments (e.g. vLLM with a reduced
+ * max_model_len) an unclamped ceiling can push the request over the window
+ * and the backend rejects it with a 400 before the model runs
+ * (https://github.com/QwenLM/qwen-code/issues/7960). Floored at 1 so the
+ * request stays valid even when the estimate already exceeds the window —
+ * slimming strips media the estimate still counts, and an unusable result
+ * is still discarded by the empty-summary handling below.
+ *
+ * Pure function — no I/O, no shared state — safe to call repeatedly.
+ */
+export function computeCompactionOutputBudget(
+  estimatedInputTokens: number,
+  contextLimit: number,
+): number {
+  const remaining =
+    contextLimit - estimatedInputTokens - COMPACTION_BUDGET_SAFETY_MARGIN;
+  return Math.max(1, Math.min(COMPACT_MAX_OUTPUT_TOKENS, remaining));
+}
+
 const COMPRESSION_REQUEST_DIRECTIVE =
   'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.';
 
@@ -600,6 +631,9 @@ export class ChatCompressionService {
 
     const abortSignal = signal ?? new AbortController().signal;
     abortSignal.throwIfAborted();
+    // The output budget runColdCompression requests: the fixed ceiling
+    // clamped to the window's remaining room (issue #7960).
+    let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
     const runColdCompression = () => {
       const slim = getColdInput();
       if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
@@ -610,6 +644,19 @@ export class ChatCompressionService {
               `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
           );
       }
+      // Clamp the output budget to the window's remaining room so
+      // `prompt + max_tokens <= window` holds even on small-window
+      // deployments (issue #7960). Same estimate terms the compaction-model
+      // guard above uses.
+      coldOutputBudget = computeCompactionOutputBudget(
+        estimateContentTokens(
+          slim.slimmedHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) +
+          Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+          Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN),
+        contextLimit,
+      );
       return runSideQuery(config, {
         purpose: 'chat-compression',
         skipOutputLanguagePreference: true,
@@ -639,13 +686,16 @@ export class ChatCompressionService {
             ],
           },
         ],
-        // Compression output is bounded by maxOutputTokens to guarantee a predictable
-        // reserve across providers (see docs/design/auto-compaction-threshold-redesign.md).
-        // Thinking is disabled because per-provider thinking-budget semantics are
-        // inconsistent (Anthropic/OpenAI count it separately, Gemini varies by model).
+        // Compression output is bounded by the window-clamped budget to
+        // guarantee a predictable reserve across providers and keep
+        // `prompt + max_tokens <= window` valid on small-window deployments
+        // (see docs/design/auto-compaction-threshold-redesign.md, issue
+        // #7960). Thinking is disabled because per-provider thinking-budget
+        // semantics are inconsistent (Anthropic/OpenAI count it separately,
+        // Gemini varies by model).
         config: {
           thinkingConfig: { includeThoughts: false },
-          maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
+          maxOutputTokens: coldOutputBudget,
         },
         abortSignal,
         promptId,
