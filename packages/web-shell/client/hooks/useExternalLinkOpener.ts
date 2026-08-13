@@ -21,7 +21,7 @@ import {
 export function useExternalLinkOpener() {
   const { t } = useI18n();
   return useCallback(
-    (event: MouseEvent, url: string | undefined) => {
+    (event: MouseEvent<HTMLAnchorElement>, url: string | undefined) => {
       if (!url || !isExternalOpenUrl(url) || !isDesktopShell()) return;
       event.preventDefault();
       openExternalUrl(url).catch((error: unknown) => {

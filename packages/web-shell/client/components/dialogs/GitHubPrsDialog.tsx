@@ -97,8 +97,10 @@ function PullRequestRow({
     ) : null;
 
   return (
-    <button
-      type="button"
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noopener noreferrer"
       className={styles.prRow}
       aria-label={t('githubPrs.open', { number: pr.number })}
       onClick={(event) => openExternalLink(event, pr.url)}
@@ -119,7 +121,7 @@ function PullRequestRow({
         {pr.author ? ` · ${pr.author}` : ''} ·{' '}
         {timeAgo(pr.updatedAt, now, language)}
       </span>
-    </button>
+    </a>
   );
 }
 

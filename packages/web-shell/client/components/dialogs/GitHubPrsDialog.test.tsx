@@ -116,7 +116,7 @@ describe('GitHubPrsContent', () => {
     await flush();
 
     const row = document.body.querySelector(
-      'button[aria-label*="pull request #42"]',
+      'a[aria-label*="pull request #42"]',
     );
     expect(row).toBeTruthy();
     let event: MouseEvent | undefined;
@@ -129,6 +129,25 @@ describe('GitHubPrsContent', () => {
     expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/o/r/pull/42',
     });
+  });
+
+  it('keeps pull request rows as native links in plain browsers', async () => {
+    workspaceGitHubPullRequests.mockResolvedValue(listPayload([pr()]));
+    mount();
+    await flush();
+
+    const row = document.body.querySelector<HTMLAnchorElement>(
+      'a[aria-label*="pull request #42"]',
+    );
+    expect(row?.href).toBe('https://github.com/o/r/pull/42');
+    expect(row?.target).toBe('_blank');
+    let event: MouseEvent | undefined;
+    await act(async () => {
+      event = new MouseEvent('click', { bubbles: true, cancelable: true });
+      row?.dispatchEvent(event);
+    });
+
+    expect(event?.defaultPrevented).toBe(false);
   });
 
   it('renders draft and changes-requested pull requests', async () => {
