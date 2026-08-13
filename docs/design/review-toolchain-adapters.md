@@ -392,6 +392,32 @@ targets. Past the cap the run widens to the full reactor and discloses it.
 
 ### Report semantics
 
+> **Rule — judging pass/fail from untrusted tool output.** Prefer the tool's
+> authoritative _structured_ signals (exit code + machine-readable reports)
+> over scraping human stdout. Parse the structured output with a **real**
+> parser and treat a parse failure as fail-closed. "Pass" requires _positive
+> structural evidence_ — exit 0 and a parsed report with no failing element —
+> never the mere absence of a failure substring. Where a grammar must be
+> parsed (CLI args), use one spec-referenced tokenizer and fail-closed on
+> ambiguity: imprecision can only ever be stricter, never release. The
+> human-stdout scrapers are a _fallback_ for runs that produced no reports;
+> with reports present the structured signals judge, and the scrapers can
+> only ever convict under a distrusted exit 0. Same lesson as #9020 — read
+> what the tool authoritatively reports, don't enumerate the ways its output
+> can lie — applied to build results.
+
+Concretely, the Maven verdict is a fail-closed state machine over three
+authoritative signals — the exit code, the parsed report elements, and the
+`.mvn/maven.config` settings that change what exit 0 means (fail-never /
+testFailureIgnore, or an unreadable config grammar assumed to carry them).
+A distrusted exit 0 (one of those settings, or an ambiguous config) lets the
+framed-stdout failure scans convict even beside clean reports — the strict
+direction. When no fresh reports exist, the stdout channel is the only
+evidence left, so the scrapers judge there (Surefire `Tests run:` summaries
+survive a relocated `<reportsDirectory>`, and framed errors a fail-never
+setting swallowed live nowhere else). When reports exist, a non-zero exit is
+attributed to the PR — over-attribution, never an environmental wash.
+
 `BuildTestReport.toolchain` widens to `"npm" | "maven" | "unsupported"`.
 Existing fields are generalized without changing their JSON shape:
 
@@ -419,11 +445,8 @@ Command results carry five optional classification flags consumed by
   claim must not be ruled reproduced against it.
 - `CommandResult.evidenceCapped`: the adapter refused to certify the run
   because part of its evidence was never read or cannot corroborate a pass
-  (fresh reports past the parse cap, reports rejected by the parser, reports
-  unseen past a truncated sweep, failure-evidence lines dropped by the
-  output trim's rescue cap, or a `-l`/`--log-file` setting in
-  `.mvn/maven.config` that redirects the whole build output away from the
-  stdout the failure scans read)
+  (reports rejected by the parser, reports unseen past a truncated sweep, or
+  failure-evidence lines dropped by the output trim's rescue cap)
   and a Test Plan claim must not be settled against it. The flag is
   exit-code independent: on an exit-0 run it withholds a pass; on a
   non-zero exit the exit remains definitive.
@@ -432,13 +455,18 @@ Command results carry five optional classification flags consumed by
   adjudicate against the run and a contradiction is worded as suppression,
   not recorded failures.
 - `CommandResult.neverRan`: the command exited 0 but cannot prove the
-  toolchain started. With an unmodified launcher that means no fresh reports
-  and no Maven-framed output (a stub wrapper); a wrapper the diff itself
-  modified always lands here, because it can print `[INFO]` lines and write
-  fresh reports itself — nothing about such a run's evidence proves a build
-  started. A `-q`/`--quiet` setting in `.mvn/maven.config` can also land a
-  real run here (it strips every framed line). Either way the run verified
-  nothing, and a Test Plan claim must not be ruled reproduced against it.
+  toolchain started, and no fresh reports exist. With an unmodified launcher
+  that means no fresh reports and no Maven-framed output (a stub wrapper).
+  A `-q`/`--quiet` setting strips every framed line, and a `-l`/`--log-file`
+  setting redirects the whole stdout to a file — with no reports on disk,
+  neither state can prove a build started, so both land here. A wrapper the
+  diff itself modified controls the output channel, so with no fresh
+  reports it lands here too; but when it DID surface fresh reports the
+  structured evidence judges the run (a failing report still overrides a
+  green exit), and a green verdict carries a note naming the diff-changed
+  wrapper caveat instead of silently trusting it. Either way the run is not
+  certified on stdout alone, and a Test Plan claim must not be ruled
+  reproduced against a never-ran run.
 
 Command results additionally carry `maven` — the lifecycle phase, `-pl`
 module set, and `-am` flag the adapter rendered the command from — so
@@ -478,16 +506,28 @@ resolution inputs.
 
 Before invoking Maven, record existing Surefire/Failsafe XML paths and mtimes.
 After it returns, parse only reports created or updated after the invocation
-started. P1 uses a small, purpose-built parser for the root `<testsuite>`
-attributes and `<testcase>` failure/error children; it does not add a general XML
-runtime dependency to the CLI package.
+started. Reports are parsed with a strict, throwing XML parser (`saxes`):
+well-formedness, CDATA, comments, entities, and self-closing tags are the
+parser's job. A report the parser rejects (oversized, unreadable, or
+malformed) is treated as failing — unknown evidence joins the fail-closed
+rejections and the run is never certified green over it. This replaces an
+earlier hand-rolled tag walk: XML has infinitely many corners, and each
+review round found the next one — the same anti-pattern the review skill hit
+with a hand-rolled CommonMark scanner and closed by adopting a real parser
+(#9020). The strict parser closes the class instead of enumerating it, and
+removes the surefire-stdout CDATA exemption along with every swallowing
+probe. Every fresh report is parsed — the earlier parse-count cap once let a
+failing report ordered past the cap certify green — so the sweep's path cap
+and the per-file size cap are the only bounds.
 
 Normalized Maven evidence must retain module-relative identity so two modules
 with the same test class cannot be conflated. Fresh report summaries are appended
 to the bounded command output for Agent 7 and test-plan consumption; raw stale
 reports are ignored. Surefire writes one XML per test class, so clean reports roll
-up per project dir and the failing-report and failing-case lines are capped; the
-block is appended after the command output is trimmed and carries its own bound.
+up per project dir — UNcapped, one attributed line per project, so no module
+can land in an unattributed omitted tail; the failing-report and failing-case
+lines stay capped, preserving attribution (per-project rollups, not a
+byte-order slice). The block is appended after the command output is trimmed.
 
 ### Downstream integration
 

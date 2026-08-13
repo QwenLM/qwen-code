@@ -27,6 +27,7 @@ import {
   gib,
 } from './disk.js';
 import { shellQuotePath } from './shell-quote.js';
+import { SaxesParser } from 'saxes';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 export interface MavenOwnership {
@@ -58,12 +59,14 @@ const REPORT_DIRS = ['surefire-reports', 'failsafe-reports'];
 /**
  * Surefire writes one XML per test class, so a green full-reactor run yields
  * thousands of reports. Clean AND failing reports therefore roll up per
- * project dir, and the rollup lines are capped: this block is appended AFTER
- * the command output was trimmed, so it carries its own bound.
+ * project dir — one attributed line per project, so module attribution
+ * survives any reactor size. The FAILING-side lines stay capped: that block
+ * is appended AFTER the command output was trimmed, so it carries its own
+ * bound; the cap preserves attribution (per-project rollups, not a
+ * byte-order slice).
  */
 const MAX_FAILING_REPORT_LINES = 100;
 const MAX_FAILURE_CASE_LINES = 200;
-const MAX_CLEAN_ROLLUP_LINES = 100;
 
 /**
  * cmd.exe refuses command lines past 8191 characters, and containerized
@@ -115,25 +118,11 @@ const MAX_SCANNED_DIRS = 20_000;
 const MAX_DIR_ENTRIES = 10_000;
 
 /**
- * Cap how many fresh reports one run parses: the parse is synchronous,
- * outside any deadline, on files the PR's own tests can write during the
- * run (the mtime freshness filter accepts any writer). `MAX_REPORT_BYTES`
- * bounds each file, but nothing else bounded the COUNT — thousands of
- * 2 MiB reports are multi-GB of live strings and minutes of CPU past the
- * outer tool timeout. Past the cap the run's note discloses the sampling
- * (`sampledEvidence`) instead of refusing certification: the parsed
- * reports are still real evidence, and a green-but-huge reactor run must
- * not read as an uncertified failure.
- */
-const MAX_FRESH_REPORTS = 1_000;
-
-/**
  * Cap the sweep's PATH accumulation itself: every other cap bounds ONE
- * dimension (scanned dirs, entries per dir, parsed reports, report bytes),
- * but nothing bounded their product — 20k scanned dirs x both report dirs x
- * 10k entries each accumulates hundreds of millions of paths, and
- * snapshotReports + freshTestSummaries statSync and retain every one before
- * the MAX_FRESH_REPORTS slice ever applies. A PR controls how many
+ * dimension (scanned dirs, entries per dir, report bytes), but nothing
+ * bounded their product — 20k scanned dirs x both report dirs x 10k entries
+ * each accumulates hundreds of millions of paths, and snapshotReports +
+ * freshTestSummaries statSync and retain every one. A PR controls how many
  * directories and report files exist, so the product is this harness's own
  * denial-of-service surface. Past the cap the sweep stops collecting and
  * reports truncation, failing closed like the other caps.
@@ -518,492 +507,131 @@ function snapshotReports(root: string): ReportSnapshot {
   return { mtimes, truncated };
 }
 
-function xmlAttributes(source: string): Map<string, string> {
-  const attributes = new Map<string, string>();
-  // The lookbehind pins each name to a maximal word run: without it, a long
-  // attribute-name run with no `=` backtracked the greedy name from every
-  // start position — quadratic on PR-controlled report bytes.
-  const re = /(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(source)) !== null) {
-    attributes.set(match[1], match[2] ?? match[3] ?? '');
-  }
-  return attributes;
-}
-
-function decodeXml(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
-}
-
-function numberAttribute(
-  attributes: Map<string, string>,
-  name: string,
-): number {
-  const value = Number.parseInt(attributes.get(name) ?? '0', 10);
-  if (!Number.isFinite(value)) return 0;
-  // A malformed report's negative count must not cancel legitimate counts
-  // from its neighbours when totals roll up across reports.
-  return Math.max(0, value);
-}
-
-/** A start tag located by `xmlOpenTagHeaders`. */
-interface XmlOpenTagHeader {
-  /** Attribute run between the tag name and the closing `>`. */
-  attributes: string;
-  /** Offset of the opening `<` in the scanned text. */
-  index: number;
-  /** The full tag text; a self-closing tag ends `/>`. */
-  text: string;
-}
-
-const XML_WORD_CHAR = /[A-Za-z0-9_]/;
-
 /**
- * Quote-aware linear scan for `<name …>` start tags. A `>` is legal
- * unescaped inside a quoted attribute value (parameterized-test and
- * @DisplayName suite/case names carry them). The regex header walk this
- * replaces went quadratic on PR-controlled reports: one never-closed opener
- * made every later tag start scan to EOF (a 2 MiB report of `<testcase x `
- * openers measured minutes per file — a denial of service through the very
- * evidence this parser exists to read). Here each byte is examined once:
- * locate a `<name` start, then advance to the next `>` outside quotes.
- * An opener with no `>` before EOF ends the scan and reports truncation:
- * every later header — and every `<failure>`/`<error>` body after it — was
- * discarded, so parseTestReport fails closed on such a report instead of
- * reading the surviving prefix as the whole truth.
- */
-function xmlOpenTagHeaders(
-  xml: string,
-  name: string,
-): { headers: XmlOpenTagHeader[]; truncated: boolean } {
-  const tag = `<${name.toLowerCase()}`;
-  // toLowerCase() can lengthen UTF-16 text (`İ` → `i` + U+0307), so offsets
-  // located in a lowercased copy would misindex the original xml past the
-  // first such character. Use the copy only while it stayed the same length;
-  // otherwise scan the original case-insensitively.
-  const lower = xml.toLowerCase();
-  const indexOfTag =
-    lower.length === xml.length
-      ? (from: number): number => lower.indexOf(tag, from)
-      : (from: number): number => {
-          for (let i = from; i + tag.length <= xml.length; i += 1) {
-            let matched = true;
-            for (let j = 0; j < tag.length; j += 1) {
-              if (xml[i + j].toLowerCase() !== tag[j]) {
-                matched = false;
-                break;
-              }
-            }
-            if (matched) return i;
-          }
-          return -1;
-        };
-  const headers: XmlOpenTagHeader[] = [];
-  let from = 0;
-  for (;;) {
-    const start = indexOfTag(from);
-    if (start === -1) return { headers, truncated: false };
-    from = start + 1;
-    // `\b` semantics: `<testsuite` must not match `<testsuites`.
-    const next = xml[start + tag.length];
-    if (next !== undefined && XML_WORD_CHAR.test(next)) continue;
-    let quote: '"' | "'" | null = null;
-    let end = -1;
-    for (let i = start + tag.length; i < xml.length; i++) {
-      const c = xml[i];
-      if (quote !== null) {
-        if (c === quote) quote = null;
-      } else if (c === '"' || c === "'") {
-        quote = c;
-      } else if (c === '>') {
-        end = i;
-        break;
-      }
-    }
-    if (end === -1) return { headers, truncated: true };
-    headers.push({
-      attributes: xml.slice(start + tag.length, end),
-      index: start,
-      text: xml.slice(start, end + 1),
-    });
-    from = end + 1;
-  }
-}
-
-/**
- * Quote-aware forward scan for the next `</testcase …>` close. A literal
- * `</testcase>` inside a quoted attribute value is content, not markup:
- * cutting a body there silently loses every `<failure>`/`<error>` element
- * after it — the anti-greenwash body floor this walk exists to provide.
- * Quote state only matters INSIDE tags; body text between tags carries
- * apostrophes freely.
- */
-function findTestcaseClose(
-  xml: string,
-  from: number,
-): { start: number; end: number } | null {
-  let inTag = false;
-  let quote: '"' | "'" | null = null;
-  for (let i = from; i < xml.length; i += 1) {
-    const char = xml[i];
-    if (inTag) {
-      if (quote !== null) {
-        if (char === quote) quote = null;
-      } else if (char === '"' || char === "'") {
-        quote = char;
-      } else if (char === '>') {
-        inTag = false;
-      }
-      continue;
-    }
-    if (char !== '<') continue;
-    if (isTestcaseCloseAt(xml, i)) {
-      let end = i;
-      while (xml[end] !== '>') end += 1;
-      return { start: i, end: end + 1 };
-    }
-    inTag = true;
-  }
-  return null;
-}
-
-function isTestcaseCloseAt(xml: string, i: number): boolean {
-  let j = i + 1;
-  for (const char of '/testcase') {
-    if ((xml[j] ?? '').toLowerCase() !== char) return false;
-    j += 1;
-  }
-  while (xml[j] !== undefined && /^\s$/.test(xml[j])) j += 1;
-  return xml[j] === '>';
-}
-
-const XML_NAME_CHAR = /[A-Za-z0-9:_.-]/;
-
-/**
- * Drop terminated `<![CDATA[ … ]]>` sections and `<!-- … -->` comments in
- * one linear pass: both are opaque text, never markup, and scanning a
- * commented-out or CDATA-wrapped suite (aggregate writers like jest-junit
- * and karma emit both) fabricated phantom suites and failure evidence. The
- * earlier marker wins — a marker inside the other kind is literal content,
- * consumed with it. An unterminated section rejects the report: kept
- * verbatim, its opaque text is scanned as markup by the body walk, and a
- * planted `</testcase>` inside it cuts a testcase body before its
- * `<failure>` evidence — a green read instead of a fail-closed one.
+ * Parse one Surefire/Failsafe XML report with a STRICT XML parser (saxes):
+ * well-formedness, CDATA, comments, entities, self-closing tags, and
+ * nesting are the parser's job. This replaces a hand-rolled tag walk whose
+ * surface kept growing one adversarial XML corner per review round —
+ * the same anti-pattern the review skill once hit with a hand-rolled
+ * CommonMark scanner and closed by adopting a real parser (#9020).
  *
- * The pass tracks tag/quote state so markers are honored only in genuine
- * markup position. A malformed aggregate-writer report can carry a RAW `<!--`
- * inside unescaped `<system-out>` text whose matching `-->` sits inside a
- * LATER suite — honoring it swallows that suite's failing header and reads a
- * failed run green. Two COMMENT shapes therefore reject the report (null),
- * joining the parser's other fail-closed rejections: a marker inside a tag
- * or quoted attribute is never markup, and a comment whose interior closes
- * an element still open where the comment started spanned across that
- * element's boundary — the swallowing shape — rather than commenting out
- * self-contained phantom markup, whose open/close pairs both sit inside the
- * comment. CDATA carries the same probe, with the one legitimate shape
- * narrowed: surefire's own writer wraps `<system-out>`/`<system-err>` test
- * stdout in CDATA immediately after the open tag, and that stdout
- * routinely contains XML samples closing the very elements open around the
- * section or pairing their own opens and closes — both stay exempt. The
- * swallowing shape is the sequence neither covers: an interior close of an
- * element open at the marker FOLLOWED BY an interior open of verdict
- * markup — markup after the section that the section deletes must open
- * inside it — and rejects the report. A raw CDATA marker anywhere else
- * (even after OTHER content inside the stream element) carries the full
- * probe and rejects exactly like its comment twin.
+ * The strictness IS the threat model: reports live in worktree files the PR
+ * controls, so anything the parser rejects is unreadable verdict evidence —
+ * fail-closed, joined with the other rejections, never read green. Content
+ * the parser treats as text (a `<failure>` sample inside `<system-out>`,
+ * CDATA-wrapped stdout, commented-out markup) can therefore never be read
+ * as verdict markup, by construction.
+ *
+ * A bare multi-`<testsuite>` document with no root element is malformed XML
+ * and rejects like any other shape; aggregate writers that wrap their
+ * suites in a `<testsuites>` root parse normally and every suite counts.
  */
-function stripOpaqueSections(xml: string): string | null {
-  if (!xml.includes('<![CDATA[') && !xml.includes('<!--')) return xml;
-  const chunks: string[] = [];
-  let i = 0;
-  let chunkStart = 0;
-  const openElements: string[] = [];
-  // Lowercased-name counts alongside the stack: the closeTag match and the
-  // comment-swallow probe both ask membership, and scanning the stack per
-  // question went quadratic on PR-controlled bytes — k never-closed openers
-  // plus k unmatched closers is k full scans. Membership is O(1) here; the
-  // pop loop below runs only when a match EXISTS, so each element is popped
-  // at most once and the whole pass stays linear.
-  const openCounts = new Map<string, number>();
-  const pushOpen = (name: string): void => {
-    openElements.push(name);
-    const lower = name.toLowerCase();
-    openCounts.set(lower, (openCounts.get(lower) ?? 0) + 1);
-  };
-  // The tag currently being scanned (`-1` = content position), its name, and
-  // whether it is a closing tag.
-  let tagStart = -1;
-  let tagName = '';
-  let tagClosing = false;
-  let quote: '"' | "'" | null = null;
-  // Non-whitespace content seen since the innermost element's open tag:
-  // the CDATA exemption models surefire's own writer, whose CDATA starts
-  // IMMEDIATELY after the stream open tag — a marker with content before
-  // it is the swallowing shape even inside a stream element.
-  let contentSinceOpen = true;
-  const closeTag = (selfClosing: boolean): void => {
-    if (tagClosing) {
-      const lower = tagName.toLowerCase();
-      if ((openCounts.get(lower) ?? 0) > 0) {
-        for (let stack = openElements.length - 1; stack >= 0; stack -= 1) {
-          const name = openElements[stack].toLowerCase();
-          const count = (openCounts.get(name) ?? 1) - 1;
-          if (count === 0) openCounts.delete(name);
-          else openCounts.set(name, count);
-          if (name === lower) {
-            openElements.length = stack;
-            break;
-          }
-        }
-      }
-      contentSinceOpen = true;
-    } else if (!selfClosing && tagName !== '') {
-      pushOpen(tagName);
-      contentSinceOpen = false;
-    } else {
-      contentSinceOpen = true;
-    }
-    tagStart = -1;
-    tagName = '';
-    tagClosing = false;
-  };
-  while (i < xml.length) {
-    if (tagStart === -1) {
-      if (xml.startsWith('<!--', i) || xml.startsWith('<![CDATA[', i)) {
-        // `<![CDATA[` also starts with `<!` — the comment test must anchor
-        // the FULL marker, or CDATA inherits the comment-only checks.
-        const comment = xml.startsWith('<!--', i);
-        const closer = comment ? '-->' : ']]>';
-        const end = xml.indexOf(closer, i + (comment ? 4 : 9));
-        // Unterminated: rejected fail-closed (see the doc comment) rather
-        // than kept verbatim, where the body walk would scan it as markup.
-        if (end === -1) return null;
-        // The swallowing-shape probe: an interior close of an element open
-        // at the marker spans across that element's boundary. Applied to
-        // CDATA too — except the shape surefire's own writer emits, a
-        // section immediately after an open `<system-out>`/`<system-err>`
-        // tag with no content before it.
-        const innermost = openElements.at(-1)?.toLowerCase() ?? '';
-        const exempt =
-          !comment &&
-          !contentSinceOpen &&
-          (innermost === 'system-out' || innermost === 'system-err');
-        const interior = xml.slice(i + (comment ? 4 : 9), end);
-        if (exempt) {
-          // The exempt shape keeps the probe for the one direction the
-          // surefire-stdout model cannot cover. Legitimate stdout samples
-          // close the elements open around the section and open-and-close
-          // self-contained phantom markup — both stay exempt. But markup
-          // the section SWALLOWS must open inside it AFTER the closes of
-          // the surrounding elements: a later suite, or a later case of
-          // this suite. Reject exactly
-          // that sequence — an interior close of an element open at the
-          // marker followed by an interior OPEN — pairing interior closes
-          // against earlier interior opens first, so a self-contained
-          // sample never trips it.
-          const interiorToken =
-            /<(\/)?\s*(testsuite|testcase|failure|error)\b[^<>]*?(\/?)\s*>/gi;
-          const interiorOpenCounts = new Map<string, number>();
-          let closesSurrounding = false;
-          let match: RegExpExecArray | null;
-          while ((match = interiorToken.exec(interior)) !== null) {
-            const name = match[2].toLowerCase();
-            if (match[1]) {
-              const open = interiorOpenCounts.get(name) ?? 0;
-              if (open > 0) {
-                interiorOpenCounts.set(name, open - 1);
-              } else if ((openCounts.get(name) ?? 0) > 0) {
-                closesSurrounding = true;
-              }
-            } else if (match[3] !== '/') {
-              if (closesSurrounding) return null;
-              interiorOpenCounts.set(
-                name,
-                (interiorOpenCounts.get(name) ?? 0) + 1,
-              );
-            }
-          }
-        } else {
-          const interiorClose = /<\/\s*([A-Za-z0-9:_.-]+)/gi;
-          let match: RegExpExecArray | null;
-          const interiorCloses = new Map<string, number>();
-          while ((match = interiorClose.exec(interior)) !== null) {
-            const name = match[1].toLowerCase();
-            if ((openCounts.get(name) ?? 0) > 0) {
-              return null;
-            }
-            interiorCloses.set(name, (interiorCloses.get(name) ?? 0) + 1);
-          }
-          // The mirror probe: an interior OPEN of a verdict-bearing element
-          // whose close sits after the section straddles the boundary the
-          // other way — the section deletes the element's header and its
-          // failure body. Restricted to the names the parse reads: stray
-          // unclosed fragments of test output (a printed generic type, an
-          // HTML log) must not reject the report.
-          const interiorOpen =
-            /<(testsuite|testcase|failure|error)\b[^<>]*?(\/?)\s*>/gi;
-          const interiorOpens = new Map<string, number>();
-          while ((match = interiorOpen.exec(interior)) !== null) {
-            if (match[2] === '/') continue;
-            const name = match[1].toLowerCase();
-            interiorOpens.set(name, (interiorOpens.get(name) ?? 0) + 1);
-          }
-          for (const [name, opens] of interiorOpens) {
-            if (opens > (interiorCloses.get(name) ?? 0)) {
-              return null;
-            }
-          }
-        }
-        chunks.push(xml.slice(chunkStart, i));
-        i = end + closer.length;
-        chunkStart = i;
-        continue;
-      }
-      if (xml[i] === '<') {
-        tagStart = i;
-        tagClosing = xml[i + 1] === '/';
-        tagName = '';
-        let nameEnd = i + (tagClosing ? 2 : 1);
-        while (nameEnd < xml.length && XML_NAME_CHAR.test(xml[nameEnd])) {
-          tagName += xml[nameEnd];
-          nameEnd += 1;
-        }
-        i = nameEnd;
-        continue;
-      }
-      if (!/^\s$/.test(xml[i])) contentSinceOpen = true;
-      i += 1;
-      continue;
-    }
-    const char = xml[i];
-    if (quote !== null) {
-      if (char === quote) quote = null;
-      i += 1;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      i += 1;
-      continue;
-    }
-    if (xml.startsWith('<!--', i) || xml.startsWith('<![CDATA[', i)) {
-      return null;
-    }
-    if (char === '>') {
-      closeTag(xml[i - 1] === '/');
-      i += 1;
-      continue;
-    }
-    i += 1;
-  }
-  chunks.push(xml.slice(chunkStart));
-  return chunks.join('');
-}
-
 function parseTestReport(
   root: string,
   path: string,
 ): MavenTestSummary | 'no-suites' | null {
-  try {
-    if (statSync(path).size > MAX_REPORT_BYTES) return null;
-  } catch {
-    return null;
-  }
   let xml: string;
   try {
+    // The size cap bounds parse cost on PR-controlled files; a reject here
+    // joins the other fail-closed rejections upstream.
+    if (statSync(path).size > MAX_REPORT_BYTES) return null;
     xml = readFileSync(path, 'utf8');
   } catch {
     return null;
   }
-  // CDATA and comment content is opaque text, never markup: test output
-  // wrapped in `<system-out>` CDATA routinely CONTAINS XML samples, and
-  // aggregate writers also emit commented-out markup; scanning either as
-  // real fabricated phantom suites and failure evidence. Drop terminated
-  // sections; an unterminated one rejects the report — kept verbatim, a
-  // planted close tag inside it would cut a body before its failure evidence.
-  const stripped = stripOpaqueSections(xml);
-  if (stripped === null) return null;
-  xml = stripped;
-  // Aggregate counts across EVERY suite in the file: aggregate JUnit writers
-  // (jest-junit, karma reporters aimed at target/surefire-reports/ for
-  // SonarQube) emit several `<testsuite>` elements, and reading only the
-  // first undercounts later suites' failures to zero.
+  // A BOM would trip the parser's grammar before the declaration; real
+  // writers emit one, so strip it rather than fail-closing a valid report.
+  if (xml.charCodeAt(0) === 0xfeff) xml = xml.slice(1);
+
+  const parser = new SaxesParser();
+  // saxes reports well-formedness errors through the error event and keeps
+  // going; the first one condemns the whole report, and every handler
+  // below stops acting once it fires.
+  let malformed = false;
+  parser.on('error', () => {
+    malformed = true;
+  });
+
+  let suites = 0;
   let tests = 0;
   let failures = 0;
   let errors = 0;
   let skipped = 0;
-  let suites = 0;
-  const suiteWalk = xmlOpenTagHeaders(xml, 'testsuite');
-  // An interrupted walk discarded every later header (and every failure
-  // body after it): the report's failure status is unknown — reject it
-  // like the other unreadable shapes instead of reading the prefix.
-  if (suiteWalk.truncated) return null;
-  for (const suite of suiteWalk.headers) {
-    const attributes = xmlAttributes(suite.attributes);
-    suites += 1;
-    tests += numberAttribute(attributes, 'tests');
-    failures += numberAttribute(attributes, 'failures');
-    errors += numberAttribute(attributes, 'errors');
-    skipped += numberAttribute(attributes, 'skipped');
-  }
-  // A file read IN FULL that carries zero <testsuite> elements contributes
-  // no evidence and no gap — its failure status is provably known-empty,
-  // unlike the oversized/unreadable rejections the caller counts.
-  if (suites === 0) return 'no-suites';
   const failedCases: string[] = [];
   let droppedCases = 0;
-  let consumedUntil = 0;
-  const caseWalk = xmlOpenTagHeaders(xml, 'testcase');
-  // The same fail-closed rule as the suite walk: an unclosed opener ends
-  // the walk here and silently discards every later `<failure>`/`<error>`
-  // body — the anti-greenwash body-evidence check must not lose parsed
-  // proof of failure into a green read.
-  if (caseWalk.truncated) return null;
-  // A `<testcase` nested inside the QUOTED ATTRIBUTE VALUE of another header
-  // is consumed with the outer tag and never becomes a header itself, so its
-  // `<failure>` body lands in no body the evidence floor below scans — a
-  // failing case deleted from the read. Count the raw openers the walk
-  // should have seen; more of them than headers is the nesting shape, and
-  // the report joins the parser's other fail-closed rejections.
-  const rawCaseOpens = xml.match(/<testcase(?![A-Za-z0-9_])/gi)?.length ?? 0;
-  if (rawCaseOpens > caseWalk.headers.length) return null;
-  for (const header of caseWalk.headers) {
-    const bodyStart = header.index + header.text.length;
-    let body = '';
-    if (!header.text.endsWith('/>')) {
-      // Closing tags are consumed forward-only: an opener whose body starts
-      // before the last consumed close overlaps an already-attributed body —
-      // malformed XML, and the pre-fix shape that re-found the same early
-      // close for every later opener, quadratic over the whole file.
-      if (bodyStart < consumedUntil) continue;
-      const close = findTestcaseClose(xml, bodyStart);
-      // A file truncated mid-case has no closing tag to attribute a body to;
-      // fail closed like the interrupted header walk — an unattributable body
-      // must not read away into a green verdict, and every later opener has
-      // the same hole.
-      if (close === null) return null;
-      body = xml.slice(bodyStart, close.start);
-      consumedUntil = close.end;
+
+  const countAttribute = (
+    attributes: Record<string, string>,
+    name: string,
+  ): number => {
+    const value = Number.parseInt(attributes[name] ?? '0', 10);
+    // A malformed report's negative count must not cancel legitimate
+    // counts from its neighbours when totals roll up across reports.
+    return Number.isFinite(value) ? Math.max(0, value) : 0;
+  };
+
+  // The testcase currently open, if any: `<failure>`/`<error>` elements
+  // belong to it. saxes fires closetag for self-closing tags too, so the
+  // stack cannot drift.
+  const openCases: Array<{
+    className: string;
+    name: string;
+    failing: boolean;
+  }> = [];
+
+  parser.on('opentag', (node) => {
+    if (malformed) return;
+    const name = node.name.toLowerCase();
+    if (name === 'testsuite') {
+      // Aggregate counts across EVERY suite in the file: aggregate JUnit
+      // writers emit several `<testsuite>` elements under a `<testsuites>`
+      // root, and reading only the first undercounts later failures.
+      suites += 1;
+      tests += countAttribute(node.attributes, 'tests');
+      failures += countAttribute(node.attributes, 'failures');
+      errors += countAttribute(node.attributes, 'errors');
+      skipped += countAttribute(node.attributes, 'skipped');
+    } else if (name === 'testcase') {
+      openCases.push({
+        className: node.attributes['classname'] ?? '',
+        name: node.attributes['name'] ?? '',
+        failing: false,
+      });
+    } else if (
+      (name === 'failure' || name === 'error') &&
+      openCases.length > 0
+    ) {
+      openCases[openCases.length - 1].failing = true;
     }
-    if (!/<(?:failure|error)\b/i.test(body)) continue;
+  });
+  parser.on('closetag', (node) => {
+    if (malformed) return;
+    if (node.name.toLowerCase() !== 'testcase') return;
+    const testcase = openCases.pop();
+    if (testcase === undefined || !testcase.failing) return;
     if (failedCases.length >= MAX_FAILURE_CASES_PER_REPORT) {
       // Keep counting but stop materializing: one report can carry tens of
       // thousands of failing cases, and the display cap in
-      // appendTestSummaries only ever shows a bounded prefix — the
-      // dropped count still joins the omission marker.
+      // appendTestSummaries only ever shows a bounded prefix — the dropped
+      // count still joins the omission marker.
       droppedCases += 1;
-      continue;
+      return;
     }
-    const testcaseAttributes = xmlAttributes(header.attributes);
-    const className = decodeXml(testcaseAttributes.get('classname') ?? '');
-    const name = decodeXml(testcaseAttributes.get('name') ?? 'unknown');
-    failedCases.push(className ? `${className}#${name}` : name);
-  }
+    const caseName = testcase.name === '' ? 'unknown' : testcase.name;
+    failedCases.push(
+      testcase.className === ''
+        ? caseName
+        : `${testcase.className}#${caseName}`,
+    );
+  });
+
+  parser.write(xml);
+  parser.close();
+  if (malformed) return null;
+  // A file read IN FULL that carries zero <testsuite> elements contributes
+  // no evidence and no gap — its failure status is provably known-empty,
+  // unlike the rejections the caller counts.
+  if (suites === 0) return 'no-suites';
   return {
     report: toPosix(relative(root, path)),
     tests,
@@ -1020,7 +648,6 @@ function freshTestSummaries(
   before: ReportSnapshot,
 ): {
   summaries: MavenTestSummary[];
-  unparsed: number;
   rejected: number;
   truncated: boolean;
 } {
@@ -1038,18 +665,20 @@ function freshTestSummaries(
     fresh.push(path);
   }
   // Byte-order, not localeCompare: evidence-line order must not depend on
-  // the host's ICU/locale settings. Sorting BEFORE the parse cap keeps the
-  // parsed subset deterministic (readdir order is not). All paths share
+  // the host's ICU/locale settings (readdir order is not). All paths share
   // the same root prefix, so absolute and relative order agree.
   fresh.sort();
   const summaries: MavenTestSummary[] = [];
-  // Fresh reports the parser REFUSED (oversized, unreadable, or malformed
-  // in a shape that can swallow failure bodies) are unknown evidence, and
-  // unlike the count cap they fail closed: a disclosed gap there is one a
-  // PR can weaponize to hide a failing report. A zero-suite file read in
-  // full is the opposite — known-empty, no gap.
+  // EVERY fresh report is parsed — a count cap once let failures ordered
+  // past the cap certify green, because the parsed prefix read clean while
+  // the unread remainder's failure status was unknown. The sweep's path cap
+  // and the per-file size cap bound the cost; a parse the strict parser
+  // REFUSES (oversized, unreadable, or malformed) is unknown evidence and
+  // fails closed: a disclosed gap there is one a PR can weaponize to hide
+  // a failing report. A zero-suite file read in full is the opposite —
+  // known-empty, no gap.
   let rejected = 0;
-  for (const path of fresh.slice(0, MAX_FRESH_REPORTS)) {
+  for (const path of fresh) {
     const parsed = parseTestReport(root, path);
     if (parsed === 'no-suites') continue;
     if (parsed) summaries.push(parsed);
@@ -1057,7 +686,6 @@ function freshTestSummaries(
   }
   return {
     summaries,
-    unparsed: Math.max(0, fresh.length - MAX_FRESH_REPORTS),
     rejected,
     // A truncated PRE-run sweep makes the freshness baseline incomplete (a
     // committed stale report the pre-walk missed reads as fresh), so both
@@ -1082,9 +710,8 @@ function markerSafe(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f]/g, '_');
 }
 
-/** Evidence the run could not read: unparsed past the count cap, rejected by the parser, or unseen past a truncated sweep. */
+/** Evidence the run could not read: rejected by the parser, or unseen past a truncated sweep. */
 interface FreshEvidenceGaps {
-  unparsed: number;
   rejected: number;
   truncated: boolean;
 }
@@ -1101,12 +728,7 @@ function appendTestSummaries(
   summaries: MavenTestSummary[],
   gaps: FreshEvidenceGaps,
 ): CommandResult {
-  if (
-    summaries.length === 0 &&
-    gaps.unparsed === 0 &&
-    gaps.rejected === 0 &&
-    !gaps.truncated
-  ) {
+  if (summaries.length === 0 && gaps.rejected === 0 && !gaps.truncated) {
     return result;
   }
 
@@ -1129,43 +751,21 @@ function appendTestSummaries(
     // Σtests/Σskipped: test-plan parses counts per LINE with its own clamp,
     // and Surefire does not guarantee tests >= skipped within one report
     // (class-level @Disabled), so raw pre-aggregated totals would parse to
-    // a different passed count than the clamped per-report truth — and
-    // which path a group takes (printed rollup vs omission marker) would
-    // change the observed count.
+    // a different passed count than the clamped per-report truth.
     const clampedPassed = group.reduce(
       (sum, item) => sum + Math.max(0, item.tests - item.skipped),
       0,
     );
-    return {
-      line:
-        `[maven-test-report] ${markerSafe(project)} (${group.length} report(s)): ` +
-        `tests=${clampedPassed}, failures=0, errors=0, skipped=0`,
-      clampedPassed,
-    };
+    return (
+      `[maven-test-report] ${markerSafe(project)} (${group.length} report(s)): ` +
+      `tests=${clampedPassed}, failures=0, errors=0, skipped=0`
+    );
   });
-  const cleanLines = cleanGroups.map((group) => group.line);
-  // One line per project dir: bounded by module count, but a 300-module
-  // reactor still appends 300 lines AFTER the command output was trimmed, so
-  // cap it like the failing-report and case blocks. The marker carries the
-  // omitted counts so count adjudication still sees the whole run — a
-  // truncated total once "corrected" a right author count to a wrong one.
-  // They are per-report CLAMPED passed totals: the parser clamps per parsed
-  // line, and clamping the marker's aggregated raw totals instead would let
-  // one anomalous report (Surefire does not guarantee tests >= skipped)
-  // cancel the passed counts of its batchmates — the exact cancellation the
-  // per-report clamp prevents.
-  if (cleanGroups.length > MAX_CLEAN_ROLLUP_LINES) {
-    const omittedGroups = cleanGroups.slice(MAX_CLEAN_ROLLUP_LINES);
-    cleanLines.length = MAX_CLEAN_ROLLUP_LINES;
-    const passed = omittedGroups.reduce(
-      (sum, group) => sum + group.clampedPassed,
-      0,
-    );
-    cleanLines.push(
-      `[maven-test-report] ${omittedGroups.length} more clean project rollup(s) omitted: ` +
-        `tests=${passed}, failures=0, errors=0, skipped=0`,
-    );
-  }
+  const cleanLines = cleanGroups;
+  // One line per project dir, UNcapped: bounded by module count, and every
+  // project keeps its own attributed line — a cap here once dropped module
+  // attribution past the bound, mis-ruling a scoped count claim whose
+  // module landed in the omitted tail.
   lines.push(...cleanLines);
 
   // One line per PROJECT dir, like the clean rollup: per-report lines
@@ -1276,12 +876,6 @@ function appendTestSummaries(
   }
   lines.push(...caseLines);
 
-  if (gaps.unparsed > 0) {
-    lines.push(
-      `[maven-test-report] ${gaps.unparsed} more fresh report(s) not parsed: ` +
-        `the ${MAX_FRESH_REPORTS}-report evidence cap was reached`,
-    );
-  }
   if (gaps.rejected > 0) {
     lines.push(
       `[maven-test-report] ${gaps.rejected} fresh report(s) could not be parsed ` +
@@ -1690,17 +1284,50 @@ function mavenConfigTokens(root: string): string[] {
 }
 
 /**
- * Resolution inputs named by `.mvn/maven.config`: the launcher injects them
- * into the very command this adapter runs, so a settings or local-repository
- * location referenced there is a dependency input the PR can change.
+ * Everything the verdict reads from `.mvn/maven.config`, classified by ONE
+ * spec-referenced tokenizer: the settings/local-repository locations Maven's
+ * launcher injects into this run (dependency inputs), the settings that
+ * change what exit 0 means (fail-never, testFailureIgnore), the settings
+ * that silence or redirect the stdout channel (quiet, log-file), skip-tests
+ * settings — and whether any token defied classification.
+ *
+ * Ambiguity fails CLOSED: when the tokenizer cannot confidently read the
+ * config, the verdict proceeds as if fail-never/testFailureIgnore were set
+ * and distrusts a bare exit 0. Arg-parsing imprecision can then only ever
+ * be stricter, never release.
  */
-function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
-  const inputs: string[] = [];
-  // commons-cli also accepts the single-dash LONG spellings (`-settings`,
-  // `-global-settings`) exactly like their `--` twins; they must pair with
-  // the next line BEFORE the attached-short regexes read them —
-  // `-settings` starts with `-s`.
-  const pairedFlags = new Set([
+interface MavenConfigFacts {
+  quiet: boolean;
+  failNever: boolean;
+  testFailureIgnore: boolean;
+  skipTests: boolean;
+  logFile: boolean;
+  ambiguous: boolean;
+  dependencyInputs: string[];
+}
+
+function analyzeMavenConfig(root: string): MavenConfigFacts {
+  const facts: MavenConfigFacts = {
+    quiet: false,
+    failNever: false,
+    testFailureIgnore: false,
+    skipTests: false,
+    logFile: false,
+    ambiguous: false,
+    dependencyInputs: [],
+  };
+  const addInput = (value: string | undefined): void => {
+    if (!value) return;
+    const path = normalizedChangedPath(root, value);
+    if (path !== null) facts.dependencyInputs.push(path);
+  };
+  // commons-cli accepts these spellings of two settings that change what
+  // exit 0 means; keep them beside the tokenizer that classifies them.
+  const quietFlags = new Set(['-q', '--quiet', '-quiet']);
+  const failNeverFlags = new Set(['-fn', '--fail-never', '-fail-never']);
+  // Flags that take the NEXT config line as their value (Maven reads the
+  // file line-by-line and hands each line to commons-cli as one argument).
+  const settingsFlags = new Set([
     '-s',
     '--settings',
     '-settings',
@@ -1708,12 +1335,82 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
     '--global-settings',
     '-global-settings',
   ]);
-  for (let i = 0; i < tokens.length; i++) {
+  const logFileFlags = new Set(['-l', '--log-file', '-log-file']);
+  const otherPairedFlags = new Set([
+    '-T',
+    '--threads',
+    '-P',
+    '--activate-profiles',
+    '-pl',
+    '--projects',
+    '-rf',
+    '--resume-from',
+  ]);
+  // Valueless flags commons-cli knows: classified so they do not trip the
+  // ambiguity fail-closed below. Not exhaustive — an unknown flag is
+  // exactly the shape ambiguity exists to catch.
+  const valuelessFlags = new Set([
+    '-ff',
+    '--fail-fast',
+    '-fae',
+    '--fail-at-end',
+    '-B',
+    '--batch-mode',
+    '-ntp',
+    '--no-transfer-progress',
+    '-o',
+    '--offline',
+    '-U',
+    '--update-snapshots',
+    '-e',
+    '--errors',
+    '-X',
+    '--debug',
+    '-N',
+    '--non-recursive',
+    '-am',
+    '--also-make',
+    '-amd',
+    '--also-make-dependents',
+    '-llr',
+    '--legacy-local-repository',
+    '-legacy-local-repository',
+  ]);
+  const classifyDefine = (property: string): void => {
+    // Maven 3.9's chained local repositories: EVERY entry is a local-
+    // repository location. The two prefixes are disjoint —
+    // `-Dmaven.repo.local.tail=` diverges from `-Dmaven.repo.local=` at
+    // `.tail`, not `=`. Maven splits the tail property on COMMA only
+    // (DefaultRepositorySystemSessionFactory: `localRepoTail.split(",")`);
+    // a `|` is part of a path here, not a separator.
+    if (property.startsWith('maven.repo.local.tail=')) {
+      for (const part of property
+        .slice('maven.repo.local.tail='.length)
+        .split(',')) {
+        if (!part) continue;
+        addInput(part);
+      }
+      return;
+    }
+    if (property.startsWith('maven.repo.local=')) {
+      addInput(property.slice('maven.repo.local='.length));
+      return;
+    }
+    // A bare property (no `=`) defaults to true in Maven.
+    if (/^maven\.test\.failure\.ignore(=true)?$/i.test(property)) {
+      facts.testFailureIgnore = true;
+      return;
+    }
+    if (/^(skipTests|maven\.test\.skip)(=true)?$/i.test(property)) {
+      facts.skipTests = true;
+      return;
+    }
+  };
+  const tokens = mavenConfigTokens(root);
+  for (let i = 0; i < tokens.length; i += 1) {
     let token = tokens[i];
-    // The config reader hands Maven one argument per line, and commons-cli
-    // pairs a value-less `-D` with the NEXT line exactly like the attached
-    // `-Dmaven.repo.local=…` spelling — join the pair so the property
-    // prefixes below see the same shape.
+    // commons-cli pairs a value-less `-D` with the NEXT line exactly like
+    // the attached spelling — join the pair so defines see one shape.
     if (
       (token === '-D' || token === '--define' || token === '-define') &&
       tokens[i + 1] !== undefined
@@ -1721,50 +1418,87 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
       token = `-D${tokens[i + 1]}`;
       i += 1;
     }
-    // Maven 3.9's chained local repositories: EVERY entry is a local-
-    // repository location. The two prefixes are disjoint —
-    // `-Dmaven.repo.local.tail=` diverges from `-Dmaven.repo.local=` at
-    // `.tail`, not `=` — so the check ordering does not matter; keep both.
-    if (token.startsWith('-Dmaven.repo.local.tail=')) {
-      // Maven splits this property on COMMA only
-      // (DefaultRepositorySystemSessionFactory: `localRepoTail.split(",")`);
-      // a `|` is part of a path here, not a separator.
-      for (const part of token
-        .slice('-Dmaven.repo.local.tail='.length)
-        .split(',')) {
-        if (!part) continue;
-        const path = normalizedChangedPath(root, part);
-        if (path !== null) inputs.push(path);
-      }
+    if (quietFlags.has(token)) {
+      facts.quiet = true;
       continue;
     }
-    let value: string | undefined;
-    if (pairedFlags.has(token)) value = tokens[i + 1];
-    else if (token.startsWith('--settings='))
-      value = token.slice('--settings='.length);
-    else if (token.startsWith('--global-settings='))
-      value = token.slice('--global-settings='.length);
-    else if (token.startsWith('-Dmaven.repo.local='))
-      value = token.slice('-Dmaven.repo.local='.length);
-    // The single-dash long spellings' attached forms — checked BEFORE the
+    if (failNeverFlags.has(token)) {
+      facts.failNever = true;
+      continue;
+    }
+    if (settingsFlags.has(token) || logFileFlags.has(token)) {
+      const value = tokens[i + 1];
+      i += 1;
+      if (settingsFlags.has(token)) addInput(value);
+      else facts.logFile = true;
+      continue;
+    }
+    if (otherPairedFlags.has(token)) {
+      i += 1;
+      continue;
+    }
+    // Attached define spellings: `-D…`, `--define=…`, `-define=…`, and the
+    // short form's `=` separator (`-D=…`, which commons-cli strips).
+    if (token.startsWith('-D')) {
+      classifyDefine(token.slice(2).replace(/^=/, ''));
+      continue;
+    }
+    if (token.startsWith('--define=')) {
+      classifyDefine(token.slice('--define='.length));
+      continue;
+    }
+    if (token.startsWith('-define=')) {
+      classifyDefine(token.slice('-define='.length));
+      continue;
+    }
+    // Attached settings/log-file spellings — checked BEFORE the
     // attached-short regexes, because `-settings=…` also starts with `-s`.
-    else if (token.startsWith('-settings='))
-      value = token.slice('-settings='.length);
-    else if (token.startsWith('-global-settings='))
-      value = token.slice('-global-settings='.length);
+    if (token.startsWith('--settings=')) {
+      addInput(token.slice('--settings='.length));
+      continue;
+    }
+    if (token.startsWith('--global-settings=')) {
+      addInput(token.slice('--global-settings='.length));
+      continue;
+    }
+    if (token.startsWith('-settings=')) {
+      addInput(token.slice('-settings='.length));
+      continue;
+    }
+    if (token.startsWith('-global-settings=')) {
+      addInput(token.slice('-global-settings='.length));
+      continue;
+    }
+    if (token.startsWith('--log-file=') || token.startsWith('-log-file=')) {
+      facts.logFile = true;
+      continue;
+    }
+    // Known valueless flags win over the attached-short regexes:
+    // `-legacy-local-repository` starts with `-l` but is the single-dash
+    // long spelling commons-cli matches before the `-l` short option, so it
+    // must not read as an attached log-file value.
+    if (valuelessFlags.has(token)) continue;
     // commons-cli also accepts the attached short forms (`-s<path>`): the
-    // remainder of a token whose option bears an argument becomes the value.
-    // The `=` of an attached `-s=<path>` spelling is part of the separator,
-    // not the value: commons-cli strips it for single-char short options.
-    else if (/^-s.+/.test(token))
-      value = token.slice('-s'.length).replace(/^=/, '');
-    else if (/^-gs.+/.test(token))
-      value = token.slice('-gs'.length).replace(/^=/, '');
-    if (!value) continue;
-    const path = normalizedChangedPath(root, value);
-    if (path !== null) inputs.push(path);
+    // remainder of a token whose option bears an argument becomes the
+    // value; the `=` of an attached `-s=<path>` is part of the separator
+    // and stripped for single-char short options.
+    if (/^-gs.+/.test(token)) {
+      addInput(token.slice('-gs'.length).replace(/^=/, ''));
+      continue;
+    }
+    if (/^-s.+/.test(token)) {
+      addInput(token.slice('-s'.length).replace(/^=/, ''));
+      continue;
+    }
+    if (/^-l.+/.test(token)) {
+      facts.logFile = true;
+      continue;
+    }
+    if (!token.startsWith('-')) continue; // goals and bare values are inert
+    // A flag this tokenizer cannot classify: fail closed.
+    facts.ambiguous = true;
   }
-  return inputs;
+  return facts;
 }
 
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
@@ -1871,50 +1605,28 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // repository locations `.mvn/maven.config` references, or the executed
   // wrapper (which can redirect the local repository or settings), the
   // resolution failure may be the diff's own doing.
-  const configTokens = mavenConfigTokens(args.root);
-  const settingsInputs = mavenConfigDependencyInputs(args.root, configTokens);
-  // A repo-shipped, PR-writable `.mvn/maven.config` can carry `-q`/`--quiet`
-  // (commons-cli accepts the single-dash long `-quiet` too), which strips
-  // EVERY `[INFO]`/framed line the neverRan check below keys on: a quiet run
-  // that skipped its tests (or a module with none) exits 0 with zero bytes of
-  // output, indistinguishable there from a wrapper that never started. Detect
-  // it so the note names the real cause.
-  const quietConfig = configTokens.some(
-    (token) => token === '-q' || token === '--quiet' || token === '-quiet',
-  );
-  // fail-never is the ONE setting that lets framed `[ERROR]` failures
-  // coexist with an exit-0 run, and `.mvn/maven.config` is the only place
-  // this run inherits it (the adapter never adds it to the command line).
-  // The swallowed-failure check below keys on this.
-  const failNeverConfig = configTokens.some(
-    (token) =>
-      token === '-fn' || token === '--fail-never' || token === '-fail-never',
-  );
-  // `-l`/`--log-file` (the single-dash long `-log-file` included) redirects
-  // the ENTIRE build output into the named file: every stdout scan this
-  // verdict keys on reads an empty stream, while a green sibling report still
-  // blocks neverRan — the certified green-wash quietConfig and failNeverConfig
-  // exist to prevent. Refuse certification like capped evidence.
-  const logFileConfig = configTokens.some(
-    (token) =>
-      token === '-l' ||
-      token === '--log-file' ||
-      token === '-log-file' ||
-      token.startsWith('--log-file=') ||
-      token.startsWith('-log-file=') ||
-      (/^-l.+/.test(token) &&
-        !token.startsWith('-log-file') &&
-        // commons-cli matches the single-dash long spelling of
-        // `--legacy-local-repository` before the `-l` short option.
-        token !== '-legacy-local-repository'),
-  );
+  //
+  // All config facts come from ONE tokenizer pass (see analyzeMavenConfig):
+  // dependency inputs, the settings that change what exit 0 means
+  // (fail-never / testFailureIgnore), the settings that silence or redirect
+  // the stdout channel (quiet / log-file), skip-tests settings, and an
+  // ambiguity flag that fails the verdict closed.
+  const configFacts = analyzeMavenConfig(args.root);
+  // Distrust a bare exit 0: fail-never and testFailureIgnore let Maven exit
+  // 0 over failures, and an UNREADABLE config grammar is assumed to carry
+  // them too (the tokenizer's fail-closed direction — imprecision can only
+  // ever be stricter, never release).
+  const distrustExit0 =
+    configFacts.failNever ||
+    configFacts.testFailureIgnore ||
+    configFacts.ambiguous;
   const dependencyInputsChanged = args.changedFiles.some((file) => {
     const path = normalizedChangedPath(args.root, file);
     if (path === null) return false;
     if (path.startsWith('.mvn/')) return true;
     if (executedWrapper !== null && path === executedWrapper) return true;
     if (
-      settingsInputs.some(
+      configFacts.dependencyInputs.some(
         (input) => path === input || path.startsWith(`${input}/`),
       )
     ) {
@@ -2099,11 +1811,11 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const rejected = SELECTOR_REJECTED_RE.exec(executed.output);
   const fresh = before
     ? freshTestSummaries(args.root, before)
-    : { summaries: [], unparsed: 0, rejected: 0, truncated: false };
+    : { summaries: [], rejected: 0, truncated: false };
   const summaries = fresh.summaries;
+  const hasReports = summaries.length > 0;
   const result = {
     ...appendTestSummaries(executed, summaries, {
-      unparsed: fresh.unparsed,
       rejected: fresh.rejected,
       truncated: fresh.truncated,
     }),
@@ -2129,134 +1841,95 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // failed run instead of reporting the all-clear over it.
   const swallowedReports =
     result.exitCode === 0 && !result.timedOut && freshFailures;
-  // A selector rejection on an exit-0 run with ANY fresh reports is the
-  // forged-framing class: absent fail-never, a genuine rejection fail-fasts
-  // non-zero before any test runs, so it never coexists with fresh reports —
-  // green OR failing. The wording is test stdout, and discarding the run let
-  // a forged line hide captured genuine failures exactly like it hides a
-  // green run — the same gate every other exit-0 framing scan honors.
-  if (
-    rejected &&
-    !(result.exitCode === 0 && summaries.length > 0 && !failNeverConfig)
-  ) {
+  // A genuine selector rejection fail-fasts BEFORE any test runs, at every
+  // exit code and under every fail mode — so it never coexists with fresh
+  // reports. When reports exist the wording was echoed by test stdout, and
+  // discarding the run would hide captured evidence (genuine failures, or
+  // the very green the forged line claims to protect) behind an unsupported
+  // handoff.
+  if (rejected && summaries.length === 0) {
     return unsupportedReport(
       `Maven rejected the selected project(s) — ${rejected[1].trim()} — as not part of the active reactor. ` +
         'They are standalone or profile-inactive under the current profiles and JDK, so this run verified ' +
         'nothing and no other scope was guessed.',
     );
   }
-  // Reports past the count cap were never parsed — disclosure, not denial:
-  // the parsed reports are still real evidence, and refusing certification
-  // over the unread remainder failed closed on exactly the large reactors
-  // this adapter targets (Surefire writes one report per test CLASS, so a
-  // green reactor-wide run reported as an uncertified failure and every
-  // Test Plan claim read unchecked). The note below names the sampling.
-  // Reports the parser REJECTED and truncated sweeps stay fail-closed:
-  // rejection also covers malformed XML whose shape can swallow failure
-  // bodies, and a truncated sweep's freshness baseline is incomplete — a
-  // disclosed gap there is one a PR can weaponize to hide a failing
-  // report, so the run refuses certification like the other unread states.
-  // The trim's rescue cap dropping failure-evidence lines is the same
-  // epistemic state — classification read an output whose verdict-relevant
-  // lines may be gone. A `-l`/`--log-file` setting in `.mvn/maven.config`
-  // is the same state from the other side: the scans read an output the
-  // setting redirected away.
+  // Evidence the run could not read fails CLOSED — a rejected parse
+  // (oversized, unreadable, or malformed XML the strict parser refused) and
+  // a truncated sweep (freshness baseline incomplete) are gaps a PR can
+  // weaponize to hide a failing report, and the trim's rescue cap dropping
+  // failure-evidence lines is the same epistemic state: classification read
+  // an output whose verdict-relevant lines may be gone.
   const evidenceCapped =
-    fresh.rejected > 0 ||
-    fresh.truncated ||
-    result.rescueOverflow === true ||
-    logFileConfig;
-  const sampledEvidence = fresh.unparsed > 0;
+    fresh.rejected > 0 || fresh.truncated || result.rescueOverflow === true;
+  // --- The verdict state machine ---
+  // Three authoritative signals only: the exit code, the parsed report
+  // elements, and the config settings that change what exit 0 means
+  // (fail-never/testFailureIgnore, or an ambiguous config grammar assumed
+  // to carry them). Green requires POSITIVE structural evidence — exit 0
+  // and no parsed failing element — never the mere absence of a failure
+  // wording. The human-stdout scrapers (source/dependency/launch/goal
+  // wording, `Tests run:` summaries) are a FALLBACK for runs that produced
+  // no reports; with reports present the structured signals judge, and the
+  // scrapers can only ever CONVICT under a distrusted exit 0 — arg-parsing
+  // imprecision can only be stricter, never release.
   // A skip setting (`-DskipTests`/`-Dmaven.test.skip=true` in
   // `.mvn/maven.config`, or a POM `<skipTests>`) lets `mvn test` exit 0
   // having executed ZERO tests, and Surefire's skip path emits none of the
-  // framed errors the predicates below scan for — without this check a run
-  // that tested nothing is certified green, and Test Plan count claims
-  // become uncontradictable. The marker covers all three spellings.
+  // framed errors the scrapers scan for — without this check a run that
+  // tested nothing is certified green, and Test Plan count claims become
+  // uncontradictable. The config spelling and the stdout marker both feed
+  // it; with reports present tests demonstrably ran, so neither applies.
   const testsSuppressed =
-    summaries.length === 0 &&
-    result.output.split('\n').some((line) => isTestsSkippedLine(line));
-  // Surefire's framed `Tests run: …, Failures: N` summary lines survive a
-  // relocated `<reportsDirectory>` the sweep cannot see, and are printed
-  // even under `testFailureIgnore`: when they record failures the zero exit
-  // did not fail on, the run is not clean even with zero reports on disk.
-  // As POSITIVE exit-0 failure evidence the scan is gated like the other
-  // framed scans below (`!framingUntrusted`): Surefire echoes test stdout
-  // verbatim, and a plugin-integration test printing a child build's
-  // failing summary otherwise flipped a fully green run whose fresh reports
-  // were green to failed. With visible fresh reports a real
-  // testFailureIgnore run ALSO writes failing XML (`freshFailures`), so the
-  // ungated reading survives only where no reports are visible at all —
-  // the relocated-reports shape it exists for. The interrupted-run notes
-  // and the acquisition suppression below keep their ungated readings:
-  // neither manufactures a pass off them.
+    !hasReports &&
+    (configFacts.skipTests ||
+      result.output.split('\n').some((line) => isTestsSkippedLine(line)));
   const stdoutTestFailures = hasStdoutTestFailure(result.output);
   // A NON-EMPTY wrapper can still exit 0 without launching Maven (a stub
   // `#!/bin/sh` edit keeps the exec bit): zero fresh reports AND zero
   // Maven-framed output means the build never started — "never ran", not
-  // "tested nothing". Enumerating wrapper shapes misses the next spelling;
-  // classifying the run does not.
-  // A diff-modified wrapper CONTROLS both evidence channels — a stub edit
-  // can echo a framed line or write forged reports during the run. When the
-  // executed wrapper is diff-changed and the run surfaced no fresh reports,
-  // framed output proves nothing the stub could not forge, so the run reads
-  // unverified regardless of it. An UNMODIFIED wrapper's evidence still
-  // decides: fresh reports or framed output show a build demonstrably ran —
-  // a plain `.mvn/wrapper/` bump runs the whole reactor green and must not
-  // read as never run — while a silent stub still fails this check.
+  // "tested nothing". A diff-modified wrapper CONTROLS the output channel
+  // (a stub can echo framed lines), and a `-q`/`--quiet` or `-l`/`--log-
+  // file` setting silences or redirects it — with no reports on disk, none
+  // of those states can prove a build started, so all read unverified. An
+  // UNMODIFIED wrapper's evidence still decides: fresh reports or framed
+  // output show a build demonstrably ran — a plain `.mvn/wrapper/` bump
+  // runs the whole reactor green and must not read as never run — while a
+  // silent stub still fails this check.
   const neverRan =
     result.exitCode === 0 &&
     !result.timedOut &&
     !testsSuppressed &&
-    summaries.length === 0 &&
-    (executedWrapperChanged || !hasMavenFramedLine(result.output));
-  // A zero exit is not a pass when Maven's own framing records errors it did
-  // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
-  // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
-  // resolution, AND launch-class failures (a mid-command ENOSPC), and none
-  // of those writes Surefire XML for `freshFailures` to see. Read the
-  // output, or the run verifies nothing while reporting green.
-  // Surefire echoes test stdout into the same stream verbatim, and that
-  // stdout can FORGE Maven's `[ERROR]` framing — a plugin-integration test
-  // printing a real Maven log does exactly that on a fully green run. On
-  // an exit-0 run whose fresh reports are green, genuine framed failures
-  // can only coexist under fail-never (Maven prints no `[ERROR]` on
-  // success otherwise), so absent that setting the whole-output framing
-  // matches are test output, not Maven's own verdict — the same prelude
-  // defense isLaunchFailure applies, extended to the remaining scans.
-  const framingUntrusted =
-    result.exitCode === 0 &&
-    summaries.length > 0 &&
-    !freshFailures &&
-    !failNeverConfig;
-  // A failing exit carries no exit-0 forgery premise — Maven DOES frame its
-  // own failures there — and the acquisition scans below read the WHOLE
-  // output: `-pl <mod> -am` builds AND tests the upstream modules first, so
-  // the first `[INFO] Running` line prints long before the changed module
-  // is even resolved, and a dependency-resolution, launch, or disk death
-  // after it is still the run's own death. Cutting at the first test phase
-  // filed a transient registry outage (and a mid-command ENOSPC) as a
-  // defect in the PR. Exit-0 scans read the whole output too, gated by
-  // `framingUntrusted` against forged test-stdout framing.
-  // The source-failure suppression inside the acquisition carve-out reads the
-  // whole output for the mirror reason: an upstream module's passing test
-  // can echo dependency- or disk-wording lines in its own stdout, and the
-  // echo must not launder a genuine later compile failure into an
-  // infrastructure result — a compile failure writes no Surefire XML, so
-  // `freshFailures` cannot see it. Test stdout echoing COMPILER-error shapes
-  // over a real acquisition failure launders the other way; that direction
-  // files a failure against the PR instead of the environment — the
-  // over-attribution the dependency-inputs carve-out already prefers.
+    !hasReports &&
+    (executedWrapperChanged ||
+      configFacts.quiet ||
+      configFacts.logFile ||
+      !hasMavenFramedLine(result.output));
   const swallowedFailure =
     result.exitCode === 0 &&
     !result.timedOut &&
     !freshFailures &&
     (testsSuppressed ||
-      (!framingUntrusted &&
+      // No reports: the stdout channel is the only evidence left, so the
+      // scrapers judge — surefire's `Tests run:` summaries survive a
+      // relocated `<reportsDirectory>` the sweep cannot see, and framed
+      // errors a fail-never setting swallowed live nowhere else.
+      (!hasReports &&
         (stdoutTestFailures ||
           isSourceFailure(result.output) ||
           isDependencyFailure(result.output) ||
           isLaunchFailure(result.output) ||
+          isGoalFailure(result.output))) ||
+      // Distrusted exit 0 (fail-never/testFailureIgnore set, or the config
+      // grammar unreadable): exit-code semantics are broken, so framed
+      // failure evidence convicts even beside clean reports. Surefire
+      // echoes test stdout verbatim, so this arm stays conviction-only and
+      // restricted to the wordings a real fail-never build frames — the
+      // strict direction.
+      (distrustExit0 &&
+        hasReports &&
+        (stdoutTestFailures ||
+          isSourceFailure(result.output) ||
           isGoalFailure(result.output))));
   const ok =
     result.exitCode === 0 &&
@@ -2265,12 +1938,23 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !swallowedFailure &&
     !evidenceCapped &&
     !neverRan;
-  // Every carve-out carries a diff-inputs exception: when the PR changed
-  // the wrapper or the dependency inputs, the failure may be the diff's own
-  // doing and must not be laundered into an environmental result.
+  // Environmental classification for a failing run. When reports exist the
+  // structured evidence says tests RAN — the non-zero exit is attributed to
+  // the PR side (over-attribution, never an environmental wash). With no
+  // reports, the scrapers classify acquisition deaths: `-pl <mod> -am`
+  // builds AND tests the upstream modules first, so the first `[INFO]
+  // Running` line prints long before the changed module is even resolved,
+  // and a dependency-resolution, launch, or disk death after it is still
+  // the run's own death — cutting at the first test phase once filed a
+  // transient registry outage (and a mid-command ENOSPC) as a defect in the
+  // PR. Every carve-out carries a diff-inputs exception: when the PR
+  // changed the wrapper or the dependency inputs, the failure may be the
+  // diff's own doing and must not be laundered into an environmental
+  // result.
   const acquisitionFailure =
     !ok &&
     !freshFailures &&
+    !hasReports &&
     !isSourceFailure(result.output) &&
     // Executed failing tests record themselves in the stdout summaries even
     // when the sweep misses their XML: dependency-flavored assertion text
@@ -2279,15 +1963,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // infrastructure result.
     !stdoutTestFailures &&
     result.exitCode !== null &&
-    // The wording arms, gated by the exit-0 twin of the swallowed-failure
-    // defense: with green fresh reports and no fail-never, framed wording is
-    // forged test stdout, and an exit-0 acquisition finding off it would
-    // launder the run.
-    ((((isLaunchFailure(result.output) &&
+    ((isLaunchFailure(result.output) &&
       !executedWrapperChanged &&
       !(executable === 'mvn' && platformWrapperChanged)) ||
-      (isDependencyFailure(result.output) && !dependencyInputsChanged)) &&
-      !framingUntrusted) ||
+      (isDependencyFailure(result.output) && !dependencyInputsChanged) ||
       // Shape-classified, not wording-classified: bash/dash localize
       // these diagnostics under a non-English LANG, so the match keys on
       // the structure — an unmodified wrapper dying at a launch exit code
@@ -2432,7 +2111,8 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     const gapReasons: string[] = [];
     if (fresh.rejected > 0) {
       gapReasons.push(
-        `${fresh.rejected} fresh report(s) could not be parsed (oversized or unreadable)`,
+        `${fresh.rejected} fresh report(s) could not be parsed (oversized, ` +
+          'unreadable, or malformed XML the strict parser refused)',
       );
     }
     if (fresh.truncated) {
@@ -2445,12 +2125,6 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         'the output trim dropped failure-evidence lines past its rescue cap',
       );
     }
-    if (logFileConfig) {
-      gapReasons.push(
-        '`.mvn/maven.config` redirects the build output to a log file (`-l`/`--log-file`), ' +
-          'so the stdout failure scans read nothing',
-      );
-    }
     report.note =
       `\`${result.command}\` exited 0, but ${gapReasons.join('; ')} — their ` +
       'failure status is unknown, so the run is not certified as a pass.' +
@@ -2458,34 +2132,41 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         ? ' The output also records failures Maven did not fail on.'
         : '');
   } else if (!ok && result.exitCode === 0 && testsSuppressed) {
+    const suppressionSource = configFacts.skipTests
+      ? 'a skip setting (`-DskipTests`/`-Dmaven.test.skip`) in `.mvn/maven.config`'
+      : 'Maven reporting `Tests are skipped.` — a skip setting (`-DskipTests`/' +
+        '`-Dmaven.test.skip` in `.mvn/maven.config` or a POM `<skipTests>`)';
     report.note =
-      `\`${result.command}\` exited 0, but Maven reported \`Tests are skipped.\` — ` +
-      'a skip setting (`-DskipTests`/`-Dmaven.test.skip` in `.mvn/maven.config` or a POM ' +
-      '`<skipTests>`) suppressed the entire test phase, so nothing was tested. ' +
+      `\`${result.command}\` exited 0 with the test phase suppressed: ${suppressionSource} ` +
+      'skipped every test, so nothing was tested. ' +
       'Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0 && neverRan) {
+    const cause = executedWrapperChanged
+      ? 'the wrapper this run executed is changed by the diff, so it controls the output ' +
+        'channel and any framed lines in it prove nothing'
+      : configFacts.logFile
+        ? 'a `-l`/`--log-file` setting in `.mvn/maven.config` redirected the build output ' +
+          'to a file, so the stdout channel proves nothing'
+        : configFacts.quiet
+          ? 'a `-q`/`--quiet` (or single-dash `-quiet`) setting in `.mvn/maven.config` ' +
+            'suppressed every line Maven prints'
+          : 'no fresh reports and no Maven output at all, so the build never ran ' +
+            '(an empty or stub wrapper passes the launch gates and exits 0)';
     report.note =
-      `\`${result.command}\` exited 0 without starting Maven — no fresh reports` +
-      ' and no Maven output at all, so the build never ran and nothing was verified (an empty or ' +
-      'stub wrapper passes the launch gates and exits 0' +
-      (executedWrapperChanged
-        ? ' — and the wrapper this run executed is changed by the diff'
-        : '') +
-      (quietConfig
-        ? ', or a `-q`/`--quiet` (or single-dash `-quiet`) setting in `.mvn/maven.config` ' +
-          'suppressed every line Maven prints, which also silences a run that skipped its tests'
-        : '') +
-      '). Treat this as an unverified run, not a pass.';
+      `\`${result.command}\` exited 0 without verifiable evidence that a build ran — ` +
+      `${cause}. Treat this as an unverified run, not a pass.`;
   } else if (!ok && result.exitCode === 0) {
-    report.note = failNeverConfig
-      ? `\`${result.command}\` exited 0 but its output records failures Maven did not fail on — ` +
-        'a fail-never setting (e.g. `-fn`/`--fail-never` in `.mvn/maven.config`) or a ' +
-        'testFailureIgnore-style surefire setting is swallowing them. ' +
-        'Treat this as a failed run, not a pass.'
-      : `\`${result.command}\` exited 0 but its output records test failures the exit code ` +
-        'did not fail on — a testFailureIgnore-style surefire setting is the usual cause, ' +
-        'though echoed test output prints the same lines. ' +
-        'Treat this as a failed run, not a pass.';
+    const distrustedCause = configFacts.failNever
+      ? 'a fail-never setting (e.g. `-fn`/`--fail-never` in `.mvn/maven.config`)'
+      : configFacts.testFailureIgnore
+        ? 'a testFailureIgnore-style setting (`-Dmaven.test.failure.ignore`)'
+        : configFacts.ambiguous
+          ? 'an unreadable `.mvn/maven.config` (unrecognized arguments — assumed to ' +
+            'swallow failures, the strict direction)'
+          : 'a testFailureIgnore-style surefire setting, though echoed test output prints the same lines';
+    report.note =
+      `\`${result.command}\` exited 0 but the evidence records failures the exit code did ` +
+      `not fail on — ${distrustedCause}. Treat this as a failed run, not a pass.`;
   } else if (!ok) {
     report.note =
       `\`${result.command}\` failed. Correlate compiler or test errors with the changed files; ` +
@@ -2504,12 +2185,6 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     report.note =
       `Maven test passed with fresh reports: ${totals.tests} tests, ${totals.failures} failures, ` +
       `${totals.errors} errors, ${totals.skipped} skipped across ${summaries.length} report(s).`;
-  }
-  if (sampledEvidence) {
-    report.note +=
-      ` Evidence sampled: ${fresh.unparsed} fresh Surefire/Failsafe report(s) ` +
-      `exceeded the ${MAX_FRESH_REPORTS}-report parse cap and were not parsed — ` +
-      'the verdict stands on the parsed reports only.';
   }
   if (!reactorWide) {
     report.note +=
@@ -2541,6 +2216,18 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         : ` Note: the diff changes the Maven wrapper, but this run executed \`${executable}\`, ` +
           'so the wrapper change itself was not exercised.';
   }
+  if (ok && executedWrapperChanged) {
+    // The run certified green, but the wrapper it executed is one the diff
+    // itself changed. Fresh failing reports still override a green exit, so
+    // this only fires over structurally clean evidence — yet the wrapper is
+    // the very program that LAUNCHED the build, and a diff-controlled
+    // launcher could pin versions, inject settings, or skip work. Name the
+    // caveat next to the green verdict instead of silently trusting it.
+    report.note +=
+      ' Note: this run is green, but it executed a Maven wrapper the diff itself ' +
+      'changed — a diff-controlled launcher could inject settings or skip work, ' +
+      'so confirm the wrapper change is benign before relying on this verdict.';
+  }
   if (isRegularFile(join(args.root, 'package.json'))) {
     // A mixed root: npm's applies() refused the root package.json (an
     // unmodeled workspace glob, a zero-package glob, or no build/test
@@ -2557,7 +2244,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
 
 /** Existence AND regular file: a DIRECTORY carrying the name passes
  *  existsSync but is not a manifest — the same gate mavenExecutable and
- *  mavenConfigDependencyInputs apply. */
+ *  the config tokenizer apply. */
 function isRegularFile(path: string): boolean {
   try {
     return statSync(path).isFile();

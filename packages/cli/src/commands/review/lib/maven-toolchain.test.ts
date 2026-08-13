@@ -604,7 +604,12 @@ describe('maven toolchain adapter', () => {
     expect(report.note).not.toContain('infrastructure evidence');
   });
 
-  it('keeps dependency resolution classified as infrastructure after fresh reports', () => {
+  it('attributes dependency wording beside fresh reports to the PR, not the environment', () => {
+    // State-machine rule: when fresh reports exist, the STRUCTURED evidence
+    // says tests ran — the stdout scrapers are a fallback for runs with NO
+    // reports, so dependency wording beside reports cannot launder the run
+    // into an environmental result. Over-attribution to the PR is the
+    // documented preference over an environmental wash.
     writeReactor();
 
     const report = runAdapter(['core/src/Main.java'], {
@@ -624,7 +629,9 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(report.test[0]?.output).toContain('[maven-test-report]');
-    expect(report.note).toContain('infrastructure evidence');
+    expect(report.test[0]?.infrastructure).toBeUndefined();
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
   });
 
   it('keeps fresh failing tests as source evidence despite infrastructure words', () => {
@@ -988,10 +995,12 @@ describe('maven toolchain adapter', () => {
     );
   });
 
-  it('carries clamped passed totals in the clean omission marker', () => {
-    // An anomalous report (Surefire does not guarantee tests >= skipped)
-    // inside the omitted batch must not cancel the passed counts of its
-    // batchmates — clamp the aggregated totals and it cancels two.
+  it('keeps per-project clamped totals now that the clean rollup is uncapped', () => {
+    // The clean rollup no longer caps: every project keeps its own
+    // attributed line, so no module can land in an unattributed omitted
+    // tail (the shape that once mis-ruled a scoped count claim). The
+    // per-report clamp still applies inside each line: mod99 records one
+    // test with three skipped, which clamps to zero passed.
     const modules = Array.from({ length: 120 }, (_, i) => `mod${i}`);
     writeProject('.', modules);
     for (const module of modules) writeProject(module);
@@ -1003,7 +1012,6 @@ describe('maven toolchain adapter', () => {
           mkdirSync(dir, { recursive: true });
           writeFileSync(
             join(dir, 'TEST-Clean.xml'),
-            // mod99 sorts into the omitted tail of the per-project rollups.
             module === 'mod99'
               ? '<testsuite tests="1" failures="0" errors="0" skipped="3"/>'
               : '<testsuite tests="1" failures="0" errors="0" skipped="0"/>',
@@ -1014,15 +1022,22 @@ describe('maven toolchain adapter', () => {
     });
 
     const output = report.test[0]?.output ?? '';
+    // All 120 projects carry an attributed line; nothing is omitted.
+    expect(
+      output.match(/\[maven-test-report\] mod\d+ \(1 report\(s\)\)/g),
+    ).toHaveLength(120);
+    expect(output).not.toContain('omitted');
     expect(output).toContain(
-      '[maven-test-report] 20 more clean project rollup(s) omitted: ' +
-        'tests=19, failures=0, errors=0, skipped=0',
+      '[maven-test-report] mod99 (1 report(s)): tests=0, failures=0, errors=0, skipped=0',
     );
-    // 100 kept rollup lines pass one test each; the omitted batch passes
-    // 19. The second reading is the changed module's (`mod0`) subtotal —
-    // emitted beside the reactor-wide sum so a count claim scoped to the
-    // changed modules can settle on either.
+    // 119 projects pass one each; mod99 clamps to zero. The second reading
+    // is the changed module's (`mod0`) subtotal, emitted beside the
+    // reactor-wide readings so a scoped count claim can settle.
     expect(observedTestCounts(report)).toEqual([119, 1]);
+    // The green note's totals cover all 120 reports.
+    expect(report.note).toContain(
+      'Maven test passed with fresh reports: 120 tests',
+    );
   });
 
   it('carries clamped passed totals in the failing omission marker', () => {
@@ -1057,40 +1072,6 @@ describe('maven toolchain adapter', () => {
     // passes 2. The second reading is the changed module's (`mod0`)
     // subtotal, emitted beside the reactor-wide sum.
     expect(observedTestCounts(report)).toEqual([102, 1]);
-  });
-
-  it('caps the clean per-project rollup lines', () => {
-    const modules = Array.from({ length: 120 }, (_, i) => `mod${i}`);
-    writeProject('.', modules);
-    for (const module of modules) writeProject(module);
-
-    const report = runAdapter(['mod0/src/main/java/Main.java'], {
-      exec: (command) => {
-        for (const module of modules) {
-          const dir = join(root, module, 'target', 'surefire-reports');
-          mkdirSync(dir, { recursive: true });
-          writeFileSync(
-            join(dir, 'TEST-Clean.xml'),
-            '<testsuite tests="1" failures="0" errors="0" skipped="0"/>',
-          );
-        }
-        return result(command);
-      },
-    });
-
-    const output = report.test[0]?.output ?? '';
-    expect(
-      output.match(/\[maven-test-report\] mod\d+ \(1 report\(s\)\)/g),
-    ).toHaveLength(100);
-    expect(output).toContain(
-      '[maven-test-report] 20 more clean project rollup(s) omitted: ' +
-        'tests=20, failures=0, errors=0, skipped=0',
-    );
-    // The green note is the only test-count evidence on a passing Maven run;
-    // its totals are computed BEFORE the cap, over all 120 reports.
-    expect(report.note).toContain(
-      'Maven test passed with fresh reports: 120 tests',
-    );
   });
 
   it('caps failing case lines', () => {
@@ -2098,22 +2079,19 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.evidenceCapped).toBe(true);
   }, 20_000);
 
-  it('discloses sampling past the fresh-report parse cap instead of failing a green run', () => {
-    // The mtime freshness filter accepts any writer, so the PR's own
-    // tests control how many reports exist at parse time. Surefire
-    // writes one report per test CLASS, so a reactor-wide run on a large
-    // reactor produces more fresh reports than the parse cap — and the
-    // parsed reports are still real evidence: failing closed over the
-    // unread remainder read a fully green run as an uncertified failure
-    // and ruled every Test Plan claim unchecked. The cap now discloses
-    // the sampling and the green verdict stands.
+  it('parses every fresh report — failures ordered past the old cap are still evidence', () => {
+    // The count cap this test once disclosed was itself the leak: a failing
+    // report ordered past the cap stayed unread while the parsed prefix read
+    // clean, certifying green over a failed run. The cap is gone — EVERY
+    // fresh report is parsed (the sweep's path cap and the per-file size cap
+    // still bound the cost), so the failure is evidence wherever it sorts.
     writeReactor();
 
     const report = runAdapter(['core/src/Main.java'], {
       exec: (command) => {
         const dir = join(root, 'core', 'target', 'surefire-reports');
         mkdirSync(dir, { recursive: true });
-        for (let i = 0; i < 1005; i++) {
+        for (let i = 0; i < 1000; i++) {
           writeFileSync(
             join(dir, `TEST-Case${String(i).padStart(4, '0')}.xml`),
             '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
@@ -2121,19 +2099,24 @@ describe('maven toolchain adapter', () => {
               '</testsuite>',
           );
         }
+        // Sorts AFTER every TEST-Case… report — exactly where the old cap
+        // stopped reading.
+        for (let i = 0; i < 5; i++) {
+          writeFileSync(
+            join(dir, `TEST-ZFailed${i}.xml`),
+            '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+              `<testcase classname="example.ZFailed${i}" name="fails"><failure/></testcase>` +
+              '</testsuite>',
+          );
+        }
         return result(command);
       },
     });
 
-    expect(report.ok).toBe(true);
+    expect(report.ok).toBe(false);
     expect(report.test[0]?.evidenceCapped).toBeUndefined();
-    expect(report.note).toContain('Evidence sampled: 5 fresh');
-    expect(report.note).toContain('1000-report parse cap');
     expect(report.test[0]?.output).toContain(
-      '5 more fresh report(s) not parsed',
-    );
-    expect(report.test[0]?.output).toContain(
-      '1000-report evidence cap was reached',
+      '[maven-test-failure] core/target/surefire-reports/TEST-ZFailed0.xml: example.ZFailed0#fails',
     );
   }, 30_000);
 
@@ -2171,9 +2154,11 @@ describe('maven toolchain adapter', () => {
   }, 30_000);
 
   it('parses a suite header of unpaired attribute-name runs in linear time', () => {
-    // `xmlAttributes` backtracked quadratically on a long attribute-name
-    // run with no `=` — the same denial-of-service class, entering through
-    // the suite header instead of the testcase walk.
+    // A million-character attribute-name run with no `=` is malformed XML;
+    // the strict parser rejects it in one linear pass (the hand-rolled
+    // attribute regex backtracked quadratically here). Fail-closed AND
+    // bounded-time: the adversarial report reads as unknown evidence, never
+    // green, never a hang.
     writeReactor();
     const startedAt = Date.now();
 
@@ -2191,7 +2176,8 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(report.ok).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
   }, 20_000);
   it('walks stacked openers-before-closers reports in linear time', () => {
     // Every opener preceding every closer used to re-find the same early
@@ -3062,13 +3048,13 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.evidenceCapped).toBe(true);
   });
 
-  it('rejects an exempt stream CDATA whose interior swallows a later suite', () => {
-    // The surefire-writer exemption tolerates stdout samples that close
-    // the elements open around the section — but for the section to
-    // delete a REAL later suite, that suite must open inside the interior
-    // after the closes of the surrounding elements. That sequence
-    // rejects the report fail-closed; without the probe the swallowed
-    // suite's header and failure body parse away to a green read.
+  it('reads a CDATA-wrapped markup sample as opaque text, never as evidence', () => {
+    // The strict parser treats CDATA as character data: the suite, case, and
+    // `<failure>` text inside the section are NOT markup, so they cannot
+    // forge a verdict in either direction. The hand-rolled scanner needed a
+    // swallowing-shape probe here; the parser makes the whole class
+    // structural — the phantom suite reads as text and the run certifies on
+    // the real suite alone.
     writeReactor();
 
     const report = runAdapter(['core/src/Main.java'], {
@@ -3089,8 +3075,9 @@ describe('maven toolchain adapter', () => {
       },
     });
 
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.evidenceCapped).toBe(true);
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+    expect(report.test[0]?.output).not.toContain('[maven-test-failure]');
   });
 
   it('rejects a report holding an unterminated CDATA section', () => {
@@ -3146,11 +3133,13 @@ describe('maven toolchain adapter', () => {
     );
   });
 
-  it('does not cut a testcase body on a quoted </testcase> attribute value', () => {
-    // The close-tag walk is quote-aware like the header walk: a literal
-    // `</testcase>` inside a quoted attribute value is content, not
-    // markup. Cutting the body there silently lost the `<failure>` after
-    // it and read a failing report green.
+  it('does not cut a testcase body on a close-tag-shaped attribute value', () => {
+    // A well-formed writer escapes the value (`&lt;/testcase&gt;`); the
+    // parser then reads it as content, not markup, and the `<failure>`
+    // after it still belongs to the case. The raw unescaped spelling is
+    // malformed XML and joins the fail-closed rejections (pinned by the
+    // malformed-report tests) — either way a failing case cannot parse
+    // away into a green read.
     writeReactor();
     const report = runAdapter(['core/src/Main.java'], {
       exec: (command) => {
@@ -3160,7 +3149,7 @@ describe('maven toolchain adapter', () => {
           join(dir, 'TEST-Core.xml'),
           '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
             '<testcase classname="example.CoreTest" name="t">' +
-            '<property name="</testcase>"/>' +
+            '<property name="&lt;/testcase&gt;"/>' +
             '<failure>boom</failure>' +
             '</testcase></testsuite>',
         );
@@ -3512,10 +3501,12 @@ describe('maven toolchain adapter', () => {
   });
 
   it('refuses certification when maven.config redirects output to a log file', () => {
-    // `-l`/`--log-file` sends the ENTIRE build output to the named file:
-    // every stdout failure scan reads nothing while a green sibling report
-    // still blocks neverRan — the certified green-wash the quiet and
-    // fail-never detectors exist to prevent.
+    // `-l`/`--log-file` redirects the ENTIRE stdout to a file, but Surefire
+    // reports go to DISK regardless — so clean fresh reports are complete
+    // structural evidence and judge the run green even though every stdout
+    // scan reads nothing. The old model treated the redirected stdout as an
+    // unread-evidence gap; the state machine judges on parsed reports when
+    // they exist.
     writeReactor();
     mkdirSync(join(root, '.mvn'));
     writeFileSync(join(root, '.mvn', 'maven.config'), '-l\nbuild.log\n');
@@ -3535,10 +3526,27 @@ describe('maven toolchain adapter', () => {
       },
     });
 
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+    expect(report.note).toContain('Maven test passed');
+  });
+
+  it('reads a log-file run with no reports as never run, not green', () => {
+    // The twin with no structural evidence: stdout is redirected away AND no
+    // reports exist, so nothing proves a build ran — fail closed to neverRan
+    // rather than certifying the empty run.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-l\nbuild.log\n');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
     expect(report.ok).toBe(false);
-    expect(report.test[0]?.evidenceCapped).toBe(true);
-    expect(report.note).toContain('log file');
-    expect(report.note).not.toContain('Maven test passed');
+    expect(report.test[0]?.neverRan).toBe(true);
+    expect(report.note).toContain('--log-file');
+    expect(report.note).toContain('unverified');
   });
 
   it('reads post-test-phase disk and dependency deaths at a failing exit as infrastructure', () => {
@@ -3685,10 +3693,13 @@ describe('maven toolchain adapter', () => {
     expect(report.note).toContain('test failures, not a pass');
   });
 
-  it('rejects a section that opens a verdict element it does not close', () => {
-    // The mirror of the swallowing shape: an interior OPEN whose close
-    // sits after the section erases the element's header and failure body
-    // without rejection.
+  it('never reads a commented-out failure sample as a failing case', () => {
+    // Comments are opaque to the parser: a `<failure>` sample inside one is
+    // text, not verdict markup. The hand-rolled scanner probed this shape
+    // for swallowing; the strict parser makes it structural — the case has
+    // no failure element, the report reads clean, and nothing forges a
+    // phantom failure (nor erases a real one, which would be genuine
+    // markup the parser counts).
     writeReactor();
 
     const report = runAdapter(['core/src/Main.java'], {
@@ -3697,16 +3708,17 @@ describe('maven toolchain adapter', () => {
         mkdirSync(dir, { recursive: true });
         writeFileSync(
           join(dir, 'TEST-Core.xml'),
-          '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
-            '<testcase classname="T" name="fails"><!-- <failure> --></testcase>' +
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="T" name="passes"><!-- <failure> --></testcase>' +
             '</testsuite>',
         );
-        return result(command, { exitCode: 1, output: '[INFO] BUILD FAILURE' });
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
       },
     });
 
-    expect(report.ok).toBe(false);
-    expect(report.test[0]?.evidenceCapped).toBe(true);
+    expect(report.ok).toBe(true);
+    expect(report.test[0]?.evidenceCapped).toBeUndefined();
+    expect(report.test[0]?.output).not.toContain('[maven-test-failure]');
   });
 
   it('keeps stray unclosed fragments of other names out of the mirror probe', () => {
@@ -3881,9 +3893,8 @@ describe('maven toolchain adapter', () => {
   });
 
   it('parses a failing case whose classname carries İ through the fallback scan', () => {
-    // `İ`.toLowerCase() lengthens UTF-16 text, which switches
-    // xmlOpenTagHeaders to its case-insensitive fallback scan; the parse
-    // must still attribute the failure body to its case.
+    // `İ`.toLowerCase() lengthens UTF-16 text — the parse must still
+    // attribute the failure body to its case with Unicode names intact.
     writeReactor();
 
     const report = runAdapter(['core/src/Main.java'], {
@@ -4028,7 +4039,7 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.neverRan).toBe(true);
-    expect(report.note).toContain('without starting Maven');
+    expect(report.note).toContain('the build never ran');
   });
 
   it('mirrors Maven line-by-line maven.config reading for spaced arguments', () => {
@@ -4076,6 +4087,97 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(report.note).toContain('infrastructure evidence');
+  });
+
+  it('does not read -legacy-local-repository as a log-file flag', () => {
+    // commons-cli matches the single-dash long spelling before the `-l`
+    // short option: `-legacy-local-repository` starts with `-l` but is a
+    // valueless flag, not an attached log-file value.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-legacy-local-repository\n',
+    );
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output: '[INFO] BUILD SUCCESS',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.note).not.toContain('--log-file');
+  });
+
+  it.each([
+    '--define=maven.repo.local=custom-repo\n',
+    '-define=maven.repo.local=custom-repo\n',
+    '-D=maven.repo.local=custom-repo\n',
+  ])(
+    'treats the attached define spelling %j as a dependency input',
+    (config) => {
+      // The tokenizer normalizes every attached define spelling to the
+      // `-D<prop>=<v>` shape before the property prefixes read it — a
+      // changed local-repository location in any spelling suppresses the
+      // infrastructure carve-out.
+      writeReactor();
+      mkdirSync(join(root, '.mvn'));
+      writeFileSync(join(root, '.mvn', 'maven.config'), config);
+      mkdirSync(join(root, 'custom-repo'));
+
+      const report = runAdapter(['custom-repo/corrupt.jar'], {
+        exec: (command) =>
+          result(command, {
+            exitCode: 1,
+            output:
+              '[ERROR] Could not resolve dependencies for project example:core',
+          }),
+      });
+
+      expect(report.note).toContain('Correlate compiler or test errors');
+      expect(report.note).not.toContain('infrastructure evidence');
+    },
+  );
+
+  it('distrusts a bare exit 0 when the config grammar is ambiguous', () => {
+    // A flag the tokenizer cannot classify fails the verdict CLOSED: the
+    // run proceeds as if fail-never were set, so framed failure wording
+    // convicts even beside clean reports — imprecision can only ever be
+    // stricter, never release.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '--some-unknown-flag\n');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-checkstyle-plugin:3.3.1:check on project core',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.swallowedFailure).toBe(true);
+    expect(report.note).toContain('unreadable');
   });
 
   it.each([
@@ -4296,14 +4398,12 @@ describe('maven toolchain adapter', () => {
     expect(paths.length).toBe(20_000);
   }, 60_000);
 
-  it('matches unmatched closers against a deep open stack in linear time', () => {
-    // The closeTag membership scan went quadratic on PR-controlled bytes:
-    // k never-closed openers plus k unmatched closers is k full stack
-    // scans — measured seconds at 20k pairs through the real adapter
-    // (extrapolating to tens of minutes at the report cap), the same
-    // denial-of-service class the other linear pins in this suite. The
-    // trailing comment is load-bearing: without a CDATA/comment marker
-    // stripOpaqueSections returns before scanning at all.
+  it('rejects a multi-root malformed report fail-closed in bounded time', () => {
+    // A self-closing suite followed by tens of thousands of stray
+    // openers/closers is malformed (multiple roots, mismatched names). The
+    // hand-rolled stack scans went quadratic on exactly this shape; the
+    // strict parser walks it once, rejects it, and the rejection fails
+    // closed — unknown evidence, never green, never a hang.
     writeReactor();
     const startedAt = Date.now();
 
@@ -4323,37 +4423,8 @@ describe('maven toolchain adapter', () => {
     });
 
     expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(report.ok).toBe(true);
-  }, 20_000);
-
-  it('scans comment-interior close tokens against a deep stack in linear time', () => {
-    // The swallow check ran `.some(...)` over the whole open stack for
-    // EVERY close token inside a comment — the second quadratic site,
-    // reachable through a single `<!--` marker. The interior names match
-    // nothing open, so the report stays parseable and the scan must stay
-    // fast.
-    writeReactor();
-    const startedAt = Date.now();
-
-    const report = runAdapter(['core/src/Main.java'], {
-      exec: (command) => {
-        const dir = join(root, 'core', 'target', 'surefire-reports');
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(
-          join(dir, 'TEST-Core.xml'),
-          '<testsuite tests="1" failures="0" errors="0" skipped="0"/>' +
-            '<opener>'.repeat(30_000) +
-            '<!--' +
-            '</closer>'.repeat(30_000) +
-            '-->' +
-            '<testcase classname="example.T" name="passes"/>',
-        );
-        return result(command);
-      },
-    });
-
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(report.ok).toBe(true);
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
   }, 20_000);
 
   it('prints per-report clamped totals on the failing rollup', () => {
@@ -4470,12 +4541,12 @@ describe('maven toolchain adapter', () => {
 
   it('names a quiet maven.config as the never-ran alternative cause', () => {
     // `-q`/`--quiet` in the PR-writable config strips every framed line the
-    // neverRan check keys on: a quiet run that skipped its tests exits 0
-    // with empty output, indistinguishable there from a wrapper that never
+    // neverRan check keys on: a quiet run with no reports exits 0 with
+    // empty output, indistinguishable there from a wrapper that never
     // started — the note must name the real alternative.
     writeReactor();
     mkdirSync(join(root, '.mvn'));
-    writeFileSync(join(root, '.mvn', 'maven.config'), '-q\n-DskipTests\n');
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-q\n');
 
     const report = runAdapter(['core/src/Main.java'], {
       exec: (command) => result(command, { exitCode: 0, output: '' }),
