@@ -25,6 +25,7 @@ import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { truncateNotificationLabel } from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
@@ -185,9 +186,12 @@ export function buildBackgroundEntryLabel(
   ) {
     raw = raw.slice(entry.subagentType.length + 1).trimStart();
   }
+  // Measure code points, not UTF-16 units: a unit-based slice could cut
+  // an astral character in half and emit an unpaired surrogate.
+  const codePoints = [...raw];
   const truncated =
-    raw.length > MAX_DESCRIPTION_LENGTH
-      ? raw.slice(0, MAX_DESCRIPTION_LENGTH - 1) + '\u2026'
+    codePoints.length > MAX_DESCRIPTION_LENGTH
+      ? codePoints.slice(0, MAX_DESCRIPTION_LENGTH - 1).join('') + '\u2026'
       : raw;
   return includePrefix && entry.subagentType
     ? `${entry.subagentType}: ${truncated}`
@@ -1579,7 +1583,7 @@ export class BackgroundTaskRegistry {
   }
 
   private buildDisplayLabel(entry: AgentTask): string {
-    return buildBackgroundEntryLabel(entry);
+    return truncateNotificationLabel(buildBackgroundEntryLabel(entry));
   }
 
   private emitNotification(entry: AgentTask): void {

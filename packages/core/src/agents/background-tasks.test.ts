@@ -2140,6 +2140,57 @@ describe('BackgroundTaskRegistry', () => {
     });
   });
 
+  describe('notification displayText', () => {
+    it('normalizes the agent display label like the monitor/shell surfaces', () => {
+      // The structured i18n label is stripped/collapsed/capped; the legacy
+      // displayText must go through the same normalization so the surfaces
+      // cannot drift (and bidi/Trojan-Source hardening is not bypassed).
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: `a\u202eb\tc\n${'x'.repeat(90)}`,
+        subagentType: 'Explore',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test-1.jsonl',
+      });
+
+      registry.complete('test-1', 'done');
+
+      const [displayText] = callback.mock.calls[0];
+      expect(displayText).toBe(
+        `Background agent "Explore: ab c${'x'.repeat(33)}\u2026" completed.`,
+      );
+    });
+
+    it('does not split astral descriptions when truncating the display label', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: '\u{1F600}'.repeat(50),
+        subagentType: 'coder',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test-1.jsonl',
+      });
+
+      registry.complete('test-1', 'done');
+
+      const [displayText] = callback.mock.calls[0];
+      expect(displayText).toBe(
+        `Background agent "coder: ${'\u{1F600}'.repeat(39)}\u2026" completed.`,
+      );
+    });
+  });
+
   describe('notification XML', () => {
     it('includes output-file tag when outputFile is set', () => {
       const callback = vi.fn();

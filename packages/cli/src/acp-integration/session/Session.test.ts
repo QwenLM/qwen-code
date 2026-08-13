@@ -4814,6 +4814,62 @@ describe('Session', () => {
       });
     });
 
+    it('keeps astral agent descriptions free of unpaired surrogates', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // buildBackgroundEntryLabel caps the description at 40 code points
+      // BEFORE the Session-side cap runs; that cut must not split a
+      // surrogate pair (round-6 review: `coder: ` + emoji description).
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([
+        {
+          id: 'agent-1',
+          description: '\u{1F600}'.repeat(50),
+          subagentType: 'coder',
+          isBackgrounded: true,
+          status: 'completed',
+          notified: false,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Background agent "\u2026" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                kind: 'agent',
+                description: 'coder: ' + '\u{1F600}'.repeat(39) + '\u2026',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
     it('truncates astral (emoji) labels on a code-point boundary', async () => {
       mockChat.sendMessageStream = vi
         .fn()

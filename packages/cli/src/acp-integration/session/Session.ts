@@ -7170,7 +7170,8 @@ export class Session implements SessionContext {
           ? {
               description: truncateNotificationLabel(entry.description),
               eventCount: meta.eventCount,
-              droppedLines: entry.droppedLines || undefined,
+              droppedLines:
+                entry.droppedLines > 0 ? entry.droppedLines : undefined,
             }
           : undefined,
       });
@@ -7270,6 +7271,14 @@ export class Session implements SessionContext {
     void this.#drainNotificationQueue();
   }
 
+  /**
+   * Entry point for daemon-delivered background notifications (the
+   * `sessionBackgroundNotification` ext-method). The ext-method contract
+   * carries no structured i18n fields, so web shells render these
+   * notifications' English `displayText` through the Markdown fallback —
+   * deliberately: it is how the sub-session completion's clickable
+   * `qwen-session://` link survives.
+   */
   async enqueueBackgroundNotification(
     item: BackgroundNotificationQueueItem,
   ): Promise<{ accepted: boolean }> {
@@ -7315,7 +7324,6 @@ export class Session implements SessionContext {
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
-          ...item.structured,
         },
       );
     } catch (error) {

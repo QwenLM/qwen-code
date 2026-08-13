@@ -172,7 +172,7 @@ export const SystemMessage = memo(function SystemMessage({
     ) {
       return undefined;
     }
-    const key = `notification.${taskKind}.${taskStatus}` as const;
+    const key = `notification.${taskKind}.${taskStatus}`;
     if (taskKind === 'shell') {
       return taskCommandLabel
         ? t(key, { command: taskCommandLabel })
@@ -190,15 +190,9 @@ export const SystemMessage = memo(function SystemMessage({
     return undefined;
   })();
 
-  const renderedContent = preserveWhitespace ? (
-    <pre>{content}</pre>
-  ) : variant === 'info' ? (
-    <Markdown content={content} />
-  ) : (
-    <pre>{content}</pre>
-  );
-
   if (isTaskNotification) {
+    // Notifications are never retryable (only `turn_error` messages are),
+    // so this early return does not drop the retry hint.
     return (
       <div className={styles.notificationBubbleRow}>
         <div className={styles.notificationBubbleColumn}>
@@ -220,6 +214,14 @@ export const SystemMessage = memo(function SystemMessage({
       </div>
     );
   }
+
+  const renderedContent = preserveWhitespace ? (
+    <pre>{content}</pre>
+  ) : variant === 'info' ? (
+    <Markdown content={content} />
+  ) : (
+    <pre>{content}</pre>
+  );
 
   return (
     <div
