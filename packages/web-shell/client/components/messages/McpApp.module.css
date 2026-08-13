@@ -31,6 +31,12 @@
   transition: height 180ms ease;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .frame {
+    transition: none;
+  }
+}
+
 .fallback {
   padding: 12px;
   color: var(--muted-foreground);

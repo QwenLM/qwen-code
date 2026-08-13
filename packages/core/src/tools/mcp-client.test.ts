@@ -1317,6 +1317,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
         readResource: vi.fn().mockResolvedValue({
           contents: [{ uri: 'res://doc', text: 'BODY' }],
         }),
@@ -1341,6 +1342,47 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const result = await client.readResource('res://doc');
       expect(mockedClient.readResource).toHaveBeenCalledWith(
         { uri: 'res://doc' },
+        undefined,
+      );
+      expect((result.contents[0] as { text: string }).text).toBe('BODY');
+    });
+
+    it('readResource falls back to a raw request when a modern server omits resources', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        readResource: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'TYPED' }],
+        }),
+        request: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'BODY' }],
+        }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const result = await client.readResource('res://doc');
+      expect(mockedClient.readResource).not.toHaveBeenCalled();
+      expect(mockedClient.request).toHaveBeenCalledWith(
+        { method: 'resources/read', params: { uri: 'res://doc' } },
+        expect.anything(),
         undefined,
       );
       expect((result.contents[0] as { text: string }).text).toBe('BODY');
@@ -1624,6 +1666,38 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(tools.map((tool) => tool.serverToolName)).toEqual([
         'show_dashboard',
       ]);
+    });
+
+    it('lists tools via request when a modern server omits the tools capability', async () => {
+      const mockedClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        request: vi.fn().mockResolvedValue({
+          tools: [{ name: 'echo' }],
+        }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'echo' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'under-declared',
+        { command: 'test-command' },
+        mockedClient,
+        cfgWithResources(),
+        { applyConfigFilters: false },
+      );
+
+      expect(vi.mocked(mockedClient.request)).toHaveBeenCalledWith(
+        { method: 'tools/list', params: {} },
+        expect.anything(),
+      );
+      expect(vi.mocked(mockedClient.listTools)).not.toHaveBeenCalled();
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['echo']);
     });
 
     it('allows invocation context only for a client bound to a created stdio transport', async () => {
@@ -2186,11 +2260,13 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     });
 
     it('attempts prompts/list even when the prompts capability is undeclared (lenient)', async () => {
-      // Regression guard: pre-fix this returned [] WITHOUT a request when
-      // `capabilities.prompts` was absent, hiding prompts from servers that
-      // under-declare the capability. We now always attempt the call.
+      // Regression guard: the v2 typed helper returns [] WITHOUT a request
+      // when `capabilities.prompts` is absent. Modern under-declared servers
+      // must still hit the wire.
       const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
         getServerCapabilities: vi.fn().mockReturnValue({}),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
         request: vi
           .fn()
           .mockRejectedValue(new Error('MCP error -32601: Method not found')),
@@ -2198,11 +2274,14 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const result = await listMcpPrompts('no-prompts', mockClient);
       expect(result).toEqual([]);
       expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.listPrompts)).not.toHaveBeenCalled();
     });
 
     it('lists prompts from a server that omits the prompts capability but still answers', async () => {
       const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
         getServerCapabilities: vi.fn().mockReturnValue({}),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
         request: vi.fn().mockResolvedValue({
           prompts: [{ name: 'greet' }],
         }),
@@ -2211,6 +2290,23 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(result).toHaveLength(1);
       expect(result[0].name).toBe('greet');
       expect(result[0].serverName).toBe('under-declared');
+      expect(vi.mocked(mockClient.listPrompts)).not.toHaveBeenCalled();
+    });
+
+    it('uses the typed helper when a modern server declares prompts', async () => {
+      const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        listPrompts: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'greet' }],
+        }),
+        request: vi.fn(),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('modern', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('greet');
+      expect(vi.mocked(mockClient.listPrompts)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.request)).not.toHaveBeenCalled();
     });
 
     it('returns [] on protocol error (server up but list call rejects)', async () => {
@@ -2273,7 +2369,9 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
     it('attempts resources/list even when the resources capability is undeclared (lenient)', async () => {
       const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
         getServerCapabilities: vi.fn().mockReturnValue({}),
+        listResources: vi.fn().mockResolvedValue({ resources: [] }),
         request: vi
           .fn()
           .mockRejectedValue(new Error('MCP error -32601: Method not found')),
@@ -2281,6 +2379,23 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       const result = await listMcpResources('no-resources', mockClient);
       expect(result).toEqual([]);
       expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.listResources)).not.toHaveBeenCalled();
+    });
+
+    it('uses the typed helper when a modern server declares resources', async () => {
+      const mockClient = {
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        listResources: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'file:///a.txt', name: 'a' }],
+        }),
+        request: vi.fn(),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('modern', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].uri).toBe('file:///a.txt');
+      expect(vi.mocked(mockClient.listResources)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(mockClient.request)).not.toHaveBeenCalled();
     });
 
     it('returns [] on protocol error (server up but list call rejects)', async () => {

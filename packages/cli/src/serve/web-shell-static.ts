@@ -146,9 +146,10 @@ const SESSION_DEEP_LINK_PATH = /^\/session\/[^/]+\/?$/u;
  * that cannot attach the bearer header. Percent-encoded single-segment deep
  * links (e.g. `/session/<id>%2fstatus`) also match — Express does not decode
  * `%2F` during route matching — but they cannot reach an API route or session
- * data: pre-auth answers serve only the public shell HTML, identical to
- * `GET /` (or the startup-failure envelope). Keep in sync with the routes
- * registered in `mountWebShellAssets`.
+ * data: pre-auth answers serve only the public shell HTML or the MCP App
+ * sandbox proxy, identical to `GET /` (or the startup-failure envelope).
+ * Keep in sync with the routes registered in `mountWebShellAssets` and
+ * `mountMcpAppSandbox`.
  */
 export function isPreAuthWebShellRequest(req: Request): boolean {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
@@ -245,6 +246,9 @@ function createSendIndex(
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
  *  - `GET /session/:id` document navigations — the HTML shell, so a browser
  *    refresh can load before the front-end adds its bearer header.
+ *
+ * `GET /mcp-app-sandbox` is a separate pre-auth route mounted by
+ * `mountMcpAppSandbox` (the iframe proxy, not the shell HTML).
  *
  * `isPreAuthWebShellRequest` encodes this same surface for the
  * deferred-runtime gate; keep the two in sync.

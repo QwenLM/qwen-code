@@ -752,11 +752,10 @@ export class McpClient {
     // but under-declares the `resources` capability would otherwise have its
     // resources discovered, listed in `/mcp`, and offered in `@server:`
     // completion, yet fail on read with a misleading "does not support
-    // resources" error. Modern sessions use the cache-aware typed helper;
-    // legacy sessions retain the raw request path so an under-declared server
-    // can still answer. A server that genuinely lacks resources returns
-    // `-32601`, which surfaces naturally to the caller.
-    if (this.client.getProtocolEra?.() === 'modern') {
+    // resources" error. The v2 typed helper skips the wire request when the
+    // capability is omitted, so modern sessions use it only when `resources`
+    // is declared; otherwise we issue the same raw request as the legacy path.
+    if (canUseModernTypedHelper(this.client, 'resources')) {
       return this.client.readResource({ uri }, options);
     }
     return this.client.request(
@@ -1395,9 +1394,12 @@ export async function discoverTools(
     > = [];
     let didListTools = false;
     const listTools = async (params?: { cursor?: string }) => {
+      // Clients without getProtocolEra (tests and the genai adapter) keep
+      // the typed helper. Modern sessions use it only when `tools` is
+      // declared; otherwise the v2 helper returns [] without a wire request.
       const result =
         typeof mcpClient.getProtocolEra !== 'function' ||
-        mcpClient.getProtocolEra() === 'modern'
+        canUseModernTypedHelper(mcpClient, 'tools')
           ? await mcpClient.listTools(params)
           : await mcpClient.request(
               { method: 'tools/list', params: params ?? {} },
@@ -1540,6 +1542,22 @@ function isMethodNotFound(error: unknown): boolean {
 }
 
 /**
+ * v2 typed list/read helpers return empty (or skip the call) when the
+ * server omitted that capability. Use them only when the capability is
+ * declared; otherwise fall back to a raw request so under-declared
+ * servers stay visible.
+ */
+function canUseModernTypedHelper(
+  mcpClient: Client,
+  capability: 'prompts' | 'resources' | 'tools',
+): boolean {
+  return (
+    mcpClient.getProtocolEra?.() === 'modern' &&
+    Boolean(mcpClient.getServerCapabilities?.()?.[capability])
+  );
+}
+
+/**
  * Pure prompt listing. Asks the MCP server for its prompts and returns
  * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
  * WITHOUT registering them anywhere. pool uses this so a single
@@ -1549,14 +1567,14 @@ function isMethodNotFound(error: unknown): boolean {
  * Returns `[]` on protocol errors or when the server has no prompts —
  * matches `discoverPrompts` swallow-and-continue behavior.
  *
- * We deliberately do NOT gate on `getServerCapabilities()?.prompts`. A
- * non-trivial number of real MCP servers implement `prompts/list` but
- * under-declare (or omit) the `prompts` capability in their `initialize`
- * response; gating on the declared capability made those servers' prompts
- * silently invisible in qwen-code (no `/`-menu entry) while lenient
- * clients still surfaced them. Modern sessions use the cache-aware typed
- * helper; legacy sessions retain the raw request path without a capability
- * assertion. A server that truly lacks prompts answers `-32601 Method not
+ * We deliberately do NOT skip the wire request when
+ * `getServerCapabilities()?.prompts` is absent. A non-trivial number of
+ * real MCP servers implement `prompts/list` but under-declare (or omit)
+ * the `prompts` capability in their `initialize` response; the v2 typed
+ * helper returns `[]` without a request in that case. Modern sessions
+ * therefore use the helper only when the capability is declared;
+ * otherwise we issue the same raw `prompts/list` request as the legacy
+ * path. A server that truly lacks prompts answers `-32601 Method not
  * found`, which the catch below swallows silently.
  */
 export async function listMcpPrompts(
@@ -1566,7 +1584,7 @@ export async function listMcpPrompts(
   try {
     const response = await retryWithBackoff(
       () =>
-        mcpClient.getProtocolEra?.() === 'modern'
+        canUseModernTypedHelper(mcpClient, 'prompts')
           ? mcpClient.listPrompts()
           : mcpClient.request(
               { method: 'prompts/list', params: {} },
@@ -1667,14 +1685,16 @@ export async function invokeMcpPrompt(
  * transport can produce the snapshot once and let each session register
  * into its own registry. Mirrors `listMcpPrompts`.
  *
- * As with prompts, we do NOT gate on `getServerCapabilities()?.resources`:
- * some servers expose resources but under-declare the capability. Modern
- * sessions use the cache-aware typed helper; legacy sessions retain the raw
- * request path without a capability assertion. A server with no resources
- * answers `-32601 Method not found`, swallowed below.
+ * As with prompts, we do NOT skip the wire request when
+ * `getServerCapabilities()?.resources` is absent: some servers expose
+ * resources but under-declare the capability. The v2 typed helper returns
+ * `[]` without a request in that case, so modern sessions use it only
+ * when `resources` is declared; otherwise we issue the same raw request
+ * as the legacy path. A server with no resources answers `-32601 Method
+ * not found`, swallowed below.
  *
- * Modern sessions aggregate cursor pagination in the v2 helper. Legacy
- * sessions preserve the existing first-page behavior.
+ * When the capability is declared, the v2 helper also aggregates cursor
+ * pagination. Legacy sessions preserve the existing first-page behavior.
  */
 export async function listMcpResources(
   mcpServerName: string,
@@ -1683,7 +1703,7 @@ export async function listMcpResources(
   try {
     const response = await retryWithBackoff(
       () =>
-        mcpClient.getProtocolEra?.() === 'modern'
+        canUseModernTypedHelper(mcpClient, 'resources')
           ? mcpClient.listResources()
           : mcpClient.request(
               { method: 'resources/list', params: {} },

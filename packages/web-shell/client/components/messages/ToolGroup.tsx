@@ -1400,7 +1400,7 @@ export const ToolLine = memo(function ToolLine({
           )}
         </div>
       )}
-      {mcpApp && <McpApp display={mcpApp} />}
+      {mcpApp && (!summaryOnly || expanded) && <McpApp display={mcpApp} />}
       {!mcpApp && (!summaryOnly || expanded) && isTodo && hasTodoList && (
         <TodoToolBody
           tool={tool}
@@ -1511,7 +1511,6 @@ export const ToolGroup = memo(function ToolGroup({
     ? getMcpAppDisplay(singleTool.rawOutput)
     : undefined;
   const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
-  const hasSingleMcpApp = singleMcpApp !== undefined;
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -1528,14 +1527,14 @@ export const ToolGroup = memo(function ToolGroup({
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
-    setChatExpanded(hasSingleMcpApp);
+    setChatExpanded(false);
     monitorDetailsRequestRef.current = null;
-  }, [
-    monitorDetailsAvailable,
-    singleMonitor?.callId,
-    hasSingleMcpApp,
-    singleMcpAppResourceUri,
-  ]);
+  }, [monitorDetailsAvailable, singleMonitor?.callId]);
+  useEffect(() => {
+    if (singleMcpAppResourceUri) {
+      setChatExpanded(true);
+    }
+  }, [singleMcpAppResourceUri]);
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;

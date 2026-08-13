@@ -457,6 +457,33 @@ describe('tool group summary logic', () => {
     expect(container.textContent).toContain('Dashboard ready');
   });
 
+  it('does not mount an MCP App while a summary-only row is collapsed', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+      { summaryOnly: true },
+    );
+
+    expect(container.textContent).not.toContain('Dashboard ready');
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    act(() => {
+      line.click();
+    });
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
       makeTool({

@@ -8,6 +8,10 @@ import type { McpAppDisplay } from './McpApp';
 
 const appBridgeMocks = vi.hoisted(() => ({
   constructed: 0,
+  last: null as {
+    onsandboxready?: () => void;
+    oninitialized?: () => void;
+  } | null,
   setHostContext: vi.fn(),
   connect: vi.fn(() => Promise.resolve()),
   close: vi.fn(() => Promise.resolve()),
@@ -30,6 +34,7 @@ vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
     teardownResource = appBridgeMocks.teardownResource;
     constructor() {
       appBridgeMocks.constructed += 1;
+      appBridgeMocks.last = this;
     }
   },
 }));
@@ -51,9 +56,13 @@ afterEach(() => {
 
 beforeEach(() => {
   appBridgeMocks.constructed = 0;
+  appBridgeMocks.last = null;
   appBridgeMocks.setHostContext.mockClear();
   appBridgeMocks.connect.mockClear();
   appBridgeMocks.close.mockClear();
+  appBridgeMocks.sendSandboxResourceReady.mockClear();
+  appBridgeMocks.sendToolInput.mockClear();
+  appBridgeMocks.sendToolResult.mockClear();
   appBridgeMocks.teardownResource.mockClear();
 });
 
@@ -142,5 +151,34 @@ describe('McpApp host lifetime', () => {
     expect(appBridgeMocks.setHostContext).toHaveBeenCalledWith(
       expect.objectContaining({ theme: WebShellThemeId.Light }),
     );
+  });
+
+  it('sends the sandbox resource after AppBridge reports ready', async () => {
+    renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(appBridgeMocks.connect).toHaveBeenCalled();
+    expect(appBridgeMocks.last?.onsandboxready).toEqual(expect.any(Function));
+
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      await Promise.resolve();
+    });
+
+    expect(appBridgeMocks.sendSandboxResourceReady).toHaveBeenCalledWith(
+      expect.objectContaining({ html: '<main>Ready</main>' }),
+    );
+
+    await act(async () => {
+      appBridgeMocks.last?.oninitialized?.();
+      await Promise.resolve();
+    });
+
+    expect(appBridgeMocks.sendToolInput).toHaveBeenCalledWith({
+      arguments: {},
+    });
+    expect(appBridgeMocks.sendToolResult).toHaveBeenCalledWith({ content: [] });
   });
 });
