@@ -15,6 +15,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import type { UIState } from '../contexts/UIStateContext.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 import { MultiSelect, type MultiSelectItem } from './shared/MultiSelect.js';
 import {
   aggregateModelTokens,
@@ -49,7 +50,12 @@ const DESCRIPTION_COLUMN = 24;
 // + search block(3) + list marginTop(1) + preview block(3) + footer(2).
 // The preview block is exactly one content line: buildStatusLinePresetLines
 // returns at most one line, and the empty state renders one fallback line.
+// The count stays valid at any width because every counted text renders
+// with wrap="truncate" and option labels are capped to the terminal width.
 const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
+// Terminal cells an option row spends outside its label: dialog
+// border(2) + paddingX(2) + active marker(2) + checkbox(4).
+const LABEL_ROW_OVERHEAD = 10;
 
 function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
   const preset =
@@ -133,12 +139,24 @@ export function StatusLineDialog({
     buildInitialSelectedKeys(settings),
   );
 
+  // Cap labels to the render width so each option is exactly one terminal
+  // row — an uncapped label (e.g. model-with-reasoning, ~86 cells with the
+  // marker/checkbox columns) wraps to 2 rows at narrow widths and
+  // overflows the height budget.
+  const labelCap = Math.max(
+    DESCRIPTION_COLUMN,
+    (uiState.mainAreaWidth ?? 80) - LABEL_ROW_OVERHEAD,
+  );
+
   const options = useMemo<Array<MultiSelectItem<StatusLineOption>>>(
     () => [
       {
         key: THEME_COLORS_KEY,
         value: { kind: 'theme-colors' },
-        label: `${'Use theme colors'.padEnd(DESCRIPTION_COLUMN)} Apply colors from the active /theme`,
+        label: truncateToWidth(
+          `${'Use theme colors'.padEnd(DESCRIPTION_COLUMN)} Apply colors from the active /theme`,
+          labelCap,
+        ),
       },
       {
         key: 'statusline-separator',
@@ -150,10 +168,13 @@ export function StatusLineDialog({
       ...STATUS_LINE_PRESET_ITEMS.map((item) => ({
         key: item.id,
         value: { kind: 'item' as const, id: item.id },
-        label: `${item.label.padEnd(DESCRIPTION_COLUMN)} ${item.description}`,
+        label: truncateToWidth(
+          `${item.label.padEnd(DESCRIPTION_COLUMN)} ${item.description}`,
+          labelCap,
+        ),
       })),
     ],
-    [],
+    [labelCap],
   );
 
   const terminalHeight = availableTerminalHeight ?? 18;
@@ -276,13 +297,13 @@ export function StatusLineDialog({
       {hasFullLayout && (
         <>
           <Text bold>Configure Status Line</Text>
-          <Text color={theme.text.secondary}>
+          <Text color={theme.text.secondary} wrap="truncate">
             Select which items to display in the status line.
           </Text>
 
           <Box marginTop={1} flexDirection="column">
             <Text color={theme.text.secondary}>Type to search</Text>
-            <Text>{query ? `> ${query}` : '>'}</Text>
+            <Text wrap="truncate">{query ? `> ${query}` : '>'}</Text>
           </Box>
         </>
       )}
@@ -300,7 +321,9 @@ export function StatusLineDialog({
             maxItemsToShow={maxItemsToShow}
           />
         ) : (
-          <Text color={theme.text.secondary}>No preset items match.</Text>
+          <Text color={theme.text.secondary} wrap="truncate">
+            No preset items match.
+          </Text>
         )}
       </Box>
 
@@ -329,7 +352,7 @@ export function StatusLineDialog({
           </Box>
 
           <Box marginTop={1}>
-            <Text color={theme.text.secondary}>
+            <Text color={theme.text.secondary} wrap="truncate">
               Use up/down to navigate, space to select, enter to confirm, esc to
               cancel
             </Text>

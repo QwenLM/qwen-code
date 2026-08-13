@@ -404,6 +404,30 @@ describe('StatusLineDialog', () => {
     },
   );
 
+  it('caps option labels to the render width', () => {
+    // ink-testing-library renders at 100 columns, so wrapping can't be
+    // observed directly; assert the width-derived string cap instead —
+    // the ~80-cell model-with-reasoning label must be clipped with an
+    // ellipsis at mainAreaWidth 80 (cap = 80 - 10 overhead = 70).
+    const narrowUiState = { ...uiState, mainAreaWidth: 80 };
+    const { lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={createSettings()}
+          config={config}
+          uiState={narrowUiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={25}
+        />
+      </KeypressProvider>,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame.split('\n').length).toBeLessThanOrEqual(25);
+    expect(frame).toMatch(/model-with-reasoning.*…/);
+  });
+
   it('uses every available row in an intermediate compact layout', () => {
     const { lastFrame } = render(
       <KeypressProvider kittyProtocolEnabled={false}>

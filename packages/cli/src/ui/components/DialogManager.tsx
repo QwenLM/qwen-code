@@ -490,6 +490,7 @@ export const DialogManager = ({
         reloadCommands={uiActions.reloadCommands}
         setInputBuffer={uiActions.setInputBuffer}
         availableTerminalHeight={constrainedDialogHeight}
+        terminalWidth={mainAreaWidth}
       />
     );
   }

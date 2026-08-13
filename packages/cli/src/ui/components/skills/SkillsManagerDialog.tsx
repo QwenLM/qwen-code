@@ -39,6 +39,7 @@ import {
 } from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
 import { levelLabel } from '../../utils/skill-level-label.js';
+import { truncateToWidth } from '../../utils/textUtils.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
@@ -59,6 +60,12 @@ interface SkillsManagerDialogProps {
    */
   setInputBuffer: (text: string) => void;
   availableTerminalHeight?: number;
+  /**
+   * Width the dialog renders into (DialogManager passes `mainAreaWidth`).
+   * Used to cap MultiSelect labels so each item stays one terminal row;
+   * when undefined (e.g. unit tests) only the static label caps apply.
+   */
+  terminalWidth?: number;
 }
 
 interface SkillItemValue {
@@ -77,8 +84,13 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 const NAME_COLUMN = 24;
 // Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
 // + search row(2) + list marginTop(1) + footer(2). The optional locked-skills
-// block adds 2 + N rows when present; not counted here.
+// block adds 2 + N rows when present; not counted here. The count stays
+// valid at any width because every counted text renders with
+// wrap="truncate" and list labels are capped to the terminal width.
 const SKILLS_DIALOG_FIXED_ROWS = 11;
+// Terminal cells a MultiSelect row spends outside its label: dialog
+// border(2) + paddingX(2) + active marker(2) + checkbox(4).
+const LABEL_ROW_OVERHEAD = 10;
 
 function lower(name: string): string {
   return name.trim().toLowerCase();
@@ -148,6 +160,7 @@ export function SkillsManagerDialog({
   reloadCommands,
   setInputBuffer,
   availableTerminalHeight,
+  terminalWidth,
 }: SkillsManagerDialogProps): React.JSX.Element {
   const [skills, setSkills] = useState<SkillConfig[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -270,17 +283,28 @@ export function SkillsManagerDialog({
     );
   }, [lockedSkills, query]);
 
+  // Cap labels to the render width so each item is exactly one terminal
+  // row — an uncapped label wraps to 2 rows below ~115 columns and
+  // silently overflows the height budget below.
+  const labelCap =
+    terminalWidth === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(NAME_COLUMN, terminalWidth - LABEL_ROW_OVERHEAD);
+
   const items = useMemo<Array<MultiSelectItem<SkillItemValue>>>(
     () =>
       filteredUnlocked.map((s) => ({
         key: s.name,
         value: { name: s.name, description: s.description, level: s.level },
-        label: `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
-          s.description,
-          80,
-        )}  (${levelLabel(s.level)})`,
+        label: truncateToWidth(
+          `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
+            s.description,
+            80,
+          )}  (${levelLabel(s.level)})`,
+          labelCap,
+        ),
       })),
-    [filteredUnlocked],
+    [filteredUnlocked, labelCap],
   );
 
   // Persist any pending toggle changes. Returns:
@@ -526,41 +550,45 @@ export function SkillsManagerDialog({
   const hasQuery = query.trim().length > 0;
   const showsLockedSearchResults =
     hasQuery && items.length === 0 && filteredLocked.length > 0;
-  // The 3 reserves the locked block's non-skill rows in non-search mode:
-  // marginTop(1) + header(1) + hint row(1).
-  const lockedItemBudget =
+  // Rows left for the unlocked list + locked block after the fixed chrome.
+  const residual =
     availableTerminalHeight === undefined
-      ? filteredLocked.length
-      : Math.max(
-          0,
-          availableTerminalHeight -
-            SKILLS_DIALOG_FIXED_ROWS -
-            (showsLockedSearchResults ? 0 : 3),
-        );
-  const lockedItemsAreTruncated = filteredLocked.length > lockedItemBudget;
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, availableTerminalHeight - SKILLS_DIALOG_FIXED_ROWS);
+  // Allocation: the interactive unlocked list claims rows first (the list
+  // area always renders at least one row — a forced item or a fallback
+  // message), and the read-only locked block spends what remains,
+  // collapsing to its one-row hint — or nothing — instead of overflowing,
+  // so FIXED_ROWS + list + locked never exceeds the budget.
+  const unlockedWindow = Math.min(
+    15,
+    Math.max(
+      1,
+      residual -
+        (!showsLockedSearchResults && filteredLocked.length > 0 ? 1 : 0),
+    ),
+  );
+  const unlockedRows = showsLockedSearchResults
+    ? 0
+    : Math.max(1, Math.min(filteredUnlocked.length, unlockedWindow));
+  const lockedRowBudget = Math.max(0, residual - unlockedRows);
+  // The expanded locked block costs marginTop(1) + header(1) + one row per
+  // visible skill + an optional hint row; when that doesn't fit it
+  // collapses to the standalone hint, and the hint itself is dropped
+  // before the dialog renders beyond its budget.
   const visibleLocked = filteredLocked.slice(
     0,
-    Math.max(0, lockedItemBudget - (lockedItemsAreTruncated ? 1 : 0)),
+    showsLockedSearchResults
+      ? filteredLocked.length <= lockedRowBudget
+        ? filteredLocked.length
+        : Math.max(0, lockedRowBudget - 1)
+      : filteredLocked.length + 2 <= lockedRowBudget
+        ? filteredLocked.length
+        : Math.max(0, lockedRowBudget - 3),
   );
   const hiddenLockedCount = filteredLocked.length - visibleLocked.length;
-  // Locked block: marginTop(1) + header(1) + visible skills + optional hint.
-  const lockedRows = showsLockedSearchResults
-    ? 0
-    : visibleLocked.length > 0
-      ? visibleLocked.length + 2 + (hiddenLockedCount > 0 ? 1 : 0)
-      : hiddenLockedCount > 0
-        ? 1
-        : 0;
-  const maxItemsToShow =
-    availableTerminalHeight === undefined
-      ? 15
-      : Math.max(
-          1,
-          Math.min(
-            15,
-            availableTerminalHeight - SKILLS_DIALOG_FIXED_ROWS - lockedRows,
-          ),
-        );
+  const showLockedHint = hiddenLockedCount > 0 && lockedRowBudget > 0;
+  const maxItemsToShow = unlockedWindow;
 
   // -- Render --
   if (loadError) {
@@ -618,8 +646,8 @@ export function SkillsManagerDialog({
       })}
     </Text>
   ));
-  const lockedHint = hiddenLockedCount > 0 && (
-    <Text color={theme.text.secondary} dimColor>
+  const lockedHint = showLockedHint && (
+    <Text color={theme.text.secondary} dimColor wrap="truncate">
       {t('Hidden locked skills: {{count}} · type to search', {
         count: String(hiddenLockedCount),
       })}
@@ -636,7 +664,7 @@ export function SkillsManagerDialog({
       width="100%"
     >
       <Text bold>{t('Manage Skills')}</Text>
-      <Text color={theme.text.secondary}>
+      <Text color={theme.text.secondary} wrap="truncate">
         {hasQuery
           ? t('{{matched}} / {{total}} skills · ', {
               matched: String(matchedCount),
@@ -663,7 +691,7 @@ export function SkillsManagerDialog({
 
       <Box marginTop={1} flexDirection="column">
         {allSkills.length === 0 ? (
-          <Text color={theme.text.secondary}>
+          <Text color={theme.text.secondary} wrap="truncate">
             {t('No skills are currently available.')}
           </Text>
         ) : items.length > 0 ? (
@@ -696,7 +724,7 @@ export function SkillsManagerDialog({
           </>
         ) : unlockedSkills.length === 0 ? (
           visibleLocked.length === 0 && hiddenLockedCount > 0 ? null : (
-            <Text color={theme.text.secondary}>
+            <Text color={theme.text.secondary} wrap="truncate">
               {hasQuery
                 ? t('No skills match the search.')
                 : t(
@@ -705,7 +733,7 @@ export function SkillsManagerDialog({
             </Text>
           )
         ) : (
-          <Text color={theme.text.secondary}>
+          <Text color={theme.text.secondary} wrap="truncate">
             {t('No skills match the search.')}
           </Text>
         )}
@@ -713,7 +741,7 @@ export function SkillsManagerDialog({
 
       {!showsLockedSearchResults && visibleLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
-          <Text color={theme.text.secondary}>
+          <Text color={theme.text.secondary} wrap="truncate">
             {t('Locked by higher-scope settings (cannot toggle here):')}
           </Text>
           {lockedSkillRows}
@@ -724,7 +752,7 @@ export function SkillsManagerDialog({
       {!showsLockedSearchResults && visibleLocked.length === 0 && lockedHint}
 
       <Box marginTop={1}>
-        <Text color={theme.text.secondary} dimColor>
+        <Text color={theme.text.secondary} dimColor wrap="truncate">
           {t('↑/↓ navigate · backspace edits search')}
         </Text>
       </Box>
