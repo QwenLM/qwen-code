@@ -18,7 +18,7 @@ import {
   symlinkSync,
   lstatSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
@@ -642,9 +642,8 @@ describe('capture-tui without tmux (probe seam)', () => {
             timeoutMs: 1000,
           } as never),
         );
-        // The probe name rides IN the compared value: `expect(v, message)`
-        // is banned by vitest/valid-expect, and a bare false would not say
-        // which of the three refusals regressed.
+        // The probe name rides IN the compared value, so a miss prints
+        // WHICH of the three refusals regressed instead of `false`.
         expect({
           probe: name,
           exitCode: process.exitCode,
@@ -738,6 +737,49 @@ describe('capture-tui without tmux (probe seam)', () => {
     },
   );
 
+  it('a RELATIVE ansPath does not pass the ownership signature', async () => {
+    // Probe-reproduced: while ownership compared `resolve(m.ansPath)`, a
+    // foreign JSON carrying a relative ansPath that happened to resolve to
+    // this run's .ans passed the signature and took all three of the user's
+    // files with it. This tool always records the already-resolved absolute
+    // path, so the relative form can only come from somewhere else.
+    // The relative path is built to resolve CORRECTLY from the test's cwd —
+    // process.chdir is unavailable in a vitest worker thread, and would
+    // prove less: this is the exact string the old comparison accepted.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-relansp-'));
+    try {
+      const json = JSON.stringify({
+        evidence: 'png',
+        ansPath: relative(process.cwd(), join(dir, 'cap.ans')),
+        settledBy: 'timeout',
+      });
+      writeFileSync(join(dir, 'cap.json'), json);
+      writeFileSync(join(dir, 'cap.ans'), 'user file');
+      writeFileSync(join(dir, 'cap.png'), 'user file');
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('collides with a file this capture did not');
+      expect(readFileSync(join(dir, 'cap.json'), 'utf8')).toBe(json);
+      expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('user file');
+      expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('clears stale artifacts for the SHAPE-BOUNDS gate family too', async () => {
     // Seven refusal gates have seeded-artifact ordering pins; the family
     // between the probe gates and the marker gate — geometry bounds, an
@@ -780,9 +822,8 @@ describe('capture-tui without tmux (probe seam)', () => {
             ...(over as Record<string, unknown>),
           } as never),
         );
-        // The gate name rides IN the compared value: expect(v, message) is
-        // banned by vitest/valid-expect, and a bare miss would not say
-        // which gate stopped naming itself.
+        // The gate name rides IN the compared value, so a miss prints WHICH
+        // gate stopped naming itself instead of a bare `false`.
         expect({ gate: name, named: stderr.includes(reason) }).toEqual({
           gate: name,
           named: true,
@@ -1355,6 +1396,29 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.pngPath).toBeNull();
     // Its own .ans was cleared and rewritten by this run.
     expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('WORLD');
+  });
+
+  it('an ans-only manifest with a string pngPath still spares <out>.png', async () => {
+    // The internally inconsistent shape: a signature-passing manifest whose
+    // evidence says ans-only but whose pngPath is a string. The old
+    // disjunct fired on it and cleared the user's file (probe-reproduced),
+    // contradicting the guard's own invariant — an ans-only run wrote no
+    // png, so nothing at that name is the next run's to remove.
+    writeFileSync(join(dir, 'cap.ans'), 'old run');
+    writeFileSync(join(dir, 'cap.png'), 'user file');
+    writeFileSync(
+      join(dir, 'cap.json'),
+      JSON.stringify({
+        evidence: 'ans-only',
+        ansPath: join(dir, 'cap.ans'),
+        pngPath: join(dir, 'cap.png'),
+        settledBy: 'fixed-delay',
+      }),
+    );
+    const { stderr } = await withStdio(() => run());
+    expect(process.exitCode).toBeUndefined();
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+    expect(stderr).toContain('holds a file this capture did not write');
   });
 
   it('captures the real rendering into .ans and records the ladder honestly', async () => {
@@ -2355,6 +2419,28 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.evidence).toBe('png');
   });
 
+  it('degrades when the rendered png cannot be statted, never crashes', async () => {
+    // Honest about what this covers: the hazard the guard closes is a
+    // TOCTOU — the png vanishing BETWEEN the existsSync and the statSync,
+    // reachable only with a concurrent deleter or fs fault injection, and
+    // this test does not reproduce it (a dangling symlink short-circuits
+    // at existsSync, so the pre-guard code degrades here too). What it
+    // does pin is the branch the guard creates: a path freeze left that
+    // cannot be statted produces a clean ans-only contract rather than an
+    // uncaught ENOENT — exit 1, no contract JSON, a stack trace, and both
+    // artifacts orphaned with no manifest (fault-injected upstream).
+    await withFakeFreeze(
+      '#!/bin/sh\nln -s /no-such-target-for-stat "$5"\nexit 0\n',
+      () => run(),
+    );
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toContain('exited 0 but wrote no image');
+    expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
+  });
+
   it('records a freeze CRASH with its diagnostics, not just its absence', async () => {
     await withFakeFreeze(
       '#!/bin/sh\necho "boom: render exploded" >&2\nexit 9\n',
@@ -3115,6 +3201,57 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   });
 
   it.skipIf(!hasPgrep)(
+    'reaps an ATTACHED child but not a DAEMONIZED one — the documented boundary',
+    async () => {
+      // The reap is kill-server, not a process-tree reaper, and the header,
+      // the plan's kill comment and the agent brief now say so. This pins
+      // the line they draw, in both directions — a claim about a limit is
+      // worth no more than a claim about a guarantee if nothing measures
+      // it. The attached arm is the guarantee: a child in the pane's
+      // session dies with the server. The detached arm is the limit: it
+      // setsids into its own session, its parent is init before the reap
+      // even runs, and nothing portable reaches it.
+      // The two arms are told apart by their sleep DURATION — unique to
+      // this pid's run, and visible in pgrep's argv match without any
+      // rewriting of the command under test.
+      const arms: Array<[string, number, string, boolean]> = [
+        // A child in the pane's session: dies with the server. The guarantee.
+        ['attached', 41, `sleep 41 & printf 'MARK\\n'; sleep 20`, false],
+        // setsid'd into its own session, parent already init before the reap
+        // runs: nothing portable reaches it. The documented limit.
+        [
+          'detached',
+          42,
+          `node -e "require('child_process').spawn('sleep',['42'],{detached:true,stdio:'ignore'}).unref()"; printf 'MARK\\n'; sleep 20`,
+          true,
+        ],
+      ];
+      for (const [arm, secs, command, expectedAlive] of arms) {
+        const alive = (): boolean =>
+          (
+            spawnSync('pgrep', ['-f', `sleep ${secs}`], {
+              encoding: 'utf8',
+            }).stdout ?? ''
+          ).trim() !== '';
+        try {
+          await withStdio(() =>
+            run({ command, until: 'MARK', timeoutMs: 20_000 }),
+          );
+          // The reap is asynchronous at the OS level: kill-server returns
+          // before the pane's descendants have finished dying. BOTH arms
+          // get the same window — the attached one leaves it early, the
+          // detached one sits through all of it.
+          for (let i = 0; i < 40 && alive(); i++) await sleep(50);
+          expect(`${arm}:${alive()}`).toBe(`${arm}:${expectedAlive}`);
+        } finally {
+          spawnSync('pkill', ['-f', `sleep ${secs}`]);
+        }
+      }
+    },
+    90_000,
+  );
+
+  it.skipIf(!hasPgrep)(
     'reaps the private server when the capture is signalled mid-poll — SIGTERM and SIGINT',
     async () => {
       // The no-orphan guarantee cannot rest on finally alone — a signal
@@ -3266,22 +3403,41 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let waited = 0;
-    while (!existsSync(renderStarted) && waited < 200) {
-      await sleep(50);
-      waited++;
-    }
-    expect(existsSync(renderStarted)).toBe(true);
-    child.kill('SIGTERM');
-    const disposition = await new Promise<{
+    // Attached BEFORE the wait, like its mid-poll sibling: if the child
+    // dies during the render window the sole exit event fires unobserved
+    // and the await below never settles.
+    const disposition = new Promise<{
       code: number | null;
       signal: string | null;
     }>((resolve) =>
       child.once('exit', (code, signal) => resolve({ code, signal })),
     );
-    // Death BY the signal — not a swallowed exit 0 with success JSON.
-    expect(disposition.signal ?? `code:${disposition.code}`).toBe('SIGTERM');
-  });
+    // ...and the child is killed on ANY exit from here, including a thrown
+    // assertion. Without this, a sentinel that never appears (a cold tsx
+    // start on a loaded runner, a fixture regression) threw before the
+    // kill below and left the node process AND its private tmux server
+    // alive together — measured through a 16s window. SIGTERM, never
+    // SIGKILL: the child's own handler is what reaps the server, and a
+    // SIGKILL'd child leaves it standing (measured).
+    const orphanGuard = setTimeout(() => child.kill('SIGTERM'), 20_000);
+    try {
+      let waited = 0;
+      while (!existsSync(renderStarted) && waited < 200) {
+        await sleep(50);
+        waited++;
+      }
+      expect(existsSync(renderStarted)).toBe(true);
+      child.kill('SIGTERM');
+      const { code, signal } = await disposition;
+      // Death BY the signal — not a swallowed exit 0 with success JSON.
+      expect(signal ?? `code:${code}`).toBe('SIGTERM');
+    } catch (e) {
+      child.kill('SIGTERM');
+      throw e;
+    } finally {
+      clearTimeout(orphanGuard);
+    }
+  }, 60_000);
 
   it('renders through a stdin-IGNORING spawn — a pipe stdin breaks freeze', async () => {
     // The production spawn sets stdio ignore because freeze treats a

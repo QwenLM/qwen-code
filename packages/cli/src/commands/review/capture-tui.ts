@@ -20,7 +20,17 @@
 // let alone resize or kill — the user's own tmux sessions. The measured
 // failure mode of desktop-automation verification was exactly "drives the
 // user's own windows"; a private server makes that impossible rather than
-// discouraged. `kill-server` at the end reaps everything the capture started.
+// discouraged. `kill-server` at the end reaps the server, the session, the
+// holder and everything still attached to the pane — which is everything a
+// normal command leaves behind. It is NOT a process-tree reaper: a command
+// that DAEMONIZES (setsid, `spawn(..., {detached: true}).unref()`, a TUI
+// that forks a browser or updater helper) puts its descendant in a new
+// session, and no portable kill reaches it — measured, with a control arm:
+// the detached grandchild outlived the reap, the attached one did not.
+// Nothing links that process back to the capture afterwards either (its
+// parent is already init), so guessing at it would kill the wrong pid.
+// Capture such commands only when you are prepared to reap their daemons
+// yourself.
 //
 // Degradation is explicit, not silent: the manifest names which evidence rung
 // was reached (`png` or `ans-only`) and why, because a verifier must say
@@ -483,7 +493,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         typeof m === 'object' &&
         (m.evidence === 'png' || m.evidence === 'ans-only') &&
         typeof m.ansPath === 'string' &&
-        resolve(m.ansPath) === ansPath &&
+        // The STRING, not what it resolves to: every manifest this tool
+        // writes records `resolve(--out) + '.ans'` already, so a RELATIVE
+        // ansPath is a shape it never produces. Resolving first accepted
+        // one — `{"ansPath":"cap.ans"}` in a foreign JSON, run with the cwd
+        // at that directory, passed the signature and deleted all three of
+        // the user's files (probe-reproduced). Strict comparison keeps
+        // every manifest this tool actually wrote and no other.
+        m.ansPath === ansPath &&
         (m.settledBy === 'until-match' ||
           m.settledBy === 'timeout' ||
           m.settledBy === 'fixed-delay');
@@ -493,8 +510,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // someone else — and clearing it on the next run against the same
       // --out (the documented reuse shape) destroyed a foreign file the
       // previous run had deliberately spared.
-      manifestHadPng =
-        shaped && (m.evidence === 'png' || typeof m.pngPath === 'string');
+      // The evidence rung ALONE: this writer pairs `evidence: 'ans-only'`
+      // with `pngPath: null`, so the string-pngPath disjunct was
+      // unreachable for anything it produces — and where it did fire, on a
+      // signature-passing but internally inconsistent manifest, it cleared
+      // a foreign <out>.png on an ans-only rung (probe-reproduced),
+      // contradicting this guard's own invariant.
+      manifestHadPng = shaped && m.evidence === 'png';
     } catch {
       // ANY read failure means the capture signature could not be verified —
       // including fd exhaustion (EMFILE/ENFILE), which is transient under
@@ -1039,8 +1061,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     return;
   } finally {
     // Always, even when the capture threw mid-run: the private server holds
-    // every process this capture launched, and an orphaned TUI outliving the
-    // review is the mess this command exists to make impossible. A start
+    // every process this capture launched that stayed in its session, and an
+    // orphaned TUI outliving the review is the mess this command exists to
+    // make impossible. The boundary is the session, not the process tree —
+    // see the header on daemonizing commands. A start
     // that threw has no server to reap, and reap() stays silent about it.
     // The reap runs FIRST — releasing the listeners before it left a
     // measured 25ms-to-death window with no listener. Honest limit, also
@@ -1193,10 +1217,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // Read the size DEFENSIVELY: this was the only unguarded throwable fs
+    // call in the function. A png that disappears between the existsSync
+    // and the statSync — a concurrent actor on the same --out, the very
+    // shape the clear phase and collision gate exist to handle — threw an
+    // uncaught ENOENT: exit 1, no contract JSON on stdout, a stack trace on
+    // stderr, and .ans and .png both orphaned with no manifest
+    // (fault-injected). A gone png is simply not a png rung.
+    let pngSize = 0;
+    try {
+      pngSize = statSync(pngPath).size;
+    } catch {
+      // Gone or unstattable mid-check — the degradation branch below says so.
+    }
     if (
       r.status === 0 &&
-      existsSync(pngPath) &&
-      statSync(pngPath).size > 0 &&
+      pngSize > 0 &&
       // ...and THIS run is what put those bytes there. Existence alone
       // credited a file the clear phase deliberately spared — an unrelated
       // <out>.png with no capture manifest beside it — as this run's

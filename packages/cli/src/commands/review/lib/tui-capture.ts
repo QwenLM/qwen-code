@@ -391,8 +391,12 @@ export function tmuxPlan(opts: {
       opts.session,
     ],
     // kill-server, not kill-session: the server is ours alone (private -L),
-    // and killing it reaps every process the capture started — no orphaned
-    // TUI keeps running after the review.
+    // and killing it reaps the session and everything still in it — no
+    // orphaned TUI keeps running after the review. Its reach ends at the
+    // session: a command that daemonizes a descendant (setsid, a detached
+    // unref'd spawn) leaves that process running, and no portable kill
+    // reaches it (measured against an attached control arm). See the
+    // capture-tui header.
     kill: [...scope, 'kill-server'],
     // One send-keys per token, verbatim — quoting-by-joining is how a key
     // sequence silently becomes a different key sequence. `--` for the same
