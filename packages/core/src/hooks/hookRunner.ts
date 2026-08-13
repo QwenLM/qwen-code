@@ -36,6 +36,16 @@ import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 /**
+ * A hook command that is a bare quoted path (`"C:/Program Files/x.cmd"` or the
+ * single-quoted variant) — PowerShell evaluates such a value as a string
+ * literal and echoes it instead of executing it. The cmd→powershell fallback
+ * must prefix it with the call operator; an explicit powershell shell must
+ * error. Matching both quote styles keeps the guard from silently missing the
+ * single-quoted form escapeShellArg itself produces.
+ */
+const BARE_QUOTED_COMMAND_RE = /^\s*["']/;
+
+/**
  * Default timeout for hook execution (60 seconds)
  */
 const DEFAULT_HOOK_TIMEOUT = 60000;
@@ -596,7 +606,10 @@ export class HookRunner {
       // runs. An explicit powershell shell with a bare-quoted command is a
       // config error.
       let resolvedCommand = command;
-      if (shellConfig.shell === 'powershell' && /^\s*"/.test(command)) {
+      if (
+        shellConfig.shell === 'powershell' &&
+        BARE_QUOTED_COMMAND_RE.test(command)
+      ) {
         if (hookConfig.shell === 'powershell') {
           const errorMessage =
             'Command starts with a quoted path under an explicit powershell shell; prefix it with the call operator (&) so PowerShell executes it instead of echoing it';
@@ -832,6 +845,19 @@ export class HookRunner {
   ): string {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
+    if (shellType === 'powershell') {
+      // A placeholder inside the author's own double quotes must not get the
+      // single-quoted form escapeShellArg produces: `"$CLAUDE_PROJECT_DIR/…"`
+      // would become `"'C:\proj'/…"`, which PowerShell cannot parse. Emit the
+      // double-quote-escaped path instead, so the author's surrounding quotes
+      // stay the only string boundary.
+      const doubleQuotedCwd = input.cwd.replace(/([$`"])/g, '`$1');
+      return command
+        .replace(/"\$GEMINI_PROJECT_DIR/g, () => `"${doubleQuotedCwd}`)
+        .replace(/"\$CLAUDE_PROJECT_DIR/g, () => `"${doubleQuotedCwd}`)
+        .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
+        .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd);
+    }
     return command
       .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
       .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility

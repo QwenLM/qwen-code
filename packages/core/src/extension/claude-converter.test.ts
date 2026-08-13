@@ -16,6 +16,7 @@ import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
   normalizeClaudeMcpServer,
+  normalizeMcpServers,
   type ClaudePluginConfig,
   type ClaudeMarketplacePluginConfig,
   type ClaudeMarketplaceConfig,
@@ -128,6 +129,44 @@ describe('convertClaudeToQwenConfig', () => {
     expect(() => convertClaudeToQwenConfig(claudeConfig)).toThrow(
       /server entries must be JSON objects/,
     );
+  });
+
+  it('sanitizes a hostile plugin name carried into the invalid-MCP error', () => {
+    const hostileName = '\u001b[2J\u001b[1;1Hspoofed';
+    const claudeConfig = {
+      name: hostileName,
+      version: '1.0.0',
+      mcpServers: { bad: null } as unknown as Record<string, MCPServerConfig>,
+    } as ClaudePluginConfig;
+
+    let caught: unknown;
+    try {
+      convertClaudeToQwenConfig(claudeConfig);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toMatch(/Invalid MCP configuration/);
+    // The attacker-controlled name is interpolated as the error's configPath;
+    // raw ESC bytes must not reach the user's terminal.
+    expect((caught as Error).message).not.toContain('\u001b');
+  });
+});
+
+describe('normalizeMcpServers', () => {
+  it('keeps a server literally named __proto__', () => {
+    // JSON.parse produces `__proto__` as an own property (a literal would hit
+    // the prototype setter), matching what a real manifest JSON yields.
+    const servers = JSON.parse(
+      '{"__proto__": {"command": "echo hi"}}',
+    ) as Record<string, unknown>;
+    const result = normalizeMcpServers(servers, 'test-config');
+    // A plain `{}` + assignment would silently drop the entry by mutating the
+    // result's prototype instead of creating a property.
+    expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(
+      true,
+    );
+    expect(result['__proto__']).toEqual({ command: 'echo hi' });
   });
 });
 
@@ -258,6 +297,20 @@ describe('isClaudePluginConfig', () => {
   it('throws when pluginName is given but no Claude manifest exists', () => {
     expect(() => isClaudePluginConfig(testDir, 'test-plugin')).toThrow(
       /Plugin "test-plugin" not found/,
+    );
+  });
+
+  it('throws when the marketplace omits pluginName and plugin.json is named differently', () => {
+    // Marketplace lists only 'other'; plugin.json is named 'third' — neither
+    // matches the explicit install request. The identity guard must throw, or
+    // detectManifest would route the install to the wrong plugin.
+    writeManifest('marketplace.json', {
+      plugins: [{ name: 'other', source: './' }],
+    });
+    writeManifest('plugin.json', { name: 'third', version: '1.0.0' });
+
+    expect(() => isClaudePluginConfig(testDir, 'test-plugin')).toThrow(
+      /standalone plugin\.json is named "third"/,
     );
   });
 
@@ -482,6 +535,36 @@ describe('convertClaudePluginPackage', () => {
     ).rejects.toThrow(/resolves through a symlink outside the marketplace/);
 
     fs.rmSync(secretDir, { recursive: true, force: true });
+  });
+
+  it('throws when a marketplace source is an absolute path', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-abs-source');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'evil',
+          version: '1.0.0',
+          source: path.resolve(path.sep, 'etc'),
+          strict: false,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    await expect(
+      convertClaudePluginPackage(pluginSourceDir, 'evil'),
+    ).rejects.toThrow(
+      /is an absolute path; only paths relative to the marketplace/,
+    );
   });
 
   it('treats uppercase HTTPS marketplace plugin sources as URLs', async () => {
@@ -1002,6 +1085,43 @@ describe('convertClaudePluginPackage', () => {
     );
 
     // The escaping hooks path is confined away rather than persisted.
+    expect(result.config.hooks).toBeUndefined();
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('drops a directory-valued hooks string path', async () => {
+    const pluginSourceDir = path.join(testDir, 'plugin-hooks-dir');
+    fs.mkdirSync(pluginSourceDir, { recursive: true });
+    // A directory named "hooks" — an easy authoring slip — must not pass the
+    // conversion-time checks (it can never load and would shadow a default).
+    fs.mkdirSync(path.join(pluginSourceDir, 'hooks'), { recursive: true });
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+
+    const marketplaceConfig: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'hooks-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          hooks: './hooks',
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify(marketplaceConfig, null, 2),
+      'utf-8',
+    );
+
+    const result = await convertClaudePluginPackage(
+      pluginSourceDir,
+      'hooks-plugin',
+    );
+
     expect(result.config.hooks).toBeUndefined();
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
@@ -1598,6 +1718,18 @@ describe('convertClaudePluginPackage — git-subdir source', () => {
       source: 'git-subdir',
       url: 'https://example.com/repo.git',
       path: path.resolve(path.sep, 'etc'),
+    });
+    await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
+      /Invalid plugin subdirectory/,
+    );
+  });
+
+  it('rejects a subdirectory spelling that resolves to the clone root', async () => {
+    vi.mocked(cloneFromGit).mockResolvedValue(undefined as never);
+    writeMarketplace({
+      source: 'git-subdir',
+      url: 'https://example.com/repo.git',
+      path: './',
     });
     await expect(convertClaudePluginPackage(extDir, 'p')).rejects.toThrow(
       /Invalid plugin subdirectory/,

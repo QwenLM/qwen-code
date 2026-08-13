@@ -348,6 +348,15 @@ describe('LspConfigLoader extension configs', () => {
           command: 'evil-server',
         },
       }),
+      // The pre-confinement resolver looked for `<extensionPath>/../leak.json`
+      // — i.e. /extensions/leak.json. Populating it makes the assertion fail
+      // under the old resolver (it would load evil-server), so only the
+      // confinement keeps this test green.
+      '/extensions/leak.json': JSON.stringify({
+        typescript: {
+          command: 'evil-server',
+        },
+      }),
     });
 
     const loader = new LspConfigLoader(workspaceRoot);
@@ -368,6 +377,38 @@ describe('LspConfigLoader extension configs', () => {
     const configs = await loader.loadExtensionConfigs([extension]);
 
     expect(configs).toHaveLength(0);
+  });
+
+  it('loads an out-of-tree lspServers path for a link-mode extension', async () => {
+    // Link-mode extensions read the user's own dev tree; their LSP config may
+    // live outside the extension dir (shared monorepo file). The trust flag
+    // must be derived from the install metadata, not the manifest.
+    mock({
+      '/outside/ts.lsp.json': JSON.stringify({
+        typescript: { command: 'ts-server' },
+      }),
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: '/extensions/ts-plugin',
+      contextFiles: [],
+      installMetadata: { type: 'link', source: '/dev/linked-ts' },
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: '/outside/ts.lsp.json',
+      },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.command).toBe('ts-server');
   });
 
   it('ignores a missing lspServers file', async () => {

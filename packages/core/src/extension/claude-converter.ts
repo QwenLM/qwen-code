@@ -45,6 +45,19 @@ const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
  */
 const sanitizeForError = stripAnsiAndControl;
 
+/**
+ * True when `filePath` exists and is a regular file (not a directory). Used to
+ * reject a directory-valued hooks reference at conversion time and after
+ * resource collection.
+ */
+const isRegularFile = (filePath: string): boolean => {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+};
+
 export interface ClaudePluginConfig {
   name: string;
   version: string;
@@ -382,7 +395,10 @@ export function normalizeMcpServers(
   servers: Record<string, unknown>,
   configPath: string,
 ): Record<string, MCPServerConfig> {
-  const normalized: Record<string, MCPServerConfig> = {};
+  // Object.create(null) so a server literally named `__proto__` becomes a real
+  // entry instead of mutating the result's prototype (a plain `{}` + assignment
+  // would silently drop it).
+  const normalized: Record<string, MCPServerConfig> = Object.create(null);
   for (const [name, raw] of Object.entries(servers)) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       throw new Error(
@@ -418,7 +434,7 @@ export function convertClaudeToQwenConfig(
     } else {
       mcpServers = normalizeMcpServers(
         claudeConfig.mcpServers as Record<string, unknown>,
-        claudeConfig.name,
+        stripAnsiAndControl(claudeConfig.name),
       );
     }
   }
@@ -600,11 +616,17 @@ export async function buildQwenExtensionFromPlugin(
   }
 
   // Confine a hooks string path to the plugin the same way as mcpServers, so
-  // an absolute or `../`-laden value can't point at a file outside it.
+  // an absolute or `../`-laden value can't point at a file outside it. A
+  // directory-valued reference (an easy authoring slip) must also be dropped –
+  // it can never load and would shadow a co-shipped default hooks/hooks.json.
   if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
-    if (!resolvePluginRelativeFile(pluginSource, mergedConfig.hooks)) {
+    const resolvedHooks = resolvePluginRelativeFile(
+      pluginSource,
+      mergedConfig.hooks,
+    );
+    if (!resolvedHooks || !isRegularFile(resolvedHooks)) {
       debugLogger.warn(
-        `Dropping hooks path "${mergedConfig.hooks}" that escapes the plugin; hooks will not load.`,
+        `Dropping hooks path "${stripAnsiAndControl(mergedConfig.hooks)}" that is not a usable regular file inside the plugin; hooks will not load.`,
       );
       delete mergedConfig.hooks;
     }
@@ -654,9 +676,9 @@ export async function buildQwenExtensionFromPlugin(
     // advertise hooks that can never load.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
       const hooksFilePath = path.join(tmpDir, mergedConfig.hooks);
-      if (!fs.existsSync(hooksFilePath)) {
+      if (!isRegularFile(hooksFilePath)) {
         debugLogger.warn(
-          `Dropping hooks path "${mergedConfig.hooks}" whose file was removed during resource collection; hooks will not load.`,
+          `Dropping hooks path "${stripAnsiAndControl(mergedConfig.hooks)}" whose file was removed or is not a regular file during resource collection; hooks will not load.`,
         );
         delete mergedConfig.hooks;
       }
@@ -1009,9 +1031,11 @@ async function resolvePluginSource(
     // "../../../../etc/ssh" must not resolve outside the marketplace dir.
     // resolvePathWithin rejects absolute/escaping/symlink-escaping sources.
     const sourcePath = resolvePathWithin(marketplaceDir, source, (kind) =>
-      kind === 'symlink-escape'
-        ? `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`
-        : `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
+      kind === 'absolute'
+        ? `Plugin source "${sanitizeForError(source)}" is an absolute path; only paths relative to the marketplace directory are allowed`
+        : kind === 'symlink-escape'
+          ? `Plugin source "${sanitizeForError(source)}" resolves through a symlink outside the marketplace directory`
+          : `Plugin source "${sanitizeForError(source)}" escapes the marketplace directory`,
     );
 
     if (!fs.existsSync(sourcePath)) {
@@ -1076,7 +1100,7 @@ async function resolvePluginSource(
     await cloneFromGit(installMetadata, pluginDir, signal);
     // `source.path` comes from an untrusted manifest. Confine it to the cloned
     // repo so a value like "../../.ssh" (or an absolute path) cannot escape.
-    if (!source.path || source.path === '.') {
+    if (!source.path) {
       throw new Error(
         `Invalid plugin subdirectory "${sanitizeForError(String(source.path))}" for ${sanitizeForError(source.url)}`,
       );
@@ -1090,6 +1114,14 @@ async function resolvePluginSource(
           ? `Plugin subdirectory "${sanitizeForError(source.path)}" resolves through a symlink outside the repository root of ${sanitizeForError(source.url)}`
           : `Plugin subdirectory "${sanitizeForError(source.path)}" escapes the repository root of ${sanitizeForError(source.url)}`,
     );
+    // `./`, `sub/..`, `a/b/../..` all normalize to the clone root; the
+    // git-subdir contract requires an actual subdirectory, so reject any
+    // value that resolves to the root itself.
+    if (subDir === path.resolve(pluginDir)) {
+      throw new Error(
+        `Invalid plugin subdirectory "${sanitizeForError(source.path)}" for ${sanitizeForError(source.url)}`,
+      );
+    }
     if (!fs.existsSync(subDir)) {
       throw new Error(
         `Plugin subdirectory "${sanitizeForError(source.path)}" not found in ${sanitizeForError(source.url)} (ref: ${sanitizeForError(source.ref ?? source.sha ?? 'HEAD')})`,

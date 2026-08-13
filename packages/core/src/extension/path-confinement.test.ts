@@ -51,6 +51,21 @@ describe('realPathWithin', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('returns true for a symlink whose realpath stays inside root', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    try {
+      const target = path.join(dir, 'base.md');
+      fs.writeFileSync(target, 'x', 'utf-8');
+      const link = path.join(dir, 'link.md');
+      fs.symlinkSync(target, link);
+      // Legitimate in-package symlinks (git preserves them) must be accepted,
+      // not blanket-rejected — the escape tests cover only the rejection side.
+      expect(realPathWithin(link, dir)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('readExtensionManifest', () => {
@@ -91,6 +106,32 @@ describe('readExtensionManifest', () => {
     }
   });
 
+  it('reads a symlinked manifest when trustSymlinks is set', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+    try {
+      fs.writeFileSync(
+        path.join(outside, 'plugin.json'),
+        JSON.stringify({ name: 'shared', version: '1.0.0' }),
+        'utf-8',
+      );
+      fs.symlinkSync(
+        path.join(outside, 'plugin.json'),
+        path.join(dir, 'plugin.json'),
+      );
+      // Link-mode installs read the user's own dev tree; the escaping symlink
+      // is followed instead of rejected. (The default strict rejection is
+      // covered by 'throws for a manifest symlinked outside the package'.)
+      expect(readExtensionManifest(dir, 'plugin.json', true)).toEqual({
+        name: 'shared',
+        version: '1.0.0',
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('reads a valid manifest', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
@@ -103,10 +144,14 @@ describe('readExtensionManifest', () => {
     }
   });
 
-  it('throws for a non-object manifest body', () => {
+  it.each([
+    ['null', 'null'],
+    ['array', '[]'],
+    ['scalar', '5'],
+  ])('throws for a %s manifest body', (_label, body) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
-      fs.writeFileSync(path.join(dir, 'plugin.json'), 'null', 'utf-8');
+      fs.writeFileSync(path.join(dir, 'plugin.json'), body, 'utf-8');
       expect(() => readExtensionManifest(dir, 'plugin.json')).toThrow(
         /expected a JSON object/,
       );
@@ -255,10 +300,14 @@ describe('readExtraJsonFile', () => {
     }
   });
 
-  it('returns null for a non-object body', () => {
+  it.each([
+    ['null', 'null'],
+    ['array', '[]'],
+    ['scalar', '5'],
+  ])('returns null for a %s body', (_label, body) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     try {
-      fs.writeFileSync(path.join(dir, 'hooks.json'), 'null', 'utf-8');
+      fs.writeFileSync(path.join(dir, 'hooks.json'), body, 'utf-8');
       expect(readExtraJsonFile(dir, 'hooks.json')).toBeNull();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -288,10 +337,37 @@ describe('readExtraJsonFile', () => {
     }
   });
 
+  it('reads a symlinked auxiliary file when trustSymlinks is set', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
+    try {
+      const secret = path.join(outside, 'hooks.json');
+      fs.writeFileSync(secret, JSON.stringify({ hooks: {} }), 'utf-8');
+      fs.symlinkSync(secret, path.join(dir, 'hooks.json'));
+      // Link mode follows the user's own symlinks (relative and default-route
+      // absolute paths alike), but still refuses a literal `..` traversal.
+      // (The default strict rejection is covered by 'returns null for a symlink
+      // escaping the extension'.)
+      expect(readExtraJsonFile(dir, 'hooks.json', true)).toEqual({
+        hooks: {},
+      });
+      expect(
+        readExtraJsonFile(dir, path.join(outside, 'hooks.json'), true),
+      ).toEqual({ hooks: {} });
+      expect(readExtraJsonFile(dir, '../outside/hooks.json', true)).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('returns null for an absolute path escaping the extension', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
+      // The escaping file must exist, or the read falls through to the
+      // missing-file branch and never exercises the absolute-path guard.
+      fs.writeFileSync(path.join(outside, 'hooks.json'), '{}', 'utf-8');
       expect(
         readExtraJsonFile(dir, path.join(outside, 'hooks.json')),
       ).toBeNull();

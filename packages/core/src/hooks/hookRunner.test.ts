@@ -1131,7 +1131,66 @@ describe('HookRunner', () => {
       }
     });
 
-    it('prefixes a bare-quoted command with the call operator on the cmd fallback', async () => {
+    it.each([
+      ['double-quoted', '"', '"'],
+      ['single-quoted', "'", "'"],
+    ])(
+      'prefixes a %s bare command with the call operator on the cmd fallback',
+      async (_label, openQuote, closeQuote) => {
+        const spy = vi
+          .spyOn(shellUtils, 'getShellConfiguration')
+          .mockReturnValue({
+            executable: 'cmd.exe',
+            argsPrefix: ['/d', '/s', '/c'],
+            shell: 'cmd',
+          });
+        try {
+          mockSpawn.mockImplementation(() => createMockProcess(0));
+          await hookRunner.executeHook(
+            {
+              type: HookType.Command,
+              command: `${openQuote}C:/Program Files/My App/setup.cmd${closeQuote}`,
+              source: HooksConfigSource.Project,
+            },
+            HookEventName.PreToolUse,
+            createMockInput(),
+          );
+          const spawnArgs = mockSpawn.mock.calls[0];
+          expect(spawnArgs[0]).toBe('powershell');
+          expect(spawnArgs[1][0]).toBe('-NoProfile');
+          expect(spawnArgs[1][2]).toBe(
+            `& ${openQuote}C:/Program Files/My App/setup.cmd${closeQuote}`,
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      ['double-quoted', '"', '"'],
+      ['single-quoted', "'", "'"],
+    ])(
+      'errors on a %s bare command with an explicit powershell shell',
+      async (_label, openQuote, closeQuote) => {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: `${openQuote}C:/Program Files/App/x.cmd${closeQuote}`,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        expect(mockSpawn).not.toHaveBeenCalled();
+        expect(result.success).toBe(false);
+        expect(result.error?.message).toContain('quoted path');
+      },
+    );
+
+    it('expands a quoted project-dir placeholder without injecting single quotes on the cmd fallback', async () => {
       const spy = vi
         .spyOn(shellUtils, 'getShellConfiguration')
         .mockReturnValue({
@@ -1144,36 +1203,37 @@ describe('HookRunner', () => {
         await hookRunner.executeHook(
           {
             type: HookType.Command,
-            command: '"C:/Program Files/My App/setup.cmd"',
+            command: '"$CLAUDE_PROJECT_DIR/scripts/validate.cmd"',
             source: HooksConfigSource.Project,
           },
           HookEventName.PreToolUse,
-          createMockInput(),
+          createMockInput({ cwd: '/test/project' }),
         );
         const spawnArgs = mockSpawn.mock.calls[0];
         expect(spawnArgs[0]).toBe('powershell');
-        expect(spawnArgs[1][0]).toBe('-NoProfile');
-        expect(spawnArgs[1][2]).toBe('& "C:/Program Files/My App/setup.cmd"');
+        // The quoted placeholder expands into the author's double quotes as one
+        // valid PowerShell string, then the fallback prefixes the call operator.
+        expect(spawnArgs[1][2]).toBe('& "/test/project/scripts/validate.cmd"');
       } finally {
         spy.mockRestore();
       }
     });
 
-    it('errors on a bare-quoted command with an explicit powershell shell', async () => {
+    it('expands a quoted project-dir placeholder for an explicit powershell shell', async () => {
       mockSpawn.mockImplementation(() => createMockProcess(0));
-      const result = await hookRunner.executeHook(
+      await hookRunner.executeHook(
         {
           type: HookType.Command,
-          command: '"C:/Program Files/App/x.cmd"',
+          command: '& "$CLAUDE_PROJECT_DIR/scripts/validate.cmd"',
           source: HooksConfigSource.Project,
           shell: 'powershell',
         },
         HookEventName.PreToolUse,
-        createMockInput(),
+        createMockInput({ cwd: '/test/project' }),
       );
-      expect(mockSpawn).not.toHaveBeenCalled();
-      expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('quoted path');
+      const spawnArgs = mockSpawn.mock.calls[0];
+      expect(spawnArgs[0]).toBe('powershell');
+      expect(spawnArgs[1][2]).toBe('& "/test/project/scripts/validate.cmd"');
     });
 
     it('uses the same powershell config for explicit shell and cmd fallback', async () => {

@@ -456,6 +456,53 @@ describe('extension tests', () => {
       ]);
     });
 
+    it('loads a link-mode extension whose manifest and hooks are shared symlinks', async () => {
+      // R6-11/29: a link install reads the user's own dev tree, where the
+      // manifest/hooks files may be symlinks into a shared monorepo location.
+      // Those must load (base behavior), not be silently dropped by the
+      // symlink guard designed for untrusted conversion products.
+      const sharedDir = path.join(tempWorkspaceDir, 'linked-shared');
+      fs.mkdirSync(sharedDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sharedDir, 'qwen-extension.json'),
+        JSON.stringify({
+          name: 'linked-qwen',
+          version: '1.0.0',
+          hooks: './shared-hooks.json',
+        }),
+      );
+      fs.writeFileSync(
+        path.join(sharedDir, 'shared-hooks.json'),
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [{ type: 'command', command: 'echo hi' }],
+          },
+        }),
+      );
+
+      const sourcePath = path.join(tempWorkspaceDir, 'linked-qwen-devdir');
+      fs.mkdirSync(sourcePath, { recursive: true });
+      fs.symlinkSync(
+        path.join(sharedDir, 'qwen-extension.json'),
+        path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+      );
+      fs.symlinkSync(
+        path.join(sharedDir, 'shared-hooks.json'),
+        path.join(sourcePath, 'shared-hooks.json'),
+      );
+
+      const manager = createExtensionManager();
+      const linked = await manager.installExtension(
+        { type: 'link', source: sourcePath },
+        async () => {},
+      );
+      expect(linked.path).toBe(sourcePath);
+      expect(linked.config.hooks).toBe('./shared-hooks.json');
+      // config.hooks proves the symlinked manifest mounted; PreToolUse proves
+      // the symlinked hooks file was read and hydrated.
+      expect(linked.hooks?.['PreToolUse']).toHaveLength(1);
+    });
+
     it.each([undefined, 42, ''])(
       'isolates link metadata with invalid source %s during refresh',
       async (source) => {

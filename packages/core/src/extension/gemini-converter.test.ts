@@ -122,6 +122,32 @@ describe('convertGeminiToQwenConfig', () => {
     expect(result.hooks).toBeUndefined();
   });
 
+  it('omits hooks when the default hooks file resolves outside the extension', () => {
+    const mockDir = '/mock/extension/dir';
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify({ name: 'x', version: '1.0.0' }),
+    );
+    // hooks/hooks.json exists (as a symlink) but its real target escapes the
+    // extension; copyDirectory would refuse to ship it, so the manifest must
+    // not advertise hooks pointing at a file that never materializes.
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p: unknown) =>
+        String(p).endsWith('gemini-extension.json') ||
+        String(p).endsWith(path.join('hooks', 'hooks.json')),
+    );
+    vi.mocked(fs.realpathSync).mockImplementation((p: unknown) => {
+      const s = String(p);
+      if (s.includes('hooks.json')) {
+        return '/outside/hooks.json';
+      }
+      return path.resolve(s);
+    });
+
+    const result = convertGeminiToQwenConfig(mockDir);
+
+    expect(result.hooks).toBeUndefined();
+  });
+
   it('should throw error for missing name', () => {
     const mockDir = '/mock/extension/dir';
     const invalidConfig = {

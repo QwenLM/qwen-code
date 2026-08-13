@@ -338,11 +338,39 @@ describe('convertQoderPlugin', () => {
 
       // A non-object server entry still fails (normalizeMcpServers), but the
       // control-byte filename must be sanitized out of the error message.
-      await expect(convertQoderPlugin(root)).rejects.toThrow(
+      let rejected: unknown;
+      try {
+        await convertQoderPlugin(root);
+      } catch (error) {
+        rejected = error;
+      }
+      expect(rejected).toBeInstanceOf(Error);
+      expect((rejected as Error).message).toMatch(
         /server entries must be JSON objects/,
       );
+      expect((rejected as Error).message).not.toContain('\u001b');
     },
   );
+
+  it('rejects a manifest symlinked outside the package', async () => {
+    const outside = path.join(
+      path.dirname(root),
+      `${path.basename(root)}-outside.json`,
+    );
+    fs.writeFileSync(
+      outside,
+      JSON.stringify({ name: 'evil', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.symlinkSync(outside, path.join(root, QODER_PLUGIN_MANIFEST));
+
+    // Converter-level guard: the escape must fail the install (not fall back
+    // to a misleading "not found" or install past the escape).
+    await expect(convertQoderPlugin(root)).rejects.toThrow(
+      /resolves through a symlink outside/,
+    );
+    fs.rmSync(outside, { force: true });
+  });
 
   it('skips an invalid MCP wrapper from a configured path', async () => {
     writeManifest({

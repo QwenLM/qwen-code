@@ -340,7 +340,12 @@ describe('detectManifest', () => {
       'utf-8',
     );
     fs.writeFileSync(path.join(root, 'gemini-extension.json'), '{', 'utf-8');
-    expect(() => detectManifest(root)).toThrow(/Invalid/);
+    // Pin the file identity — the Claude error ("Invalid .claude-plugin/…")
+    // must surface (??= keeps it first), not the Gemini one; /Invalid/ alone
+    // would match both and never notice a precedence flip.
+    expect(() => detectManifest(root)).toThrow(
+      /\.claude-plugin[\\/]plugin\.json/,
+    );
   });
 
   it('throws the Gemini detection error when Claude returns null', () => {
@@ -354,12 +359,25 @@ describe('detectManifest', () => {
 describe('convertCompatibleExtension', () => {
   let root: string;
 
+  // Real converters write a fresh mkdtemp directory per call; track them so
+  // afterEach can clean up instead of leaking one temp dir per test run.
+  const convertedDirs = new Set<string>();
+  const trackConvertedDir = (result: { extensionDir: string }): void => {
+    if (result.extensionDir !== root) {
+      convertedDirs.add(result.extensionDir);
+    }
+  };
+
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'convert-extension-'));
   });
 
   afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
+    for (const dir of convertedDirs) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    convertedDirs.clear();
   });
 
   it('returns a native extension without conversion', async () => {
@@ -396,6 +414,7 @@ describe('convertCompatibleExtension', () => {
     expect(
       fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
     ).toBe(true);
+    trackConvertedDir(result);
   });
 
   it('converts a detected Gemini extension', async () => {
@@ -409,6 +428,7 @@ describe('convertCompatibleExtension', () => {
     expect(
       fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
     ).toBe(true);
+    trackConvertedDir(result);
   });
 
   it('converts a detected Qoder plugin', async () => {
@@ -423,6 +443,7 @@ describe('convertCompatibleExtension', () => {
     expect(
       fs.existsSync(path.join(result.extensionDir, 'qwen-extension.json')),
     ).toBe(true);
+    trackConvertedDir(result);
   });
 
   it('forwards networkPolicy and AbortSignal to the marketplace converter', async () => {
@@ -452,5 +473,16 @@ describe('convertCompatibleExtension', () => {
 
     expect(spy).toHaveBeenCalledWith(root, 'selected', policy, signal);
     spy.mockRestore();
+    // The spy wraps without replacing the implementation, so the real
+    // conversion ran and wrote a temp dir — clean it up too.
+    const realCall = spy.mock.results[0];
+    if (
+      realCall?.type === 'return' &&
+      realCall.value &&
+      typeof realCall.value === 'object' &&
+      'extensionDir' in realCall.value
+    ) {
+      trackConvertedDir(realCall.value as { extensionDir: string });
+    }
   });
 });

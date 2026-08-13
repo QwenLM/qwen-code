@@ -47,12 +47,15 @@ export function realPathWithin(target: string, root: string): boolean {
 export function readExtensionManifest(
   extensionDir: string,
   filename: string,
+  trustSymlinks = false,
 ): Record<string, unknown> | null {
   const filePath = path.join(extensionDir, filename);
   if (!fs.existsSync(filePath)) {
     return null;
   }
-  if (!realPathWithin(filePath, extensionDir)) {
+  if (!trustSymlinks && !realPathWithin(filePath, extensionDir)) {
+    // A symlinked manifest is only valid for a trusted install (link mode,
+    // where the user owns the dev tree); untrusted content must stay confined.
     throw new Error(
       `${stripAnsiAndControl(filename)} at ${stripAnsiAndControl(filePath)} resolves through a symlink outside the package`,
     );
@@ -118,16 +121,18 @@ export function resolvePluginRelativeFile(
   try {
     return resolvePathWithin(pluginSource, relativePath, (kind) => {
       if (kind === 'absolute') {
-        return `Ignoring absolute path "${relativePath}" in plugin config; only paths inside the plugin are allowed.`;
+        return `Ignoring absolute path "${stripAnsiAndControl(relativePath)}" in plugin config; only paths inside the plugin are allowed.`;
       }
       if (kind === 'escapes') {
-        return `Ignoring path "${relativePath}" in plugin config; it escapes the plugin directory.`;
+        return `Ignoring path "${stripAnsiAndControl(relativePath)}" in plugin config; it escapes the plugin directory.`;
       }
-      return `Ignoring path "${relativePath}" in plugin config; it resolves through a symlink outside the plugin directory.`;
+      return `Ignoring path "${stripAnsiAndControl(relativePath)}" in plugin config; it resolves through a symlink outside the plugin directory.`;
     });
   } catch (error) {
     debugLogger.warn(
-      `${error instanceof Error ? error.message : String(error)}`,
+      stripAnsiAndControl(
+        error instanceof Error ? error.message : String(error),
+      ),
     );
     return null;
   }
@@ -143,31 +148,63 @@ export function resolvePluginRelativeFile(
 export function readExtraJsonFile(
   extensionDir: string,
   fileRef: string,
+  trustSymlinks = false,
 ): Record<string, unknown> | null {
   let filePath: string;
   if (path.isAbsolute(fileRef)) {
     // Absolute path: only an existing file can escape via symlink; a missing
-    // one is ignored by the existsSync below.
-    if (fs.existsSync(fileRef) && !realPathWithin(fileRef, extensionDir)) {
+    // one is ignored by the existsSync below. Distinguish a genuine symlink
+    // escape from a plain absolute path outside the extension, so the warning
+    // names the actual violation. A trusted link-mode install reads the user's
+    // own dev tree, so its escaping symlinks are followed (not dropped).
+    if (
+      !trustSymlinks &&
+      fs.existsSync(fileRef) &&
+      !realPathWithin(fileRef, extensionDir)
+    ) {
+      const isSymlink = (() => {
+        try {
+          return fs.lstatSync(fileRef).isSymbolicLink();
+        } catch {
+          return false;
+        }
+      })();
       debugLogger.warn(
-        `Ignoring "${fileRef}"; it resolves through a symlink outside the extension.`,
+        isSymlink
+          ? `Ignoring "${stripAnsiAndControl(fileRef)}"; it resolves through a symlink outside the extension.`
+          : `Ignoring "${stripAnsiAndControl(fileRef)}"; it is outside the extension directory.`,
       );
       return null;
     }
     filePath = fileRef;
   } else {
-    try {
-      filePath = resolvePathWithin(extensionDir, fileRef, (kind) => {
-        if (kind === 'escapes') {
-          return `Ignoring path "${fileRef}"; it escapes the extension directory.`;
-        }
-        return `Ignoring path "${fileRef}"; it resolves through a symlink outside the extension directory.`;
-      });
-    } catch (error) {
-      debugLogger.warn(
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
+    if (trustSymlinks) {
+      // Trusted link mode: follow the user's own symlinks, but still refuse a
+      // literal `..` traversal (a config error regardless of trust).
+      const resolved = path.resolve(extensionDir, fileRef);
+      if (!isPathWithin(resolved, path.resolve(extensionDir))) {
+        debugLogger.warn(
+          `Ignoring path "${stripAnsiAndControl(fileRef)}"; it escapes the extension directory.`,
+        );
+        return null;
+      }
+      filePath = resolved;
+    } else {
+      try {
+        filePath = resolvePathWithin(extensionDir, fileRef, (kind) => {
+          if (kind === 'escapes') {
+            return `Ignoring path "${stripAnsiAndControl(fileRef)}"; it escapes the extension directory.`;
+          }
+          return `Ignoring path "${stripAnsiAndControl(fileRef)}"; it resolves through a symlink outside the extension directory.`;
+        });
+      } catch (error) {
+        debugLogger.warn(
+          stripAnsiAndControl(
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
+        return null;
+      }
     }
   }
   if (!fs.existsSync(filePath)) {

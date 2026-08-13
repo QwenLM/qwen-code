@@ -38,6 +38,7 @@ import {
   realPathWithin,
   readExtraJsonFile,
 } from './path-confinement.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import type { JsonValue } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -1382,6 +1383,11 @@ export class ExtensionManager {
 
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
+    // A link-mode install reads the user's own dev tree through a symlink; its
+    // manifest/hooks files may themselves be symlinks (monorepo sharing). Trust
+    // that source: skip the symlink-escape rejection for it, but keep refusing
+    // a literal `..` traversal and all untrusted install types.
+    const trustSymlinks = installMetadata?.type === 'link';
 
     if (
       installMetadata?.type === 'link' &&
@@ -1395,6 +1401,7 @@ export class ExtensionManager {
       const loadedManifest = this.loadExtensionManifest({
         extensionDir: effectiveExtensionPath,
         workspaceDir,
+        trustSymlinks,
       });
       let config = loadedManifest.config;
       if (loadedManifest.format === 'qwen') {
@@ -1489,14 +1496,16 @@ export class ExtensionManager {
         // A hooks path (string or absolute) must stay inside the extension;
         // an escaping value would otherwise load an arbitrary host file. Only
         // an existing path can escape via symlink — a missing file is dropped
-        // by the existsSync below, not an escape.
+        // by the existsSync below, not an escape. Link-mode installs trust the
+        // user's own dev tree, so their symlinks are followed (not dropped).
         if (
           configHooksPath &&
+          !trustSymlinks &&
           fs.existsSync(configHooksPath) &&
           !realPathWithin(configHooksPath, effectiveExtensionPath)
         ) {
           debugLogger.warn(
-            `Dropping hooks path "${config.hooks}" that escapes the extension; hooks will not load.`,
+            `Dropping hooks path "${stripAnsiAndControl(String(config.hooks))}" that escapes the extension; hooks will not load.`,
           );
           configHooksPath = null;
         }
@@ -1517,6 +1526,7 @@ export class ExtensionManager {
           const parsedHooks = readExtraJsonFile(
             effectiveExtensionPath,
             hooksFilePath,
+            trustSymlinks,
           );
           if (parsedHooks) {
             let hooksData;
@@ -1581,7 +1591,11 @@ export class ExtensionManager {
   private loadExtensionManifest(
     context: LoadExtensionContext,
   ): LoadedExtensionManifest {
-    const { extensionDir, workspaceDir = this.workspaceDir } = context;
+    const {
+      extensionDir,
+      workspaceDir = this.workspaceDir,
+      trustSymlinks,
+    } = context;
     const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
     if (agentPluginStatus !== 'unrelated') {
       try {
@@ -1604,6 +1618,7 @@ export class ExtensionManager {
       const manifest = readExtensionManifest(
         extensionDir,
         EXTENSIONS_CONFIG_FILENAME,
+        trustSymlinks,
       );
       if (!manifest) {
         throw new Error(`Invalid configuration in ${configFilePath}`);
@@ -1964,6 +1979,7 @@ export class ExtensionManager {
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
+          trustSymlinks: installMetadata.type === 'link',
         });
         const isAgentPlugin = originSource === 'AgentPlugins';
         const extensionId = getExtensionId(newExtensionConfig, installMetadata);

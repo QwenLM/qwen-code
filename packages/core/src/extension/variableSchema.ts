@@ -18,6 +18,9 @@ export interface VariableSchema {
 export interface LoadExtensionContext {
   extensionDir: string;
   workspaceDir?: string;
+  /** Trust symlinked manifest/hooks files (link-mode installs read the user's
+   *  own dev tree). Defaults to strict confinement. */
+  trustSymlinks?: boolean;
 }
 
 const PATH_SEPARATOR_DEFINITION = {

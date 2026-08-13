@@ -13,6 +13,7 @@ import {
 } from '../extension/variables.js';
 import type { Extension } from '../extension/extensionManager.js';
 import { readExtraJsonFile } from '../extension/path-confinement.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 import type {
   LspInitializationOptions,
   LspServerConfig,
@@ -85,23 +86,16 @@ export class LspConfigLoader {
 
       const originBase = `extension ${extension.name}`;
       if (typeof lspServers === 'string') {
-        // readExtraJsonFile tolerantly reads a relative/absolute JSON file under
-        // the extension and confines it there (missing/unparseable/escaping →
-        // warn + null), matching the hooks/mcp file handling and the
-        // "relative path, no absolute or .. traversal" contract.
-        const data = readExtraJsonFile(extension.path, lspServers);
-        if (data) {
-          const hydrated = this.hydrateExtensionLspConfig(
-            data as JsonValue,
-            extension.path,
-          );
-          configs.push(
-            ...this.parseConfigSource(
-              hydrated,
-              `${originBase} (${lspServers})`,
-            ),
-          );
-        }
+        // Link-mode extensions read the user's own dev tree, so their LSP
+        // config symlinks are trusted the same way as manifest/hooks.
+        const trustSymlinks = extension.installMetadata?.type === 'link';
+        this.loadExtensionStringLspConfig(
+          lspServers,
+          extension,
+          originBase,
+          configs,
+          trustSymlinks,
+        );
       } else if (this.isRecord(lspServers)) {
         const hydrated = this.hydrateExtensionLspConfig(
           lspServers as JsonValue,
@@ -118,6 +112,39 @@ export class LspConfigLoader {
     }
 
     return configs;
+  }
+
+  /**
+   * Load a string `lspServers` value (a JSON file path relative to the
+   * extension). readExtraJsonFile confines and reads it; a declared-but-missing
+   * file is a packaging defect, so warn instead of going silent.
+   */
+  private loadExtensionStringLspConfig(
+    lspServers: string,
+    extension: Extension,
+    originBase: string,
+    configs: LspServerConfig[],
+    trustSymlinks: boolean,
+  ): void {
+    const data = readExtraJsonFile(extension.path, lspServers, trustSymlinks);
+    if (!data) {
+      const lspConfigPath = path.isAbsolute(lspServers)
+        ? lspServers
+        : path.join(extension.path, lspServers);
+      if (!fs.existsSync(lspConfigPath)) {
+        debugLogger.warn(
+          `LSP config not found for ${originBase}: ${stripAnsiAndControl(lspConfigPath)}`,
+        );
+      }
+      return;
+    }
+    const hydrated = this.hydrateExtensionLspConfig(
+      data as JsonValue,
+      extension.path,
+    );
+    configs.push(
+      ...this.parseConfigSource(hydrated, `${originBase} (${lspServers})`),
+    );
   }
 
   /**
