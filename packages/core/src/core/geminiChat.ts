@@ -4700,6 +4700,9 @@ export class GeminiChat {
           // can reject a semantically empty continuation.
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
+              if (!yieldedAnyChunk) {
+                deferredFirstChunk = chunk;
+              }
               deferredFinishReason ??= candidate.finishReason;
               delete candidate.finishReason;
             }

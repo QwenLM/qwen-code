@@ -2806,6 +2806,51 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('excludes a split degraded placeholder from curated history', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ text: '(request ' }, { text: 'timeout)' }],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'real' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-placeholder-curation-split',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
+      ]);
+      expect(chat.getHistory(true)).toEqual([
+        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
+        { role: 'model', parts: [{ text: 'real' }] },
+      ]);
+    });
+
     it('keeps a placeholder turn that carries a functionCall in curated history', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'query' }] },
@@ -6337,12 +6382,81 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should retry a tool result continuation placeholder without yielding it', async () => {
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return streamResponse(
+              stopResponse([{ text: '(request timeout)' }]),
+            );
+          }
+          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-degraded-placeholder',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                '(request timeout)',
+          ),
+        ).toBe(false);
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: 'Recovered response' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should exhaust retries for upstream fail-fast placeholder responses', async () => {
       vi.useFakeTimers();
       try {
         vi.mocked(
           mockContentGenerator.generateContentStream,
-        ).mockImplementation(async () => (async function* () {
+        ).mockImplementation(async () =>
+          (async function* () {
             yield {
               candidates: [
                 {
@@ -6354,7 +6468,8 @@ describe('GeminiChat', async () => {
                 },
               ],
             } as unknown as GenerateContentResponse;
-          })());
+          })(),
+        );
 
         const stream = await chat.sendMessageStream(
           'test-model',
