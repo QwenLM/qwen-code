@@ -8783,6 +8783,7 @@ describe('useGeminiStream', () => {
         [notificationContinuationRequest],
         expect.any(AbortSignal),
         undefined,
+        undefined,
       );
 
       const notificationRetryRequest: ToolCallRequestInfo = {
@@ -8814,6 +8815,7 @@ describe('useGeminiStream', () => {
         [notificationRetryRequest],
         expect.any(AbortSignal),
         undefined,
+        undefined,
       );
 
       const ordinaryRequest: ToolCallRequestInfo = {
@@ -8841,6 +8843,7 @@ describe('useGeminiStream', () => {
       expect(mockScheduleToolCalls).toHaveBeenCalledWith(
         [ordinaryRequest],
         expect.any(AbortSignal),
+        undefined,
         undefined,
       );
     });

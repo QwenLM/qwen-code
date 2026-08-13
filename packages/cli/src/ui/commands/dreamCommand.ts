@@ -51,10 +51,7 @@ export const dreamCommand: SlashCommand = {
           .getMemoryManager()
           .writeDreamManualRun(projectRoot, config.getSessionId());
 
-      if (
-        context.executionMode === 'acp' ||
-        context.executionMode === 'non_interactive'
-      ) {
+      if (context.executionMode === 'acp') {
         recordDream().catch(() => {});
         return {
           type: 'submit_prompt',

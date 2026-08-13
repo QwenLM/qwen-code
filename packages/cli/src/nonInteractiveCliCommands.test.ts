@@ -437,6 +437,33 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes a submit_prompt onComplete callback through to the result', async () => {
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with completion bookkeeping',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run and record completion' }],
+        onComplete,
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result).toMatchObject({
+      type: 'submit_prompt',
+      onComplete,
+    });
+  });
+
   it('passes a submit_prompt tool guard through to ACP consumers', async () => {
     const toolInvocationGuard = vi
       .fn()

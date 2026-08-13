@@ -1010,6 +1010,7 @@ export async function runNonInteractive(
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
       let fullTurnToolInvocationGuard: ToolInvocationGuard | undefined;
+      let fullTurnOnComplete: (() => Promise<void>) | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1078,6 +1079,7 @@ export async function runNonInteractive(
               initialPartList = slashCommandResult.content;
               fullTurnToolInvocationGuard =
                 slashCommandResult.toolInvocationGuard;
+              fullTurnOnComplete = slashCommandResult.onComplete;
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before
@@ -1511,6 +1513,17 @@ export async function runNonInteractive(
       let loopDetected = false;
       let loopDetectedMessage = formatLoopDetectedMessage(undefined);
 
+      const runFullTurnOnComplete = async (): Promise<void> => {
+        const onComplete = fullTurnOnComplete;
+        fullTurnOnComplete = undefined;
+        if (!onComplete) return;
+        try {
+          await onComplete();
+        } catch (error) {
+          debugLogger.error('onComplete callback failed:', error);
+        }
+      };
+
       // Shared terminal block for the structured-output success
       // contract. Both the main-turn loop and the drain-turn post-loop
       // previously reproduced this block verbatim
@@ -1541,6 +1554,7 @@ export async function runNonInteractive(
           await new Promise((r) => setTimeout(r, 50));
         }
         flushQueuedNotificationsToSdk(localQueue);
+        await runFullTurnOnComplete();
         finalizeOneShotMonitors();
         const metrics = uiTelemetryService.getMetrics();
         const usage = computeUsageFromMetrics(metrics);
@@ -2403,6 +2417,7 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          await runFullTurnOnComplete();
           // Clear before any Goal/teammate continuation can loop back through
           // the shared tool-batch call site.
           fullTurnToolInvocationGuard = undefined;

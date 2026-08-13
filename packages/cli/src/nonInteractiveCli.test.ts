@@ -1708,6 +1708,40 @@ describe('runNonInteractive', () => {
       ]);
     });
 
+    it('adds plan mode reminders to a marker-less interrupted prompt replay', async () => {
+      setupMetricsMock();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+      mockGeminiClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(finishedEvents),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plain', {
+        continueInterrupted: true,
+      });
+
+      const [request, , , options] =
+        mockGeminiClient.sendMessageStream.mock.calls[0]!;
+      expect(options).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      expect(request).toEqual([
+        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
+        { text: 'do the thing' },
+      ]);
+      expect(request).not.toContainEqual({
+        text: MANUAL_DREAM_TOOL_GUARD_MARKER,
+      });
+    });
+
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
       setupMetricsMock();
       mockGeminiClient.getChat = vi.fn(() => ({
@@ -4452,6 +4486,66 @@ describe('runNonInteractive', () => {
     );
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
+  });
+
+  it('runs a slash-command onComplete callback after a successful headless turn', async () => {
+    setupMetricsMock();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'record-on-success',
+        description: 'record only completed turns',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Complete this turn' }],
+          onComplete,
+        }),
+      },
+    ]);
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/record-on-success',
+      'prompt-on-complete-success',
+    );
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not run a slash-command onComplete callback when the headless turn fails', async () => {
+    setupMetricsMock();
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'record-on-success',
+        description: 'record only completed turns',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Fail this turn' }],
+          onComplete,
+        }),
+      },
+    ]);
+    const apiError = new Error('API connection failed');
+    mockGeminiClient.sendMessageStream.mockImplementation(() => {
+      throw apiError;
+    });
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/record-on-success',
+        'prompt-on-complete-failure',
+      ),
+    ).rejects.toThrow(apiError);
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it('keeps a slash-command tool guard for the full headless turn', async () => {

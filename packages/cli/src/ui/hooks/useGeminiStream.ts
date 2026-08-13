@@ -2803,20 +2803,12 @@ export const useGeminiStream = (
 
         if (executableToolCallRequests.length > 0) {
           scheduledToolContinuation = true;
-          if (toolInvocationGuard) {
-            scheduleToolCalls(
-              executableToolCallRequests,
-              signal,
-              modelOverrideRef.current,
-              toolInvocationGuard,
-            );
-          } else {
-            scheduleToolCalls(
-              executableToolCallRequests,
-              signal,
-              modelOverrideRef.current,
-            );
-          }
+          scheduleToolCalls(
+            executableToolCallRequests,
+            signal,
+            modelOverrideRef.current,
+            toolInvocationGuard,
+          );
         }
       }
       return {

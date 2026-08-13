@@ -104,7 +104,7 @@ describe('dreamCommand', () => {
     expect(result).not.toHaveProperty('onComplete');
   });
 
-  it('calls writeDreamManualRun eagerly in headless mode without onComplete', async () => {
+  it('defers writeDreamManualRun until a headless turn completes', async () => {
     const projectRoot = path.join('tmp', 'dream-project');
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
     const writeDreamManualRun = vi.fn();
@@ -123,16 +123,20 @@ describe('dreamCommand', () => {
     });
 
     const result = await dreamCommand.action?.(context, '');
-    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
+    expect(writeDreamManualRun).not.toHaveBeenCalled();
     expect(result).toEqual({
       type: 'submit_prompt',
       content: [
         { text: MANUAL_DREAM_TOOL_GUARD_MARKER },
         { text: 'dream prompt' },
       ],
+      onComplete: expect.any(Function),
       toolInvocationGuard: expect.any(Function),
     });
-    expect(result).not.toHaveProperty('onComplete');
+    if (result?.type === 'submit_prompt') {
+      await result.onComplete?.();
+    }
+    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
   });
 
   it('silently catches writeDreamManualRun errors in ACP mode', async () => {

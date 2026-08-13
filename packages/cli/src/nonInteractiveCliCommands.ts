@@ -77,6 +77,8 @@ export type NonInteractiveSlashCommandResult =
       modelOverride?: string;
       /** Execution-time guard scoped to this submitted turn. */
       toolInvocationGuard?: ToolInvocationGuard;
+      /** Callback invoked after the submitted turn completes successfully. */
+      onComplete?: () => Promise<void>;
       refreshContextFilesOnWrite?: boolean;
     }
   | {
@@ -137,6 +139,7 @@ function handleCommandResult(
         ...(result.toolInvocationGuard
           ? { toolInvocationGuard: result.toolInvocationGuard }
           : {}),
+        ...(result.onComplete ? { onComplete: result.onComplete } : {}),
         ...(result.refreshContextFilesOnWrite
           ? { refreshContextFilesOnWrite: true }
           : {}),
