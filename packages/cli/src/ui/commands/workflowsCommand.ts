@@ -30,10 +30,14 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     meta: s.meta,
     status: s.status,
     currentPhase: null,
+    currentPhaseVisitId: null,
     phases: s.phases ?? [],
+    phaseVisits: s.phaseVisits ?? [],
+    dispatches: s.dispatches ?? [],
     agentsDispatched: s.agentsDispatched ?? 0,
     agentsCompleted: s.agentsCompleted ?? 0,
     recentLogs: s.recentLogs ?? [],
+    events: s.events ?? [],
     tokensSpent: s.tokensSpent ?? 0,
     tokenBudgetTotal: s.tokenBudgetTotal ?? null,
     perPhaseTokens: new Map(s.perPhaseTokens ?? []),
@@ -48,7 +52,7 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     outputOffset: 0,
     notified: true,
     abortController: new AbortController(),
-  } as WorkflowTask;
+  };
 }
 
 /**
