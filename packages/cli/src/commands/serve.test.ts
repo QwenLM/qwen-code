@@ -185,6 +185,31 @@ describe('serve command args', () => {
     ).toBe(1048576);
   });
 
+  it('rejects valueless journal cap flags instead of silently unpinning', () => {
+    // Presence pins the caps and disables adaptive growth; without nargs a
+    // bare flag parses as undefined and the pin never reaches runQwenServe.
+    for (const input of [
+      '--max-journal-events',
+      '--max-journal-bytes',
+      '--no-web --max-journal-events',
+      '--max-journal-events --max-journal-bytes',
+    ]) {
+      expect(() => buildParser().parseSync(input)).toThrow(
+        /Not enough arguments following: max-journal-(events|bytes)/,
+      );
+    }
+    expect(
+      buildParser().parseSync('--max-journal-events=5000')[
+        'max-journal-events'
+      ],
+    ).toBe(5000);
+    expect(
+      buildParser().parseSync('--max-journal-bytes=1048576')[
+        'max-journal-bytes'
+      ],
+    ).toBe(1048576);
+  });
+
   it('parses --local-control and requires its generated token and Web Shell', () => {
     expect(buildParser().parseSync('')['local-control']).toBe(false);
     expect(buildParser().parseSync('--token fixed')['token']).toBe('fixed');

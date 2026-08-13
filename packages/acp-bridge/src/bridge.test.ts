@@ -5347,6 +5347,8 @@ describe('createAcpSessionBridge', () => {
       ).toMatchObject({ data: { scope: 'live_journal' } });
       // Pin the retained window too: marker presence alone also passes on
       // an over-eviction that drops one extra entry.
+      expect(JSON.stringify(snap.liveJournal)).toContain('r-2');
+      expect(JSON.stringify(snap.liveJournal)).toContain('r-3');
       expect(JSON.stringify(snap.liveJournal)).toContain('r-4');
       expect(JSON.stringify(snap.liveJournal)).toContain('r-5');
 

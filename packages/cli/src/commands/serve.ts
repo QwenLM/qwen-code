@@ -401,6 +401,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-journal-events', {
         type: 'number',
+        nargs: 1,
         description:
           'Per-session baseline cap on replay entries retained in the ' +
           'in-flight live journal (current unfinished turn). Compatible ' +
@@ -414,6 +415,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-journal-bytes', {
         type: 'number',
+        nargs: 1,
         description:
           'Per-session baseline source-event byte cap on the in-flight live ' +
           'journal. When a turn outgrows it, adaptive growth raises the ' +
