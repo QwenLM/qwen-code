@@ -159,7 +159,9 @@ export interface WorkflowMeta {
  *      vm context whose globalThis is a null-prototyped object — no
  *      bridge to the host realm, no access to host primitives like
  *      `process` / `require` / the workflow-sandbox bridge globals
- *      (`args` / `agent` / `phase` / `log` / etc.). The vm realm DOES
+ *      (`args` / `agent` / `phase` / `log` / etc.), and bounded by
+ *      `META_EVAL_TIMEOUT_MS` so a field value that never returns cannot
+ *      wedge the caller. The vm realm DOES
  *      provide its own intrinsics (`Object`, `Array`, `Math`, `Date`,
  *      `JSON`, …) which is fine: meta extraction is a one-shot at tool-
  *      invocation time, not replayed during resume, so non-determinism in
@@ -195,7 +197,9 @@ export function extractAndStripMeta(source: string): {
   const metaContext = vm.createContext(Object.create(null));
   let raw: unknown;
   try {
-    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext);
+    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
+      timeout: META_EVAL_TIMEOUT_MS,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(
@@ -378,6 +382,16 @@ const MAX_PHASE_ENTRIES = 10_000;
 // Max nesting depth for args; defends against stack-overflow on deeply
 // nested model-authored input.
 const ARGS_MAX_DEPTH = 64;
+
+// Wall-clock bound on evaluating the `meta` object literal. The literal is
+// model-authored source, and an IIFE in a field value
+// (`{ name: (function(){ while(true){} })() }`) is a synchronous infinite
+// loop that would otherwise wedge the calling thread with no way out.
+// Generous for a contract object whose fields are strings and small arrays;
+// tight enough that a wedge surfaces as a normal malformed-meta error.
+// Callers evaluate meta on interactive paths (tool confirmation, saved-workflow
+// enumeration), so this must never be unbounded.
+const META_EVAL_TIMEOUT_MS = 250;
 
 /**
  * WorkflowAgentOpts — structured options for the `agent()` global.

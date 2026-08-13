@@ -266,6 +266,34 @@ describe('extractAndStripMeta', () => {
     expect(() => extractAndStripMeta(src)).toThrow(/unbalanced/i);
   });
 
+  // The meta literal is model-authored source, and every caller evaluates it
+  // on a path where a wedged thread is unrecoverable: the tool-confirmation
+  // dialog (the user has not consented yet, so there is nothing to cancel)
+  // and saved-workflow enumeration (no run exists to abort). A synchronous
+  // IIFE that never returns must therefore surface as an ordinary malformed
+  // -meta error, not as a hang.
+  it('a meta field that never returns times out instead of hanging', () => {
+    const src = `export const meta = { name: (function () { while (true) {} })(), description: 'd' }\nreturn 1`;
+    const startedAt = Date.now();
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+    // Generous multiple of META_EVAL_TIMEOUT_MS (250ms): this asserts the
+    // timeout fired at all, not how precisely it fired, so it stays stable
+    // on a loaded CI runner.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it('a well-formed meta literal is unaffected by the eval timeout', () => {
+    const src = `export const meta = { name: 'w', description: 'd', phases: [{ title: 'One' }] }\nreturn 1`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta).toEqual({
+      name: 'w',
+      description: 'd',
+      phases: [{ title: 'One' }],
+    });
+  });
+
   // P4a adversarial review (HIGH × 3 lenses): the docstring at
   // workflow-sandbox.ts:283-294 promises the returned meta is HOST-realm —
   // a per-field copy that defends against T1/T8/T14-style vm-realm escape
