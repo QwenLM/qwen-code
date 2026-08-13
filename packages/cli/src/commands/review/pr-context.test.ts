@@ -168,7 +168,7 @@ describe('fullBody', () => {
     const long = 'x'.repeat(9000);
     const got = fullBody(long, 42);
     expect(got).toContain('truncated at 8000 chars');
-    expect(got).toContain('/reviews/42');
+    expect(got).toContain('comment-body 42 --kind review');
     expect(got).toContain('cannot tell');
   });
 });
@@ -177,7 +177,7 @@ describe('fullCommentBody', () => {
   it('caps long comment bodies and names the comment id for the tail', () => {
     const got = fullCommentBody('y'.repeat(9000), 314);
     expect(got).toContain('truncated at 8000 chars');
-    expect(got).toContain('pulls/comments/314');
+    expect(got).toContain('comment-body 314 --kind inline');
     expect(got).toContain('cannot tell');
   });
 });
@@ -310,7 +310,7 @@ describe('buildMarkdown — review bodies and replied Criticals', () => {
     expect(md).toContain('THE-TAIL-SURVIVES');
     expect(md).toContain('(comment 11)');
     // The reply snippet is cut, and the cut names the fetch for the rest.
-    expect(md).toContain('pulls/comments/12');
+    expect(md).toContain('comment-body 12 --kind inline');
   });
 });
 
@@ -352,8 +352,12 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
     );
     // A markerless blocker past the snippet cap is recoverable only through
     // the named fetch — and the emitted command must not need filling in.
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/comments/21');
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/31');
+    expect(md).toContain(
+      'comment-body 21 --kind inline --repo QwenLM/qwen-code',
+    );
+    expect(md).toContain(
+      'comment-body 31 --kind issue --repo QwenLM/qwen-code',
+    );
     expect(md).not.toContain('{owner}');
   });
 
@@ -373,7 +377,9 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
         },
       ],
     );
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/6711/reviews/7');
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo QwenLM/qwen-code',
+    );
   });
 
   it('a settled replied thread cut past the snippet cap names both comment ids', () => {
@@ -393,8 +399,8 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
       },
     ];
     const md = buildMarkdown('1', 'o/r', meta, inline, [], []);
-    expect(md).toContain('gh api repos/o/r/pulls/comments/41');
-    expect(md).toContain('gh api repos/o/r/pulls/comments/42');
+    expect(md).toContain('comment-body 41 --kind inline --repo o/r');
+    expect(md).toContain('comment-body 42 --kind inline --repo o/r');
   });
 });
 
@@ -861,7 +867,7 @@ describe('blockerSection — both channels, and the budget', () => {
     }
     // The one past the budget is a snippet, and it names the exact fetch.
     expect(md).toContain('section budget spent');
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/3');
+    expect(md).toContain('comment-body 3 --kind issue --repo QwenLM/qwen-code');
   });
 
   it('renders the bodies that fit in FULL and only degrades past the budget', () => {

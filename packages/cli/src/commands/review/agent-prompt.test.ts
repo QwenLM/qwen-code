@@ -2279,12 +2279,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('timeout: 600000');
   });
 
-  it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
+  it('welds the PR into Agent 0 — an unqualified number judges the wrong issue', () => {
     const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
     const p = buildRoleBrief(PR_PLAN, '0', { planPath });
     expect(p).toContain('#6766');
     expect(p).toContain('QwenLM/qwen-code');
     expect(p).toContain(join(resolve('/x'), 'qwen-review-pr-6766-context.md'));
+    // The evidence fetch is the welded issue-context command, not a gh prose line.
+    expect(p).toContain('review issue-context 6766 --repo QwenLM/qwen-code');
+    expect(p).toContain(
+      join(resolve('/x'), 'qwen-review-pr-6766-issue-context.md'),
+    );
+    expect(p).not.toContain('gh pr view');
     // The empty scope is a complete answer, and it needs evidence to be one.
     expect(p).toContain('scope empty');
     expect(p).toContain('motivating evidence');
