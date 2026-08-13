@@ -512,6 +512,30 @@ describe('findings (command boundary)', () => {
     return out;
   }
 
+  it('demotes an unwitnessed Critical through the whole handler, and says so on stderr', () => {
+    // The unit tests pin holdUnwitnessedCriticals in isolation; this pins the
+    // WIRING — the call sits in the handler before buildReport, so removing
+    // it, or moving it after the report is built, fails here, not silently.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'w1' },
+        { ...base, id: 'w2', witness: 'probe flipped: 2 calls → 1' },
+      ]),
+    );
+    const stderr = runCapturingStderr({ input, out, print: false });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    const byId = new Map(report.findings.map((f) => [f.id, f]));
+    expect(byId.get('w1')?.confidence).toBe('low');
+    expect(byId.get('w1')?.failureScenario).toContain('witness rule');
+    expect(byId.get('w2')?.confidence).toBe('high');
+    expect(stderr).toContain('w1 filed at low confidence');
+    expect(stderr).not.toContain('w2 filed at low confidence');
+    expect(report.counts.byConfidence['low']).toBe(1);
+  });
+
   it('announces every hold, naming the finding and the measured file', () => {
     // A severity this command lowered is a change to what the review says. Left
     // unannounced it reads as the reviewer's own judgement, which is the one
