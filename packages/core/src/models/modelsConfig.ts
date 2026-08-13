@@ -28,6 +28,7 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   CREDENTIAL_FIELDS,
   PROVIDER_SOURCED_FIELDS,
+  AUTH_ENV_MAPPINGS,
 } from './constants.js';
 
 export {
@@ -1179,6 +1180,70 @@ export class ModelsConfig {
         };
       }
     }
+  }
+
+  /**
+   * Re-read the API key from process.env for the given auth type and update
+   * _generationConfig. Called by /reload-env after process.env is refreshed.
+   *
+   * syncAfterAuthRefresh's credential preservation can skip env re-reads for
+   * non-registry models (e.g. bare OPENAI_API_KEY without modelProviders
+   * config). This method ensures the new key is in _generationConfig before
+   * refreshAuth rebuilds the ContentGenerator.
+   *
+   * Unlike updateCredentials, this does NOT set hasManualCredentials or clear
+   * provider-sourced config.
+   *
+   * @returns true if the apiKey was changed.
+   */
+  refreshApiKeyFromEnv(authType: AuthType): boolean {
+    // First try apiKeyEnvKey (set when model came from modelProviders)
+    const directEnvKey = this._generationConfig.apiKeyEnvKey;
+    if (directEnvKey) {
+      const freshKey = process.env[directEnvKey];
+      if (freshKey !== this._generationConfig.apiKey) {
+        if (freshKey) {
+          this._generationConfig.apiKey = freshKey;
+          this.generationConfigSources['apiKey'] = {
+            kind: 'env',
+            envKey: directEnvKey,
+          };
+        } else {
+          this._generationConfig.apiKey = undefined;
+          delete this.generationConfigSources['apiKey'];
+        }
+        return true;
+      }
+      return false;
+    }
+
+    // Fall back to AUTH_ENV_MAPPINGS for the auth type
+    // (handles bare OPENAI_API_KEY / ANTHROPIC_API_KEY without modelProviders)
+    const envMapping = AUTH_ENV_MAPPINGS[authType];
+    if (!envMapping) return false;
+
+    for (const key of envMapping.apiKey) {
+      const freshKey = process.env[key];
+      if (freshKey && freshKey !== this._generationConfig.apiKey) {
+        this._generationConfig.apiKey = freshKey;
+        this.generationConfigSources['apiKey'] = { kind: 'env', envKey: key };
+        return true;
+      }
+    }
+
+    // If no env key has a value but we previously had one, clear it
+    if (this._generationConfig.apiKey) {
+      const anyKeyPresent = envMapping.apiKey.some(
+        (k) => process.env[k] !== undefined && process.env[k] !== '',
+      );
+      if (!anyKeyPresent) {
+        this._generationConfig.apiKey = undefined;
+        delete this.generationConfigSources['apiKey'];
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
