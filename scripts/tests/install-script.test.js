@@ -327,6 +327,8 @@ describe('installation scripts', () => {
       'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command',
     );
     expect(verifyChecksum.indexOf('finally')).toBeGreaterThan(-1);
+    expect(verifyChecksum).toContain('$stream.Dispose()');
+    expect(verifyChecksum).toContain('$sha256.Dispose()');
     expect(verifyChecksum.indexOf('$stream.Dispose()')).toBeLessThan(
       verifyChecksum.indexOf('$sha256.Dispose()'),
     );
