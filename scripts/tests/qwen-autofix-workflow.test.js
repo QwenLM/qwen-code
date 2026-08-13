@@ -546,6 +546,9 @@ describe('qwen-autofix workflow', () => {
       '.github/workflows/qwen-code-pr-review.yml',
       'utf8',
     );
+    expect(reviewWorkflow.split('\n')[0]).toBe(
+      "name: '🧐 Qwen Pull Request Review'",
+    );
     for (const name of nonBlocking) {
       expect(reviewWorkflow).toContain(`\n  ${name}:\n`);
     }
@@ -611,6 +614,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('fleet_row "${PR}" \'review-in-flight\'');
     // The gate must sit BEFORE the stale-base update (a merge-main is exactly
     // the push that killed two reviews on #8830) and the feedback dispatch.
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('Auto-rerun a check that died on INFRASTRUCTURE'),
+    );
     expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
       reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
     );
@@ -1223,6 +1229,7 @@ describe('qwen-autofix workflow', () => {
       rerunOk = true,
       crName = 'E2E',
       wfName = 'CI',
+      reviewLive = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'infra-'));
       const bin = join(dir, 'bin');
@@ -1269,6 +1276,7 @@ describe('qwen-autofix workflow', () => {
             PR: '1',
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
             PR_HEAD_OID: 'headSHA',
+            REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
@@ -1302,6 +1310,16 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: 'Expected 1 argument but got 2 — src/foo.ts:10',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // A live review-pr must win: rerunning review-address can push and cancel
+    // that review, so the infra recovery waits for the next scan.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          'The self-hosted runner lost communication with the server',
+        reviewLive: true,
       }),
     ).toEqual({ reran: false, continued: false });
     // Already reran once (attempt 2) and still infra-failing → persistent, do

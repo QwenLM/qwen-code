@@ -2559,6 +2559,52 @@ jobs:
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
             PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
 
+            # Review-in-flight gate (#8888): NON_BLOCKING_CHECKS keeps an
+            # in-flight review-pr from blocking the FEEDBACK gate (its
+            # conclusion carries nothing the loop acts on — #7416), but every
+            # head mutation this scan can make (a stale-base update-branch,
+            # infra rerun, or address push later) is a synchronize event that
+            # cancels the in-flight review via qwen-code-pr-review.yml's
+            # cancel-in-progress, discarding up to ~3h of review work — the
+            # self-reinforcing cancellation loop of #8830 (three killed runs
+            # in one PR, two by merge-main). Its findings are also the very
+            # feedback the next round should batch with, so deferring the
+            # WHOLE round until the review lands loses nothing: the watermark
+            # is not advanced on a skip, so the feedback stays visible. This
+            # is deliberately SEPARATE from HAS_PENDING_CHECKS rather than a
+            # NON_BLOCKING_CHECKS revert: that gate ages checks out after
+            # PENDING_STALE_MIN and would also re-block on the review's
+            # conclusion, reintroducing #7416's median-49-minute wait.
+            REVIEW_PR_LIVE="$(jq -r '
+              [ .[]
+                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
+            REVIEW_RUN_STARTED_AT=""
+            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
+              # Delay-window fallback: a review run parked BEFORE its job
+              # starts (the 10-minute environment wait) has no review-pr
+              # check-run yet, but a push now would still cancel it via
+              # synchronize. Only pull_request_target runs are cancelable —
+              # comment/review-triggered runs use per-run concurrency groups
+              # that a synchronize never cancels, so holding the round for
+              # one would defer autofix for nothing (R2-1). The scan fetched
+              # the newest run page once above; match by immutable head SHA or
+              # PR number, never by fork-controlled bare branch name.
+              REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
+                [ .workflow_runs[]?
+                  | select((.workflow_id | tostring) == $wf)
+                  | select((.event // "") == "pull_request_target")
+                  | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
+                  | select(((.head_sha // "") == $head) or any(.pull_requests[]?; (.number | tostring) == $pr))
+                  | (.run_started_at // .created_at // "") ]
+                | map(select(. != "")) | sort | last // ""
+              ' <<< "${REVIEW_RUNS_JSON}")"
+              if [[ -n "${REVIEW_RUN_STARTED_AT}" ]]; then
+                REVIEW_PR_LIVE="true"
+              fi
+            fi
+
             # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
             # INFRA_FAILURE_SIGNATURES). Only reached when the PR has a FAILED
             # check; then, for each, we read its annotations and — if they carry
@@ -2568,7 +2614,7 @@ jobs:
             # marker needed; the attempt counter is the guard, and after a rerun
             # the attempt increments so the next scan skips it. Any API failure
             # here is fail-safe: it just means no rerun.
-            if [[ -n "${PR_HEAD_OID}" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
+            if [[ -n "${PR_HEAD_OID}" && "${REVIEW_PR_LIVE}" != "true" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
               RERAN_INFRA=false
               # Failed check-runs on this head, with their run id and annotation
               # count — fetched once. External statuses (no check-run) are absent
@@ -2623,51 +2669,6 @@ jobs:
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               fleet_row "${PR}" 'waiting' 'active checks in flight'
               continue
-            fi
-            # Review-in-flight gate (#8888): NON_BLOCKING_CHECKS keeps an
-            # in-flight review-pr from blocking the FEEDBACK gate (its
-            # conclusion carries nothing the loop acts on — #7416), but every
-            # head mutation this scan can make (a stale-base update-branch
-            # below, an address push later) is a synchronize event that
-            # cancels the in-flight review via qwen-code-pr-review.yml's
-            # cancel-in-progress, discarding up to ~3h of review work — the
-            # self-reinforcing cancellation loop of #8830 (three killed runs
-            # in one PR, two by merge-main). Its findings are also the very
-            # feedback the next round should batch with, so deferring the
-            # WHOLE round until the review lands loses nothing: the watermark
-            # is not advanced on a skip, so the feedback stays visible. This
-            # is deliberately SEPARATE from HAS_PENDING_CHECKS rather than a
-            # NON_BLOCKING_CHECKS revert: that gate ages checks out after
-            # PENDING_STALE_MIN and would also re-block on the review's
-            # conclusion, reintroducing #7416's median-49-minute wait.
-            REVIEW_PR_LIVE="$(jq -r '
-              [ .[]
-                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
-              | length > 0
-            ' <<< "${CHECKS_JSON}")"
-            REVIEW_RUN_STARTED_AT=""
-            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
-              # Delay-window fallback: a review run parked BEFORE its job
-              # starts (the 10-minute environment wait) has no review-pr
-              # check-run yet, but a push now would still cancel it via
-              # synchronize. Only pull_request_target runs are cancelable —
-              # comment/review-triggered runs use per-run concurrency groups
-              # that a synchronize never cancels, so holding the round for
-              # one would defer autofix for nothing (R2-1). The scan fetched
-              # the newest run page once above; match by immutable head SHA or
-              # PR number, never by fork-controlled bare branch name.
-              REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
-                [ .workflow_runs[]?
-                  | select((.workflow_id | tostring) == $wf)
-                  | select((.event // "") == "pull_request_target")
-                  | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
-                  | select(((.head_sha // "") == $head) or any(.pull_requests[]?; (.number | tostring) == $pr))
-                  | (.run_started_at // .created_at // "") ]
-                | map(select(. != "")) | sort | last // ""
-              ' <<< "${REVIEW_RUNS_JSON}")"
-              if [[ -n "${REVIEW_RUN_STARTED_AT}" ]]; then
-                REVIEW_PR_LIVE="true"
-              fi
             fi
             if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
               echo "🔍 #${PR}: review-pr in flight on this head — holding this round so the push cannot cancel it (#8888)"
