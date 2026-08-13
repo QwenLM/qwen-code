@@ -1193,3 +1193,15 @@ export function effectiveMaxDownloadFileBytes(config: Config): number {
 // is how the ACP agent's static closure acquired iconv-lite's 550 KB of
 // encoding tables (scripts/check-serve-fast-path-bundle.js caught it).
 export { reanchorRememberedMedia } from './memory-recall.js';
+
+// Trajectory export (S6): a pure reader over transcript + memory.json,
+// exposed through the omni door for the wrapper script and E2E tests.
+export {
+  exportOmniTrajectory,
+  serializeOmniTrajectory,
+  writeOmniTrajectoryJsonl,
+  type OmniTrajectoryRecord,
+  type OmniTrajectoryTurnRecord,
+  type OmniTrajectoryExecutionRecord,
+  type OmniTrajectoryFileRecord,
+} from './export.js';
