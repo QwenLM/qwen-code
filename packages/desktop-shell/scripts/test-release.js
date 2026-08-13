@@ -85,6 +85,15 @@ async function testBootstrapWorkspaceVisibility() {
       'The reduced-motion startup view must keep the logo and status text on the same horizontal center.',
     );
   }
+  const runtimeSource = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'src', 'runtime.rs'),
+    'utf8',
+  );
+  assert.match(
+    runtimeSource,
+    /let mut child = spawn_runtime_group\(&mut command\)/,
+    'DesktopRuntime::start must spawn the runtime through the hidden-console helper.',
+  );
   const primary = await createBootstrapHarness();
   const { body, commands, element, listeners, resolveBootstrapState } = primary;
 
