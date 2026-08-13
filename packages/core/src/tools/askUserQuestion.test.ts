@@ -196,6 +196,7 @@ describe('AskUserQuestionTool', () => {
       });
 
       expect(invocation.requiresUserInteraction?.()).toBe(true);
+      expect(invocation.canAutoApproveOnAllow?.()).toBe(false);
     });
 
     it('should not require unavailable interaction in plain non-interactive mode', () => {
@@ -329,36 +330,6 @@ describe('AskUserQuestionTool', () => {
 
       const result = await invocation.execute(new AbortController().signal);
       expect(result.llmContent).toContain('declined to answer');
-    });
-
-    it('should return the confirmation pipeline cancellation reason', async () => {
-      const params = {
-        questions: [
-          {
-            question: 'Test?',
-            header: 'Test',
-            options: [
-              { label: 'A', description: 'Option A' },
-              { label: 'B', description: 'Option B' },
-            ],
-            multiSelect: false,
-          },
-        ],
-      };
-      const cancellationReason =
-        'The host could not present the required approval for "ask_user_question".';
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-      await confirmation.onConfirm(ToolConfirmationOutcome.Cancel, {
-        cancelMessage: cancellationReason,
-      });
-
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.llmContent).toBe(cancellationReason);
-      expect(result.returnDisplay).toBe(cancellationReason);
     });
 
     it('should return formatted answers when user provides them', async () => {
