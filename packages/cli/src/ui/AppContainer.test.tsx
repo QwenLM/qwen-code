@@ -527,10 +527,12 @@ describe('AppContainer State Management', () => {
     };
     fileRewindError?: Error;
     noGeminiClient?: boolean;
+    history?: HistoryItem[];
+    contextFilePaths?: string[];
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
-    const history: HistoryItem[] = [
+    const history: HistoryItem[] = options.history ?? [
       rewindUserItem(1, 'first prompt', 'prompt-1'),
       { id: 2, type: 'gemini', text: 'first response' },
       rewindUserItem(3, 'second prompt', 'prompt-2'),
@@ -611,6 +613,12 @@ describe('AppContainer State Management', () => {
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
     } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
+
+    if (options.contextFilePaths) {
+      vi.spyOn(mockConfig, 'getContextFilePaths').mockReturnValue(
+        options.contextFilePaths,
+      );
+    }
 
     render(
       <AppContainer
@@ -5863,6 +5871,72 @@ describe('AppContainer State Management', () => {
         { truncatedCount: 2 },
         harness.snapshots.slice(0, 2),
       );
+    });
+
+    it('re-arms the latch when rewinding past the context-file announcement', async () => {
+      // Announcement sits after the rewind target, so it is filtered out of
+      // truncatedUi; the latch re-arms and the next prompt re-announces the
+      // still-attached files.
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'first prompt', 'prompt-1'),
+        { id: 2, type: 'gemini', text: 'first response' },
+        rewindUserItem(3, 'second prompt', 'prompt-2'),
+        {
+          id: 4,
+          type: MessageType.INFO,
+          text: 'Read context files: QWEN.md',
+        },
+      ];
+      const harness = renderRewindHarness({
+        history,
+        contextFilePaths: ['QWEN.md'],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      capturedUIActions.handleFinalSubmit('again', {
+        submittedPrompt: 'again',
+      });
+      const announcements = harness.addItem.mock.calls.filter(
+        ([item]) =>
+          item.type === MessageType.INFO &&
+          typeof item.text === 'string' &&
+          item.text.startsWith('Read context files:'),
+      );
+      expect(announcements).toHaveLength(1);
+    });
+
+    it('keeps the latch consumed when rewinding to a turn after the announcement', async () => {
+      // Announcement sits before the rewind target, so it survives in
+      // truncatedUi; the latch stays consumed and the next prompt does not
+      // duplicate the announcement.
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'first prompt', 'prompt-1'),
+        {
+          id: 2,
+          type: MessageType.INFO,
+          text: 'Read context files: QWEN.md',
+        },
+        rewindUserItem(3, 'second prompt', 'prompt-2'),
+        { id: 4, type: 'gemini', text: 'second response' },
+      ];
+      const harness = renderRewindHarness({
+        history,
+        contextFilePaths: ['QWEN.md'],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      capturedUIActions.handleFinalSubmit('again', {
+        submittedPrompt: 'again',
+      });
+      const announcements = harness.addItem.mock.calls.filter(
+        ([item]) =>
+          item.type === MessageType.INFO &&
+          typeof item.text === 'string' &&
+          item.text.startsWith('Read context files:'),
+      );
+      expect(announcements).toHaveLength(0);
     });
 
     it('restores code only without truncating conversation history', async () => {

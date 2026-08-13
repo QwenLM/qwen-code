@@ -271,7 +271,17 @@ describe('directoryCommand', () => {
         path.normalize('/home/user/new-project'),
       );
 
-      expect(loadServerHierarchicalMemory).toHaveBeenCalled();
+      // Pin the CWD anchor (getWorkingDir, not process.cwd) and the new
+      // directory so an anchor regression can't slip through green.
+      expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+        '/test/dir',
+        expect.arrayContaining([path.normalize('/home/user/new-project')]),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        'tree',
+        expect.anything(),
+      );
       expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
         'a/QWEN.md',

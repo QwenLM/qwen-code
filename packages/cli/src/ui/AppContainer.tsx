@@ -1984,7 +1984,7 @@ export const AppContainer = (props: AppContainerProps) => {
         conditionalRules,
         projectRoot,
       } = await loadHierarchicalGeminiMemory(
-        process.cwd(),
+        config.getWorkingDir(),
         settings.merged.context?.loadFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()
           : [],

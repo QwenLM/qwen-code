@@ -107,8 +107,8 @@ export const isBtwCommand = (query: string): boolean => {
  * deliberately exempt (they don't advance the main conversation even
  * though they may fork a model call), shell-mode input is intercepted, and
  * local slash commands resolve without a model turn — but model-invocable
- * slash commands (skills, MCP prompts) are expanded into a submit_prompt
- * and routed before the shell-mode intercept, so they consume it even
+ * slash commands (skills) are expanded into a submit_prompt and routed
+ * before the shell-mode intercept, so they consume it even
  * while shell mode is active. This is a prediction, not an admission
  * guarantee; rare post-admission aborts and built-in submit_prompt
  * commands without the modelInvocable flag are out of scope here.
@@ -129,7 +129,9 @@ export function consumesContextAnnouncementLatch(
   if (isSlashCommand(trimmedPrompt)) {
     // Slash commands are routed before the shell-mode intercept, so shell
     // mode does not exclude them; only the model-invocable ones (expanded
-    // into a submit_prompt) reach the model.
+    // into a submit_prompt) reach the model — user-invoked skills with
+    // disableModelInvocation and description-less extension commands also
+    // expand to submit_prompt but are deliberately exempt.
     return (
       parseSlashCommand(trimmedPrompt, options.slashCommands).commandToExecute
         ?.modelInvocable === true
