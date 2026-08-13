@@ -350,13 +350,14 @@ const makeCore = () => {
 };
 
 // The fake Octokit records every mutation and returns canned pages for the
-// three repo-wide listings the sweep paginates over.
-const makeGithub = ({ calls, fail = () => null, pages = {} }) => {
+// three repo-wide listings the sweep paginates over, plus canned `data`
+// replies for the lock-race read-back (issues.get).
+const makeGithub = ({ calls, fail = () => null, pages = {}, replies = {} }) => {
   const record = (name) => async (params) => {
     calls.push({ name, params });
     const error = fail(name, params);
     if (error) throw error;
-    return { data: {} };
+    return { data: replies[name] ?? {} };
   };
   return {
     rest: {
@@ -364,6 +365,7 @@ const makeGithub = ({ calls, fail = () => null, pages = {} }) => {
         deleteComment: record('issues.deleteComment'),
         update: record('issues.update'),
         lock: record('issues.lock'),
+        get: record('issues.get'),
         // github.paginate is handed the endpoint function itself; using the
         // name as a token keeps the fake's dispatch trivial.
         listCommentsForRepo: 'issues.listCommentsForRepo',
@@ -422,7 +424,7 @@ const summaryItems = (core) => core.logs.summaryLists.flat();
 const enforce = async (
   eventName,
   payload,
-  { blocklist = BLOCKLIST, fail } = {},
+  { blocklist = BLOCKLIST, fail, replies } = {},
 ) => {
   const calls = [];
   const core = makeCore();
@@ -430,7 +432,7 @@ const enforce = async (
     eventName,
     payload,
     env: { BLOCKLIST_PATH: blocklist },
-    github: makeGithub({ calls, fail }),
+    github: makeGithub({ calls, fail, replies }),
     core,
   });
   return { calls, core };
@@ -589,7 +591,12 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     // a legitimate contributor's PR — only their comment goes.
     const { calls } = await enforce('pull_request_review_comment', {
       comment: { id: 5, user: { login: 'spamuser' } },
-      pull_request: { number: 60, user: { login: 'legit' }, state: 'open' },
+      pull_request: {
+        number: 60,
+        user: { login: 'legit' },
+        state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
+      },
     });
     assert.deepEqual(names(calls), ['pulls.deleteReviewComment']);
   });
@@ -601,6 +608,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         number: 60,
         user: { login: 'spamuser' },
         state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
@@ -618,6 +626,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         // Mixed-case PR author: pins case-insensitivity on the close path.
         user: { login: 'SpAmUsEr' },
         state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), [
@@ -639,6 +648,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         user: { login: 'spamuser' },
         state: 'closed',
         locked: true,
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), ['pulls.deleteReviewComment']);
@@ -653,6 +663,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         user: { login: 'spamuser' },
         state: 'open',
         locked: true,
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), [
@@ -695,6 +706,24 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.deepEqual(names(calls), ['pulls.deleteReviewComment']);
   });
 
+  it('skips a deleted-fork PR review comment: head.repo is null', async () => {
+    // GitHub represents a deleted fork as head.repo: null. The token is
+    // still the fork-downgraded read-only one, so the guard must fire
+    // exactly as for a live fork instead of red-running on a 403.
+    const { calls, core } = await enforce('pull_request_review_comment', {
+      comment: { id: 5, user: { login: 'spamuser' } },
+      pull_request: {
+        number: 60,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: null },
+      },
+    });
+    assert.deepEqual(names(calls), []);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
+  });
+
   it('minimizes a review body, which has no REST delete', async () => {
     const { calls } = await enforce('pull_request_review', {
       review: { id: 7, node_id: 'PRR_abc', user: { login: 'spamuser' } },
@@ -720,6 +749,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         number: 61,
         user: { login: 'spamuser' },
         state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
@@ -735,6 +765,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         // Mixed-case PR author: pins case-insensitivity on the close path.
         user: { login: 'SpAmUsEr' },
         state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), [
@@ -751,7 +782,12 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     // legitimate author's PR stays open.
     const { calls } = await enforce('pull_request_review', {
       review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
-      pull_request: { number: 61, user: { login: 'legit' }, state: 'open' },
+      pull_request: {
+        number: 61,
+        user: { login: 'legit' },
+        state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
+      },
     });
     assert.deepEqual(names(calls), ['graphql.minimizeComment']);
   });
@@ -767,6 +803,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         user: { login: 'spamuser' },
         state: 'closed',
         locked: true,
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), ['graphql.minimizeComment']);
@@ -781,6 +818,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         user: { login: 'spamuser' },
         state: 'open',
         locked: true,
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
       },
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
@@ -796,6 +834,24 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
         user: { login: 'spamuser' },
         state: 'open',
         head: { repo: { full_name: 'forker/qwen-code' } },
+      },
+    });
+    assert.deepEqual(names(calls), []);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /manual minimization/.test(m)));
+  });
+
+  it('skips a deleted-fork PR review body: head.repo is null', async () => {
+    // The deleted-fork twin: head.repo: null must fire the guard and leave
+    // the manual-minimization notice behind, because no lane can minimize
+    // a review body on a read-only token.
+    const { calls, core } = await enforce('pull_request_review', {
+      review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+      pull_request: {
+        number: 61,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: null },
       },
     });
     assert.deepEqual(names(calls), []);
@@ -847,10 +903,12 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
   });
 
-  it('treats a 422 on issues.lock as already-done', async () => {
+  it('treats a lock 422 as already-done once the thread reads back locked', async () => {
     // issues.lock answers 422 when the thread is already locked — a
-    // concurrent run won the race, and the desired end state is reached.
-    const { core } = await enforce(
+    // concurrent run won the race — but GitHub also answers 422 for
+    // validation and abuse-protection failures, so the lane reads the
+    // lock state back before accepting it.
+    const { calls, core } = await enforce(
       'issue_comment',
       {
         comment: { id: 9, user: { login: 'spamuser' } },
@@ -859,10 +917,153 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       {
         fail: (name) =>
           name === 'issues.lock' ? new HttpError(422, 'Already locked') : null,
+        replies: { 'issues.get': { locked: true } },
       },
     );
     assert.deepEqual(core.logs.failed, []);
-    assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
+    const readback = calls.find((call) => call.name === 'issues.get');
+    assert.equal(readback.params.issue_number, 42);
+  });
+
+  it('fails the run when a lock 422 reads back unlocked', async () => {
+    // The unverified half of the race: an unlocked readback means the 422
+    // was a validation/abuse rejection, not a concurrent lock — the lock
+    // never happened and the run must fail.
+    const { core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'spamuser' } },
+        issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.lock'
+            ? new HttpError(422, 'Validation Failed')
+            : null,
+        replies: { 'issues.get': { locked: false } },
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /lock .*422/);
+  });
+
+  it('fails the run when the lock-race readback itself fails', async () => {
+    // Fail closed: if the lock state cannot be read back, the 422 stays
+    // unverified and counts as the lock failure it may be.
+    const { core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'spamuser' } },
+        issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.lock'
+            ? new HttpError(422, 'Already locked')
+            : name === 'issues.get'
+              ? new HttpError(403, 'rate limited')
+              : null,
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /lock .*422/);
+  });
+
+  it('fails the run when the issue-comment delete 422s', async () => {
+    // A 422 cannot prove the comment is gone — GitHub also uses it for
+    // validation and abuse-protection failures — so the run must fail.
+    const { core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 111, user: { login: 'spamuser' } },
+        issue: { number: 5, user: { login: 'legit' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.deleteComment'
+            ? new HttpError(422, 'Validation Failed')
+            : null,
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /delete issue comment .*422/);
+  });
+
+  it('fails the run when the review-comment delete 422s', async () => {
+    const { core } = await enforce(
+      'pull_request_review_comment',
+      {
+        comment: { id: 5, user: { login: 'spamuser' } },
+        pull_request: {
+          number: 60,
+          user: { login: 'legit' },
+          state: 'open',
+          head: { repo: { full_name: 'QwenLM/qwen-code' } },
+        },
+      },
+      {
+        fail: (name) =>
+          name === 'pulls.deleteReviewComment'
+            ? new HttpError(422, 'Validation Failed')
+            : null,
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /delete review comment .*422/);
+  });
+
+  it('fails the run when the issue close 422s', async () => {
+    const { core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'legit' } },
+        issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.update'
+            ? new HttpError(422, 'Validation Failed')
+            : null,
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /close issue #42: 422/);
+  });
+
+  it('fails the run when the PR close 422s', async () => {
+    const { core } = await enforce(
+      'pull_request_target',
+      {
+        pull_request: { number: 101, user: { login: 'spamuser' } },
+      },
+      {
+        fail: (name) =>
+          name === 'pulls.update'
+            ? new HttpError(422, 'Validation Failed')
+            : null,
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /close pull request #101: 422/);
+  });
+
+  it('fails the run when the review-body minimize 422s', async () => {
+    // A review body has no sweep backstop: a failed minimize must red-run
+    // so the run failure itself flags the need for manual cleanup.
+    const { core } = await enforce(
+      'pull_request_review',
+      {
+        review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+      },
+      {
+        fail: (name) =>
+          name === 'graphql.minimizeComment'
+            ? new HttpError(422, 'Validation Failed')
+            : null,
+      },
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /minimize review 7: 422/);
   });
 
   it('keeps closing the thread after a delete 404s', async () => {
@@ -1042,7 +1243,12 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     // let a blocklisted author's PR escape the close.
     const { calls } = await enforce('pull_request_review', {
       review: { id: 1, node_id: 'PRR_ghost', user: null },
-      pull_request: { number: 2, user: { login: 'spamuser' }, state: 'open' },
+      pull_request: {
+        number: 2,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
+      },
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
     assert.equal(calls[0].params.pull_number, 2);
@@ -1056,6 +1262,7 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
     reviewComments = [],
     threads = [],
     fail,
+    replies,
     blocklist = BLOCKLIST,
     lookbackHours,
   } = {}) => {
@@ -1068,6 +1275,7 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
       github: makeGithub({
         calls,
         fail,
+        replies,
         pages: {
           'issues.listCommentsForRepo': issueComments,
           'pulls.listReviewCommentsForRepo': reviewComments,
@@ -1245,16 +1453,45 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
     assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
   });
 
-  it('treats a sweep 422 on lock as already-done', async () => {
+  it('treats a sweep lock 422 as already-done once it reads back locked', async () => {
     // A concurrent run locking the thread between listForRepo and
-    // issues.lock must not read as a sweep failure.
-    const { core } = await sweep({
+    // issues.lock must not read as a sweep failure — but the lock state
+    // is read back first, because 422 also signals validation failures.
+    const { calls, core } = await sweep({
       threads: [{ number: 11, user: { login: 'spamuser' }, state: 'open' }],
       fail: (name) =>
         name === 'issues.lock' ? new HttpError(422, 'Already locked') : null,
+      replies: { 'issues.get': { locked: true } },
     });
     assert.deepEqual(core.logs.failed, []);
-    assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
+    const readback = calls.find((call) => call.name === 'issues.get');
+    assert.equal(readback.params.issue_number, 11);
+  });
+
+  it('fails the sweep when a lock 422 reads back unlocked', async () => {
+    const { core } = await sweep({
+      threads: [{ number: 11, user: { login: 'spamuser' }, state: 'open' }],
+      fail: (name) =>
+        name === 'issues.lock' ? new HttpError(422, 'Validation Failed') : null,
+      replies: { 'issues.get': { locked: false } },
+    });
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /lock .*422/);
+  });
+
+  it('fails the sweep when a delete 422s', async () => {
+    // The sweep twin of the enforce pin: a 422 cannot prove the comment
+    // is gone, so it must red-flag the run instead of logging it as
+    // already gone.
+    const { core } = await sweep({
+      issueComments: [{ id: 2, user: { login: 'spamuser' } }],
+      fail: (name) =>
+        name === 'issues.deleteComment'
+          ? new HttpError(422, 'Validation Failed')
+          : null,
+    });
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /delete issue comment .*422/);
   });
 
   it('still locks a sweep thread when the close fails mid-sequence', async () => {
@@ -1303,6 +1540,33 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
         summaryItems(core).some((item) => item.startsWith('FAILED — ')),
       );
     });
+  }
+
+  // Neither a 404 nor a 422 can prove there was nothing to scan: any
+  // non-success listing response fails the run — silently scanning zero
+  // items is exactly how blocklisted content stays visible.
+  for (const listing of [
+    'paginate:issues.listCommentsForRepo',
+    'paginate:pulls.listReviewCommentsForRepo',
+    'paginate:issues.listForRepo',
+  ]) {
+    for (const status of [404, 422]) {
+      it(`fails the run when ${listing.replace('paginate:', '')} answers ${status}`, async () => {
+        const { calls, core } = await sweep({
+          issueComments: [{ id: 2, user: { login: 'spamuser' } }],
+          fail: (name) =>
+            name === listing ? new HttpError(status, 'listing failed') : null,
+        });
+        assert.equal(core.logs.failed.length, 1);
+        assert.match(core.logs.failed[0], new RegExp(String(status)));
+        // The remaining listings still run: one failed listing must not
+        // abort the sweep before the other two scans.
+        const paginated = calls.filter((call) =>
+          call.name.startsWith('paginate:'),
+        );
+        assert.equal(paginated.length, 3);
+      });
+    }
   }
 
   it('survives deleted accounts across all three listings', async () => {

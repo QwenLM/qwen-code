@@ -152,22 +152,41 @@ jobs:
             const actions = [];
             const failures = [];
 
-            const run = async (label, fn) => {
+            // Tolerated statuses are per-operation. A 404 proves the target
+            // is already gone — the desired end state for the delete and
+            // close calls below. A 422 proves nothing — GitHub also uses it
+            // for validation and abuse-protection failures — so only the
+            // lock call tolerates one, and only after the lock state reads
+            // back locked.
+            const run = async (label, fn, tolerated = [404]) => {
               try {
                 await fn();
                 actions.push(label);
                 core.info(`ok: ${label}`);
               } catch (error) {
-                // 404 means someone (a maintainer, the spammer, a concurrent
-                // run of this workflow) already removed it; 422 is what
-                // issues.lock returns when a concurrent run already locked
-                // the thread. Both are the desired end state, not a failure.
-                if (error?.status === 404 || error?.status === 422) {
+                if (tolerated.includes(error?.status)) {
                   core.info(`already gone: ${label}`);
                   return;
                 }
                 failures.push(`${label}: ${error?.status ?? ''} ${error?.message ?? error}`);
                 core.warning(`failed: ${label} — ${error?.message ?? error}`);
+              }
+            };
+
+            // issues.lock answers 422 both for a thread a concurrent run
+            // already locked and for validation/abuse failures. Reading the
+            // lock state back tells the two apart; an unreadable thread
+            // fails closed.
+            const isLocked = async (number) => {
+              try {
+                const { data } = await github.rest.issues.get({
+                  owner,
+                  repo,
+                  issue_number: number,
+                });
+                return data?.locked === true;
+              } catch {
+                return false;
               }
             };
 
@@ -198,14 +217,22 @@ jobs:
                       }),
                 );
               }
-              await run(`lock ${kind} #${number}`, () =>
-                github.rest.issues.lock({
-                  owner,
-                  repo,
-                  issue_number: number,
-                  lock_reason: 'spam',
-                }),
-              );
+              await run(`lock ${kind} #${number}`, async () => {
+                try {
+                  await github.rest.issues.lock({
+                    owner,
+                    repo,
+                    issue_number: number,
+                    lock_reason: 'spam',
+                  });
+                } catch (error) {
+                  // A 422 lock race counts only when the thread reads back
+                  // locked; any other 422 rethrows and fails the run.
+                  const lockRace =
+                    error?.status === 422 && (await isLocked(number));
+                  if (!lockRace) throw error;
+                }
+              });
             };
 
             if (eventName === 'issue_comment') {
@@ -240,10 +267,13 @@ jobs:
               // every write below would 403 and red-run the lane. Defer to
               // the lanes holding a write token: pull_request_target closes
               // fork PRs at open time, the hourly sweep deletes comments and
-              // repairs thread state.
+              // repairs thread state. A deleted fork arrives as
+              // head.repo: null with the same read-only downgrade, so a
+              // missing head repo counts as a fork.
               if (
-                pull?.head?.repo?.full_name &&
-                pull.head.repo.full_name !== `${owner}/${repo}` &&
+                pull &&
+                (!pull.head?.repo ||
+                  pull.head.repo.full_name !== `${owner}/${repo}`) &&
                 (isBlocked(comment?.user?.login) ||
                   isBlocked(pull.user?.login))
               ) {
@@ -277,9 +307,12 @@ jobs:
               // Same read-only downgrade as the review-comment lane — except
               // a review BODY has no sweep backstop, so the notice is all the
               // automation leaves behind: the body needs manual minimization.
+              // A deleted fork arrives as head.repo: null and guards the
+              // same way as a live one.
               if (
-                pull?.head?.repo?.full_name &&
-                pull.head.repo.full_name !== `${owner}/${repo}` &&
+                pull &&
+                (!pull.head?.repo ||
+                  pull.head.repo.full_name !== `${owner}/${repo}`) &&
                 (isBlocked(review?.user?.login) ||
                   isBlocked(pull.user?.login))
               ) {
@@ -290,7 +323,10 @@ jobs:
               }
               if (isBlocked(review?.user?.login)) {
                 // No REST delete for a review body; SPAM-classify it instead.
-                await run(`minimize review ${review.id}`, () =>
+                // The minimize tolerates no status: a failed minimize leaves
+                // the body visible with no sweep backstop, so it must
+                // red-run.
+                const minimize = () =>
                   github.graphql(
                     `mutation MinimizeComment($id: ID!) {
                       minimizeComment(input: {subjectId: $id, classifier: SPAM}) {
@@ -298,8 +334,8 @@ jobs:
                       }
                     }`,
                     { id: review.node_id },
-                  ),
-                );
+                  );
+                await run(`minimize review ${review.id}`, minimize, []);
               }
               if (
                 pull &&
@@ -316,11 +352,11 @@ jobs:
             }
 
             // Both empty means either no blocklisted author was involved or
-            // every needed action was already done (a 404/422 tolerated
-            // above). Checking `failures` too matters: when the single action
-            // attempted is the one that failed, `actions` is still empty, and
-            // returning here would skip the setFailed below and report the
-            // run green.
+            // every needed action was already done (a tolerated status
+            // above). Checking `failures` too matters: when the single
+            // action attempted is the one that failed, `actions` is still
+            // empty, and returning here would skip the setFailed below and
+            // report the run green.
             if (actions.length === 0 && failures.length === 0) {
               core.info('No actions taken; any needed work was already done.');
               return;
@@ -392,22 +428,43 @@ jobs:
 
             const actions = [];
             const failures = [];
-            const run = async (label, fn) => {
+            // Tolerated statuses are per-operation. A 404 proves the target
+            // is already gone — the desired end state for the delete, close,
+            // and lock calls below. A 422 proves nothing — GitHub also uses
+            // it for validation and abuse-protection failures — so only the
+            // lock call tolerates one, and only after the lock state reads
+            // back locked. The listings pass [] and fail on every status.
+            const run = async (label, fn, tolerated = [404]) => {
               try {
                 const result = await fn();
                 actions.push(label);
                 core.info(`ok: ${label}`);
                 return result;
               } catch (error) {
-                // 404 = already removed; 422 = issues.lock on a thread a
-                // concurrent run already locked. Desired end state both ways.
-                if (error?.status === 404 || error?.status === 422) {
+                if (tolerated.includes(error?.status)) {
                   core.info(`already gone: ${label}`);
                   return undefined;
                 }
                 failures.push(`${label}: ${error?.status ?? ''} ${error?.message ?? error}`);
                 core.warning(`failed: ${label} — ${error?.message ?? error}`);
                 return undefined;
+              }
+            };
+
+            // issues.lock answers 422 both for a thread a concurrent run
+            // already locked and for validation/abuse failures. Reading the
+            // lock state back tells the two apart; an unreadable thread
+            // fails closed.
+            const isLocked = async (number) => {
+              try {
+                const { data } = await github.rest.issues.get({
+                  owner,
+                  repo,
+                  issue_number: number,
+                });
+                return data?.locked === true;
+              } catch {
+                return false;
               }
             };
 
@@ -419,15 +476,21 @@ jobs:
             // inline review comment. Routed through run() so a failed listing
             // (a rate-limit 403 is realistic — the token's limit is shared
             // with every enforce run of the same hour) collects as a failure
-            // and the rest of the sweep still executes.
+            // and the rest of the sweep still executes. A listing tolerates
+            // no status: neither a 404 nor a 422 can prove there was nothing
+            // to scan, so any non-success response fails the run instead of
+            // silently scanning zero items.
             const issueComments =
-              (await run('list issue comments', () =>
-                github.paginate(github.rest.issues.listCommentsForRepo, {
-                  owner,
-                  repo,
-                  since,
-                  per_page: 100,
-                }),
+              (await run(
+                'list issue comments',
+                () =>
+                  github.paginate(github.rest.issues.listCommentsForRepo, {
+                    owner,
+                    repo,
+                    since,
+                    per_page: 100,
+                  }),
+                [],
               )) ?? [];
             for (const comment of issueComments) {
               if (!isBlocked(comment.user?.login)) continue;
@@ -441,13 +504,16 @@ jobs:
             }
 
             const reviewComments =
-              (await run('list review comments', () =>
-                github.paginate(github.rest.pulls.listReviewCommentsForRepo, {
-                  owner,
-                  repo,
-                  since,
-                  per_page: 100,
-                }),
+              (await run(
+                'list review comments',
+                () =>
+                  github.paginate(github.rest.pulls.listReviewCommentsForRepo, {
+                    owner,
+                    repo,
+                    since,
+                    per_page: 100,
+                  }),
+                [],
               )) ?? [];
             for (const comment of reviewComments) {
               if (!isBlocked(comment.user?.login)) continue;
@@ -470,16 +536,19 @@ jobs:
             // reopening their own locked thread). `locked` therefore guards
             // only the lock call; everything still open gets closed.
             const threads =
-              (await run('list threads', () =>
-                github.paginate(github.rest.issues.listForRepo, {
-                  owner,
-                  repo,
-                  state: 'all',
-                  since,
-                  sort: 'updated',
-                  direction: 'desc',
-                  per_page: 100,
-                }),
+              (await run(
+                'list threads',
+                () =>
+                  github.paginate(github.rest.issues.listForRepo, {
+                    owner,
+                    repo,
+                    state: 'all',
+                    since,
+                    sort: 'updated',
+                    direction: 'desc',
+                    per_page: 100,
+                  }),
+                [],
               )) ?? [];
             for (const thread of threads) {
               if (!isBlocked(thread.user?.login)) continue;
@@ -504,14 +573,24 @@ jobs:
                 );
               }
               if (!thread.locked) {
-                await run(`lock ${kind} #${thread.number}`, () =>
-                  github.rest.issues.lock({
-                    owner,
-                    repo,
-                    issue_number: thread.number,
-                    lock_reason: 'spam',
-                  }),
-                );
+                await run(`lock ${kind} #${thread.number}`, async () => {
+                  try {
+                    await github.rest.issues.lock({
+                      owner,
+                      repo,
+                      issue_number: thread.number,
+                      lock_reason: 'spam',
+                    });
+                  } catch (error) {
+                    // A 422 lock race counts only when the thread reads
+                    // back locked; any other 422 rethrows and fails the
+                    // run.
+                    const lockRace =
+                      error?.status === 422 &&
+                      (await isLocked(thread.number));
+                    if (!lockRace) throw error;
+                  }
+                });
               }
             }
 
