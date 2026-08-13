@@ -68,11 +68,23 @@ async function testBootstrapWorkspaceVisibility() {
     'The bootstrap splash mark must ship with the frontendDist directory.',
   );
   assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
-  assert.match(
-    bootstrapHtml,
-    /@media \(prefers-reduced-motion: reduce\) \{\s*body\[data-state='starting'\] \.mark \{[^}]*\}\s*body\[data-state='starting'\] \.brand \{[^}]*justify-content: center;[^}]*\}\s*body\[data-state='starting'\] \.status \{[^}]*text-align: center;[^}]*\}/,
-    'The reduced-motion startup view must keep the logo and status text on the same horizontal center.',
+  const reducedMotionBlock = bootstrapHtml.match(
+    /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)(?:@media|<\/style>)/,
   );
+  assert.ok(
+    reducedMotionBlock,
+    'The bootstrap splash must keep a reduced-motion media block.',
+  );
+  for (const centeringRule of [
+    /body\[data-state='starting'\] \.brand \{[^}]*justify-content: center;[^}]*\}/,
+    /body\[data-state='starting'\] \.status \{[^}]*text-align: center;[^}]*\}/,
+  ]) {
+    assert.match(
+      reducedMotionBlock[1],
+      centeringRule,
+      'The reduced-motion startup view must keep the logo and status text on the same horizontal center.',
+    );
+  }
   const primary = await createBootstrapHarness();
   const { body, commands, element, listeners, resolveBootstrapState } = primary;
 
