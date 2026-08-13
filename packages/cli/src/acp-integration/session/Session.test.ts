@@ -592,7 +592,6 @@ describe('Session', () => {
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
       reconcileLoadedSkillTracking: vi.fn(),
-      reconcileLoadedSkillTracking: vi.fn(),
       setTools: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
