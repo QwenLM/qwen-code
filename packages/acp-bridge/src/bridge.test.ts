@@ -5077,7 +5077,17 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('selects summary live replay without changing the default full replay', async () => {
-    const handle = makeChannel();
+    const handle = makeChannel({
+      // Fail the transcript page fetch deterministically so the summary
+      // projection below rides the in-memory replay fallback no matter how
+      // the fake's default ext-method response shape evolves.
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error('transcript unavailable');
+        }
+        return {};
+      },
+    });
     const bridge = makeBridge({
       channelFactory: async () => handle.channel,
       maxJournalEvents: 2,
@@ -7010,7 +7020,10 @@ describe('createAcpSessionBridge', () => {
   it('rejects a full load joining an in-flight summary restore', async () => {
     const load = deferred<LoadSessionResponse>();
     const handle = makeChannel({ loadSessionImpl: () => load.promise });
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
 
     const first = bridge.loadSession({
       sessionId: 'coalesce-live-replay-mode-full-after-summary',
@@ -7020,6 +7033,33 @@ describe('createAcpSessionBridge', () => {
     });
     await vi.waitFor(() => {
       expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+
+    // Flood the in-flight restore past the two-entry cap so the owner's
+    // response exercises the summary projection on the fresh-restore path.
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'coalesce-live-replay-mode-full-after-summary',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'root-before' },
+      },
+    });
+    for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: 'coalesce-live-replay-mode-full-after-summary',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+          _meta: { parentToolCallId: 'agent-1' },
+        },
+      });
+    }
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'coalesce-live-replay-mode-full-after-summary',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'root-after' },
+      },
     });
 
     // A full request cannot share the in-flight summary restore — the
@@ -7035,7 +7075,209 @@ describe('createAcpSessionBridge', () => {
     ).rejects.toBeInstanceOf(RestoreInProgressError);
 
     load.resolve({});
-    await first;
+    const owner = await first;
+    // The owner's fresh-restore replay fields are projected for its own
+    // summary mode: root frames retained, nested frames excluded, and no
+    // truncation marker inherited from the full journal.
+    expect(owner.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(owner.liveJournal).not.toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            _meta: { parentToolCallId: 'agent-1' },
+          }),
+        }),
+      }),
+    );
+    const ownerJournal = JSON.stringify(owner.liveJournal);
+    expect(ownerJournal).toContain('root-before');
+    expect(ownerJournal).toContain('root-after');
+    expect(ownerJournal).not.toContain('nested-');
+    await bridge.shutdown();
+  });
+
+  it('coalesces a summary load onto an in-flight summary restore', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-summary-onto-summary',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      liveReplayMode: 'summary',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+
+    // Flood the in-flight restore past the two-entry cap so both responses
+    // carry a real summary projection to assert on.
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'coalesce-summary-onto-summary',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'root-before' },
+      },
+    });
+    for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: 'coalesce-summary-onto-summary',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+          _meta: { parentToolCallId: 'agent-1' },
+        },
+      });
+    }
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'coalesce-summary-onto-summary',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'root-after' },
+      },
+    });
+
+    // Same-mode coalescing: a second summary client shares the in-flight
+    // summary restore instead of failing with RestoreInProgressError.
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-summary-onto-summary',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      liveReplayMode: 'summary',
+    });
+
+    load.resolve({});
+    const [r1, r2] = await Promise.all([first, second]);
+    expect(r1.attached).toBe(false);
+    expect(r2.attached).toBe(true);
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+
+    // Both responses carry the owner's marker-free summary projection.
+    for (const restored of [r1, r2]) {
+      expect(restored.liveJournal).not.toContainEqual(
+        expect.objectContaining({ type: 'history_truncated' }),
+      );
+      expect(restored.liveJournal).not.toContainEqual(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            update: expect.objectContaining({
+              _meta: { parentToolCallId: 'agent-1' },
+            }),
+          }),
+        }),
+      );
+      const journal = JSON.stringify(restored.liveJournal);
+      expect(journal).toContain('root-before');
+      expect(journal).toContain('root-after');
+      expect(journal).not.toContain('nested-');
+    }
+    await bridge.shutdown();
+  });
+
+  it('re-projects a history-paged coalesced waiter from its own replay mode', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => load.promise,
+      // Fail the transcript page fetch deterministically so the waiter's
+      // recomputation falls back to the in-memory replay — the branch this
+      // test fences — instead of depending on the fake's default response.
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error('transcript unavailable');
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-waiter-history-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'full',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+
+    // Flood the in-flight restore past the two-entry cap so the two modes'
+    // projections observably differ.
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'coalesce-waiter-history-page',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'root-before' },
+      },
+    });
+    for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+      await handle.agentConnection.sessionUpdate({
+        sessionId: 'coalesce-waiter-history-page',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text },
+          _meta: { parentToolCallId: 'agent-1' },
+        },
+      });
+    }
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'coalesce-waiter-history-page',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'root-after' },
+      },
+    });
+
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-waiter-history-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'summary',
+    });
+
+    load.resolve({});
+    const [r1, r2] = await Promise.all([first, second]);
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+
+    // The owner keeps its full-mode replay, truncation marker included.
+    expect(r1.liveJournal).toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+
+    // The waiter requested a history page, so its recompute takes the
+    // refreshedReplayFieldsFor arm; the settle fallback must project with
+    // the WAITER's mode, not the owner's.
+    expect(
+      handle.agent.extMethodCalls.some(
+        (call) => call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      ),
+    ).toBe(true);
+    expect(r2.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(r2.liveJournal).not.toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            _meta: { parentToolCallId: 'agent-1' },
+          }),
+        }),
+      }),
+    );
+    const waiterJournal = JSON.stringify(r2.liveJournal);
+    expect(waiterJournal).toContain('root-before');
+    expect(waiterJournal).toContain('root-after');
+    expect(waiterJournal).not.toContain('nested-');
     await bridge.shutdown();
   });
 

@@ -1153,6 +1153,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(summary.lastEventId).toBe(101);
 
       engine.ingest(makeTurnComplete(102));
+      expect(engine.snapshot('summary').liveJournal).toEqual([]);
       expect(extractTexts(engine.snapshot().compactedTurns).join('')).toBe(
         Array.from({ length: 99 }, (_, index) => `nested-${index + 2}`).join(
           '',
@@ -2008,6 +2009,51 @@ describe('TurnBoundaryCompactionEngine', () => {
         maxEvents: 8,
         maxBytes: 32 * 1024 * 1024,
       });
+    });
+
+    it('accepts growth from the summary journal once it breaches alone', () => {
+      // Nested frames pressure only the full journal, so an early refusal
+      // evicts a root frame from the full journal while the summary journal
+      // retains it. The journals then diverge, and a later root append that
+      // breaches the summary journal must compute its growth decision from
+      // the summary journal's own tail — not the full journal's.
+      let clockMs = 1_000_000;
+      const asks: Array<{ maxEvents: number; maxBytes: number }> = [];
+      const grants: Array<{ maxEvents: number; maxBytes: number } | undefined> =
+        [
+          undefined, // first breach (full journal): refuse
+          { maxEvents: 100, maxBytes: 120 }, // second breach (full): accept
+          { maxEvents: 100, maxBytes: 140 }, // third breach (summary): accept
+        ];
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 100,
+        maxJournalBytes: 100,
+        now: () => clockMs,
+        onJournalGrowth: (current) => {
+          asks.push({ ...current });
+          return grants.shift();
+        },
+      });
+      engine.ingest(makeUserMessage(1, 'root-1'), 70);
+      engine.ingest(makeTextChunkWithParent(2, 'nested', 'agent-1'), 60);
+      // Past the refusal throttle: the new breach gets a fresh ask.
+      clockMs += 10_000;
+      engine.ingest(makeUserMessage(3, 'root-2'), 60);
+
+      // The third ask reports the caps grown by the full journal's grant,
+      // proving the summary breach was consulted separately after it.
+      expect(asks).toEqual([
+        { maxEvents: 100, maxBytes: 100 },
+        { maxEvents: 100, maxBytes: 100 },
+        { maxEvents: 100, maxBytes: 120 },
+      ]);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 100,
+        maxBytes: 140,
+      });
+      const summary = engine.snapshot('summary');
+      expect(markerOf(summary)).toBeUndefined();
+      expect(summary.liveJournal.map((event) => event.id)).toEqual([1, 3]);
     });
   });
 

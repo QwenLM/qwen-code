@@ -2799,6 +2799,26 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({});
     });
 
+    it('omits load-only replay fields from the resume wire body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/w',
+          attached: false,
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.resumeSession('s-1', {
+        workspaceCwd: '/w',
+        historyPageSize: 100,
+        liveReplayMode: 'summary',
+      });
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/resume');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/w' });
+    });
+
     it('throws DaemonHttpError on restore failures', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(404, { error: 'missing' }),
