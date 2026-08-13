@@ -57,6 +57,7 @@ import {
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import {
   appendRunSession,
+  priorSessionIds,
   readResumeMarker,
   recordResume,
   recordRestart,
@@ -257,12 +258,18 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     liveHeadSha = null;
   }
   const marker = readResumeMarker(out);
+  // The cap reads BOTH counters: the marker is the primary record, and the
+  // session ledger cross-caps it — a deleted marker must not read as an
+  // unspent cap while the ledger still names every session that ran. The
+  // ledger's first entry is the original run's own session, not a resume.
+  const ledgerResumes = Math.max(0, priorSessionIds(out).length - 1);
   const ruling = assessResume(prev, {
     prNumber,
     worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     liveHeadSha,
-    resumeCount: marker.resumes.length,
+    resumeCount: Math.max(marker.resumes.length, ledgerResumes),
+    requestedEffort: args.effort ?? null,
   });
   if (!ruling.ok) {
     return {
@@ -286,13 +293,30 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   appendRunSession(out);
   recordResume(out);
   const attempt = marker.resumes.length + 1;
+  // `restartsSpent` is the resume marker's ONE consumer beyond idempotency:
+  // the resumed session initialises Step 7's once-per-review restart bound
+  // from it — without a reader here, the recorded restart would silently
+  // reset on every resume. `effort` names the level the continuation is
+  // pinned to (the plan's, deliberately untouched), so a continuation never
+  // silently runs at a level the caller did not expect.
+  const pinnedEffort =
+    prev !== null && typeof prev.effort === 'string' && prev.effort !== ''
+      ? prev.effort
+      : 'high';
   writeStdoutLine(
-    JSON.stringify({ resumed: true, resumeAttempt: attempt, out }),
+    JSON.stringify({
+      resumed: true,
+      resumeAttempt: attempt,
+      restartsSpent: marker.restarts.length,
+      effort: pinnedEffort,
+      out,
+    }),
   );
   writeStderrLine(
     `Resumed PR #${prNumber} review (resume ${attempt} of ${RESUME_MAX}): ` +
       `worktree, plan and the interrupted attempt's agent evidence are reused; ` +
-      `the report at ${out} is unchanged.`,
+      `the report at ${out} is unchanged, and the run continues at its ` +
+      `recorded effort (${pinnedEffort}).`,
   );
   return { resumed: true };
 }

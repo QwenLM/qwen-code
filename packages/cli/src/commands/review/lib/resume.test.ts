@@ -28,6 +28,7 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   diffSha256OnDisk: DIFF_SHA,
   liveHeadSha: SHA,
   resumeCount: 0,
+  requestedEffort: null,
   ...over,
 });
 
@@ -54,6 +55,41 @@ describe('assessResume', () => {
     expect(assessResume({ ...prev(), prNumber: '999' }, probes())).toEqual({
       ok: false,
       reason: 'pr-mismatch',
+    });
+  });
+
+  it('refuses with effort-mismatch when an explicit effort differs', () => {
+    // A different effort is a request for different work; the fresh
+    // fall-through honors it instead of silently pinning the old level.
+    expect(
+      assessResume(
+        { ...prev(), effort: 'medium' },
+        probes({ requestedEffort: 'high' }),
+      ),
+    ).toEqual({ ok: false, reason: 'effort-mismatch' });
+  });
+
+  it('resumes when the explicit effort matches the recorded one', () => {
+    expect(
+      assessResume(
+        { ...prev(), effort: 'medium' },
+        probes({ requestedEffort: 'medium' }),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it('reads a plan with no recorded effort as the default high', () => {
+    expect(assessResume(prev(), probes({ requestedEffort: 'high' }))).toEqual({
+      ok: true,
+    });
+    expect(assessResume(prev(), probes({ requestedEffort: 'medium' }))).toEqual(
+      { ok: false, reason: 'effort-mismatch' },
+    );
+  });
+
+  it('never refuses on effort when none was passed', () => {
+    expect(assessResume({ ...prev(), effort: 'medium' }, probes())).toEqual({
+      ok: true,
     });
   });
 
