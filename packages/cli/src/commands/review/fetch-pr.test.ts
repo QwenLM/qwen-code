@@ -276,6 +276,13 @@ vi.mock('./lib/merge-base.js', () => ({
   resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
 }));
 
+// The ledger append is the wiring under test here, not the ledger itself
+// (run-ledger.test.ts owns that): a silently unwritten ledger would make a
+// later --resume find no prior sessions and re-run everything.
+vi.mock('./lib/run-ledger.js', () => ({
+  appendRunSession: vi.fn(),
+}));
+
 describe('fetch-pr report assembly', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -694,5 +701,58 @@ describe('fetch-pr diff identity (diffSha256)', () => {
     });
     const report = await reportFor();
     expect(report.diffSha256).toBeNull();
+  });
+});
+
+describe('fetch-pr run-session ledger wiring', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+  });
+
+  it('appends the session against the plan it just wrote, after the write', async () => {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: '/tmp/fetch-report.json',
+      maxChunkLines: 400,
+    } as unknown as Parameters<typeof handler>[0]);
+
+    const { appendRunSession } = await import('./lib/run-ledger.js');
+    expect(vi.mocked(appendRunSession)).toHaveBeenCalledWith(
+      '/tmp/fetch-report.json',
+    );
+    // After the plan write: the entry must sit inside the run-epoch fence the
+    // readers apply, which is keyed on the plan's mtime.
+    const appendOrder = vi.mocked(appendRunSession).mock.invocationCallOrder[0];
+    const writeOrder = producerMocks.writeFileSync.mock.invocationCallOrder.at(
+      producerMocks.writeFileSync.mock.calls.findIndex(
+        ([path]) => path === '/tmp/fetch-report.json',
+      ),
+    );
+    expect(writeOrder).toBeDefined();
+    expect(appendOrder).toBeGreaterThan(writeOrder as number);
   });
 });

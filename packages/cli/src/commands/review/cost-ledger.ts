@@ -66,7 +66,12 @@ interface StreamCost {
 
 interface Ledger {
   totals: Omit<StreamCost, 'id' | 'label'> & { wallSeconds: number };
-  main: StreamCost | null;
+  /**
+   * Never null: `computeLedger` throws before folding when the current
+   * session's chat holds no above-floor record, so a ledger that exists
+   * always carries its main loop.
+   */
+  main: StreamCost;
   agents: StreamCost[];
   /**
    * How many EARLIER sessions of this run (a resumed review) contributed
@@ -465,13 +470,11 @@ export function renderLedger(ledger: Ledger): string {
       `${human(t.outputTokens)} output (${human(t.thoughtsTokens)} thinking) · ` +
       `${Math.round(t.wallSeconds / 60)} min wall`,
   );
-  if (ledger.main !== null) {
-    const m = ledger.main;
-    lines.push(
-      `  main loop: ${plural(m.calls, 'call')} · ${human(m.inputTokens)} in · ` +
-        `${human(m.outputTokens)} out`,
-    );
-  }
+  const m = ledger.main;
+  lines.push(
+    `  main loop: ${plural(m.calls, 'call')} · ${human(m.inputTokens)} in · ` +
+      `${human(m.outputTokens)} out`,
+  );
   if (ledger.priorSessions > 0) {
     lines.push(
       `  resumed run: totals include ${plural(ledger.priorSessions, 'earlier session')} of this review`,

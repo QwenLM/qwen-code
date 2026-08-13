@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -159,5 +165,143 @@ describe('layerAuditGate', () => {
       layerAuditGate(join(dir, 'nope.json'), env, reader(returns('lexing')))
         .unreviewed,
     ).toEqual([]);
+  });
+});
+
+describe('the real reader on a resumed run — prior-session auditors count', () => {
+  // Every other suite injects readReturns; these exercise the DEFAULT reader
+  // against real transcript files, because this caller filters on the
+  // reverse-audit identity line and corroborates with territory reads — a
+  // path the shared readRunTranscripts tests cannot cover.
+  let dir: string;
+  let plan: string;
+  let diff: string;
+
+  const LAYERS = [
+    'lexing',
+    'expansion',
+    'scope-propagation',
+    'resolution-order',
+    'inheritance',
+    'toctou',
+  ];
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'layer-gate-resume-'));
+    plan = join(dir, 'plan.json');
+    diff = join(dir, 'diff.txt');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        repositoryContext: context([MODELED_SYSTEM_DOMAIN]),
+        diffPathAbsolute: diff,
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    mkdirSync(join(dir, 'plan-prompts'), { recursive: true });
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const ENV = (): NodeJS.ProcessEnv => ({
+    QWEN_CODE_PROJECT_DIR: dir,
+    QWEN_CODE_SESSION_ID: 'S1',
+  });
+
+  function ledger(...ids: string[]): void {
+    writeFileSync(
+      join(dir, 'plan-prompts', 'run-sessions.json'),
+      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    );
+  }
+
+  /** A corroborated reverse auditor in `session`: identity line, a baked
+   *  territory read it actually performed, and receipts for `covered`. */
+  function auditorTranscript(session: string, covered: string[]): void {
+    const launch =
+      'You are review agent `reverse-audit` — hunt the gaps.\n' +
+      `read_file(file_path="${diff}", offset=0, limit=100)`;
+    const base = { agentId: `ra-${session}`, agentName: 'general-purpose' };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: launch }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: diff, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'diff bytes' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              text: covered
+                .map((id) => `Layer walked: ${id} — examined.`)
+                .join('\n'),
+            },
+          ],
+        },
+      }),
+    ];
+    writeFileSync(
+      join(dir, 'subagents', session, `agent-ra-${session}.jsonl`),
+      lines.join('\n') + '\n',
+    );
+  }
+
+  it("credits the interrupted attempt's walked layers through the ledger", () => {
+    ledger('S0', 'S1');
+    auditorTranscript('S0', LAYERS);
+    expect(layerAuditGate(plan, ENV()).unreviewed).toEqual([]);
+  });
+
+  it('still owes the layers the prior auditor did not walk', () => {
+    ledger('S0', 'S1');
+    auditorTranscript('S0', ['lexing', 'expansion']);
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(4);
+    expect(out.some((e) => e.includes('scope-propagation'))).toBe(true);
+    expect(out.some((e) => e.includes('lexing'))).toBe(false);
+  });
+
+  it('sees nothing from a prior session the ledger never recorded', () => {
+    // A PARTIAL walk is the discriminating shape: were the un-ledgered
+    // transcript visible, one identity-matched auditor covering two layers
+    // would owe the other four; invisible, identityMatched is 0 and the
+    // reverse-audit-ran floor owns it — the gate defers entirely.
+    auditorTranscript('S0', ['lexing', 'expansion']);
+    expect(layerAuditGate(plan, ENV()).unreviewed).toEqual([]);
   });
 });
