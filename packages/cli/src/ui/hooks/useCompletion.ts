@@ -100,14 +100,21 @@ export function useCompletion(
     [rawSuggestions, activeCategory],
   );
 
+  const changeCategory = useCallback(
+    (nextCategory: React.SetStateAction<SuggestionCategory | 'all'>): void => {
+      setActiveCategory(nextCategory);
+      setActiveSuggestionIndex(0);
+      setVisibleStartIndex(0);
+    },
+    [],
+  );
+
   // If the active tab disappears (suggestion set changed), fall back to 'all'.
   useEffect(() => {
     if (!availableCategories.includes(activeCategory)) {
-      setActiveCategory('all');
-      setActiveSuggestionIndex(0);
-      setVisibleStartIndex(0);
+      changeCategory('all');
     }
-  }, [availableCategories, activeCategory]);
+  }, [availableCategories, activeCategory, changeCategory]);
 
   // Clamp the active index when the filtered suggestion list shrinks within
   // a still-existing category (e.g. async search returns fewer items).
@@ -132,16 +139,14 @@ export function useCompletion(
       ) {
         return;
       }
-      setActiveCategory(category);
-      setActiveSuggestionIndex(0);
-      setVisibleStartIndex(0);
+      changeCategory(category);
     },
-    [activeCategory, availableCategories],
+    [activeCategory, availableCategories, changeCategory],
   );
 
   const switchCategory = useCallback(
     (direction: 1 | -1) => {
-      setActiveCategory((cur) => {
+      changeCategory((cur) => {
         const idx = availableCategories.indexOf(cur);
         if (idx === -1) return 'all';
         const next =
@@ -149,10 +154,8 @@ export function useCompletion(
           availableCategories.length;
         return availableCategories[next];
       });
-      setActiveSuggestionIndex(0);
-      setVisibleStartIndex(0);
     },
-    [availableCategories],
+    [availableCategories, changeCategory],
   );
 
   const resetCompletionState = useCallback(() => {

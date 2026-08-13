@@ -26,8 +26,9 @@ handler.
    the highlighted suggestion to the first visible result, and filters the
    suggestion rows for that category.
 5. Confirm that clicking outside every tab does not change the active tab.
-6. Confirm that `Ctrl+Tab`, `Ctrl+Shift+Tab`, and `Ctrl+Left/Right` retain their
-   existing behavior in a terminal that forwards those keys.
+6. While the tab bar is visible, confirm that bare `Left` / `Right` cycles the
+   categories. Press `Esc` to dismiss the picker and confirm the arrows return
+   to normal input-caret behavior.
 7. Set `ui.mouseTracking` to `false`, restart Qwen Code, and confirm that tab
    clicks are not intercepted by Qwen Code.
 

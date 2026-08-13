@@ -266,10 +266,13 @@ describe('useCompletion', () => {
       const { result } = renderHook(() => useCompletion());
       act(() => {
         result.current.setSuggestions(mixed);
+        result.current.setActiveSuggestionIndex(1);
+        result.current.setVisibleStartIndex(1);
       });
       act(() => result.current.switchCategory(1));
       expect(result.current.activeCategory).toBe('file');
       expect(result.current.activeSuggestionIndex).toBe(0);
+      expect(result.current.visibleStartIndex).toBe(0);
     });
 
     it('selects an exact category and resets active and scroll indices', () => {
