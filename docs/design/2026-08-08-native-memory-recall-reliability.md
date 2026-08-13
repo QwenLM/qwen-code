@@ -40,7 +40,9 @@ Fast/Refined architecture originally proposed in RFC #7040.
 - Exclude documents the fast phase already delivered from that later delivery,
   rebuilding the prompt from what remains. Both results come from one scan, so
   the selector never saw the fast documents as excluded and can legitimately
-  re-select them. When nothing remains, record `already_delivered`.
+  re-select them. When every selected document was already delivered, record
+  `already_delivered`; when the selector returned no documents at all, record
+  `no_relevant_results`.
 - Do not abort recall merely because the initial budget expires.
 - Preserve the existing cancellation and exactly-once terminal telemetry paths.
   A cancelled turn delivers no fast result.
@@ -129,3 +131,6 @@ because a correct selection that never reaches the model is worth nothing.
 - Scoring is substring-based, so a query token can match inside a longer word
   ("owner" inside "ownership"). The evaluation corpus records one such case
   rather than hiding it.
+- Recall can see older documents outside the shared 200-document scanner cap,
+  but non-recall callers, including Forget, keep the existing capped scanner.
+  A broader manageability pass is separate from this recall-only change.

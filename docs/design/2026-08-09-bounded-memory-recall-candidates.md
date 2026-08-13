@@ -33,6 +33,10 @@ The heuristic fallback continues to score the complete recall pool and still
 returns at most five documents. Existing body and prompt limits remain
 unchanged.
 
+Forget, Indexer, Status, and Extraction keep the capped scanner. That preserves
+their current behavior but means an older document can become recallable before
+it becomes manageable by those non-recall flows.
+
 ## Failure and compatibility boundaries
 
 Project scanning remains required. User scanning remains best-effort. Invalid

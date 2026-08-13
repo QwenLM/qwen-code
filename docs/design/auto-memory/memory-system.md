@@ -404,7 +404,9 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[UserQuery 到达\n启动 Recall Prefetch] --> B{100 ms 内\nRecall 是否完成?\nINITIAL_MEMORY_RECALL_WAIT_MS}
-    B -- 是 --> C[注入首轮 Prompt\nphase: refined]
+    B -- 是 --> C{选中结果非空?}
+    C -- 是 --> C1[注入首轮 Prompt\nphase: refined]
+    C -- 否 --> C0[丢弃\nno_relevant_results]
     B -- 否 --> D{是否有确定性\nFast 结果?}
     D -- 是 --> E[注入首轮 Prompt\nphase: fast\n最多 2 篇 MAX_FAST_RECALL_DOCS]
     D -- 否 --> F[首轮不注入]
@@ -414,7 +416,9 @@ flowchart TD
     H -- 是 --> I[排除 Fast 已投递文档\n按剩余文档重建 Prompt]
     I --> J{还有剩余文档?}
     J -- 是 --> K[注入 ToolResult\nphase: refined]
-    J -- 否 --> L[丢弃\nalready_delivered]
+    J -- 否 --> L{Recall 选中了文档?}
+    L -- 是 --> L1[丢弃\nalready_delivered]
+    L -- 否 --> L2[丢弃\nno_relevant_results]
     H -- 否 --> M[丢弃\nno_safe_delivery_point]
 ```
 
