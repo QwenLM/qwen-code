@@ -377,6 +377,51 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).not.toContain('> mk');
   });
 
+  it.each([
+    [16, true],
+    [15, false],
+  ] as const)(
+    'uses the expected layout at the %i-row boundary',
+    (availableTerminalHeight, hasFullLayout) => {
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <StatusLineDialog
+            settings={createSettings()}
+            config={config}
+            uiState={uiState}
+            addItem={vi.fn()}
+            onClose={vi.fn()}
+            availableTerminalHeight={availableTerminalHeight}
+          />
+        </KeypressProvider>,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame.includes('Configure Status Line')).toBe(hasFullLayout);
+    },
+  );
+
+  it('uses every available row in an intermediate compact layout', () => {
+    const { lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={createSettings()}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={5}
+        />
+      </KeypressProvider>,
+    );
+
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
+    expect(lastFrame()).toContain('model-with-reasoning');
+  });
+
   it('keeps every option reachable in a one-line layout', async () => {
     const settings = createSettings();
     const { stdin, lastFrame } = render(

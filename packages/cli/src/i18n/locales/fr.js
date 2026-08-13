@@ -141,6 +141,8 @@ export default {
     'Aucune compétence ne correspond à la recherche.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
+  'Hidden locked skills: {{count}} · type to search':
+    'Compétences verrouillées masquées : {{count}} · saisissez pour rechercher',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [verrouillée : {{scope}}]',

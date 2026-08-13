@@ -104,6 +104,8 @@ export default {
   'No skills match the search.': '検索に一致するスキルはありません。',
   'Locked by higher-scope settings (cannot toggle here):':
     '上位スコープ設定によってロックされています（ここでは切替不可）：',
+  'Hidden locked skills: {{count}} · type to search':
+    '非表示のロック済みスキル: {{count}} · 入力して検索',
   'higher scope': '上位スコープ',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [ロック中：{{scope}}]',

@@ -122,6 +122,8 @@ export default {
   'No skills match the search.': 'Keine Skills passen zur Suche.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  'Hidden locked skills: {{count}} · type to search':
+    'Ausgeblendete gesperrte Skills: {{count}} · zum Suchen tippen',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',

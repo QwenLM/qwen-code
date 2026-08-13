@@ -351,6 +351,8 @@ export default {
   'No skills match the search.': '没有匹配搜索的技能。',
   'Locked by higher-scope settings (cannot toggle here):':
     '被更高范围设置锁定（此处无法切换）：',
+  'Hidden locked skills: {{count}} · type to search':
+    '已隐藏 {{count}} 个锁定技能 · 输入以搜索',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',

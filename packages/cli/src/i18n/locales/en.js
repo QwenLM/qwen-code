@@ -363,6 +363,8 @@ export default {
   'No skills match the search.': 'No skills match the search.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Locked by higher-scope settings (cannot toggle here):',
+  'Hidden locked skills: {{count}} · type to search':
+    'Hidden locked skills: {{count}} · type to search',
   'higher scope': 'higher scope',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [locked: {{scope}}]',

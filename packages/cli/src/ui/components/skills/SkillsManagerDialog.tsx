@@ -523,15 +523,32 @@ export function SkillsManagerDialog({
     { isActive: true },
   );
 
-  const visibleLocked =
+  const hasQuery = query.trim().length > 0;
+  const showsLockedSearchResults =
+    hasQuery && items.length === 0 && filteredLocked.length > 0;
+  const lockedItemBudget =
     availableTerminalHeight === undefined
-      ? filteredLocked
-      : filteredLocked.slice(
+      ? filteredLocked.length
+      : Math.max(
           0,
-          Math.max(0, availableTerminalHeight - SKILLS_DIALOG_FIXED_ROWS - 3),
+          availableTerminalHeight -
+            SKILLS_DIALOG_FIXED_ROWS -
+            (showsLockedSearchResults ? 0 : 3),
         );
-  // Locked block: marginTop(1) + header(1) + one row per visible skill.
-  const lockedRows = visibleLocked.length > 0 ? visibleLocked.length + 2 : 0;
+  const lockedItemsAreTruncated = filteredLocked.length > lockedItemBudget;
+  const visibleLocked = filteredLocked.slice(
+    0,
+    Math.max(0, lockedItemBudget - (lockedItemsAreTruncated ? 1 : 0)),
+  );
+  const hiddenLockedCount = filteredLocked.length - visibleLocked.length;
+  // Locked block: marginTop(1) + header(1) + visible skills + optional hint.
+  const lockedRows = showsLockedSearchResults
+    ? 0
+    : visibleLocked.length > 0
+      ? visibleLocked.length + 2 + (hiddenLockedCount > 0 ? 1 : 0)
+      : hiddenLockedCount > 0
+        ? 1
+        : 0;
   const maxItemsToShow =
     availableTerminalHeight === undefined
       ? 15
@@ -588,7 +605,24 @@ export function SkillsManagerDialog({
   // Counts shown in the header so users can see filter effect at a glance.
   const totalCount = allSkills.length;
   const matchedCount = filteredUnlocked.length + filteredLocked.length;
-  const hasQuery = query.trim().length > 0;
+  // Scope identifiers (System / User / SystemDefaults) stay as untranslated
+  // technical labels so users can match them to settings file scopes.
+  const lockedSkillRows = visibleLocked.map((skill) => (
+    <Text key={skill.name} dimColor wrap="truncate">
+      {t('  {{name}} {{description}}  [locked: {{scope}}]', {
+        name: truncate(skill.name, NAME_COLUMN).padEnd(NAME_COLUMN),
+        description: truncate(skill.description, 60),
+        scope: higher.scopeOf(skill.name) ?? t('higher scope'),
+      })}
+    </Text>
+  ));
+  const lockedHint = hiddenLockedCount > 0 && (
+    <Text color={theme.text.secondary} dimColor>
+      {t('Hidden locked skills: {{count}} · type to search', {
+        count: String(hiddenLockedCount),
+      })}
+    </Text>
+  );
 
   return (
     <Box
@@ -653,12 +687,21 @@ export function SkillsManagerDialog({
             showActiveMarker
             maxItemsToShow={maxItemsToShow}
           />
+        ) : showsLockedSearchResults ? (
+          <>
+            {lockedSkillRows}
+            {lockedHint}
+          </>
         ) : unlockedSkills.length === 0 ? (
-          <Text color={theme.text.secondary}>
-            {t(
-              'All available skills are locked at a higher scope (see below).',
-            )}
-          </Text>
+          visibleLocked.length === 0 && hiddenLockedCount > 0 ? null : (
+            <Text color={theme.text.secondary}>
+              {hasQuery
+                ? t('No skills match the search.')
+                : t(
+                    'All available skills are locked at a higher scope (see below).',
+                  )}
+            </Text>
+          )
         ) : (
           <Text color={theme.text.secondary}>
             {t('No skills match the search.')}
@@ -666,29 +709,17 @@ export function SkillsManagerDialog({
         )}
       </Box>
 
-      {visibleLocked.length > 0 && (
+      {!showsLockedSearchResults && visibleLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.text.secondary}>
             {t('Locked by higher-scope settings (cannot toggle here):')}
           </Text>
-          {visibleLocked.map((s) => {
-            // Scope identifiers (System / User / SystemDefaults) stay as
-            // untranslated technical labels — they refer to settings file
-            // scopes by name and matching them exactly helps users locate
-            // the offending entry.
-            const scopeName = higher.scopeOf(s.name) ?? t('higher scope');
-            return (
-              <Text key={s.name} dimColor wrap="truncate">
-                {t('  {{name}} {{description}}  [locked: {{scope}}]', {
-                  name: truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN),
-                  description: truncate(s.description, 60),
-                  scope: scopeName,
-                })}
-              </Text>
-            );
-          })}
+          {lockedSkillRows}
+          {lockedHint}
         </Box>
       )}
+
+      {!showsLockedSearchResults && visibleLocked.length === 0 && lockedHint}
 
       <Box marginTop={1}>
         <Text color={theme.text.secondary} dimColor>
