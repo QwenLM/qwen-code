@@ -23,6 +23,7 @@ import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
@@ -45,11 +46,19 @@ export interface ParsedReviewArgs {
   target: ReviewTarget;
   /** Resolved effort after defaults and the `--comment` override. */
   effort: ReviewEffort;
-  effortSource: 'explicit' | 'default' | 'forced-by-comment' | 'forced-by-fix';
+  effortSource:
+    | 'explicit'
+    | 'configured'
+    | 'default'
+    | 'forced-by-comment'
+    | 'forced-by-fix';
   comment: {
     /** `--comment` appeared in the arguments. */
     requested: boolean;
-    /** `--comment` applies (the target is a PR). */
+    /**
+     * `--comment` applies (the target is a PR and it was requested — by the
+     * flag, or by the standing `review.comment` setting).
+     */
     effective: boolean;
   };
   /**
@@ -179,14 +188,49 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   return { type: 'file', path: token };
 }
 
-export function parseReviewArgs(raw: string): ParsedReviewArgs {
+export function parseReviewArgs(
+  raw: string,
+  defaults: {
+    /**
+     * The standing default from `review.effort`, raw (`auto` already mapped
+     * to undefined by the caller), applied when no `--effort` flag is
+     * present. Validated case-insensitively exactly like an explicit flag —
+     * an invalid value warns and falls back instead of dropping silently.
+     * An explicit flag still wins; the `--comment`/`--fix` forcings still
+     * override it.
+     */
+    effort?: string;
+    /**
+     * The standing `review.comment` setting: treat a PR review as if
+     * `--comment` was passed. The target binding is untouched — the run still
+     * authorises only the PR the arguments name.
+     */
+    comment?: boolean;
+  } = {},
+): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
   const warnings: string[] = [];
   const unknownFlags: string[] = [];
 
-  let commentRequested = false;
+  let commentRequestedByFlag = false;
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
+
+  // The configured default gets the same validation as an explicit flag:
+  // settings loading performs no enum validation, so a hand-edited typo
+  // reaches this far raw. Discarding it silently would run every review at
+  // the built-in default while the operator believes another level is on —
+  // the flag path warns on the identical typo, so this one does too.
+  let configuredEffort: ReviewEffort | undefined;
+  let invalidConfiguredEffort: string | undefined;
+  if (defaults.effort !== undefined) {
+    const normalized = asEffort(defaults.effort);
+    if (normalized !== null) {
+      configuredEffort = normalized;
+    } else {
+      invalidConfiguredEffort = defaults.effort;
+    }
+  }
 
   // Warnings about a rejected `--effort` occurrence must state what effort
   // is ACTUALLY in effect — which is not known until every occurrence is
@@ -216,7 +260,7 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     const token = tokens[i];
 
     if (token === '--comment') {
-      commentRequested = true;
+      commentRequestedByFlag = true;
       continue;
     }
 
@@ -315,8 +359,9 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
 
   const isPr = target.type === 'pr-number' || target.type === 'pr-url';
 
+  const commentRequested = commentRequestedByFlag || defaults.comment === true;
   const commentEffective = commentRequested && isPr;
-  if (commentRequested && !isPr) {
+  if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
     );
@@ -339,6 +384,9 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
   if (explicitEffort !== null) {
     effort = explicitEffort;
     effortSource = 'explicit';
+  } else if (configuredEffort !== undefined) {
+    effort = configuredEffort;
+    effortSource = 'configured';
   } else {
     effort = isPr ? 'high' : 'medium';
     effortSource = 'default';
@@ -349,7 +397,9 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     effort = 'high';
     effortSource = 'forced-by-comment';
     warnings.push(
-      '`--comment` requires a verified review; running at high effort.',
+      commentRequestedByFlag
+        ? '`--comment` requires a verified review; running at high effort.'
+        : '`review.comment` is enabled in settings; posting requires a verified review — running at high effort.',
     );
   }
   // Editing the user's files on the strength of an unverified finding is the
@@ -376,10 +426,14 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
     effortSource === 'explicit'
       ? `--effort ${effort} (the last valid occurrence) is in effect`
       : effortSource === 'forced-by-comment'
-        ? '`--comment` forces high effort'
+        ? commentRequestedByFlag
+          ? '`--comment` forces high effort'
+          : 'the `review.comment` setting forces high effort'
         : effortSource === 'forced-by-fix'
           ? '`--fix` forces at least medium effort'
-          : 'using the default effort';
+          : effortSource === 'configured'
+            ? 'using the configured review.effort'
+            : 'using the default effort';
   for (const issue of effortIssues) {
     switch (issue.kind) {
       case 'invalid-eq':
@@ -404,12 +458,17 @@ export function parseReviewArgs(raw: string): ParsedReviewArgs {
         break;
     }
   }
+  if (invalidConfiguredEffort !== undefined) {
+    warnings.push(
+      `Invalid review.effort value ${JSON.stringify(invalidConfiguredEffort)} in settings; ${resolution}.`,
+    );
+  }
 
   return {
     target,
     effort,
     effortSource,
-    comment: { requested: commentRequested, effective: commentEffective },
+    comment: { requested: commentRequestedByFlag, effective: commentEffective },
     fix: { requested: fixRequested, effective: fixEffective },
     extraTokens,
     unknownFlags,
@@ -421,6 +480,29 @@ interface ParseArgsCliArgs {
   raw: string | undefined;
   stdin: boolean | undefined;
   out: string | undefined;
+}
+
+/**
+ * The standing defaults from `settings.json` (`review.effort`,
+ * `review.comment`), resolved for `parseReviewArgs`: `auto` effort — matched
+ * case-insensitively, like every other value on this path — means the
+ * built-in rule, so it maps to undefined. Any other value passes through
+ * raw — `parseReviewArgs` validates it exactly like an explicit `--effort`
+ * (case normalization included), so a typo warns instead of dropping
+ * silently.
+ */
+function reviewDefaultsFromSettings(): {
+  effort?: string;
+  comment?: boolean;
+} {
+  const review = operatorReviewSettings();
+  return {
+    effort:
+      review.effort === undefined || review.effort.toLowerCase() === 'auto'
+        ? undefined
+        : review.effort,
+    comment: review.comment,
+  };
 }
 
 export const parseArgsCommand: CommandModule = {
@@ -488,7 +570,7 @@ export const parseArgsCommand: CommandModule = {
       writeStderrLineSafe(bundleNotice);
     }
 
-    const parsed = parseReviewArgs(rawStr);
+    const parsed = parseReviewArgs(rawStr, reviewDefaultsFromSettings());
     const json = JSON.stringify(parsed, null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

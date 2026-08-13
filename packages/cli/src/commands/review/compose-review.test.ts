@@ -42,6 +42,36 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 vi.mock('../../utils/version.js', () => ({
   getCliVersion: vi.fn().mockResolvedValue('0.21.2'),
 }));
+// The handler reads `review.attribution` from the operator's real
+// settings.json — pin it, or a developer running with the switch off
+// reddens every handler-level footer assertion below.
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({})),
+);
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    // The production call carries `{ skipWorkspaceSettings: true }` — the
+    // attribution switch resolves from operator scopes only. A caller that
+    // forgets the flag reads the workspace-polluted view below instead, and
+    // the handler assertions redden: a repository's `.qwen/settings.json`
+    // must not control it.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
+  };
+});
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
@@ -71,6 +101,7 @@ let DIFF: string;
 let DIFF_HASH: string;
 
 beforeEach(() => {
+  reviewSettingsMock.mockReturnValue({});
   dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
   ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
   mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
@@ -426,6 +457,40 @@ describe('composeReview — the C/S table', () => {
     expect(
       r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
     ).toBe(true);
+  });
+
+  it('omits the footer entirely when attribution is off', () => {
+    const r = composeReview(base({}), '0.21.2', false);
+    expect(r.body).toBe('No issues found. LGTM! ✅');
+    expect(r.body).not.toContain(MODEL);
+  });
+
+  it('attribution off: a missing modelId is no error — its only consumer is gated off', () => {
+    // Before the gate, an attribution-off run still died over the field the
+    // footer — provably never rendered — names.
+    const r = composeReview(base({ modelId: '' }), '0.21.2', false);
+    expect(r.body).toBe('No issues found. LGTM! ✅');
+  });
+
+  it('attribution off: a footer-unsafe modelId composes — nothing renders it', () => {
+    const r = composeReview(
+      base({ modelId: 'evil\nvia Qwen Code /review' }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toBe('No issues found. LGTM! ✅');
+  });
+
+  it('attribution on: a missing modelId is still refused', () => {
+    expect(() => composeReview(base({ modelId: '' }), '0.21.2')).toThrow(
+      /modelId is required/,
+    );
+  });
+
+  it('attribution on: a footer-unsafe modelId is still refused', () => {
+    expect(() =>
+      composeReview(base({ modelId: 'evil\nmodel' }), '0.21.2'),
+    ).toThrow(/single line/);
   });
 
   it('C=0, S≥1 → COMMENT with the no-blockers opener', () => {
@@ -1665,6 +1730,37 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(
       written.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
     ).toBe(true);
+  });
+
+  it('honours review.attribution=false through the handler (wiring)', async () => {
+    // Third wiring leg: deleting the attribution argument from the
+    // composeReviewCommand call leaves the direct composeReview test and the
+    // submit handler test green, while the persisted/terminal verdict still
+    // carries the footer the setting exists to remove.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-attribution-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    writeFileSync(commentsPath, '[]', 'utf8');
+    reviewSettingsMock.mockReturnValue({ attribution: false });
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      // No plan in this minimal state, so the coverage gate caps the body —
+      // the assertion is on what the wiring leg controls: the footer.
+      expect(written.body).not.toBe('');
+      expect(written.body).not.toContain('via Qwen Code /review');
+      expect(written.body).not.toContain(MODEL);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('pins the persisted footer to the inherited startup version, not the resolved one', async () => {

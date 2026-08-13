@@ -1084,7 +1084,11 @@ vi.doMock('./components/StreamingStatus', async () => {
 });
 vi.doMock('./components/ToastHost', async () => {
   const React = await import('react');
+  const actual = await vi.importActual<Record<string, unknown>>(
+    './components/ToastHost',
+  );
   return {
+    ...actual,
     ToastHost: (props: { elevated?: boolean }) => {
       testState.latestToastHostElevated = props.elevated ?? false;
       return React.createElement('div');
