@@ -25,7 +25,7 @@ export const CONTEXT_FILES_ANNOUNCEMENT_PREFIX = 'Read context files:';
 
 /** Whether a history item is the context-files announcement. */
 export function isContextFilesAnnouncement(item: {
-  type: MessageType;
+  type: string;
   text?: string;
 }): boolean {
   return (
