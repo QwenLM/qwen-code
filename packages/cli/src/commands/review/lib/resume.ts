@@ -20,6 +20,7 @@ import { RESUME_MAX } from './run-ledger.js';
 export type ResumeRefusal =
   | 'no-report' // no previous fetch report at the plan path
   | 'pr-mismatch' // the report on disk is another PR's
+  | 'effort-mismatch' // an explicit --effort differs from the recorded run's
   | 'no-diff-hash' // the previous run predates diffSha256 (or captured no diff)
   | 'worktree-gone' // the interrupted attempt's worktree no longer exists
   | 'worktree-sha-mismatch' // the worktree is not checked out at fetchedSha
@@ -38,6 +39,7 @@ export interface PreviousReport {
   fetchedSha?: unknown;
   diffSha256?: unknown;
   worktreePath?: unknown;
+  effort?: unknown;
 }
 
 /** What the world looks like now, probed by the caller. */
@@ -50,8 +52,22 @@ export interface ResumeProbes {
   diffSha256OnDisk: string | null;
   /** The PR's live head OID from the forge, or null when unavailable. */
   liveHeadSha: string | null;
-  /** How many times this review has already resumed (the marker's count). */
+  /**
+   * How many times this review has already resumed. The caller computes the
+   * MAX of the resume marker's count and the session ledger's entry count
+   * minus one (the original run's own session is not a resume): the marker
+   * alone is deletable, and a deleted marker must not read as an unspent
+   * cap while the ledger still names every session that ran.
+   */
   resumeCount: number;
+  /**
+   * The --effort this invocation was called with, or null when the caller
+   * passed none. An EXPLICIT effort different from the recorded run's is a
+   * request for different work, not a continuation — the resume refuses and
+   * the fresh fall-through honors the request. Absent effort never refuses:
+   * the continuation keeps the recorded level.
+   */
+  requestedEffort: string | null;
 }
 
 /**
@@ -73,6 +89,17 @@ export function assessResume(
   }
   if (prev.prNumber !== probes.prNumber) {
     return { ok: false, reason: 'pr-mismatch' };
+  }
+  // A plan with no recorded effort ran the default (high) roster; compare
+  // against that rather than refusing every resume of a default-effort run.
+  if (
+    probes.requestedEffort !== null &&
+    probes.requestedEffort !==
+      (typeof prev.effort === 'string' && prev.effort !== ''
+        ? prev.effort
+        : 'high')
+  ) {
+    return { ok: false, reason: 'effort-mismatch' };
   }
   // A pre-diffSha256 report (or a run that captured no diff) has no content
   // identity to verify against; a resume that cannot prove its input is

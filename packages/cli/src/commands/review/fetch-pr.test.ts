@@ -309,6 +309,7 @@ vi.mock('./lib/merge-base.js', () => ({
 // later --resume find no prior sessions and re-run everything.
 vi.mock('./lib/run-ledger.js', () => ({
   appendRunSession: vi.fn(),
+  priorSessionIds: vi.fn(() => []),
   readResumeMarker: vi.fn(() => ({
     schemaVersion: 1,
     resumes: [],
@@ -3147,6 +3148,18 @@ describe('fetch-pr --resume', () => {
     );
     const { gitOpt } = await import('./lib/git.js');
     vi.mocked(gitOpt).mockReturnValue('f00df00df00d');
+    // clearAllMocks resets call history but NOT implementations; re-assert
+    // the ledger defaults so a mockReturnValue set by one test cannot leak
+    // into the next — the same discipline the fs mock above follows.
+    const { priorSessionIds, readResumeMarker } = await import(
+      './lib/run-ledger.js'
+    );
+    vi.mocked(priorSessionIds).mockImplementation(() => []);
+    vi.mocked(readResumeMarker).mockImplementation(() => ({
+      schemaVersion: 1,
+      resumes: [],
+      restarts: [],
+    }));
   });
 
   async function run(extraArgs: Record<string, unknown> = {}) {
@@ -3184,7 +3197,15 @@ describe('fetch-pr --resume', () => {
     await run();
     expect(reportWritten()).toBe(false);
     const lines = await stdoutJsonLines();
-    expect(lines).toEqual([{ resumed: true, resumeAttempt: 1, out: OUT }]);
+    expect(lines).toEqual([
+      {
+        resumed: true,
+        resumeAttempt: 1,
+        restartsSpent: 0,
+        effort: 'high',
+        out: OUT,
+      },
+    ]);
     const { recordResume, appendRunSession } = await import(
       './lib/run-ledger.js'
     );
@@ -3250,6 +3271,59 @@ describe('fetch-pr --resume', () => {
     await run({ resume: false });
     expect(reportWritten()).toBe(true);
     expect(await stdoutJsonLines()).toEqual([]);
+  });
+
+  it('surfaces the recorded restart count to the resumed session', async () => {
+    const { readResumeMarker } = await import('./lib/run-ledger.js');
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [],
+      restarts: [{ atMs: Date.now(), reason: 'head-moved aaa->bbb' }],
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]['restartsSpent']).toBe(1);
+  });
+
+  it('cross-caps the resume count on the session ledger — a deleted marker does not reset it', async () => {
+    // Marker reads empty (deleted), but the ledger names three sessions:
+    // the original plus two resumes. The cap must read as spent.
+    const { priorSessionIds } = await import('./lib/run-ledger.js');
+    vi.mocked(priorSessionIds).mockReturnValue(['S1', 'S2', 'S3']);
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
+  });
+
+  it('refuses on an explicit effort different from the recorded run', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ effort: 'medium' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run({ effort: 'high' });
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([
+      { resumed: false, resumeRefused: 'effort-mismatch' },
+    ]);
+  });
+
+  it('resumes at the recorded effort when none is passed, and says so', async () => {
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport({ effort: 'medium' });
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]['resumed']).toBe(true);
+    expect(lines[0]['effort']).toBe('medium');
   });
 
   it('falls through when the worktree is not at the fetched SHA', async () => {
