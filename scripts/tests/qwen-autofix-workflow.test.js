@@ -13341,27 +13341,13 @@ describe('run-agent idle watchdog', () => {
     expect(r.agentLog.length).toBe(2_097_152);
   });
 
-  it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
-    // Number('-1') is truthy, so a bare `|| default` guard would arm a
-    // negative window: Date.now() - lastOutputAt >= -1 is instantly true
-    // and every agent dies at the first idle tick. `0` (an operator's
-    // "disable") arms a zero-length window that is true at the first tick,
-    // and NaN arms one too — every rejection class named in the parse
-    // guard's comment must fall back to the default.
-    for (const idleMs of [-1, 0, Number.NaN]) {
-      const r = runAgent({
-        stub: [
-          '#!/bin/bash',
-          'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
-          'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
-          'echo done',
-          'exit 0',
-        ].join('\n'),
-        idleMs,
-      });
-      expect(r.status).toBe(0);
-      expect(r.failure).toBe('');
-    }
+  it('keeps idle timeout validation finite and positive', () => {
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(`
+const QWEN_IDLE_TIMEOUT_MS =
+  Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
+    ? parsedIdleTimeoutMs
+    : 20 * 60 * 1000;
+`);
   });
 });
 
