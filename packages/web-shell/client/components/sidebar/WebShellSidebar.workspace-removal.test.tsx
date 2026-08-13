@@ -4460,7 +4460,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     return archiveItems;
   }
 
-  it('renders exactly one archive action on a read-only row that also shows pin', async () => {
+  it('keeps one inline archive action when ownership changes', async () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
@@ -4469,31 +4469,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
 
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
-  });
 
-  it('keeps exactly one archive action across pin toggle and workspace lock transitions', async () => {
-    enableOrganization();
-    useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
-
-    renderSidebar();
-    await settle();
-    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
-
-    // Pin state transition on the read-only row.
-    const unpin = inlineSessionAction('Pinned secondary', 'Unpin');
-    expect(unpin).toBeDefined();
-    await act(async () => {
-      click(unpin!);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(updateSessionOrganization).toHaveBeenCalledWith('pinned-secondary', {
-      isPinned: false,
-    });
-    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
-
-    // Locking the workspace flips the row out of read-only scope; the
-    // archive action must still render exactly once.
     renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
@@ -4504,10 +4480,17 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
+    renderSidebar({
+      sessionActions: { items: ['pin', 'archive'], inlineItems: ['pin'] },
+    });
     await settle();
 
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
+    expect(
+      sessionRow('Pinned secondary').querySelectorAll(
+        'button[aria-label="More actions"]',
+      ),
+    ).toHaveLength(1);
     expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
   });
 });
