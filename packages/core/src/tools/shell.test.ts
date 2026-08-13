@@ -3107,6 +3107,48 @@ describe('ShellTool', () => {
         );
         expect(result.persistedOutputFiles).toBeUndefined();
       });
+
+      it('passes an explicit low threshold to output truncation', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          10_000,
+        );
+        const outputFile = '/tmp/qwen-temp/shell-output.txt';
+        const truncatedContent =
+          'Tool output was too large and has been truncated.';
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({ content: truncatedContent, outputFile });
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(15_000), exitCode: 0 });
+
+          const result = await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              threshold: 10_000,
+              previewChars: 4000,
+              lines: Number.POSITIVE_INFINITY,
+            }),
+          );
+          expect(result.llmContent).toContain(truncatedContent);
+          expect(result.persistedOutputFiles).toEqual([outputFile]);
+        } finally {
+          spy.mockRestore();
+        }
+      });
     });
 
     it('retains shell truncation without an artifact and records the persistence decision', async () => {
