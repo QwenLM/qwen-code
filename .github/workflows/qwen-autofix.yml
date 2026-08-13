@@ -2637,20 +2637,24 @@ jobs:
             # conclusion, reintroducing #7416's median-49-minute wait.
             REVIEW_PR_LIVE="$(jq -r '
               [ .[]
-                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr"))) ]
+                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
-            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
+            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" && -n "${BRANCH}" ]]; then
               # Delay-window fallback: a review run parked BEFORE its job
               # starts (the 10-minute environment wait) has no review-pr
               # check-run yet, but a push now would still cancel it via
-              # synchronize. The runs API sees it by head SHA in every
-              # not-yet-running status GitHub reports (queued, waiting,
-              # pending — all three observed live on #8888). One read per
-              # candidate, and only when the rollup showed nothing live.
-              if gh api "repos/${REPO}/actions/runs?head_sha=${PR_HEAD_OID}&per_page=50" \
-                --jq ".workflow_runs[] | select(.workflow_id == ${REVIEW_WF_ID}) | .status" 2> /dev/null \
-                | grep -qE '^(queued|waiting|pending)$'; then
+              # synchronize. The runs API catches both pull_request_target and
+              # explicit-trigger review runs by PR/head identity. One paginated
+              # read per candidate, and only when the rollup showed nothing live.
+              REVIEW_RUNS_JSON="$(gh api --paginate "repos/${REPO}/actions/workflows/${REVIEW_WF_ID}/runs?per_page=100" 2> /dev/null || printf '{"workflow_runs":[]}')"
+              if jq -e --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" --arg branch "${BRANCH}" '
+                [ .workflow_runs[]?
+                  | select((.workflow_id | tostring) == $wf)
+                  | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
+                  | select(((.head_sha // "") == $head) or ((.head_branch // "") == $branch) or any(.pull_requests[]?; (.number | tostring) == $pr)) ]
+                | length > 0
+              ' <<< "${REVIEW_RUNS_JSON}" > /dev/null; then
                 REVIEW_PR_LIVE="true"
               fi
             fi
@@ -2670,7 +2674,7 @@ jobs:
               if [[ "${EVENT_NAME}" == 'pull_request_review' && "${DRY_RUN}" != "true" && "${REVIEW_SENDER}" != "${REVIEW_BOT}" ]]; then
                 REVIEW_STARTED_AT="$(jq -r '
                   [ .[]
-                    | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr")))
+                    | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review")))
                     | (.startedAt // "")
                     | select(. != "") ] | first // ""' <<< "${CHECKS_JSON}")"
                 # An empty key (a queued check with no startedAt yet) would
@@ -2679,7 +2683,8 @@ jobs:
                 if [[ -z "${REVIEW_STARTED_AT}" ]]; then
                   echo "🕐 #${PR}: deferred-review ack skipped: live review-pr check has no startedAt yet (queued); a later scan acks once it starts"
                 else
-                  DEFER_ACKS="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate --jq '.[].body' 2> /dev/null || true)"
+                  DEFER_ACKS="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                    | jq -r --arg ab "${AUTOFIX_BOT}" '.[] | select((.user.login // "") == $ab) | .body // ""' 2> /dev/null || true)"
                   if grep -qF "<!-- autofix-review-deferred ${REVIEW_STARTED_AT} -->" <<< "${DEFER_ACKS}"; then
                     echo "🕐 #${PR}: deferred-review ack already posted for this review run"
                   else
@@ -2689,13 +2694,12 @@ jobs:
                     if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                       echo "::warning::#${PR}: deferred-review ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
                     else
-                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🕐 Review received — an automatic review of the current head is still running, so this round is held until it lands (a push now would cancel it and discard its work, #8888). Your feedback stays queued and is addressed in the next round.\n\n<details>\n<summary>中文说明</summary>\n\n🕐 已收到评审 —— 当前 head 上仍有一轮自动 review 在运行，本轮暂缓（现在推送会取消该 review 并丢弃其工作，#8888）。反馈保持排队，将在下一轮一并处理。\n\n</details>\n\n<!-- autofix-review-deferred %s -->' "${REVIEW_STARTED_AT}")" > /dev/null 2>&1 \
+                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🕐 Review received — an automatic review of the current head is still running, so this round is held until it lands (a push now would cancel it and discard its work, #8888). Your feedback stays queued for the next eligible round.\n\n<details>\n<summary>中文说明</summary>\n\n🕐 已收到评审 —— 当前 head 上仍有一轮自动 review 在运行，本轮暂缓（现在推送会取消该 review 并丢弃其工作，#8888）。反馈保持排队，等待下一次可运行的轮次处理。\n\n</details>\n\n<!-- autofix-review-deferred %s -->' "${REVIEW_STARTED_AT}")" > /dev/null 2>&1 \
                         || echo "::warning::#${PR}: deferred-review ack failed — the dedup marker is NOT posted (a later scan may ack again)"
                     fi
                   fi
                 fi
               fi
-              continue
             fi
             # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
             # cannot predate the PR, and unlike the head commit date this never
@@ -2994,6 +2998,9 @@ jobs:
                   fi
                 fi
               fi
+              continue
+            fi
+            if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
               continue
             fi
             # Auto-update a PR that is red ONLY because of a stale base (see the

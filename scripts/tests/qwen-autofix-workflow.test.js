@@ -617,6 +617,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
       reviewScanJob.indexOf('N_FAILED_CHECKS='),
     );
+    expect(
+      reviewScanJob.lastIndexOf('if [[ "${REVIEW_PR_LIVE}" == "true" ]]'),
+    ).toBeGreaterThan(reviewScanJob.indexOf('if [[ "${ROUND}" -ge'));
 
     // Replay the REAL extracted liveness filter over rollup fixtures.
     const filter = reviewScanJob.match(
@@ -641,13 +644,36 @@ describe('qwen-autofix workflow', () => {
       'WAITING',
       'REQUESTED',
     ]) {
-      expect(run([{ name: 'review-pr', status, startedAt: started }])).toBe(
-        'true',
-      );
+      expect(
+        run([
+          {
+            name: 'review-pr',
+            workflowName: '🧐 Qwen Pull Request Review',
+            status,
+            startedAt: started,
+          },
+        ]),
+      ).toBe('true');
     }
+    expect(
+      run([
+        {
+          name: 'review-pr',
+          workflowName: 'Other',
+          status: 'IN_PROGRESS',
+        },
+      ]),
+    ).toBe('false');
     // A concluded review does NOT block (that would reintroduce #7416's wait).
     expect(
-      run([{ name: 'review-pr', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+      run([
+        {
+          name: 'review-pr',
+          workflowName: '🧐 Qwen Pull Request Review',
+          status: 'COMPLETED',
+          conclusion: 'SUCCESS',
+        },
+      ]),
     ).toBe('false');
     // Other checks in flight are this gate's business as usual — not live.
     expect(
@@ -658,14 +684,24 @@ describe('qwen-autofix workflow', () => {
     // review-pr check-run does not exist yet, so the rollup alone misses it;
     // the scan falls back to queued runs of the review workflow by head SHA.
     expect(reviewScanJob).toContain('REVIEW_WF_ID=');
-    expect(reviewScanJob).toContain('actions/runs?head_sha=${PR_HEAD_OID}');
-    expect(reviewScanJob).toContain("grep -qE '^(queued|waiting|pending)$'");
+    expect(reviewScanJob).toContain(
+      'actions/workflows/${REVIEW_WF_ID}/runs?per_page=100',
+    );
+    expect(reviewScanJob).toContain('gh api --paginate');
+    expect(reviewScanJob).toContain(
+      'IN("queued", "waiting", "pending", "requested", "in_progress")',
+    );
+    expect(reviewScanJob).not.toContain(
+      "grep -qE '^(queued|waiting|pending)$'",
+    );
+    expect(reviewScanJob).toContain('any(.pull_requests[]?');
 
     // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
     // visible acknowledgment per in-flight review run (marker keyed on the
     // review-pr check's startedAt); the review bot's own findings never ack.
     expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
     expect(reviewScanJob).toContain('autofix-review-deferred');
+    expect(reviewScanJob).toContain('select((.user.login // "") == $ab)');
     expect(workflow).toContain(
       "review_sender: '${{ github.event.review.user.login }}'",
     );
