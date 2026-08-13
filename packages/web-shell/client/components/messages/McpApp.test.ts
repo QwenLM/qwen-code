@@ -27,6 +27,17 @@ describe('MCP App host helpers', () => {
     );
   });
 
+  it('swaps [::1] onto 127.0.0.1 when the sandbox would share the host origin', () => {
+    expect(
+      resolveMcpAppSandboxUrl(
+        'http://[::1]:4170',
+        'http://[::1]:4170/session/demo',
+      ),
+    ).toBe(
+      'http://127.0.0.1:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2F%5B%3A%3A1%5D%3A4170',
+    );
+  });
+
   it('rejects non-loopback hosts', () => {
     expect(
       resolveMcpAppSandboxUrl(

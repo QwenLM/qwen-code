@@ -382,6 +382,21 @@ export function getMcpAppResourceUri(tool: {
     : undefined;
 }
 
+/** SEP-1865: omit tools whose visibility does not include `"model"`. */
+export function isMcpToolVisibleToModel(tool: {
+  _meta?: Record<string, unknown>;
+}): boolean {
+  const ui = tool._meta?.['ui'];
+  if (typeof ui !== 'object' || ui === null || Array.isArray(ui)) {
+    return true;
+  }
+  const visibility = (ui as Record<string, unknown>)['visibility'];
+  if (visibility === undefined) {
+    return true;
+  }
+  return Array.isArray(visibility) && visibility.includes('model');
+}
+
 /**
  * Enum representing the overall MCP discovery state
  */
@@ -1460,6 +1475,13 @@ export async function discoverTools(
           applyConfigFilters &&
           !isEnabled(funcDecl, mcpServerName, mcpServerConfig)
         ) {
+          continue;
+        }
+
+        const listed = listedTools.find(
+          (mcpTool) => mcpTool.name === funcDecl.name,
+        );
+        if (listed && !isMcpToolVisibleToModel(listed)) {
           continue;
         }
 

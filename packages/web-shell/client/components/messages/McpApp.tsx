@@ -56,9 +56,13 @@ export function resolveMcpAppSandboxUrl(
       return undefined;
     }
     if (sandbox.origin === host.origin) {
-      if (sandbox.hostname === 'localhost') sandbox.hostname = '127.0.0.1';
-      else if (sandbox.hostname === '127.0.0.1') sandbox.hostname = 'localhost';
-      else return undefined;
+      if (sandbox.hostname === 'localhost' || sandbox.hostname === '[::1]') {
+        sandbox.hostname = '127.0.0.1';
+      } else if (sandbox.hostname === '127.0.0.1') {
+        sandbox.hostname = 'localhost';
+      } else {
+        return undefined;
+      }
     }
     sandbox.pathname = '/mcp-app-sandbox';
     sandbox.search = '';
@@ -89,6 +93,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   }, [daemonBaseUrl, display.csp]);
 
   useEffect(() => {
+    setError(undefined);
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
     let initialized = false;
@@ -173,17 +178,16 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       </div>
       {error ? (
         <div className={styles.fallback}>{display.fallbackText}</div>
-      ) : (
-        <iframe
-          ref={iframeRef}
-          title={`${display.serverName} MCP App`}
-          className={styles.frame}
-          style={{ height }}
-          sandbox="allow-scripts allow-same-origin allow-forms"
-          allow={buildAllowAttribute(display.permissions)}
-          referrerPolicy="origin"
-        />
-      )}
+      ) : null}
+      <iframe
+        ref={iframeRef}
+        title={`${display.serverName} MCP App`}
+        className={styles.frame}
+        style={{ height, display: error ? 'none' : undefined }}
+        sandbox="allow-scripts allow-same-origin allow-forms"
+        allow={buildAllowAttribute(display.permissions)}
+        referrerPolicy="origin"
+      />
     </div>
   );
 }

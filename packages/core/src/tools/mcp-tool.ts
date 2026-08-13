@@ -704,7 +704,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         ...metadata,
       };
     } catch (error) {
-      if (signal.aborted) throw createToolCallAbortError();
+      if (signal.aborted) return undefined;
       debugLogger.warn(
         `Failed to load MCP App '${this.appResourceUri}' from '${this.serverName}': ${getErrorMessage(error)}`,
       );

@@ -278,6 +278,13 @@ function formatToolResultDisplay(
   }
   if (
     isRecord(value) &&
+    value['type'] === 'mcp_app' &&
+    typeof value['fallbackText'] === 'string'
+  ) {
+    return sanitizeDisplayText(value['fallbackText']);
+  }
+  if (
+    isRecord(value) &&
     (typeof value['fileDiff'] === 'string' ||
       'ansiOutput' in value ||
       value['type'] === 'todo_list' ||

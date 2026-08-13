@@ -289,6 +289,20 @@ const useResultDisplayRenderer = (
       return { type: 'none' };
     }
 
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'mcp_app' &&
+      'fallbackText' in resultDisplay &&
+      typeof resultDisplay.fallbackText === 'string'
+    ) {
+      return {
+        type: 'string',
+        data: resultDisplay.fallbackText,
+      };
+    }
+
     // Default to string — safeguard against non-string objects
     return {
       type: 'string',

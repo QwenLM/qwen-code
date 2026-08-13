@@ -274,6 +274,46 @@ describe('reduceDaemonEventToTuiUpdates', () => {
       daemonEventId: 3,
     });
 
+    const mcpAppHtml = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
+    const mcpAppUpdates = reduceDaemonEventToTuiUpdates({
+      id: 31,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-app',
+          kind: 'mcp',
+          title: 'Show dashboard',
+          status: 'completed',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: mcpAppHtml,
+            toolResult: {
+              content: [{ type: 'text', text: 'Dashboard ready' }],
+            },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        },
+      },
+    });
+    expect(mcpAppUpdates).toHaveLength(1);
+    expect(mcpAppUpdates[0]).toMatchObject({
+      type: 'tool_group_update',
+      item: {
+        tools: [
+          {
+            resultDisplay: 'Dashboard ready',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(mcpAppUpdates)).not.toContain('PROBE_MCP_APP_HTML');
+
     expect(
       reduceDaemonEventToTuiUpdates({
         id: 4,

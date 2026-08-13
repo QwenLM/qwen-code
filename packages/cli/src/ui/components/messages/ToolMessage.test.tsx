@@ -1802,6 +1802,31 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('- Step 2: Do another thing');
   });
 
+  it('renders MCP App fallback text instead of stringifying HTML', () => {
+    const html = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html,
+          toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('MockMarkdown:Dashboard ready');
+    expect(output).not.toContain('PROBE_MCP_APP_HTML');
+    expect(output).not.toContain('mcp_app');
+  });
+
   it('renders approved plan content with approval message', () => {
     const planResultDisplay = {
       type: 'plan_summary' as const,

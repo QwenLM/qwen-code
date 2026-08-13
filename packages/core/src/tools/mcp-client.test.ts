@@ -1578,6 +1578,54 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(tools[0].alwaysLoad).toBe(true);
     });
 
+    it('skips MCP App tools whose visibility does not include model', async () => {
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            {
+              name: 'show_dashboard',
+              _meta: {
+                ui: {
+                  resourceUri: 'ui://demo/dash',
+                  visibility: ['model'],
+                },
+              },
+            },
+            {
+              name: 'internal_refresh',
+              _meta: {
+                ui: {
+                  resourceUri: 'ui://demo/refresh',
+                  visibility: ['app'],
+                },
+              },
+            },
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'show_dashboard' },
+              { name: 'internal_refresh' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'apps',
+        { command: 'test-command' },
+        mockedClient,
+        cfgWithResources(),
+        { applyConfigFilters: false },
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual([
+        'show_dashboard',
+      ]);
+    });
+
     it('allows invocation context only for a client bound to a created stdio transport', async () => {
       const callTool = vi.fn().mockResolvedValue({
         content: [{ type: 'text', text: 'ok' }],

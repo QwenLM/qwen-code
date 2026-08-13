@@ -1231,6 +1231,26 @@ describe('DiscoveredMCPTool', () => {
 
       expect(result.returnDisplay).toBe('Dashboard ready');
     });
+
+    it('keeps the tool result when aborting the optional app resource fetch', async () => {
+      const controller = new AbortController();
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => {
+          controller.abort();
+          throw new DOMException('Aborted', 'AbortError');
+        }),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(controller.signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toBe('Dashboard ready');
+    });
   });
 
   describe('output truncation for large MCP results', () => {

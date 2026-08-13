@@ -16,6 +16,7 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   getMcpAppResourceUri,
+  isMcpToolVisibleToModel,
   connectToMcpServer,
   discoverTools,
   invokeMcpPrompt,
@@ -411,5 +412,24 @@ describe('configured MCP SDK v2 negotiation', () => {
         _meta: { ui: { resourceUri: 'https://example.com/app' } },
       }),
     ).toBeUndefined();
+  });
+
+  it('hides MCP App tools whose visibility does not include model', () => {
+    expect(isMcpToolVisibleToModel({})).toBe(true);
+    expect(
+      isMcpToolVisibleToModel({
+        _meta: { ui: { resourceUri: 'ui://demo/dashboard' } },
+      }),
+    ).toBe(true);
+    expect(
+      isMcpToolVisibleToModel({
+        _meta: { ui: { visibility: ['model', 'app'] } },
+      }),
+    ).toBe(true);
+    expect(
+      isMcpToolVisibleToModel({
+        _meta: { ui: { visibility: ['app'] } },
+      }),
+    ).toBe(false);
   });
 });

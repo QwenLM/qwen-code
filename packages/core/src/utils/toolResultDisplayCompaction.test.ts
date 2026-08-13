@@ -9,6 +9,7 @@ import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
   FileDiff,
+  McpAppResultDisplay,
   McpToolProgressData,
   PlanResultDisplay,
   TaskListResultDisplay,
@@ -379,6 +380,26 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTask.tasks[0].subject).toContain('truncated from');
     expect(compactedTask.tasks[0].owner).toContain('truncated from');
     expect(compactedTeam.teamName).toContain('truncated from');
+  });
+
+  it('drops MCP App HTML and tool results from retained displays', () => {
+    const marker = 'PROBE_MCP_APP_HTML_UNIQUE_MARKER';
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: `<main>${marker}${'x'.repeat(2000)}</main>`,
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.html).toBe('');
+    expect(compacted.toolResult).toEqual({});
+    expect(compacted.fallbackText).toBe('Dashboard ready');
+    expect(JSON.stringify(compacted)).not.toContain(marker);
   });
 });
 
