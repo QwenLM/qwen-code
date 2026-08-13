@@ -68,7 +68,10 @@ export function parseSourceAndPluginName(source: string): {
         if (
           potentialPluginName &&
           !potentialPluginName.includes('/') &&
-          !/^\d+$/.test(potentialPluginName)
+          !(
+            (scheme === 'http://' || scheme === 'https://') &&
+            /^\d+$/.test(potentialPluginName)
+          )
         ) {
           repoEndIndex = scheme.length + lastColonIndex;
           hasPluginName = true;

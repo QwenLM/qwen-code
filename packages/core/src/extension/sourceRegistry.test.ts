@@ -351,6 +351,11 @@ describe('discoverPlugins', () => {
           version: '1.0.0',
           source: 'sso://team/direct-root',
         },
+        {
+          name: '2048',
+          version: '1.0.0',
+          source: 'git@github.com:someone/numeric-root.git',
+        },
       ]),
     );
 
@@ -437,6 +442,18 @@ describe('discoverPlugins', () => {
     ).toEqual({
       repo: 'sso://team/direct-root',
       pluginName: '2048-sso',
+    });
+    expect(discovered.find((p) => p.name === '2048')).toMatchObject({
+      installSource: 'git@github.com:someone/numeric-root.git:2048',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(
+      parseSourceAndPluginName(
+        discovered.find((p) => p.name === '2048')!.installSource,
+      ),
+    ).toEqual({
+      repo: 'git@github.com:someone/numeric-root.git',
+      pluginName: '2048',
     });
   });
 

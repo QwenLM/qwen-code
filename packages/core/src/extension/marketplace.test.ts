@@ -168,6 +168,15 @@ describe('parseInstallSource', () => {
       expect(result.pluginName).toBeUndefined();
     });
 
+    it('should not treat a trailing HTTPS port as a plugin name', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('https://example.com:8080');
+
+      expect(result.source).toBe('https://example.com:8080');
+      expect(result.pluginName).toBeUndefined();
+    });
+
     it('should parse an uppercase HTTPS URL scheme as a git source', async () => {
       // Mock stat to fail (not a local path)
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
@@ -259,6 +268,28 @@ describe('parseInstallSource', () => {
       expect(result.pluginName).toBe('2048-game');
       expect(result.pluginSourceKind).toBe('extension-root');
     });
+
+    it.each([
+      [
+        'git@github.com:owner/repo.git:2048',
+        'git@github.com:owner/repo.git',
+        '2048',
+      ],
+      ['sso://team/repo:2049', 'sso://team/repo', '2049'],
+    ])(
+      'parses an all-digit direct-root alias in %s',
+      async (installSource, source, pluginName) => {
+        vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+        const result = await parseInstallSource(installSource, {
+          pluginSourceKind: 'extension-root',
+        });
+
+        expect(result.source).toBe(source);
+        expect(result.pluginName).toBe(pluginName);
+        expect(result.pluginSourceKind).toBe('extension-root');
+      },
+    );
   });
 
   describe('local path parsing', () => {
