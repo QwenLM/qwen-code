@@ -137,6 +137,34 @@ env:
   # one conscious act (**[Critical]**, a Request changes review, or /retry),
   # which is precisely what separates intent from automation.
   CRITICAL_ONLY_HUMAN_BATCHES: '2'
+  # Net-diff growth budgets per counting window — the SIZE sibling of the
+  # round brake above. CRITICAL_ONLY_AFTER_ROUND counts rounds, but one round
+  # can add hundreds of lines (#8853 grew 315 → 1393 net lines in four bot
+  # rounds, +609 in a single "harden per review feedback" round; #8276 grew
+  # ~2700 net lines under management), so a managed PR can bloat drastically
+  # while still under the round threshold — and every window re-arm reopens
+  # the suggestion valve. The first round of a counting window records the
+  # PR's net size (insertions minus deletions vs the merge base) as that
+  # window's baseline; once live growth beyond the baseline exceeds a budget,
+  # Critical-only mode engages early. Everything Critical-only preserves
+  # still flows — Critical findings, Request changes reviews, in-budget
+  # maintainer feedback, failed checks, conflict resolution — only the
+  # suggestion channel stops. `@qwen-code /retry` (or re-engaging takeover)
+  # opens a fresh window and re-anchors the baseline at the current size.
+  # TWO budgets, not one: measured bloat concentrates in TESTS (#8853's
+  # growth was 86% test lines — every round pins ever-more-marginal behavior;
+  # #8276's was 78%), so a single budget is effectively spent by test growth
+  # and cannot be tightened on tests without also strangling source fixes.
+  # Test lines are *.test.*/*.spec.* files, __snapshots__/, __tests__/,
+  # test-utils/, and
+  # integration-tests/ (the pathspec lives in the prepare step); source is
+  # everything else, minus mechanical churn (lockfiles and the regenerated
+  # settings schema) that is skimmed rather than reviewed. Either budget
+  # tripping engages the brake.
+  # TUNABLE WITHOUT A CODE CHANGE like the scan budgets above; a malformed
+  # value falls back to its default at the read site.
+  GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
+  GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -4012,9 +4040,145 @@ jobs:
             STALE='true'
             echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
           fi
+          # Growth brake: measure the PR's net size (insertions minus
+          # deletions vs the merge base), split into test lines and source
+          # lines, and compare against the sizes recorded when this counting
+          # window opened. The baseline rides in the window's first pushed or
+          # no-op report comment as its OWN marker (the autofix-redcheck
+          # pattern — the positional autofix-eval parsers never change), so a
+          # /retry or takeover re-engage re-anchors it with the window.
+          # First-wins on read: a duplicate marker in one window cannot move
+          # an anchored baseline. A handoff round writes no baseline; nothing
+          # was pushed, so the next round re-measures the same size.
+          # Growth-triggered Critical-only reuses the round brake's entire
+          # deferral machinery below; the human batch budget stays
+          # round-scoped, so maintainer feedback flows exactly as today.
+          # Leading zeros are rejected, not just non-digits: bash [[ -gt ]]
+          # reads a zero-padded operand as OCTAL, so '0400' would compare as
+          # 256 (the brake fires early) and '0900' raises "value too great
+          # for base" inside [[ ]], which under an if-condition silently
+          # evaluates false — the brake never engages. Both violate the
+          # documented fallback promise, so pad-shaped values fall back too.
+          if [[ ! "${GROWTH_BUDGET_SRC_LINES}" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+            echo "::warning::GROWTH_BUDGET_SRC_LINES='${GROWTH_BUDGET_SRC_LINES}' is not a plain line count; using 400"
+            GROWTH_BUDGET_SRC_LINES=400
+          fi
+          if [[ ! "${GROWTH_BUDGET_TEST_LINES}" =~ ^(0|[1-9][0-9]{0,6})$ ]]; then
+            echo "::warning::GROWTH_BUDGET_TEST_LINES='${GROWTH_BUDGET_TEST_LINES}' is not a plain line count; using 400"
+            GROWTH_BUDGET_TEST_LINES=400
+          fi
+          # Binary files report "-" in numstat; count them as 0 lines.
+          sum_numstat() { awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }'; }
+          # __tests__/ is part of the repo's existing test-file definition
+          # (AGENTS.md's triage line-counting rule, repo-hygiene's
+          # PROD_EXCLUDE): helpers under it without a .test./.spec. suffix
+          # are still test code, not source.
+          TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
+          # Mechanical churn must not burn the budget: one dependency bump
+          # rewrites hundreds of package-lock.json lines and one
+          # `generate:settings-schema` run regenerates the committed schema —
+          # skimmed, not reviewed, so they measure no review burden. Keep the
+          # list tight and name generated artifacts EXACTLY; a broad glob
+          # would silently exempt hand-written files from the budget. Applied
+          # to BOTH measurements: a lockfile can live under a test directory
+          # (integration-tests/package-lock.json), and excluding it from one
+          # side only would corrupt the NET_SRC subtraction.
+          GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')
+          # An orphan-history branch (fork takeover / adoption admits one —
+          # nothing on this job's fetch requires a common ancestor) has no
+          # merge base: the three-dot diff exits 128. Fail OPEN to zero like
+          # the merge-tree conflict probe above — an unmeasurable PR skips
+          # the brake rather than dying red at measurement every round.
+          # A managed fork PR whose head branch is literally named 'main'
+          # makes prepare's fork update-ref re-point refs/remotes/origin/main
+          # at the fork head — the measurement would compare the branch
+          # against itself (0/0 forever). Unmeasurable: skip the brake
+          # (fail open), like the no-merge-base case.
+          # Unmeasurable is a STATE, not a zero: substituting 0 nets would
+          # anchor a bogus 0/0 baseline (or, against an existing anchor,
+          # manufacture phantom growth). NET_MEASURED gates the whole brake:
+          # no anchor, no marker, no engagement.
+          NET_MEASURED='true'
+          NET_TOTAL=0
+          NET_TEST=0
+          if [[ "${BRANCH}" == 'main' || "${BRANCH}" == 'origin/main' ]]; then
+            # 'origin/main' as a LOCAL branch name shadows the remote ref in
+            # rev disambiguation — the diff would silently self-compare.
+            echo "📏 growth measurement skipped: head branch name '${BRANCH}' shadows the measurement base"
+            NET_MEASURED='false'
+          else
+            NET_TOTAL="$(git diff --numstat origin/main...HEAD -- "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_MEASURED='false'
+            NET_TEST="$(git diff --numstat origin/main...HEAD -- "${TEST_PATHSPEC[@]}" "${GENERATED_EXCLUDES[@]}" 2> /dev/null | sum_numstat)" || NET_MEASURED='false'
+          fi
+          NET_SRC=$(( NET_TOTAL - NET_TEST ))
+          [[ "${NET_MEASURED}" != 'true' ]] &&
+            echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
+          # The marker's window field is spelled `key=`, NOT `win=`, on
+          # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
+          # the breaker PRIOR_HEADS) attribute comments to windows by the
+          # WHOLE-BODY substring `win=<key> -->`, and this marker can
+          # legitimately carry a different window key than its comment's
+          # autofix-eval marker (a supersede-exempt conflict round reporting
+          # after a re-arm). Any token embedding "win=" would double-attribute
+          # that comment to both windows.
+          # A stale-base auto-update merges current main into the branch,
+          # moving the merge base the nets are measured against: overlap
+          # resolutions then shift the measurement with no agent push. An
+          # anchor recorded before the latest base update is not comparable
+          # any more — ignore it, so the next round re-anchors at the
+          # post-update size. (A conflict round's own merge of main is the
+          # narrower residual; its delta is bounded by the overlap.)
+          BASE_UPD_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- autofix-base-updated"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
+              | {src: (.[0] | tonumber), test: (.[1] | tonumber), win: .[2], at: ($c.created_at // "")} ]
+            | map(select(.win == $key))
+            | map(select($baseupd == "" or (.at > $baseupd))) | sort_by(.at)
+            | .[0] // empty | "\(.src) \(.test)"' "${WORKDIR}/ic.json")"
+          GROWTH_BASE_NEW='false'
+          if [[ "${NET_MEASURED}" != 'true' ]]; then
+            BASE_SRC=0
+            BASE_TEST=0
+          elif [[ "${GROWTH_BASELINE}" =~ ^(-?[0-9]+)\ (-?[0-9]+)$ ]]; then
+            BASE_SRC="${BASH_REMATCH[1]}"
+            BASE_TEST="${BASH_REMATCH[2]}"
+          else
+            BASE_SRC="${NET_SRC}"
+            BASE_TEST="${NET_TEST}"
+            GROWTH_BASE_NEW='true'
+          fi
+          GROWTH_SRC=$(( NET_SRC - BASE_SRC ))
+          GROWTH_TEST=$(( NET_TEST - BASE_TEST ))
+          [[ "${NET_MEASURED}" != 'true' ]] && { GROWTH_SRC=0; GROWTH_TEST=0; }
+          {
+            echo "growth_base_new=${GROWTH_BASE_NEW}"
+            echo "growth_base_src=${BASE_SRC}"
+            echo "growth_base_test=${BASE_TEST}"
+            # The key the baseline was READ under. The report must write the
+            # marker under this same key, not the matrix WINDOW: a conflict
+            # round is exempt from the supersede discard, so it can run with
+            # a stale WINDOW after a re-arm — a marker written under that
+            # dead key would be invisible to every later read and the
+            # round's pushed growth would escape the budget for the rest of
+            # the live window.
+            echo "growth_base_win=${LIVE_REARM_KEY}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "📏 net diff src ${NET_SRC} / test ${NET_TEST} lines (window baseline ${BASE_SRC}/${BASE_TEST}, growth ${GROWTH_SRC}/${GROWTH_TEST}, budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
+
           CRITICAL_ONLY='false'
+          CRITICAL_ONLY_ROUNDS='false'
+          CRITICAL_ONLY_GROWTH='false'
           if [[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]; then
             CRITICAL_ONLY='true'
+            CRITICAL_ONLY_ROUNDS='true'
+          fi
+          if [[ "${GROWTH_SRC}" -gt "${GROWTH_BUDGET_SRC_LINES}" || "${GROWTH_TEST}" -gt "${GROWTH_BUDGET_TEST_LINES}" ]]; then
+            CRITICAL_ONLY='true'
+            CRITICAL_ONLY_GROWTH='true'
           fi
           # Which trusted humans have exhausted their per-window regular
           # feedback budget (see CRITICAL_ONLY_HUMAN_BATCHES). A batch is
@@ -4087,10 +4251,43 @@ jobs:
           rm -f "${WORKDIR}/deferred-feedback.md"
           if [[ "${CRITICAL_ONLY}" == "true" ]]; then
             PR_URL="https://github.com/${REPO}/pull/${PR}"
+            # Name the cause(s) precisely: a maintainer reading "after five
+            # rounds" on a round-2 PR that tripped the GROWTH budget would
+            # reasonably conclude the brake misfired.
+            # No literal '+' prefix: the values are signed (either dimension
+            # can shrink while the other trips the brake), and '+-120' in
+            # the cause line reads like a misfire to exactly its audience.
+            GROWTH_CLAUSE_EN="the PR's diff grew src ${GROWTH_SRC} / test ${GROWTH_TEST} net lines beyond this counting window's baseline (budgets: ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
+            GROWTH_CLAUSE_ZH="本计数窗口内 diff 净增长已达 源码 ${GROWTH_SRC} / 测试 ${GROWTH_TEST} 行（预算 ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}）"
+            ROUNDS_CLAUSE_EN="${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds are complete"
+            ROUNDS_CLAUSE_ZH="已完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次"
+            if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' && "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
+              CAUSE_EN="${ROUNDS_CLAUSE_EN} and ${GROWTH_CLAUSE_EN}"
+              CAUSE_ZH="${ROUNDS_CLAUSE_ZH}，且${GROWTH_CLAUSE_ZH}"
+            elif [[ "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
+              CAUSE_EN="${GROWTH_CLAUSE_EN}"
+              CAUSE_ZH="${GROWTH_CLAUSE_ZH}"
+            else
+              CAUSE_EN="${ROUNDS_CLAUSE_EN}"
+              CAUSE_ZH="${ROUNDS_CLAUSE_ZH}"
+            fi
+            # The maintainer batch budget is enforced by the OVER_BUDGET
+            # census, whose spans exist only in round-brake territory
+            # (rounds past CRITICAL_ONLY_AFTER_ROUND). A growth-only
+            # engagement below the threshold has no enforceable budget, and
+            # the audit record must describe the policy actually in force —
+            # not promise accounting the census cannot produce.
+            if [[ "${CRITICAL_ONLY_ROUNDS}" == 'true' ]]; then
+              BUDGET_EN="Maintainer feedback is deferred only after its author has used ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches in this window's Critical-only tail; authors at that budget, if any, are named below."
+              BUDGET_ZH="维护者反馈仅在其本人于本窗口 Critical-only 阶段已使用 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈预算后才会延后；达到预算的作者（如有）在下方点名。"
+            else
+              BUDGET_EN="Maintainer feedback continues to flow unaffected during a growth-only engagement (the per-author batch budget applies only after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds)."
+              BUDGET_ZH="纯增长触发期间维护者反馈照常流动（按作者的批次预算仅在完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后生效）。"
+            fi
             {
               echo '## Deferred non-Critical feedback'
               echo
-              echo "Critical-only mode is active after ${CRITICAL_ONLY_AFTER_ROUND} change-producing rounds. The workflow excluded the non-Critical feedback below from this round's actionable sections; the items remain open for human follow-up. Maintainer feedback is deferred only after its author has used ${CRITICAL_ONLY_HUMAN_BATCHES} regular feedback batches in this window's Critical-only tail; authors at that budget, if any, are named below. (\`@qwen-code /retry\` starts a fresh counting window.)"
+              echo "Critical-only mode is active: ${CAUSE_EN}. The workflow excluded the non-Critical feedback below from this round's actionable sections; the items remain open for human follow-up. ${BUDGET_EN} (\`@qwen-code /retry\` starts a fresh counting window.)"
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
@@ -4146,7 +4343,7 @@ jobs:
               echo '<details>'
               echo '<summary>中文说明</summary>'
               echo
-              echo "完成 ${CRITICAL_ONLY_AFTER_ROUND} 个产生改动的轮次后进入仅处理 Critical 的模式。本轮可执行区域已排除下方非 Critical 反馈；这些条目保持开放，留待人工跟进。维护者反馈仅在其本人于本窗口 Critical-only 阶段已使用 ${CRITICAL_ONLY_HUMAN_BATCHES} 批常规反馈预算后才会延后；达到预算的作者（如有）在下方点名。（评论 \`@qwen-code /retry\` 可开启新的计数窗口。）"
+              echo "已进入仅处理 Critical 的模式：${CAUSE_ZH}。本轮可执行区域已排除下方非 Critical 反馈；这些条目保持开放，留待人工跟进。${BUDGET_ZH}（评论 \`@qwen-code /retry\` 可开启新的计数窗口。）"
               echo
               echo '</details>'
             } > "${WORKDIR}/deferred-feedback.md"
@@ -4720,6 +4917,17 @@ jobs:
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
+          # Growth-brake baseline: written into this window's FIRST report
+          # comment only (growth_base_new), so later rounds' first-wins parse
+          # keeps the anchor. Empty when prepare exited early — no marker.
+          GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'
+          GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'
+          GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'
+          # The window key prepare READ the baseline under (LIVE_REARM_KEY),
+          # not the matrix WINDOW: conflict rounds are supersede-exempt and
+          # can report under a stale WINDOW after a re-arm; the marker must
+          # land under the key later reads will use.
+          GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
         run: |-
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
@@ -4987,6 +5195,9 @@ jobs:
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
               echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
+                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              fi
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -5008,11 +5219,36 @@ jobs:
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
               echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
+                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              fi
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
 
-          gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
+          # Bounded retry on the report post: this one comment carries the
+          # round's ENTIRE persisted state (autofix-eval watermark/round,
+          # redcheck head, growth baseline). The push has already landed, so
+          # a transient API failure here loses the marker while keeping the
+          # growth — the retry scan would re-anchor the baseline at the
+          # post-push size and re-evaluate feedback it already addressed.
+          # Three attempts bound that to genuine outages; the final failure
+          # keeps today's semantics (step fails, no marker, next scan
+          # retries the round).
+          REPORT_POSTED='false'
+          for attempt in 1 2 3; do
+            if gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; then
+              REPORT_POSTED='true'
+              break
+            fi
+            if [[ "${attempt}" == 3 ]]; then
+              echo "::error::report post failed ${attempt} times for PR #${PR}; giving up"
+            else
+              echo "::warning::report post attempt ${attempt} failed for PR #${PR}; retrying"
+              sleep 10
+            fi
+          done
+          [[ "${REPORT_POSTED}" == 'true' ]] || exit 1
 
           # Takeover milestone digest — roughly every 10 rounds. The takeover
           # cap (100) bounds runaway but says nothing about when a human
