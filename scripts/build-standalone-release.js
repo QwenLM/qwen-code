@@ -64,6 +64,23 @@ const DEFAULT_RUNTIME = 'bun';
 const DEFAULT_BUN_VERSION = '1.3.14';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 
+// Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
+// render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
+// so each standalone archive must ship the matching platform package(s).
+// Stage every platform variant (like the clipboard addons) because release
+// packaging cross-builds all targets from a single host. Declared before the
+// top-level `main()` call below (ESM const TDZ).
+const OPENTUI_PLATFORM_PACKAGES = [
+  '@opentui/core-darwin-arm64',
+  '@opentui/core-darwin-x64',
+  '@opentui/core-linux-arm64',
+  '@opentui/core-linux-arm64-musl',
+  '@opentui/core-linux-x64',
+  '@opentui/core-linux-x64-musl',
+  '@opentui/core-win32-arm64',
+  '@opentui/core-win32-x64',
+];
+
 if (isMainModule()) {
   try {
     await main();
@@ -257,19 +274,6 @@ function stageClipboardPackages(runtimeDir) {
 // Temporary OpenTUI preview: the bundled OpenTUI backend resolves its native
 // render library at runtime via `import('@opentui/core-<platform>-<arch>')`,
 // so each standalone archive must ship the matching platform package(s).
-// Stage every platform variant (like the clipboard addons) because release
-// packaging cross-builds all targets from a single host.
-const OPENTUI_PLATFORM_PACKAGES = [
-  '@opentui/core-darwin-arm64',
-  '@opentui/core-darwin-x64',
-  '@opentui/core-linux-arm64',
-  '@opentui/core-linux-arm64-musl',
-  '@opentui/core-linux-x64',
-  '@opentui/core-linux-x64-musl',
-  '@opentui/core-win32-arm64',
-  '@opentui/core-win32-x64',
-];
-
 function readOpenTuiPackageSpecs() {
   const packageLock = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf8'),
