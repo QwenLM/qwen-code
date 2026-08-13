@@ -16,6 +16,7 @@ import type { CLIMessage, ToolResultBlock } from '../nonInteractive/types.js';
 interface ProjectedToolResult {
   mutated: boolean;
   artifact: ToolResultBoundaryArtifact;
+  sessionId: string;
 }
 
 const acpUpdateArtifacts = new WeakMap<object, ToolResultBoundaryArtifact>();
@@ -57,7 +58,7 @@ export function observeAcpToolResultProjection(
       values: () => acpToolResultValues(output),
     });
     if ((inputEligible || outputEligible) && isObject(wireUpdate)) {
-      projectedAcpUpdates.set(wireUpdate, { mutated, artifact });
+      projectedAcpUpdates.set(wireUpdate, { mutated, artifact, sessionId });
     }
   } catch {
     // Diagnostics must not affect projection or delivery.
@@ -77,6 +78,9 @@ export function observeAcpToolResultWire(
     });
     if (updates.length === 0) return;
     const params = asRecord(record['params']);
+    const projectionSessionIds = new Set(
+      updates.map(({ projection }) => projection.sessionId),
+    );
     const toolCallIds = updates.flatMap(({ update }) => {
       const id = toolCallId(update);
       return id === undefined ? [] : [id];
@@ -86,7 +90,9 @@ export function observeAcpToolResultWire(
       sessionId:
         typeof params?.['sessionId'] === 'string'
           ? params['sessionId']
-          : undefined,
+          : projectionSessionIds.size === 1
+            ? projectionSessionIds.values().next().value
+            : undefined,
       toolCallId:
         updates.length === 1 ? toolCallId(updates[0].update) : undefined,
       ...(updates.length > 1 ? { toolCallIds } : {}),
@@ -130,7 +136,11 @@ export function observeHeadlessToolResultProjection(
       values: [{ representation: 'headless_content', value: outputContent }],
     });
     if (inputEligible || outputEligible) {
-      projectedHeadlessMessages.set(message, { mutated, artifact });
+      projectedHeadlessMessages.set(message, {
+        mutated,
+        artifact,
+        sessionId: message.session_id,
+      });
     }
   } catch {
     // Diagnostics must not affect projection or delivery.

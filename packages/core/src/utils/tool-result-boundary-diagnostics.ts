@@ -215,20 +215,10 @@ export function createToolResultBoundaryObserver(
   return (observation) => {
     try {
       if (!enabled()) return false;
-      const values =
-        typeof observation.values === 'function'
-          ? observation.values()
-          : observation.values;
-      const measuredValues = measureValues(values);
       const mutated =
         typeof observation.mutated === 'function'
           ? observation.mutated()
           : observation.mutated === true;
-      const oversized = measuredValues.some(
-        (summary) => summary.jsonUtf8Bytes > thresholdBytes,
-      );
-      if (!mutated && !oversized) return false;
-
       const currentTime = now();
       if (
         currentTime < windowStartedAt ||
@@ -237,17 +227,38 @@ export function createToolResultBoundaryObserver(
         windowStartedAt = currentTime;
         emittedInWindow = 0;
       }
+      if (mutated && emittedInWindow >= logLimit) {
+        suppressedCount++;
+        return true;
+      }
+
+      const values =
+        typeof observation.values === 'function'
+          ? observation.values()
+          : observation.values;
+      const oversized =
+        !mutated &&
+        values.some(({ value }) =>
+          jsonStringExceedsByteLength(value, thresholdBytes),
+        );
+      if (!mutated && !oversized) return false;
       if (emittedInWindow >= logLimit) {
         suppressedCount++;
         return true;
       }
 
+      const measuredValues = measureValues(values);
       hmacKey ??= randomBytes(32);
       const activeHmacKey = hmacKey;
-      const summaries = measuredValues.map(({ value, ...summary }) => ({
-        ...summary,
-        hmacSha256: hmacString(value, activeHmacKey),
-      }));
+      const valueHmacs = new Map<string, string>();
+      const summaries = measuredValues.map(({ value, ...summary }) => {
+        let hmacSha256 = valueHmacs.get(value);
+        if (hmacSha256 === undefined) {
+          hmacSha256 = hmacString(value, activeHmacKey);
+          valueHmacs.set(value, hmacSha256);
+        }
+        return { ...summary, hmacSha256 };
+      });
 
       const event: ToolResultBoundaryEvent = {
         eventName: TOOL_RESULT_BOUNDARY_EVENT_NAME,
@@ -335,15 +346,26 @@ function measureValues(
   values: readonly ToolResultBoundaryValue[],
 ): MeasuredToolResultBoundaryValue[] {
   const slots = new Map<ToolResultRepresentation, number>();
+  const measurements = new Map<
+    string,
+    Pick<
+      MeasuredToolResultBoundaryValue,
+      'codeUnits' | 'rawUtf8Bytes' | 'jsonUtf8Bytes'
+    >
+  >();
   return values.map(({ representation, value }) => {
     const slot = slots.get(representation) ?? 0;
     slots.set(representation, slot + 1);
-    return {
-      representation,
-      slot,
+    const measurement = measurements.get(value) ?? {
       codeUnits: value.length,
       rawUtf8Bytes: Buffer.byteLength(value, 'utf8'),
       jsonUtf8Bytes: jsonStringByteLength(value),
+    };
+    measurements.set(value, measurement);
+    return {
+      representation,
+      slot,
+      ...measurement,
       value,
     };
   });
@@ -372,9 +394,16 @@ function hmacString(value: string, hmacKey: Uint8Array): string {
     .digest('hex');
 }
 
-function jsonStringByteLength(value: string): number {
+function jsonStringByteLength(
+  value: string,
+  stopAfterBytes = Number.POSITIVE_INFINITY,
+): number {
   let bytes = 2;
-  for (let index = 0; index < value.length; index++) {
+  for (
+    let index = 0;
+    index < value.length && bytes <= stopAfterBytes;
+    index++
+  ) {
     const code = value.charCodeAt(index);
     if (code === 0x22 || code === 0x5c) {
       bytes += 2;
@@ -406,4 +435,11 @@ function jsonStringByteLength(value: string): number {
     }
   }
   return bytes;
+}
+
+function jsonStringExceedsByteLength(
+  value: string,
+  threshold: number,
+): boolean {
+  return jsonStringByteLength(value, threshold) > threshold;
 }

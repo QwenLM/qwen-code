@@ -44,6 +44,7 @@ import {
 } from '../utils/truncation.js';
 import {
   finalizeToolResponses,
+  toolResponseBudgetedTextLength,
   toolResponseTextLength,
 } from '../utils/tool-response-finalizer.js';
 import {
@@ -6038,6 +6039,16 @@ export class CoreToolScheduler {
     const budget =
       this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
     if (!Number.isFinite(budget) || budget <= 0) return completedCalls;
+    const exceedsBudget =
+      completedCalls.reduce(
+        (total, call) =>
+          total +
+          toolResponseBudgetedTextLength(
+            call.response.responseParts,
+            call.request.name,
+          ),
+        0,
+      ) > budget;
 
     const finalized = await finalizeToolResponses(
       this.config,
@@ -6054,7 +6065,7 @@ export class CoreToolScheduler {
           call.request.prompt_id,
         ]),
       ),
-      false,
+      exceedsBudget,
     );
 
     return completedCalls.map((call, index) => ({

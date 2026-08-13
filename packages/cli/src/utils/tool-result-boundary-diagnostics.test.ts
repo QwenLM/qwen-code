@@ -203,6 +203,7 @@ describe('CLI tool-result boundary diagnostics', () => {
     expect(mockObserveBoundary).toHaveBeenLastCalledWith(
       expect.objectContaining({
         stage: 'acp_wire',
+        sessionId: 'session-secret',
         wireUtf8Bytes: 2_501,
       }),
     );
@@ -260,6 +261,7 @@ describe('CLI tool-result boundary diagnostics', () => {
     expect(mockObserveBoundary).toHaveBeenLastCalledWith(
       expect.objectContaining({
         stage: 'acp_wire',
+        sessionId: 'session-secret',
         toolCallId: undefined,
         toolCallIds: ['first-call', 'second-call'],
         wireUtf8Bytes: 3_001,
@@ -384,6 +386,27 @@ describe('CLI tool-result boundary diagnostics', () => {
     );
 
     expect(mockObserveBoundary).not.toHaveBeenCalled();
+  });
+
+  it('correlates eligible unmutated ACP updates with the writer', () => {
+    mockObserveBoundary.mockReturnValue(true);
+    const update = acpUpdate('large');
+    observeAcpToolResultProjection(update, update, 'session-secret');
+    mockObserveBoundary.mockClear();
+
+    observeAcpToolResultWire(
+      { method: 'session/update', params: { update } },
+      20,
+    );
+
+    expect(mockObserveBoundary).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: 'acp_wire',
+        sessionId: 'session-secret',
+        mutated: false,
+        wireUtf8Bytes: 21,
+      }),
+    );
   });
 
   it('swallows observer failures at projection boundaries', () => {

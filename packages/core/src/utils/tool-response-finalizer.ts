@@ -268,10 +268,25 @@ function replaceTextSlots(
 }
 
 export function toolResponseTextLength(parts: Part[]): number {
+  return toolResponseTextLengthForBudget(parts, false);
+}
+
+export function toolResponseBudgetedTextLength(
+  parts: Part[],
+  toolName: string,
+): number {
+  return toolResponseTextLengthForBudget(parts, true, toolName);
+}
+
+function toolResponseTextLengthForBudget(
+  parts: Part[],
+  excludeBudgetExemptOutput: boolean,
+  toolName = '',
+): number {
   return collectTextSlots(
-    [{ callId: '', toolName: '', responseParts: parts }],
+    [{ callId: '', toolName, responseParts: parts }],
     true,
-    false,
+    excludeBudgetExemptOutput,
   ).reduce((total, slot) => total + slot.text.length, 0);
 }
 
@@ -300,49 +315,35 @@ export async function finalizeToolResponses(
   promptIds?: ReadonlyMap<string, string>,
   observeBoundary = true,
 ): Promise<ToolResponseBudgetEntry[]> {
+  const observeUnchangedEntries = () => {
+    if (!observeBoundary) return;
+    const unchanged = new Set<number>();
+    observeFinalizerEntries(
+      config,
+      'finalizer_input',
+      entries,
+      unchanged,
+      promptIds,
+    );
+    observeFinalizerEntries(
+      config,
+      'finalizer_output',
+      entries,
+      unchanged,
+      promptIds,
+    );
+  };
   const budget =
     config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
   if (!Number.isFinite(budget) || budget <= 0) {
-    const unchanged = new Set<number>();
-    if (observeBoundary)
-      observeFinalizerEntries(
-        config,
-        'finalizer_input',
-        entries,
-        unchanged,
-        promptIds,
-      );
-    if (observeBoundary)
-      observeFinalizerEntries(
-        config,
-        'finalizer_output',
-        entries,
-        unchanged,
-        promptIds,
-      );
+    observeUnchangedEntries();
     return entries;
   }
 
   const slots = collectTextSlots(entries);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
-    const unchanged = new Set<number>();
-    if (observeBoundary)
-      observeFinalizerEntries(
-        config,
-        'finalizer_input',
-        entries,
-        unchanged,
-        promptIds,
-      );
-    if (observeBoundary)
-      observeFinalizerEntries(
-        config,
-        'finalizer_output',
-        entries,
-        unchanged,
-        promptIds,
-      );
+    observeUnchangedEntries();
     return entries;
   }
 

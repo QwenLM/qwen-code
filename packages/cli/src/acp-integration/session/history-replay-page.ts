@@ -295,12 +295,6 @@ function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
     : update;
 }
 
-export function liftSessionUpdateTimestamps(
-  updates: SessionUpdate[],
-): SessionUpdate[] {
-  return updates.map(liftSessionUpdateTimestamp);
-}
-
 export interface ReplayedTranscriptPage {
   updates: SessionUpdate[];
   nextCursor?: string;

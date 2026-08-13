@@ -8916,6 +8916,8 @@ export class Session implements SessionContext {
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
+    let executeAttempted = false;
+    let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
@@ -9036,6 +9038,18 @@ export class Session implements SessionContext {
         opts.status,
         opts.errorType,
       );
+      if (executeAttempted && !executeReturned && !producerObserved) {
+        observeToolResultBoundary({
+          stage: 'producer',
+          sessionId: this.sessionId,
+          promptId,
+          toolCallId: callId,
+          toolName,
+          artifacts: [toolResultBoundaryArtifact(undefined, undefined)],
+          values: () => toolResultPartDiagnosticValues(errorParts),
+        });
+        producerObserved = true;
+      }
       queueToolResultRecord?.(fc, {
         callId,
         toolName,
@@ -10291,6 +10305,7 @@ export class Session implements SessionContext {
             // Set the attempted outcome immediately before calling execute so
             // synchronous throws are classified as execution failures.
             executionStatus = 'error';
+            executeAttempted = true;
             try {
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
@@ -10389,6 +10404,7 @@ export class Session implements SessionContext {
                 : []),
             ],
           });
+          producerObserved = true;
 
           // Clean up event listeners
           cleanupAgentToolResources();

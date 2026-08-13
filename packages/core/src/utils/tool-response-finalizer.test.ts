@@ -115,6 +115,45 @@ describe('tool response finalization', () => {
     );
   });
 
+  it('marks only persisted over-budget entries as mutated', async () => {
+    const entries = [
+      entry('large', [
+        {
+          functionResponse: {
+            id: 'large',
+            name: 'shell',
+            response: { output: 'x'.repeat(1000) },
+          },
+        },
+      ]),
+      entry('small', [
+        {
+          functionResponse: {
+            id: 'small',
+            name: 'shell',
+            response: { output: 'ok' },
+          },
+        },
+      ]),
+    ];
+
+    await finalizeToolResponses(config(100), entries);
+
+    const observations = boundaryObserveMock.mock.calls.map(
+      ([observation]) => observation,
+    );
+    expect(
+      observations
+        .filter((observation) => observation.toolCallId === 'large')
+        .map((observation) => observation.mutated),
+    ).toEqual([true, true]);
+    expect(
+      observations
+        .filter((observation) => observation.toolCallId === 'small')
+        .map((observation) => observation.mutated),
+    ).toEqual([false, false]);
+  });
+
   it('can suppress intermediate boundary observations', async () => {
     const entries = [
       entry('small', [

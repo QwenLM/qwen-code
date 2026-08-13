@@ -154,6 +154,27 @@ describe('tool-result boundary diagnostics', () => {
     expect(parseEvent(debug.mock.calls[0][0] as string)['mutated']).toBe(true);
   });
 
+  it('hashes equal values identically across representations', () => {
+    const debug = vi.fn();
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      hmacKey: Buffer.alloc(32, 2),
+      logger: { debug, isEnabled: () => true },
+      thresholdBytes: 0,
+    });
+
+    observe({
+      stage: 'producer',
+      values: [
+        { representation: 'model_text', value: 'same-value' },
+        { representation: 'display', value: 'same-value' },
+      ],
+    });
+
+    const values = eventValues(parseEvent(debug.mock.calls[0][0] as string));
+    expect(values[0]['hmacSha256']).toBe(values[1]['hmacSha256']);
+  });
+
   it('hashes legacy and canonical tool names identically', () => {
     const debug = vi.fn();
     const observe = createToolResultBoundaryObserver({
@@ -394,18 +415,33 @@ describe('tool-result boundary diagnostics', () => {
 
     expect(observe(observation)).toBe(true);
     expect(observe(observation)).toBe(true);
+    expect(observe(observation)).toBe(true);
     expect(debug).toHaveBeenCalledTimes(1);
     currentTime = 100;
     expect(observe(observation)).toBe(true);
     expect(debug).toHaveBeenCalledTimes(2);
     expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
-      suppressedCount: 1,
+      suppressedCount: 2,
     });
     currentTime = 200;
     expect(observe(observation)).toBe(true);
     expect(parseEvent(debug.mock.calls[2][0] as string)).not.toHaveProperty(
       'suppressedCount',
     );
+  });
+
+  it('skips value measurement for rate-limited mutated events', () => {
+    const values = vi.fn(() => [
+      { representation: 'display' as const, value: 'secret' },
+    ]);
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      logLimit: 0,
+      logger: { debug: vi.fn(), isEnabled: () => true },
+    });
+
+    expect(observe({ stage: 'producer', mutated: true, values })).toBe(true);
+    expect(values).not.toHaveBeenCalled();
   });
 
   it('starts a new rate-limit window when the clock moves backward', () => {
