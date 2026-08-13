@@ -6,12 +6,12 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { manifestRepositoryContextProvider } from './manifest-repository-context.js';
 import { MAX_ARRAY_ITEMS } from './repository-context.js';
-import { allFiles } from './test-utils.js';
+import { allFiles, toRepositoryPath } from './test-utils.js';
 
 const repoRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -251,7 +251,7 @@ describe('committed review context manifest', () => {
       .map((entry) => `${SKILLS_ROOT}/${entry.name}`)
       .sort();
     const bundledFiles = [...allFiles(join(repoRoot, BUNDLED_SKILLS_ROOT))]
-      .map((path) => relative(repoRoot, path))
+      .map((path) => toRepositoryPath(relative(repoRoot, path)))
       .sort();
     const entrypoints = bundledFiles.filter((path) =>
       /^packages\/core\/src\/skills\/bundled\/[^/]+\/SKILL\.md$/.test(path),
@@ -271,6 +271,17 @@ describe('committed review context manifest', () => {
     for (const nestedFile of nestedFiles) {
       expect(context?.relatedPaths).not.toContain(nestedFile);
     }
+  });
+
+  it('normalizes Windows file-walk results before repository matching', () => {
+    const windowsPath = win32.relative(
+      'C:\\repo',
+      'C:\\repo\\packages\\core\\src\\skills\\bundled\\review\\SKILL.md',
+    );
+
+    expect(toRepositoryPath(windowsPath, win32.sep)).toBe(
+      'packages/core/src/skills/bundled/review/SKILL.md',
+    );
   });
 
   it('stays under the resolved-file bound when every rule co-matches', () => {
