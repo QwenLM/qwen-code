@@ -392,6 +392,10 @@ describe('runTestDelta', () => {
       { testsSuppressed: true },
       { neverRan: true },
       { evidenceCapped: true },
+      // Exit 0 over fresh FAILING reports: no other flag fires for this
+      // shape, and missing it reported the all-clear over a run build-test
+      // marked ok:false.
+      { swallowedReports: true },
     ] as const) {
       const ran: string[] = [];
       const r = runWith(

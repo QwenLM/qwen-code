@@ -474,13 +474,17 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
   if (!report) return [];
   const counts: number[] = [];
   for (const cmd of report.test ?? []) {
-    // The same exclusion that ruleCommand's finished() applies to command claims:
-    // an interrupted or infrastructure-classified run is not a completed
-    // suite, and its partial counts must not adjudicate a count claim. A
-    // fail-never run that swallowed failures is the same — the field's
-    // contract forbids ruling any claim reproduced against it — and so is a
-    // run whose evidence the adapter refused to certify: part of it was
-    // never read.
+    // The same exclusion family ruleCommand applies to command claims
+    // (finished() plus the exit-0 failure gate): an interrupted or
+    // infrastructure-classified run is not a completed suite, and its
+    // partial counts must not adjudicate a count claim. A fail-never run
+    // that swallowed failures is the same — the field's contract forbids
+    // ruling any claim reproduced against it — and so is a run whose
+    // evidence the adapter refused to certify: part of it was never read.
+    // An exit-0 run over fresh FAILING reports (swallowedReports) is a
+    // failed run exactly like its command-claim twin: its derived pass
+    // count once ruled a count claim `reproduces` while build-test marked
+    // the same run ok:false.
     if (
       cmd.timedOut ||
       cmd.exitCode === null ||
@@ -488,7 +492,8 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
       cmd.swallowedFailure ||
       cmd.evidenceCapped ||
       cmd.testsSuppressed ||
-      cmd.neverRan
+      cmd.neverRan ||
+      cmd.swallowedReports
     )
       continue;
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
@@ -838,7 +843,19 @@ function shellTokens(text: string): string[] {
   // Windows path separators (`-pl .\core`), not shell escapes, and must
   // survive as literal text for the module-dir normalization below.
   const danced = text.replace(/'\\''/g, '\u0001');
-  return parseShellQuote(danced, literalEnv, { escape: '\u0000' })
+  let parsed: ReturnType<typeof parseShellQuote>;
+  try {
+    parsed = parseShellQuote(danced, literalEnv, { escape: '\u0000' });
+  } catch {
+    // An unclosed `${` or an empty `${}` makes shell-quote throw
+    // (`Bad substitution`); one malformed span — adversarial or a truncated
+    // `${` log paste, common in Maven logs — otherwise aborted the ENTIRE
+    // test-plan step and no claim in the plan was ruled. Fall back to
+    // whitespace splitting, the pre-shell-quote behavior: the claim still
+    // rules (unmodeled work reads `unchecked`) instead of never ruling.
+    return text.split(/\s+/).filter((token) => token.length > 0);
+  }
+  return parsed
     .map((entry): string => {
       // eslint-disable-next-line no-control-regex -- the dance sentinel is the character under test
       if (typeof entry === 'string') return entry.replace(/\u0001/g, "'");
@@ -855,16 +872,19 @@ function shellTokens(text: string): string[] {
 
 /**
  * The tokens of a Maven command line that are not consumed as flag values.
- * shellTokens already resolved the quoting, so a space-separated value
- * flag consumes exactly the next token and the attached `<flag>=<value>`
- * form carries its value in-token.
+ * shellTokens already resolved the quoting. A space-separated value flag
+ * consumes the next token only when it is not itself option-like —
+ * commons-cli's isArgument gate; an option-like next token is a missing
+ * value, not a value — and the attached `<flag>=<value>` form carries its
+ * value in-token.
  */
 function mavenPositionalTokens(tokens: string[]): string[] {
   const positional: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     if (MAVEN_VALUE_FLAGS.has(token)) {
-      i += 1;
+      const next = tokens[i + 1];
+      if (next !== undefined && !next.startsWith('-')) i += 1;
       continue;
     }
     const eq = token.indexOf('=');
@@ -882,8 +902,11 @@ function mavenPositionalTokens(tokens: string[]): string[] {
 
 /**
  * True when a value flag's value is missing — the command ends on the flag
- * itself (`mvn test -l`). Real Maven dies in argument parsing there
- * (`MissingArgumentException`), zero lifecycle work runs, and the claim
+ * itself (`mvn test -l`), or the next token is itself an option (`mvn
+ * -l -am test` — `-am` is no log file). Real Maven's
+ * commons-cli only consumes a next token that is not option-like (its
+ * isArgument gate) and dies in argument parsing otherwise
+ * (`MissingArgumentException`): zero lifecycle work runs, and the claim
  * names a command that cannot execute.
  */
 function mavenDanglingValueFlag(tokens: string[]): boolean {
@@ -891,7 +914,8 @@ function mavenDanglingValueFlag(tokens: string[]): boolean {
     // The attached `<flag>=<value>` form carries its value in-token, so
     // only the space-separated spelling can dangle.
     if (MAVEN_VALUE_FLAGS.has(tokens[i])) {
-      if (tokens[i + 1] === undefined) return true;
+      const next = tokens[i + 1];
+      if (next === undefined || next.startsWith('-')) return true;
       i += 1;
     }
   }
@@ -923,16 +947,24 @@ function bareMavenLifecycle(command: string): string | null {
 function mavenHasAlsoMake(tokens: string[]): boolean {
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    // A `-pl` selector can carry `-am` inside a module dir name (`-pl 'foo
-    // -am bar'` — spaces pass the POM entry gate); shellTokens keeps the
-    // quoted selector one token and the space-separated spelling consumes
-    // the next one — either way the selector's interior is never read as
-    // the flag.
-    if (token === '-pl' || token === '--projects') {
-      i += 1;
+    // EVERY space-separated value flag's value is skipped, not just `-pl`'s:
+    // a selector can carry `-am` inside a module dir name (`-pl 'foo
+    // -am bar'` — spaces pass the POM entry gate), and a file named `-am`
+    // handed to `-f` is a value the same way. shellTokens keeps a quoted
+    // value one token; the isArgument gate consumes a plain-word next token
+    // and leaves an option-like one unconsumed — the command is dangling
+    // there anyway (mavenDanglingValueFlag), so the flag is never read.
+    if (MAVEN_VALUE_FLAGS.has(token)) {
+      const next = tokens[i + 1];
+      if (next !== undefined && !next.startsWith('-')) i += 1;
       continue;
     }
-    if (token.startsWith('-pl=') || token.startsWith('--projects=')) {
+    const eq = token.indexOf('=');
+    if (
+      eq > 0 &&
+      token.startsWith('-') &&
+      MAVEN_VALUE_FLAGS.has(token.slice(0, eq))
+    ) {
       continue;
     }
     if (token === '-am' || token === '--also-make') return true;
@@ -950,13 +982,28 @@ function mavenPlModules(tokens: string[]): string[] | null {
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
     let raw: string | undefined;
-    // Advance BEFORE reading, like the sibling token walkers.
+    // Advance BEFORE reading, like the sibling token walkers, and with the
+    // same isArgument gate: an option-like next token is a missing value,
+    // not a selector.
     if (token === '-pl' || token === '--projects') {
-      i += 1;
-      raw = tokens[i];
+      const next = tokens[i + 1];
+      if (next !== undefined && !next.startsWith('-')) {
+        i += 1;
+        raw = next;
+      }
     } else if (token.startsWith('-pl=')) raw = token.slice('-pl='.length);
     else if (token.startsWith('--projects=')) {
       raw = token.slice('--projects='.length);
+    } else if (MAVEN_VALUE_FLAGS.has(token)) {
+      // The OTHER space-separated value flags consume their own values:
+      // `mvn -l -pl test` hands `-pl` to `-l` as its log file, so the `-pl`
+      // token must not be read a second time as a selector — the double
+      // read yielded lifecycle `test` AND a phantom module set `['test']`,
+      // settling the claim as module-scoped when real Maven ran it
+      // reactor-wide (or died in argument parsing).
+      const next = tokens[i + 1];
+      if (next !== undefined && !next.startsWith('-')) i += 1;
+      continue;
     }
     if (raw === undefined) continue;
     // shellTokens already resolved the quoting — space-bearing selectors,
@@ -1488,6 +1535,63 @@ function ruleCommand(
           ),
       )
     : undefined;
+  // A run whose evidence was capped can still carry DEFINITIVE failure
+  // proof: a non-zero exit (the cap withholds certification of a pass, it
+  // does not retroactively excuse a failure), or exit-0 failure evidence
+  // the cap's own cause cannot defeat (markers from reports the sweep DID
+  // parse, or failures a fail-never setting swallowed). `neverRan` is NOT
+  // in this set: the states that fire `evidenceCapped` — a fresh report
+  // rejected, a truncated sweep — are positive proof the toolchain DID
+  // start, defeating the zero-summaries inference `neverRan` is built on.
+  // Ranked ABOVE the green finished fallback: one green finished sibling
+  // matching the same claim otherwise shadows the capped run and reads the
+  // claim `reproduces` — the exact shadowing this ranking exists to
+  // forbid. The capped cascade below rules the identical shapes with the
+  // identical wording when no sibling matches, so the verdict cannot flip
+  // on which other runs the claim matched.
+  const cappedDefinitiveRuling = (c: CommandResult): TestPlanClaim | null => {
+    if (c.exitCode !== null && c.exitCode !== 0) {
+      return {
+        kind: 'command',
+        text,
+        verdict: 'contradicted',
+        observed: `exit ${c.exitCode}`,
+        note:
+          `${runForm(c).howItRan}, and it failed — part of its ` +
+          'evidence was never read (rejected or unseen fresh reports, the ' +
+          'trim rescue cap, or a log-file redirect), but the non-zero exit is definitive',
+      };
+    }
+    if (
+      c.exitCode === 0 &&
+      (freshTestFailures(c) || c.swallowedFailure === true)
+    ) {
+      // The observed/note split mirrors the finished path's exit-0 arm:
+      // the cap must not change WHICH failure the evidence records.
+      const observed = freshTestFailures(c)
+        ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
+        : c.testsSuppressed
+          ? 'exit 0, but a skip setting suppressed the test phase — nothing was tested'
+          : 'exit 0, but the output records failures the exit code did not fail on';
+      const cause = freshTestFailures(c)
+        ? 'fresh test reports record failures despite the zero exit'
+        : c.testsSuppressed
+          ? 'a skip setting suppressed the test phase — nothing was tested'
+          : 'the run recorded failures despite the zero exit';
+      return {
+        kind: 'command',
+        text,
+        verdict: 'contradicted',
+        observed,
+        note:
+          `${runForm(c).howItRan}, and ${cause} — part of its ` +
+          'evidence was never read (rejected or unseen fresh reports, the ' +
+          'trim rescue cap, or a log-file redirect), but that withholds ' +
+          'certification of a pass, it does not excuse what the run DID record',
+      };
+    }
+    return null;
+  };
   const ran =
     matches.find((c) => finished(c) && ranFailed(c)) ??
     // A spawn-level death (exitCode null, no deadline kill) is a failed run
@@ -1500,6 +1604,9 @@ function ruleCommand(
           (c) => !c.timedOut && c.exitCode === null && !c.infrastructure,
         )
       : interruptedWithFailures) ??
+    matches.find(
+      (c) => c.evidenceCapped === true && cappedDefinitiveRuling(c) !== null,
+    ) ??
     matches.find(finished);
   if (ran) {
     if (ran === interruptedWithFailures) {
@@ -1511,6 +1618,11 @@ function ruleCommand(
           'interrupted, but fresh Surefire/Failsafe reports record failures',
         note: `${runForm(ran).howItRan}; it was interrupted, but fresh test reports record failures`,
       };
+    }
+    if (ran.evidenceCapped === true) {
+      // The ranking above only admits capped runs with a definitive ruling.
+      const definitive = cappedDefinitiveRuling(ran);
+      if (definitive) return definitive;
     }
     const form = runForm(ran);
     const howItRan = form.howItRan;
@@ -1602,63 +1714,16 @@ function ruleCommand(
     // "not run" wording, which would misstate what happened.
     const capped = matches.find((c) => c.evidenceCapped);
     if (capped) {
-      // A NON-ZERO exit is a definitive failure even when part of the fresh
-      // report evidence went unread — the cap withholds certification of a
-      // PASS, it does not retroactively excuse a failure, exactly like the
-      // interrupted-with-failures policy above. Only exit 0 is genuinely
-      // unknown.
-      if (capped.exitCode !== null && capped.exitCode !== 0) {
-        return {
-          kind: 'command',
-          text,
-          verdict: 'contradicted',
-          observed: `exit ${capped.exitCode}`,
-          note:
-            `${runForm(capped).howItRan}, and it failed — part of its ` +
-            'evidence was never read (rejected or unseen fresh reports, the ' +
-            'trim rescue cap, or a log-file redirect), but the non-zero exit is definitive',
-        };
-      }
-      // Cap-INDEPENDENT positive failure evidence is definitive the same
-      // way: markers from reports the sweep DID parse (or failures a
-      // fail-never setting swallowed) prove the run failed regardless of
-      // what the unread evidence holds — the finished path's exit-0 arm
-      // rules the identical evidence contradicted, and the verdict must
-      // not flip just because the cap also fired.
-      if (
-        capped.exitCode === 0 &&
-        (freshTestFailures(capped) ||
-          capped.swallowedFailure === true ||
-          capped.neverRan === true)
-      ) {
-        // The observed/note split mirrors the finished path's exit-0 arm:
-        // the cap must not change WHICH failure the evidence records.
-        const observed = freshTestFailures(capped)
-          ? 'exit 0, but fresh Surefire/Failsafe reports record failures'
-          : capped.testsSuppressed
-            ? 'exit 0, but a skip setting suppressed the test phase — nothing was tested'
-            : capped.neverRan
-              ? 'exit 0, but Maven never started — nothing was built or tested'
-              : 'exit 0, but the output records failures the exit code did not fail on';
-        const cause = freshTestFailures(capped)
-          ? 'fresh test reports record failures despite the zero exit'
-          : capped.testsSuppressed
-            ? 'a skip setting suppressed the test phase — nothing was tested'
-            : capped.neverRan
-              ? 'the wrapper exited 0 without starting Maven — nothing was built or tested'
-              : 'the run recorded failures despite the zero exit';
-        return {
-          kind: 'command',
-          text,
-          verdict: 'contradicted',
-          observed,
-          note:
-            `${runForm(capped).howItRan}, and ${cause} — part of its ` +
-            'evidence was never read (rejected or unseen fresh reports, the ' +
-            'trim rescue cap, or a log-file redirect), but that withholds ' +
-            'certification of a pass, it does not excuse what the run DID record',
-        };
-      }
+      // The definitive shapes — a non-zero exit, or exit-0 failure evidence
+      // the cap cannot defeat — rule through the shared helper, the same
+      // ruling the ranking above hands them when a sibling matches.
+      // `neverRan` is deliberately NOT definitive here: the states that
+      // fire the cap (a rejected fresh report, a truncated sweep) are
+      // positive proof the toolchain DID start, which defeats the
+      // zero-summaries inference `neverRan` rests on — a capped never-ran
+      // run reads unchecked, never contradicted.
+      const definitive = cappedDefinitiveRuling(capped);
+      if (definitive) return definitive;
       return {
         kind: 'command',
         text,

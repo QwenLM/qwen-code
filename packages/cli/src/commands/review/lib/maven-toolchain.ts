@@ -690,8 +690,10 @@ const XML_NAME_CHAR = /[A-Za-z0-9:_.-]/;
  * commented-out or CDATA-wrapped suite (aggregate writers like jest-junit
  * and karma emit both) fabricated phantom suites and failure evidence. The
  * earlier marker wins — a marker inside the other kind is literal content,
- * consumed with it. An unterminated section stays verbatim: its content
- * then fails closed exactly as it did before this handling existed.
+ * consumed with it. An unterminated section rejects the report: kept
+ * verbatim, its opaque text is scanned as markup by the body walk, and a
+ * planted `</testcase>` inside it cuts a testcase body before its
+ * `<failure>` evidence — a green read instead of a fail-closed one.
  *
  * The pass tracks tag/quote state so markers are honored only in genuine
  * markup position. A malformed aggregate-writer report can carry a RAW `<!--`
@@ -704,13 +706,16 @@ const XML_NAME_CHAR = /[A-Za-z0-9:_.-]/;
  * element's boundary — the swallowing shape — rather than commenting out
  * self-contained phantom markup, whose open/close pairs both sit inside the
  * comment. CDATA carries the same probe, with the one legitimate shape
- * exempted: surefire's own writer wraps `<system-out>`/`<system-err>` test
+ * narrowed: surefire's own writer wraps `<system-out>`/`<system-err>` test
  * stdout in CDATA immediately after the open tag, and that stdout
  * routinely contains XML samples closing the very elements open around the
- * section — but the identical swallowing shape via a raw CDATA marker
- * anywhere else (even after OTHER content inside the stream element)
- * deletes a later suite's failure evidence and must reject the report
- * exactly like its comment twin.
+ * section or pairing their own opens and closes — both stay exempt. The
+ * swallowing shape is the sequence neither covers: an interior close of an
+ * element open at the marker FOLLOWED BY an interior open of verdict
+ * markup — markup after the section that the section deletes must open
+ * inside it — and rejects the report. A raw CDATA marker anywhere else
+ * (even after OTHER content inside the stream element) carries the full
+ * probe and rejects exactly like its comment twin.
  */
 function stripOpaqueSections(xml: string): string | null {
   if (!xml.includes('<![CDATA[') && !xml.includes('<!--')) return xml;
@@ -775,7 +780,9 @@ function stripOpaqueSections(xml: string): string | null {
         const comment = xml.startsWith('<!--', i);
         const closer = comment ? '-->' : ']]>';
         const end = xml.indexOf(closer, i + (comment ? 4 : 9));
-        if (end === -1) break;
+        // Unterminated: rejected fail-closed (see the doc comment) rather
+        // than kept verbatim, where the body walk would scan it as markup.
+        if (end === -1) return null;
         // The swallowing-shape probe: an interior close of an element open
         // at the marker spans across that element's boundary. Applied to
         // CDATA too — except the shape surefire's own writer emits, a
@@ -786,8 +793,42 @@ function stripOpaqueSections(xml: string): string | null {
           !comment &&
           !contentSinceOpen &&
           (innermost === 'system-out' || innermost === 'system-err');
-        if (!exempt) {
-          const interior = xml.slice(i + (comment ? 4 : 9), end);
+        const interior = xml.slice(i + (comment ? 4 : 9), end);
+        if (exempt) {
+          // The exempt shape keeps the probe for the one direction the
+          // surefire-stdout model cannot cover. Legitimate stdout samples
+          // close the elements open around the section and open-and-close
+          // self-contained phantom markup — both stay exempt. But markup
+          // the section SWALLOWS must open inside it AFTER the closes of
+          // the surrounding elements: a later suite, or a later case of
+          // this suite. Reject exactly
+          // that sequence — an interior close of an element open at the
+          // marker followed by an interior OPEN — pairing interior closes
+          // against earlier interior opens first, so a self-contained
+          // sample never trips it.
+          const interiorToken =
+            /<(\/)?\s*(testsuite|testcase|failure|error)\b[^<>]*?(\/?)\s*>/gi;
+          const interiorOpenCounts = new Map<string, number>();
+          let closesSurrounding = false;
+          let match: RegExpExecArray | null;
+          while ((match = interiorToken.exec(interior)) !== null) {
+            const name = match[2].toLowerCase();
+            if (match[1]) {
+              const open = interiorOpenCounts.get(name) ?? 0;
+              if (open > 0) {
+                interiorOpenCounts.set(name, open - 1);
+              } else if ((openCounts.get(name) ?? 0) > 0) {
+                closesSurrounding = true;
+              }
+            } else if (match[3] !== '/') {
+              if (closesSurrounding) return null;
+              interiorOpenCounts.set(
+                name,
+                (interiorOpenCounts.get(name) ?? 0) + 1,
+              );
+            }
+          }
+        } else {
           const interiorClose = /<\/\s*([A-Za-z0-9:_.-]+)/gi;
           let match: RegExpExecArray | null;
           const interiorCloses = new Map<string, number>();
@@ -883,7 +924,8 @@ function parseTestReport(
   // wrapped in `<system-out>` CDATA routinely CONTAINS XML samples, and
   // aggregate writers also emit commented-out markup; scanning either as
   // real fabricated phantom suites and failure evidence. Drop terminated
-  // sections; an unterminated one stays as-is and fails closed as before.
+  // sections; an unterminated one rejects the report — kept verbatim, a
+  // planted close tag inside it would cut a body before its failure evidence.
   const stripped = stripOpaqueSections(xml);
   if (stripped === null) return null;
   xml = stripped;
@@ -922,6 +964,14 @@ function parseTestReport(
   // body — the anti-greenwash body-evidence check must not lose parsed
   // proof of failure into a green read.
   if (caseWalk.truncated) return null;
+  // A `<testcase` nested inside the QUOTED ATTRIBUTE VALUE of another header
+  // is consumed with the outer tag and never becomes a header itself, so its
+  // `<failure>` body lands in no body the evidence floor below scans — a
+  // failing case deleted from the read. Count the raw openers the walk
+  // should have seen; more of them than headers is the nesting shape, and
+  // the report joins the parser's other fail-closed rejections.
+  const rawCaseOpens = xml.match(/<testcase(?![A-Za-z0-9_])/gi)?.length ?? 0;
+  if (rawCaseOpens > caseWalk.headers.length) return null;
   for (const header of caseWalk.headers) {
     const bodyStart = header.index + header.text.length;
     let body = '';
@@ -1717,28 +1767,6 @@ function mavenConfigDependencyInputs(root: string, tokens: string[]): string[] {
   return inputs;
 }
 
-/**
- * The output before any executed test phase. Surefire marks test execution's
- * start — the `T E S T S` banner and the per-class `[INFO] Running` lines —
- * and a test's own stdout reaches the captured output only at or after them:
- * the acquisition carve-out's source-failure suppression reads only this
- * range, because test stdout can echo compiler-error shapes, and an echo
- * must not hide a real acquisition failure behind "the PR broke the build".
- */
-function preTestPhaseOutput(output: string): string {
-  const kept: string[] = [];
-  for (const line of output.split('\n')) {
-    if (
-      /^\[INFO\] Running /.test(line) ||
-      /^\[INFO\]\s+T E S T S\s*$/.test(line)
-    ) {
-      break;
-    }
-    kept.push(line);
-  }
-  return kept.join('\n');
-}
-
 function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const perCommandMs = args.timeout * 1000;
   /** The deadline a command was actually given, in whole seconds — the
@@ -2093,18 +2121,23 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // `testFailureIgnore` (or `-Dmaven.test.failure.ignore`) lets `mvn test`
   // exit 0 over failing tests, and the verdict must read the evidence.
   const freshFailures = hasFreshTestFailure(summaries);
-  // A selector rejection on an exit-0 run with green fresh reports is the
-  // forged-framing class: absent fail-never, Maven prints no `[ERROR]` over a
-  // successful run, so the match is test stdout and the passing run must not
-  // be discarded — the same gate every other exit-0 framing scan honors.
+  // This exit-0 shape carries NONE of the classification flags recorded
+  // below — swallowedFailure/testsSuppressed/neverRan all key on the
+  // ABSENCE of fresh failing reports, and evidenceCapped keys on unread
+  // evidence — yet the verdict is ok:false. Record the shape itself so
+  // test-delta's failure filter and test-plan's count mining read it as a
+  // failed run instead of reporting the all-clear over it.
+  const swallowedReports =
+    result.exitCode === 0 && !result.timedOut && freshFailures;
+  // A selector rejection on an exit-0 run with ANY fresh reports is the
+  // forged-framing class: absent fail-never, a genuine rejection fail-fasts
+  // non-zero before any test runs, so it never coexists with fresh reports —
+  // green OR failing. The wording is test stdout, and discarding the run let
+  // a forged line hide captured genuine failures exactly like it hides a
+  // green run — the same gate every other exit-0 framing scan honors.
   if (
     rejected &&
-    !(
-      result.exitCode === 0 &&
-      summaries.length > 0 &&
-      !freshFailures &&
-      !failNeverConfig
-    )
+    !(result.exitCode === 0 && summaries.length > 0 && !failNeverConfig)
   ) {
     return unsupportedReport(
       `Maven rejected the selected project(s) — ${rejected[1].trim()} — as not part of the active reactor. ` +
@@ -2163,19 +2196,20 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // Maven-framed output means the build never started — "never ran", not
   // "tested nothing". Enumerating wrapper shapes misses the next spelling;
   // classifying the run does not.
-  // A diff-modified wrapper CAN forge both channels — but when the run did
-  // produce fresh reports or Maven-framed output, "never ran" asserts a
-  // false contradiction of a build that demonstrably ran: a plain
-  // `.mvn/wrapper/` bump runs the whole reactor green and still landed
-  // here. The evidence decides, whatever the launcher's history — and a
-  // stub wrapper edited by the diff still fails this check (it produces
-  // neither channel).
+  // A diff-modified wrapper CONTROLS both evidence channels — a stub edit
+  // can echo a framed line or write forged reports during the run. When the
+  // executed wrapper is diff-changed and the run surfaced no fresh reports,
+  // framed output proves nothing the stub could not forge, so the run reads
+  // unverified regardless of it. An UNMODIFIED wrapper's evidence still
+  // decides: fresh reports or framed output show a build demonstrably ran —
+  // a plain `.mvn/wrapper/` bump runs the whole reactor green and must not
+  // read as never run — while a silent stub still fails this check.
   const neverRan =
     result.exitCode === 0 &&
     !result.timedOut &&
     !testsSuppressed &&
     summaries.length === 0 &&
-    !hasMavenFramedLine(result.output);
+    (executedWrapperChanged || !hasMavenFramedLine(result.output));
   // A zero exit is not a pass when Maven's own framing records errors it did
   // not fail on: a repo (or the PR itself) shipping `.mvn/maven.config` with
   // `-fn`/`--fail-never` makes Maven exit 0 over compilation, dependency
@@ -2204,12 +2238,15 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // filed a transient registry outage (and a mid-command ENOSPC) as a
   // defect in the PR. Exit-0 scans read the whole output too, gated by
   // `framingUntrusted` against forged test-stdout framing.
-  // The ONE scan that keeps the prelude-only reading is the source-failure
-  // suppression inside the acquisition carve-out: test stdout can echo
-  // compiler-error shapes, and an echo must not hide a real acquisition
-  // failure behind "the PR broke the build".
-  const preludeOutput =
-    result.exitCode === 0 ? result.output : preTestPhaseOutput(result.output);
+  // The source-failure suppression inside the acquisition carve-out reads the
+  // whole output for the mirror reason: an upstream module's passing test
+  // can echo dependency- or disk-wording lines in its own stdout, and the
+  // echo must not launder a genuine later compile failure into an
+  // infrastructure result — a compile failure writes no Surefire XML, so
+  // `freshFailures` cannot see it. Test stdout echoing COMPILER-error shapes
+  // over a real acquisition failure launders the other way; that direction
+  // files a failure against the PR instead of the environment — the
+  // over-attribution the dependency-inputs carve-out already prefers.
   const swallowedFailure =
     result.exitCode === 0 &&
     !result.timedOut &&
@@ -2234,7 +2271,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   const acquisitionFailure =
     !ok &&
     !freshFailures &&
-    !isSourceFailure(preludeOutput) &&
+    !isSourceFailure(result.output) &&
     // Executed failing tests record themselves in the stdout summaries even
     // when the sweep misses their XML: dependency-flavored assertion text
     // (`Connection refused`, `Unknown host`) otherwise matches the
@@ -2281,15 +2318,17 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
         !hasMavenFramedLine(result.output)));
   const recorded = {
     ...result,
-    // These flags are how test-plan sees the adapter's exit-0 ok:false
-    // outcomes: a run carrying ANY of them must not settle a Test Plan
-    // claim. They are set independently — an acquisition failure under a
-    // fail-never setting can coincide with capped evidence.
+    // These flags are how test-plan and test-delta see the adapter's exit-0
+    // ok:false outcomes: a run carrying ANY of them must not settle a Test
+    // Plan claim, and test-delta must not report the all-clear over it.
+    // They are set independently — an acquisition failure under a fail-never
+    // setting can coincide with capped evidence.
     ...(acquisitionFailure ? { infrastructure: true } : {}),
     ...(swallowedFailure ? { swallowedFailure: true } : {}),
     ...(evidenceCapped ? { evidenceCapped: true } : {}),
     ...(testsSuppressed ? { testsSuppressed: true } : {}),
     ...(neverRan ? { neverRan: true } : {}),
+    ...(swallowedReports ? { swallowedReports: true } : {}),
   };
   const report = mavenReport({
     affected,

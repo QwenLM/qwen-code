@@ -291,7 +291,12 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
         t.swallowedFailure === true ||
         t.testsSuppressed === true ||
         t.neverRan === true ||
-        t.evidenceCapped === true),
+        t.evidenceCapped === true ||
+        // Exit 0 over fresh failing reports (a testFailureIgnore-style
+        // setting): no other flag fires for this shape, and without it the
+        // filter reports the all-clear over a run build-test marked
+        // ok:false — the exact opposite of that verdict.
+        t.swallowedReports === true),
   );
   if (failed.length === 0) {
     return empty(

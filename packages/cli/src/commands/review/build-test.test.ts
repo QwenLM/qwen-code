@@ -249,6 +249,56 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('NOT verified');
   });
 
+  it('runs the Maven half when npm concedes a mixed root without executing', () => {
+    // The mixed-root note says "this run executed the npm toolchain only"
+    // — a lie when npm's run() concedes WITHOUT executing (a cold
+    // yarn/pnpm/bun repo — the common case for a review worktree):
+    // nothing ran, and the Maven half was never attempted. The Maven
+    // adapter must run instead of certifying nothing; its own mixed-root
+    // caveat discloses the unscopable npm side.
+    rmSync(join(root, 'package-lock.json'));
+    rmSync(join(root, 'node_modules'), { recursive: true, force: true });
+    writeFileSync(join(root, 'yarn.lock'), '');
+    pkg('.', {
+      name: 'polyglot',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writeFileSync(
+      join(root, 'pom.xml'),
+      '<project><modules><module>core</module></modules></project>',
+    );
+    mkdirSync(join(root, 'core'), { recursive: true });
+    writeFileSync(join(root, 'core', 'pom.xml'), '<project/>');
+    writePlan(['core/src/Main.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '[INFO] BUILD SUCCESS',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.ok).toBe(true);
+    expect(rep.note).not.toContain('executed the npm toolchain only');
+    expect(rep.note).toContain('Mixed root: a root package.json exists');
+  });
+
   it('coerces fractional and zero deadlines at the spawn boundary', () => {
     // spawnSync validates `timeout` as an unsigned integer: a decimal
     // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no

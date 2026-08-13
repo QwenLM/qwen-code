@@ -543,6 +543,19 @@ describe('observedTestCounts', () => {
           output:
             '[maven-test-report] core (1 report(s)): tests=1, failures=0, errors=0, skipped=0',
         },
+        // Exit 0 over fresh FAILING reports: build-test marks the run
+        // ok:false, and its derived pass count must not adjudicate a
+        // count claim `reproduces` while the command-claim twin rules
+        // the same run contradicted.
+        {
+          command: './mvnw test',
+          exitCode: 0,
+          seconds: 3,
+          timedOut: false,
+          swallowedReports: true,
+          output:
+            '[maven-test-report] core (1 failing report(s)): tests=43, failures=1, errors=0, skipped=0',
+        },
       ],
     } as unknown as BuildTestReport;
     expect(observedTestCounts(interrupted)).toEqual([]);
@@ -1475,10 +1488,12 @@ describe('runTestPlan', () => {
       expect(sClaim?.observed).toContain('skip setting');
     });
 
-    it('keeps exit-0 never-ran evidence definitive under the evidence cap', () => {
-      // The capped arm's sub-check must name neverRan exactly like the
-      // finished path does: the cap withholds certification of a pass, it
-      // does not weaken the evidence that DID surface.
+    it('reads an exit-0 never-ran run under the evidence cap as uncertified', () => {
+      // The states that fire the cap — a rejected fresh report, a
+      // truncated sweep — are positive proof the toolchain DID start,
+      // which defeats the zero-summaries inference `neverRan` rests on.
+      // A capped never-ran run therefore settles nothing: it reads
+      // unchecked, never the never-ran contradiction.
       const bt = {
         build: [],
         test: [mavenCmd({ exitCode: 0, neverRan: true, evidenceCapped: true })],
@@ -1486,9 +1501,57 @@ describe('runTestPlan', () => {
 
       const r = run('## Test Plan\n\nRan `./mvnw -pl core test`', [], bt);
       const claim = r.claims.find((c) => c.text === './mvnw -pl core test');
-      expect(claim?.verdict).toBe('contradicted');
-      expect(claim?.observed).toContain('Maven never started');
+      expect(claim?.verdict).toBe('unchecked');
       expect(claim?.note).toContain('never read');
+    });
+
+    it('ranks a capped run with definitive failure evidence above a green finished sibling', () => {
+      // build-test records one scoped run per module, and a bare claim
+      // matches every one of them — a green finished sibling used to
+      // shadow a capped run whose own evidence is definitive (a non-zero
+      // exit, or exit-0 failure markers the cap cannot defeat), and the
+      // claim read `reproduces` over a run the build-test report marks
+      // failed. The same capped run alone rules contradicted — the
+      // sibling must not flip it.
+      const exit1 = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['core'],
+            exitCode: 1,
+            evidenceCapped: true,
+            output:
+              '[maven-test-failure] core/target/surefire-reports/TEST-A.xml: example.ATest#fails',
+          }),
+          mavenCmd({ modules: ['cli'], exitCode: 0 }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], exit1);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('contradicted');
+      expect(claim?.observed).toBe('exit 1');
+      expect(claim?.note).toContain('non-zero exit is definitive');
+
+      // The exit-0 twin: fresh-failure markers survive the cap the same
+      // way — the sibling must not shadow them either.
+      const exit0 = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['core'],
+            exitCode: 0,
+            evidenceCapped: true,
+            output:
+              '[maven-test-report] core (1 failing report(s)): tests=2, failures=1, errors=0, skipped=0\n' +
+              '[maven-test-failure] core/target/surefire-reports/TEST-A.xml: example.ATest#fails',
+          }),
+          mavenCmd({ modules: ['cli'], exitCode: 0 }),
+        ],
+      } as unknown as BuildTestReport;
+      const s = run('## Test Plan\n\nRan `./mvnw test`', [], exit0);
+      const sClaim = s.claims.find((c) => c.text === './mvnw test');
+      expect(sClaim?.verdict).toBe('contradicted');
+      expect(sClaim?.observed).toContain('fresh Surefire/Failsafe reports');
     });
 
     it('does not settle a claim on an infrastructure-classified Maven run', () => {
@@ -3064,6 +3127,80 @@ describe('runTestPlan', () => {
       expect(verdictOf(valued.claims, 'mvn test -l build.log')).toBe(
         'reproduces',
       );
+    });
+
+    it('does not double-read a -pl that a sibling value flag consumes', () => {
+      // `mvn -l -pl test`: real Maven's commons-cli hands `-pl` to `-l`
+      // as its log-file value (or dies in argument parsing when the
+      // isArgument gate below applies) — the `-pl` token is NOT a
+      // selector. The double read once yielded lifecycle `test` AND a
+      // phantom module set `['test']`, settling the claim module-scoped
+      // against a `-pl test` run and masking every sibling module the
+      // claimed full-reactor command would have run.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: ['test'] })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `mvn -l -pl test`', [], bt);
+      expect(verdictOf(r.claims, 'mvn -l -pl test')).toBe('unchecked');
+      // The same walker must not read the consumed value as `-am` either.
+      expect(verdictOf(r.claims, 'mvn -l -pl test')).not.toBe('reproduces');
+    });
+
+    it("does not read an option-like token as a value flag's value", () => {
+      // commons-cli's isArgument gate: a value flag followed by an
+      // option-like token is a MISSING VALUE (`MissingArgumentException`)
+      // — zero lifecycle work runs — not a flag with a dash-prefixed
+      // value. Without the gate, `-l -am` swallowed `-am` as the log
+      // file for one walker while another read it as `--also-make`: a
+      // claim real Maven rejects settled `reproduces`, and its
+      // failing-run twin contradicted through the `-am` carve-out a run
+      // the claim could never have executed.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const logThenAm = run('## Test Plan\n\nRan `mvn -l -am test`', [], bt);
+      expect(verdictOf(logThenAm.claims, 'mvn -l -am test')).toBe('unchecked');
+
+      const failing = {
+        build: [],
+        test: [
+          mavenCmd({
+            modules: ['core'],
+            exitCode: 1,
+            output: '[ERROR] Tests run: 1, Failures: 1',
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const carveOut = run(
+        '## Test Plan\n\nRan `./mvnw -pl core -l -am test`',
+        [],
+        failing,
+      );
+      expect(verdictOf(carveOut.claims, './mvnw -pl core -l -am test')).toBe(
+        'unchecked',
+      );
+      expect(
+        carveOut.claims.find((c) => c.text === './mvnw -pl core -l -am test')
+          ?.note,
+      ).not.toContain('failed for environmental reasons');
+    });
+
+    it('rules a claim with an unclosed shell substitution instead of aborting', () => {
+      // An unclosed `${` (or an empty `${}`) makes the shell parser throw
+      // `Bad substitution`; one malformed span — adversarial or a truncated
+      // `${` log paste, common in Maven logs — otherwise aborted the
+      // ENTIRE test-plan step and no claim in the plan was ruled. The
+      // whitespace-split fallback keeps the claim ruling.
+      const bt = {
+        build: [],
+        test: [mavenCmd({ modules: null })],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `mvn test ${FOO`', [], bt);
+      const claim = r.claims.find((c) => c.text === 'mvn test ${FOO');
+      expect(claim?.kind).toBe('command');
+      expect(claim?.verdict).toBe('unchecked');
     });
 
     it('does not settle a claim carrying an option Maven rejects', () => {

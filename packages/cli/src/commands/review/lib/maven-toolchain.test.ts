@@ -674,6 +674,10 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.output).toContain('[maven-test-failure]');
+    // The shape's own flag: none of the other verdict flags fire for an
+    // exit-0 run over fresh failing reports, and test-delta/test-plan's
+    // count mining filter on them.
+    expect(report.test[0]?.swallowedReports).toBe(true);
     expect(report.note).toContain('exited 0');
     expect(report.note).toContain('test failures, not a pass');
     expect(report.note).not.toContain('Maven test passed');
@@ -3058,6 +3062,65 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.evidenceCapped).toBe(true);
   });
 
+  it('rejects an exempt stream CDATA whose interior swallows a later suite', () => {
+    // The surefire-writer exemption tolerates stdout samples that close
+    // the elements open around the section — but for the section to
+    // delete a REAL later suite, that suite must open inside the interior
+    // after the closes of the surrounding elements. That sequence
+    // rejects the report fail-closed; without the probe the swallowed
+    // suite's header and failure body parse away to a green read.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="2" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="A" name="passes">' +
+            '<system-out><![CDATA[</system-out></testcase></testsuite>' +
+            '<testsuite tests="1" failures="1" errors="0" skipped="0">' +
+            '<testcase classname="B" name="fails"><failure>boom</failure></testcase>' +
+            '</testsuite>]]></system-out>' +
+            '</testcase></testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
+  });
+
+  it('rejects a report holding an unterminated CDATA section', () => {
+    // Kept verbatim, the opaque text would be scanned as markup by the
+    // body walk: a planted `</testcase>` inside it cuts the case body
+    // before its `<failure>` evidence and the failing report parses
+    // green. An unterminated section therefore joins the parser's
+    // fail-closed rejections instead of staying in the scan.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="T" name="a">' +
+            '<system-out><![CDATA[ sample </testcase>' +
+            '<failure>boom</failure>' +
+            '</testcase></testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
+  });
+
   it('reads failing case bodies as failures when the header is zeroed', () => {
     // A rewritten report: `failures="0" errors="0"` attributes over a live
     // `<failure>` body. The parsed proof of failure is authoritative — the
@@ -3109,6 +3172,32 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.output).toContain(
       '[maven-test-failure] core/target/surefire-reports/TEST-Core.xml: example.CoreTest#t',
     );
+  });
+
+  it('rejects a report nesting a testcase inside a quoted attribute', () => {
+    // A `<testcase` inside the QUOTED ATTRIBUTE VALUE of another header is
+    // consumed with the outer tag and never becomes a header — its
+    // `<failure>` body lands in no body the evidence floor scans, reading
+    // the failing case away. The raw-opener count sees the hidden header
+    // and rejects the report like the other unreadable shapes.
+    writeReactor();
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0">' +
+            '<testcase classname="A" name="outer" note=\'<testcase classname="B" name="fails"><failure>boom</failure></testcase>\'></testcase>' +
+            '</testsuite>',
+        );
+        return result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.evidenceCapped).toBe(true);
   });
 
   it('refuses a report whose last testcase never closes', () => {
@@ -3299,12 +3388,14 @@ describe('maven toolchain adapter', () => {
     },
   );
 
-  it('classifies a PR-modified wrapper run by its evidence, not its history', () => {
-    // A wrapper the PR modifies CAN forge framing and reports — but when
-    // the run produces them, "never ran" asserts a false contradiction of
-    // a build that demonstrably ran: a plain `.mvn/wrapper/` bump runs
-    // the whole reactor green and must not read as never run. The
-    // evidence decides, whatever the launcher's history.
+  it('reads a PR-modified wrapper with no fresh reports as never run, whatever it echoes', () => {
+    // A wrapper the PR modifies CONTROLS both evidence channels: a stub
+    // `#!/bin/sh` edit keeps the exec bit, echoes a framed line, and
+    // exits 0. With zero fresh reports, framed output proves nothing the
+    // stub could not forge, so the run reads unverified whether it echoes
+    // or stays silent. A modified wrapper that surfaces fresh reports is
+    // the sibling test's case — reports are the one evidence channel a
+    // bare echo-stub does not produce on its own terms.
     writeReactor();
     writeExecutedWrapper();
 
@@ -3312,12 +3403,12 @@ describe('maven toolchain adapter', () => {
       exec: (command) =>
         result(command, { exitCode: 0, output: '[INFO] BUILD SUCCESS' }),
     });
-    expect(framed.ok).toBe(true);
-    expect(framed.test[0]?.neverRan).toBeUndefined();
+    expect(framed.ok).toBe(false);
+    expect(framed.test[0]?.neverRan).toBe(true);
+    expect(framed.note).toContain('changed by the diff');
 
-    // The evidence-based check still catches the stub twin: a modified
-    // wrapper that produces NEITHER fresh reports nor Maven output never
-    // started a build, and the note names the diff's part in it.
+    // The silent stub twin lands the same way, and the note names the
+    // diff's part in it.
     const silent = runAdapter([executedWrapperName, 'core/src/Main.java'], {
       exec: (command) => result(command, { exitCode: 0, output: '' }),
     });
@@ -3484,6 +3575,53 @@ describe('maven toolchain adapter', () => {
     expect(genuine.note).toContain('infrastructure evidence');
   });
 
+  it('does not launder a compile failure into infrastructure when upstream test stdout echoes infrastructure words', () => {
+    // `-pl <mod> -am` runs the upstream modules' tests first, and a
+    // passing upstream test can echo dependency- or disk-wording lines in
+    // its own stdout. The acquisition arms read the whole output, so the
+    // echo matches — but a genuine framed compile failure later in the
+    // same output is the run's real verdict and must stay PR-attributed:
+    // a compile failure writes no Surefire XML for freshFailures to see,
+    // so only the source-failure suppression keeps the echo from
+    // laundering it into an infrastructure result.
+    writeReactor();
+
+    const echoedDependency = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[INFO] Running com.example.EchoTest\n' +
+            '[ERROR] Could not resolve dependencies for project example:upstream\n' +
+            '[ERROR] COMPILATION ERROR :\n' +
+            '[ERROR] /tmp/x/core/src/main/java/Main.java:[12,5] cannot find symbol',
+        }),
+    });
+    expect(echoedDependency.test[0]?.infrastructure).toBeUndefined();
+    expect(echoedDependency.note).toContain(
+      'Correlate compiler or test errors',
+    );
+    expect(echoedDependency.note).not.toContain('infrastructure evidence');
+
+    // The disk arm's twin: an upstream test exercising an ENOSPC path
+    // prints the framed disk wording; the changed module's genuine
+    // compile failure still stays PR-attributed.
+    const echoedDisk = runAdapter(['core/src/Main.java'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[INFO] Running com.example.EchoTest\n' +
+            '[ERROR] simulated ENOSPC: No space left on device\n' +
+            '[ERROR] COMPILATION ERROR :\n' +
+            '[ERROR] /tmp/x/core/src/main/java/Main.java:[12,5] cannot find symbol',
+        }),
+    });
+    expect(echoedDisk.test[0]?.infrastructure).toBeUndefined();
+    expect(echoedDisk.note).toContain('Correlate compiler or test errors');
+    expect(echoedDisk.note).not.toContain('infrastructure evidence');
+  });
+
   it('does not discard a green run on a forged selector rejection', () => {
     // Exit-0 + green fresh reports + no fail-never: Maven prints no
     // `[ERROR]`, so a framed selector-rejection line is test stdout — the
@@ -3512,6 +3650,39 @@ describe('maven toolchain adapter', () => {
     expect(report.toolchain).toBe('maven');
     expect(report.ok).toBe(true);
     expect(report.note).toContain('Maven test passed');
+  });
+
+  it('keeps fresh failing reports on a run with forged selector-rejection wording', () => {
+    // Exit 0 + fresh reports + rejection wording is always forgery: a
+    // genuine rejection fail-fasts non-zero before any test runs, so it
+    // never coexists with fresh reports — FAILING ones included. The
+    // forged line must not discard the run into `unsupported` and hide
+    // the captured genuine failures (the green twin is the test above).
+    writeProject('.', ['core']);
+    writeProject('core');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="1" errors="0" skipped="0"><testcase classname="T" name="fails"><failure/></testcase></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output:
+            '[INFO] BUILD SUCCESS\n' +
+            '[ERROR] Could not find the selected project in the reactor: core',
+        });
+      },
+    });
+
+    expect(report.toolchain).toBe('maven');
+    expect(report.ok).toBe(false);
+    expect(report.test).toHaveLength(1);
+    expect(report.test[0]?.output).toContain('[maven-test-failure]');
+    expect(report.note).toContain('test failures, not a pass');
   });
 
   it('rejects a section that opens a verdict element it does not close', () => {

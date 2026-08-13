@@ -125,6 +125,14 @@ export interface CommandResult {
    */
   testsSuppressed?: boolean;
   /**
+   * The command exited 0 over fresh failing Surefire/Failsafe reports (a
+   * `testFailureIgnore`-style setting swallowed them). None of the other
+   * flags fire for this shape — they all key on the ABSENCE of fresh
+   * failing reports — yet the verdict is `ok: false`: consumers filtering
+   * on the flags must read this as a failed run, never as a pass.
+   */
+  swallowedReports?: boolean;
+  /**
    * The command exited 0 but cannot prove the toolchain started: no fresh
    * reports and no toolchain output (an empty or stub wrapper passes the
    * launch gates and exits 0). The run verified nothing, and `test-plan`
@@ -508,6 +516,14 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       // with zero evidence. The note discloses the Maven half so a green
       // npm run never certifies it.
       const report = npmToolchainAdapter.run(runArgs);
+      // npm's applies() held but run() can still concede WITHOUT executing
+      // (a cold yarn/pnpm/bun repo — the common case for a review worktree):
+      // nothing ran, so there is no npm half to disclose and the Maven half
+      // must run instead of certifying nothing. The Maven adapter's own
+      // mixed-root caveat discloses the unscopable npm side of this root.
+      if (report.toolchain === 'unsupported') {
+        return mavenToolchainAdapter.run(runArgs);
+      }
       report.note +=
         ' Mixed root: Maven also applies at the repository root (pom.xml), but ' +
         'this run executed the npm toolchain only — Maven-built modules were ' +
