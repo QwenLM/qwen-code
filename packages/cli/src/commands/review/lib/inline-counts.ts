@@ -63,8 +63,10 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
  * attribution-off (`review.attribution: false`) run POSTS, applied by
  * `submit` after the verdict was counted from the marked payload.
  *
- * A body that was nothing but its marker is returned unchanged: stripping
- * it would post an empty comment, and GitHub 422s the whole review over it.
+ * A body that was nothing but its marker is returned unchanged: `submit`'s
+ * consistency gate refuses exactly that shape before this ever runs, and
+ * posting the bare marker is worse than handing the draft defect back to
+ * the re-compose loop as a structured refusal.
  */
 export function stripSeverityPrefix(body: string): string {
   const trimmed = body.trimStart();

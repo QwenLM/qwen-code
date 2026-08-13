@@ -19,6 +19,16 @@
 /** The attribution marker the strip regex anchors on. */
 export const FOOTER_MARKER = 'via Qwen Code /review';
 
+/**
+ * The invisible marker every attribution-OFF inline comment carries instead
+ * of the footer. Renders as nothing on GitHub; it is the one signal that
+ * survives the prefix strip and the footer removal, so `presubmit` can still
+ * recognize earlier posts for dedup — from ANY account, not just the
+ * reviewing one. Deliberately not added when attribution is on: the footer
+ * already identifies those posts, and a second marker is noise.
+ */
+export const COMMENT_MARKER = '<!-- qwen-review -->';
+
 /** The footer naming the reviewing model and the CLI version it ran under. */
 export function reviewFooter(modelId: string, cliVersion: string): string {
   return `_— ${modelId} ${FOOTER_MARKER} (v${cliVersion})_`;
@@ -61,6 +71,29 @@ export function stripReviewFooter(body: string): string {
   return body.includes(FOOTER_MARKER)
     ? body.replace(REVIEW_FOOTER_RE, '')
     : body;
+}
+
+/**
+ * Footer-shaped LINES anywhere in the body — the strip for the
+ * attribution-off leg. `stripReviewFooter` is trailing-anchored on purpose:
+ * a footer followed by ordinary text is the model looping on the same
+ * comment, and under attribution-on the canonical footer that follows makes
+ * the surviving forged line redundant-but-harmless. Under attribution-off
+ * that surviving line is the ONLY attribution the post carries — the exact
+ * signal the mode exists to remove — so it goes regardless of position.
+ * Whole lines only: the marker substring inside ordinary prose is not a
+ * footer. Linear by construction: the literal `_— ` prefix bounds the
+ * engine's start positions and `[^\n]` cannot cross a line.
+ */
+const FORGED_FOOTER_LINE_RE =
+  /\n?[ \t]*_— [^\n]* via Qwen Code \/review(?: \(v[^\n)]*\))?_[ \t]*(?=\n|$)/g;
+
+export function stripForgedFooterLines(body: string): string {
+  if (!body.includes(FOOTER_MARKER)) return body;
+  return body
+    .replace(FORGED_FOOTER_LINE_RE, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd();
 }
 
 /**

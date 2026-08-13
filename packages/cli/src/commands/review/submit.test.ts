@@ -666,8 +666,45 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       expect(text).not.toContain('via Qwen Code /review');
       expect(text).not.toContain('qwen3.7-max');
     }
-    // The severity prefix goes with the footer: it is the same template.
-    expect(inline).toBe('tidy');
+    // The severity prefix goes with the footer: it is the same template. In
+    // their place rides the invisible marker presubmit dedups on.
+    expect(inline).toBe('tidy\n\n<!-- qwen-review -->');
+  });
+
+  it('attribution off strips a forged footer even when text follows it', () => {
+    // The trailing strip leaves a footer that has text after it — and in
+    // this mode that surviving line is the only attribution the post would
+    // carry.
+    const review = file('forged-mid-body.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** null deref\n\n_— qwen3.7-max via Qwen Code /review (v0.21.3)_\n\nUpdate: also reproduced on the empty list',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline).not.toContain('qwen3.7-max');
+    expect(inline).toContain('null deref');
+    expect(inline).toContain('Update: also reproduced on the empty list');
+  });
+
+  it('refuses a comment that is nothing but its severity marker', () => {
+    const review = file('marker-only.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
+    });
+
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/nothing but its severity marker/);
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
@@ -698,8 +735,10 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     const [critical, suggestion] = posted().comments as Array<{
       body: string;
     }>;
-    expect(critical.body).toBe('null deref when the list is empty');
-    expect(suggestion.body).toBe('tidy');
+    expect(critical.body).toBe(
+      'null deref when the list is empty\n\n<!-- qwen-review -->',
+    );
+    expect(suggestion.body).toBe('tidy\n\n<!-- qwen-review -->');
   });
 
   it('attribution on keeps the severity prefixes in the posted bodies', () => {
@@ -799,10 +838,11 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     runSubmit(authorized({ review }), '0.21.3', { attribution: false });
 
-    // Attribution-off also strips the severity prefix; the assertion is on
-    // the rest of the body reaching GitHub byte-for-byte.
+    // Attribution-off also strips the severity prefix and appends the
+    // comment marker; the assertion is on the rest of the body reaching
+    // GitHub byte-for-byte.
     expect(posted().comments[0].body).toBe(
-      body.slice('**[Suggestion]** '.length),
+      `${body.slice('**[Suggestion]** '.length)}\n\n<!-- qwen-review -->`,
     );
   });
 

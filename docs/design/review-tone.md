@@ -89,10 +89,21 @@ template at all — no new plumbing anywhere.
   rides posted review bodies — invisible when rendered, but present in the
   markdown source. It is how the next review round recovers this round's
   findings; dropping it would break multi-round re-reviews. It stays.
+- Attribution-off inline comments carry an invisible
+  `<!-- qwen-review -->` marker for the same reason: it is the one signal
+  that survives the prefix strip and the footer removal, and `presubmit`'s
+  duplicate detection matches it — from any account, which also closes
+  #8994's documented "other accounts escape dedup" gap. Invisible when
+  rendered; disclosed here and in the setting's description.
 - Markerless, footerless Criticals are recognized on later rounds only by
   the semantic blocker patterns (`carriesBlockerSignal`), exactly like a
-  human's comment. That is the unavoidable price of posting without markers:
-  the machine cannot tell its own comments apart either.
+  human's comment. That is the unavoidable price of posting without visible
+  markers: the machine cannot tell its own comments apart either.
+- `qwen-autofix`'s Critical-only mode (after round 5) greps posted bodies
+  for `**[Critical]**`; attribution-off findings no longer match and are
+  deferred as non-Critical. Disclosed in the setting's description. A fix
+  (severity in an invisible marker the workflow parses instead) is possible
+  follow-up, not this PR.
 
 ### Prompt layer (SKILL.md, dogfooded)
 

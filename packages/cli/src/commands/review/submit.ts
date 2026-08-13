@@ -67,8 +67,10 @@ import {
   stripSeverityPrefix,
 } from './lib/inline-counts.js';
 import {
+  COMMENT_MARKER,
   footerVersion,
   reviewFooter,
+  stripForgedFooterLines,
   stripReviewFooter,
 } from './lib/review-footer.js';
 
@@ -153,10 +155,13 @@ function normalizeInlineComments(
       ? {
           ...comment,
           // Forged footers are stripped even with attribution off: a comment
-          // authored by the model must not carry one the operator turned off.
+          // authored by the model must not carry one the operator turned
+          // off. The off leg also strips footer-shaped lines mid-body — the
+          // trailing strip leaves those, and here they would be the only
+          // attribution the post carries.
           body:
             footer === undefined
-              ? stripReviewFooter(comment.body)
+              ? stripForgedFooterLines(stripReviewFooter(comment.body))
               : `${stripReviewFooter(comment.body)}\n\n${footer}`,
         }
       : comment,
@@ -356,6 +361,21 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
       );
     }
 
+    // A body that is nothing but its marker is the empty case wearing one:
+    // it passes the empty-body check (truthy) and the unmarked gate
+    // (severityOf matches), and under attribution-off the posted comment
+    // would BE the bare machine marker that mode exists to remove.
+    if (
+      c.body &&
+      severityOf(c) !== null &&
+      stripSeverityPrefix(c.body) === c.body
+    ) {
+      problems.push(
+        `${at} is nothing but its severity marker — redraft it with the ` +
+          `finding's description; a marker alone is not a comment`,
+      );
+    }
+
     if (!isDiffLine(c.line)) {
       problems.push(
         `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
@@ -498,12 +518,18 @@ export function runSubmit(
     // Attribution-off strips the severity markers from the POSTED bodies —
     // the one place the bracket-prefix template is visible. Everything above
     // (counting, the unmarked gate, the ledger) already ran on the marked
-    // payload, so the verdict this post carries is unchanged.
+    // payload, so the verdict this post carries is unchanged. The invisible
+    // comment marker goes on in the markers' place: it is what presubmit
+    // recognizes these posts by on a later round (the footer would do it,
+    // but the footer is exactly what the operator turned off).
     comments: attribution
       ? (payload.comments ?? [])
       : (payload.comments ?? []).map((c) =>
           typeof c.body === 'string'
-            ? { ...c, body: stripSeverityPrefix(c.body) }
+            ? {
+                ...c,
+                body: `${stripSeverityPrefix(c.body)}\n\n${COMMENT_MARKER}`,
+              }
             : c,
         ),
   };

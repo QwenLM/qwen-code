@@ -744,7 +744,9 @@ describe('presubmitCommand', () => {
     });
 
     it('classifies a footer-less comment by the reviewing account (attribution-off dedup)', async () => {
-      // Case-insensitive login match, as with self-PR detection.
+      // Case-insensitive login match, as with self-PR detection. The
+      // severityOf branch remains for posts made before the comment marker
+      // existed.
       const result = await presubmitWithComments(
         [
           {
@@ -763,9 +765,31 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(true);
     });
 
-    it('ignores a footer-less comment from another account', async () => {
-      // No footer and not the reviewing account's: nothing presubmit can
-      // attribute — it stays outside the dedup set.
+    it('classifies the shape attribution-off actually posts — markerless body, invisible marker, any account', async () => {
+      // `submit` strips the severity prefix and appends the comment marker;
+      // GitHub stores exactly this. The marker — not authorship, not the
+      // prefix — is what the dedup set recognizes.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: 'x\n\n<!-- qwen-review -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('ignores a footer-less, marker-less comment from another account', async () => {
+      // No footer, no comment marker, and not the reviewing account's:
+      // nothing presubmit can attribute — it stays outside the dedup set.
       const result = await presubmitWithComments(
         [
           {

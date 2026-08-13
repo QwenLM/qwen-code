@@ -69,6 +69,7 @@ import {
   SUGGESTION_PREFIX,
   countInlineFindings,
   severityOf,
+  stripSeverityPrefix,
   unmarkedComments,
   type DraftedComment,
 } from './lib/inline-counts.js';
@@ -1444,10 +1445,10 @@ function composeReviewBody(
 
   // Model-written blockers: quoted as-is in both halves. The marker is the
   // attributed template's severity signal; an unattributed post quotes the
-  // blocker without it (the inline comments' prefixes go the same way in
-  // `submit`).
+  // blocker without it — stripping one the model already wrote, exactly as
+  // `submit` strips the inline comments' prefixes.
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => (attribution ? withMarker(l) : l))
+    .map((l) => (attribution ? withMarker(l) : stripSeverityPrefix(l)))
     .map((l) => ({ en: l, zh: l }));
 
   const contextUnavailableClause: Bi = {

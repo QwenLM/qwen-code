@@ -519,12 +519,20 @@ describe('composeReview — the C/S table', () => {
 
   it('attribution off: a body Critical is quoted without the severity marker', () => {
     const r = composeReview(
-      base({ bodyCriticals: ['whole-PR blocker X'] }),
+      base({
+        bodyCriticals: [
+          'whole-PR blocker X',
+          // The model wrote the marker itself; the unattributed post strips
+          // it, exactly as submit strips the inline comments' prefixes.
+          '**[Critical]** whole-PR blocker Y',
+        ],
+      }),
       '0.21.2',
       false,
     );
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('whole-PR blocker X');
+    expect(r.body).toContain('whole-PR blocker Y');
     expect(r.body).not.toContain('**[Critical]**');
   });
 
@@ -3293,8 +3301,8 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('No issues found.');
-    expect(r.body).toContain('未发现问题。');
+    expect(r.body).toContain('No issues found. LGTM! ✅');
+    expect(r.body).toContain('未发现问题。LGTM！✅');
   });
 
   it('translates the disclosures — role phrase and Not-reviewed frame', () => {
@@ -4006,7 +4014,7 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.body).toContain('.github/workflows/ci.yml');
     expect(r.body).toContain('source mapping not yet supported');
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
-    expect(r.body).toContain('No issues found.');
+    expect(r.body).toContain('No issues found. LGTM! ✅');
   });
 });
 
@@ -4308,6 +4316,31 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(JSON.stringify(ledger)).not.toContain('forged');
   });
 
+  it('attribution off still appends the ledger marker — it is how the next round recovers this round', () => {
+    // The footer is gone in this mode; the invisible ledger is the only
+    // recovery channel left, so it must ride the body regardless.
+    const r = composeReview(
+      {
+        planPath: plan(),
+        modelId: 'm',
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          {
+            path: 'src/a.ts',
+            line: 3,
+            body: '**[Suggestion]** untested guard',
+          },
+        ],
+      },
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toContain('<!-- qwen-review-ledger ');
+    expect(parseLedger(r.body)?.findings).toHaveLength(1);
+    expect(r.body).not.toContain('via Qwen Code /review');
+  });
+
   it('counts the round from the side file pr-context recovered, +1', () => {
     writeFileSync(
       join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
@@ -4581,7 +4614,7 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     });
     expect(r.body).not.toContain('Not explored to full depth');
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('No issues found.');
+    expect(r.body).toContain('No issues found. LGTM! ✅');
   });
 
   it('leaves an already-linked entry untouched — never nests a second link', () => {

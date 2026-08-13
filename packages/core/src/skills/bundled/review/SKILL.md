@@ -1086,12 +1086,12 @@ Then reference each finding's `assets` URLs in its inline comment body as `![evi
     {
       "path": "src/file.ts",
       "line": 42,
-      "body": "**[Critical]** issue description — Failure scenario: <trigger> → <wrong outcome>\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
+      "body": "**[Critical]** issue description as plain sentences carrying the concrete trigger and the wrong outcome\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
     },
     {
       "path": "src/other.ts",
       "line": 88,
-      "body": "**[Suggestion]** recommended improvement — Concrete cost: <what is duplicated/wasted/fragile>\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
+      "body": "**[Suggestion]** recommended improvement as plain sentences carrying the concrete cost (what is duplicated, wasted, or fragile)\n\n```suggestion\nimproved code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review (v{{cliVersion}})_",
     },
   ],
   "state": {
