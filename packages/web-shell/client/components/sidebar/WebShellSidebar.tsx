@@ -3115,6 +3115,12 @@ export function WebShellSidebar({
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
         sessionActionItems.has('archive') && canMutateSessionArchive(session);
+      // Read-only rows render their own dedicated archive control above.
+      // The shared action block below must not contribute a second archive
+      // action for the same row (it would render a duplicate button whenever
+      // a read-only row still shows pin, e.g. restricted secondary
+      // workspaces with qualified REST + organization enabled).
+      const archiveOwnedByReadOnlyBlock = readOnly && showArchive;
       const showRename = sessionActionItems.has('rename') && mutableScope;
       const activeExportScope = getActiveExportScope(session);
       const showExport =
@@ -3322,7 +3328,9 @@ export function WebShellSidebar({
                                 ? t('sidebar.archiveCurrentDisabled')
                                 : t('sidebar.archive'),
                               visible:
-                                showArchive && inlineActionItems.has('archive'),
+                                showArchive &&
+                                !archiveOwnedByReadOnlyBlock &&
+                                inlineActionItems.has('archive'),
                               onClick: () => handleArchive(session),
                             },
                             {
@@ -3394,7 +3402,9 @@ export function WebShellSidebar({
                             ));
                         })()}
                         {(showPin && !inlineActionItems.has('pin')) ||
-                        (showArchive && !inlineActionItems.has('archive')) ||
+                        (showArchive &&
+                          !archiveOwnedByReadOnlyBlock &&
+                          !inlineActionItems.has('archive')) ||
                         sessionActionItems.has('details') ||
                         (showRename && !inlineActionItems.has('rename')) ||
                         canOrganizeSession(session, 'group') ||
@@ -3437,6 +3447,7 @@ export function WebShellSidebar({
                                   </DropdownMenuItem>
                                 )}
                                 {showArchive &&
+                                  !archiveOwnedByReadOnlyBlock &&
                                   !inlineActionItems.has('archive') && (
                                     <DropdownMenuItem
                                       disabled={busy || isCurrent}
