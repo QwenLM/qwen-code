@@ -19,6 +19,7 @@ import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { Buffer } from 'node:buffer';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
 import type { CumulativeUsage, SessionEmitterContext } from './types.js';
@@ -201,6 +202,12 @@ function replayContext(
           _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
         } as unknown as SessionUpdate;
       })();
+      observeAcpToolResultProjection(
+        update,
+        projectedUpdate,
+        sessionId,
+        updateWithRecordId,
+      );
       if (limits) {
         const updateCount = updates.length + 1;
         if (updateCount > limits.maxUpdates) {

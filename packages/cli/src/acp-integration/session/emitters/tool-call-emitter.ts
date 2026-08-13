@@ -22,6 +22,7 @@ import type {
 import {
   formatVisionBridgeNoticeDisplay,
   isVisionBridgeNoticeDisplay,
+  toolResultBoundaryArtifact,
   ToolNames,
   Kind,
 } from '@qwen-code/qwen-code-core';
@@ -30,6 +31,7 @@ import {
   createTranscriptToolCallStartUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { sanitizeTerminalText } from '../../../ui/utils/textUtils.js';
+import { associateAcpToolResultArtifact } from '../../../utils/tool-result-boundary-diagnostics.js';
 
 const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Read]: 'read',
@@ -187,24 +189,31 @@ export class ToolCallEmitter extends BaseEmitter {
       params.toolName,
       params.subagentMeta,
     );
-    await this.sendUpdate(
-      createTranscriptToolCallResultUpdate({
-        toolName: params.toolName,
-        callId: params.callId,
-        success: params.success,
-        message: params.message,
-        resultDisplay: params.resultDisplay,
-        errorMessage: params.error?.message,
-        artifacts: params.artifacts,
-        contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
-        timestamp: params.timestamp,
-        extra: {
-          ...params.subagentMeta,
-          provenance: provenance.provenance,
-          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        },
-      }),
+    const update = createTranscriptToolCallResultUpdate({
+      toolName: params.toolName,
+      callId: params.callId,
+      success: params.success,
+      message: params.message,
+      resultDisplay: params.resultDisplay,
+      errorMessage: params.error?.message,
+      artifacts: params.artifacts,
+      contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
+      timestamp: params.timestamp,
+      extra: {
+        ...params.subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
+    associateAcpToolResultArtifact(
+      update,
+      params.boundaryArtifact ??
+        toolResultBoundaryArtifact(
+          params.persistedOutputFiles,
+          params.artifacts,
+        ),
     );
+    await this.sendUpdate(update);
   }
 
   /**

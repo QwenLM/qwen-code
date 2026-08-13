@@ -783,6 +783,7 @@ describe('createAgentToolProgressHandler', () => {
           args: { arg1: 'value1' },
           status: 'success',
           responseParts,
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
         },
       ],
     };
@@ -807,6 +808,7 @@ describe('createAgentToolProgressHandler', () => {
       expect.objectContaining({
         callId: 'tool-1',
         responseParts,
+        boundaryArtifact: { state: 'reusable', kinds: ['file'] },
       }),
       'parent-tool-id',
     );

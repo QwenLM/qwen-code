@@ -6,8 +6,15 @@
 
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import type { ToolArtifact } from '../tools/tools.js';
 import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
 import { createDebugLogger } from './debugLogger.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+  type ToolResultBoundaryStage,
+} from './tool-result-boundary-diagnostics.js';
 import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
@@ -20,6 +27,41 @@ export interface ToolResponseBudgetEntry {
   toolName: string;
   responseParts: Part[];
   persistedOutputFiles?: string[];
+  artifacts?: ToolArtifact[];
+}
+
+function observeFinalizerEntries(
+  config: Config,
+  stage: Extract<
+    ToolResultBoundaryStage,
+    'finalizer_input' | 'finalizer_output'
+  >,
+  entries: ToolResponseBudgetEntry[],
+  mutatedEntryIndexes: ReadonlySet<number>,
+  promptIds?: ReadonlyMap<string, string>,
+): void {
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    try {
+      observeToolResultBoundary({
+        stage,
+        sessionId: config.getSessionId?.(),
+        promptId: promptIds?.get(entry.callId),
+        toolCallId: entry.callId,
+        toolName: entry.toolName,
+        mutated: mutatedEntryIndexes.has(index),
+        artifacts: [
+          toolResultBoundaryArtifact(
+            entry.persistedOutputFiles,
+            entry.artifacts,
+          ),
+        ],
+        values: () => toolResultPartDiagnosticValues(entry.responseParts),
+      });
+    } catch {
+      // Diagnostics must not affect response finalization.
+    }
+  }
 }
 
 type TextSlot = {
@@ -255,14 +297,49 @@ export function enforceFunctionResponseBudget(
 export async function finalizeToolResponses(
   config: Config,
   entries: ToolResponseBudgetEntry[],
+  promptIds?: ReadonlyMap<string, string>,
 ): Promise<ToolResponseBudgetEntry[]> {
   const budget =
     config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(budget) || budget <= 0) return entries;
+  if (!Number.isFinite(budget) || budget <= 0) {
+    const unchanged = new Set<number>();
+    observeFinalizerEntries(
+      config,
+      'finalizer_input',
+      entries,
+      unchanged,
+      promptIds,
+    );
+    observeFinalizerEntries(
+      config,
+      'finalizer_output',
+      entries,
+      unchanged,
+      promptIds,
+    );
+    return entries;
+  }
 
   const slots = collectTextSlots(entries);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
-  if (total <= budget) return entries;
+  if (total <= budget) {
+    const unchanged = new Set<number>();
+    observeFinalizerEntries(
+      config,
+      'finalizer_input',
+      entries,
+      unchanged,
+      promptIds,
+    );
+    observeFinalizerEntries(
+      config,
+      'finalizer_output',
+      entries,
+      unchanged,
+      promptIds,
+    );
+    return entries;
+  }
 
   const allocations = allocateTextBudget(
     slots.map((slot) => slot.text.length),
@@ -274,6 +351,14 @@ export async function finalizeToolResponses(
       entriesToPersist.add(slots[index].entryIndex);
     }
   }
+
+  observeFinalizerEntries(
+    config,
+    'finalizer_input',
+    entries,
+    entriesToPersist,
+    promptIds,
+  );
 
   const withPersistence = [...entries];
   const normalizedCallIds = entries.map((entry) =>
@@ -339,6 +424,13 @@ export async function finalizeToolResponses(
   }
 
   const finalized = replaceTextSlots(withPersistence, slots, allocations);
+  observeFinalizerEntries(
+    config,
+    'finalizer_output',
+    finalized,
+    entriesToPersist,
+    promptIds,
+  );
   const finalizedTotal = collectTextSlots(finalized).reduce(
     (sum, slot) => sum + slot.text.length,
     0,

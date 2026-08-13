@@ -186,6 +186,7 @@ export class SubAgentTracker {
           success: event.success,
           message: event.responseParts ?? [],
           resultDisplay: event.resultDisplay,
+          boundaryArtifact: event.boundaryArtifact,
           args: state?.args,
           subagentMeta: this.subagentMeta,
         })

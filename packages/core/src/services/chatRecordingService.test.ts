@@ -1293,6 +1293,38 @@ describe('ChatRecordingService', () => {
       expect(record.toolCallResult?.callId).toBe('call-1');
     });
 
+    it('uses persistence metadata only for diagnostics', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'result' },
+          },
+        },
+      ];
+
+      chatRecordingService.recordToolResult(toolResultParts, {
+        callId: 'call-1',
+        status: 'success',
+        persistedOutputFiles: ['/private/tool-result.txt'],
+        artifacts: [
+          {
+            kind: 'link',
+            title: 'private artifact',
+            url: 'https://private.example/result',
+          },
+        ],
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.toolCallResult).not.toHaveProperty('persistedOutputFiles');
+      expect(record.toolCallResult).not.toHaveProperty('artifacts');
+      expect(JSON.stringify(record)).not.toContain('/private/tool-result.txt');
+      expect(JSON.stringify(record)).not.toContain('private.example');
+    });
+
     it('should keep small file diff resultDisplay unchanged', async () => {
       const toolResultParts: Part[] = [
         {

@@ -5265,6 +5265,7 @@ describe('AgentTool', () => {
           name: 'read_file',
           success: true,
           responseParts,
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5284,6 +5285,10 @@ describe('AgentTool', () => {
       );
       expect(toolCall?.args).toEqual({ path: '/test.ts' });
       expect(toolCall?.responseParts).toBe(responseParts);
+      expect(toolCall?.boundaryArtifact).toEqual({
+        state: 'reusable',
+        kinds: ['file'],
+      });
     });
 
     it('omits subagent protocol payloads from interactive display state', async () => {
@@ -5310,6 +5315,7 @@ describe('AgentTool', () => {
           success: true,
           responseParts,
           resultDisplay: 'Rendered result',
+          boundaryArtifact: { state: 'reusable', kinds: ['file'] },
           timestamp: Date.now(),
         } satisfies AgentToolResultEvent);
       });
@@ -5331,6 +5337,7 @@ describe('AgentTool', () => {
       expect(toolCall?.resultDisplay).toBe('Rendered result');
       expect(toolCall).not.toHaveProperty('args');
       expect(toolCall).not.toHaveProperty('responseParts');
+      expect(toolCall).not.toHaveProperty('boundaryArtifact');
     });
 
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {

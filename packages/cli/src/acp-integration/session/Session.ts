@@ -181,6 +181,9 @@ import {
   splitImageParts,
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
   getInvocationContext,
   runWithInvocationContext,
   truncateNotificationLabel,
@@ -299,6 +302,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -5748,9 +5752,11 @@ export class Session implements SessionContext {
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
+    const projectedUpdate = projectAcpToolResultUpdate(update);
+    observeAcpToolResultProjection(update, projectedUpdate, this.sessionId);
     const params: SessionNotification = {
       sessionId: this.sessionId,
-      update: projectAcpToolResultUpdate(update),
+      update: projectedUpdate,
     };
 
     if (update.sessionUpdate === 'plan') {
@@ -8310,12 +8316,18 @@ export class Session implements SessionContext {
           toolName: record.toolName,
           responseParts: record.responseParts,
           persistedOutputFiles: record.persistedOutputFiles,
+          artifacts: record.metadata.artifacts,
         })),
+        new Map(orderedRecords.map((record) => [record.callId, promptId])),
       );
       orderedRecords.forEach((record, index) => {
         this.config
           .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, record.metadata);
+          ?.recordToolResult(finalized[index].responseParts, {
+            ...record.metadata,
+            persistedOutputFiles: finalized[index].persistedOutputFiles,
+            artifacts: finalized[index].artifacts,
+          });
       });
       return {
         ...result,
@@ -8461,6 +8473,8 @@ export class Session implements SessionContext {
             resultDisplay: response.resultDisplay,
             error: response.error,
             success: false,
+            artifacts: response.artifacts,
+            persistedOutputFiles: response.persistedOutputFiles,
           });
         }
       } catch (emitError) {
@@ -8482,6 +8496,7 @@ export class Session implements SessionContext {
           resultDisplay: response.resultDisplay,
           error: response.error,
           errorType: response.errorType,
+          artifacts: response.artifacts,
         },
       });
     };
@@ -10350,6 +10365,31 @@ export class Session implements SessionContext {
             sleepInhibitorHandle.release();
           }
 
+          observeToolResultBoundary({
+            stage: 'producer',
+            sessionId: this.sessionId,
+            promptId,
+            toolCallId: callId,
+            toolName,
+            artifacts: [
+              toolResultBoundaryArtifact(
+                toolResult.persistedOutputFiles,
+                toolResult.artifacts,
+              ),
+            ],
+            values: () => [
+              ...toolResultPartDiagnosticValues(toolResult.llmContent),
+              ...(typeof toolResult.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: toolResult.returnDisplay,
+                    },
+                  ]
+                : []),
+            ],
+          });
+
           // Clean up event listeners
           cleanupAgentToolResources();
 
@@ -10594,6 +10634,7 @@ export class Session implements SessionContext {
                 error: responseError,
                 success: succeeded,
                 artifacts: toolResult.artifacts,
+                persistedOutputFiles: toolResult.persistedOutputFiles,
               });
             } catch (emitError) {
               debugLogger.debug(
@@ -10649,6 +10690,7 @@ export class Session implements SessionContext {
               ...(visionBridgeNotice !== undefined
                 ? { visionBridgeNotice }
                 : {}),
+              artifacts: toolResult.artifacts,
               error:
                 status === 'error' && toolResult.error
                   ? new Error(toolResult.error.message)

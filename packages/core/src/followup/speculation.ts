@@ -41,6 +41,11 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from '../utils/tool-response-finalizer.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../utils/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -370,6 +375,34 @@ async function runSpeculativeLoop(
           );
           state.toolUseCount++;
 
+          try {
+            observeToolResultBoundary({
+              stage: 'producer',
+              sessionId: config.getSessionId?.(),
+              toolCallId: persistenceCallId,
+              toolName: name,
+              artifacts: [
+                toolResultBoundaryArtifact(
+                  result.persistedOutputFiles,
+                  result.artifacts,
+                ),
+              ],
+              values: () => [
+                ...toolResultPartDiagnosticValues(result.llmContent),
+                ...(typeof result.returnDisplay === 'string'
+                  ? [
+                      {
+                        representation: 'display' as const,
+                        value: result.returnDisplay,
+                      },
+                    ]
+                  : []),
+              ],
+            });
+          } catch {
+            // Diagnostics must not affect speculative execution.
+          }
+
           const convertedResponseParts = result.error
             ? convertToFunctionErrorResponse(
                 name,
@@ -397,6 +430,7 @@ async function runSpeculativeLoop(
             toolName: name,
             responseParts,
             persistedOutputFiles: result.persistedOutputFiles,
+            artifacts: result.artifacts,
           });
         } catch (error: unknown) {
           const responsePart: Part = {

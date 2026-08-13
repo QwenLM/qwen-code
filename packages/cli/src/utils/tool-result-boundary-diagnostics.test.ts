@@ -1,0 +1,343 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
+import { LOAD_REPLAY_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ToolResultBoundaryObservation } from '@qwen-code/qwen-code-core';
+import type { CLIUserMessage } from '../nonInteractive/types.js';
+
+const { mockObserveBoundary } = vi.hoisted(() => ({
+  mockObserveBoundary: vi.fn(
+    (_observation: ToolResultBoundaryObservation) => true,
+  ),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  observeToolResultBoundary: mockObserveBoundary,
+}));
+
+import {
+  associateAcpToolResultArtifact,
+  observeAcpToolResultProjection,
+  observeAcpToolResultWire,
+  observeHeadlessJsonToolResultWire,
+  observeHeadlessToolResultProjection,
+  observeHeadlessToolResultWire,
+} from './tool-result-boundary-diagnostics.js';
+
+function acpUpdate(text: string, toolCallId = 'call-secret'): SessionUpdate {
+  return {
+    sessionUpdate: 'tool_call_update',
+    toolCallId,
+    content: [
+      {
+        type: 'content',
+        content: { type: 'text', text },
+      },
+    ],
+    rawOutput: text,
+  };
+}
+
+function headlessMessage(
+  content: string,
+  toolCallId = 'call-secret',
+): CLIUserMessage {
+  return {
+    type: 'user',
+    session_id: 'session-secret',
+    parent_tool_use_id: null,
+    message: {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: toolCallId,
+          content,
+        },
+      ],
+    },
+  };
+}
+
+describe('CLI tool-result boundary diagnostics', () => {
+  beforeEach(() => {
+    mockObserveBoundary.mockReset().mockReturnValue(true);
+  });
+
+  it('correlates ACP projection with the exact direct NDJSON writer frame', () => {
+    const input = acpUpdate('original');
+    const output = acpUpdate('projected');
+    associateAcpToolResultArtifact(input, {
+      state: 'reusable',
+      kinds: ['file', 'image'],
+    });
+
+    observeAcpToolResultProjection(input, output, 'session-secret');
+    observeAcpToolResultWire(
+      {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { sessionId: 'session-secret', update: output },
+      },
+      1_234,
+    );
+
+    expect(mockObserveBoundary).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        stage: 'acp_projection_input',
+        mutated: true,
+        sessionId: 'session-secret',
+        toolCallId: 'call-secret',
+        artifacts: [{ state: 'reusable', kinds: ['file', 'image'] }],
+        values: expect.any(Function),
+      }),
+    );
+    const projectionValues = mockObserveBoundary.mock.calls[0]?.[0].values;
+    expect(
+      typeof projectionValues === 'function'
+        ? projectionValues()
+        : projectionValues,
+    ).toEqual([
+      { representation: 'acp_content', value: 'original' },
+      { representation: 'acp_raw_output', value: 'original' },
+    ]);
+    expect(mockObserveBoundary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stage: 'acp_wire',
+        wireUtf8Bytes: 1_235,
+        artifacts: [{ state: 'reusable', kinds: ['file', 'image'] }],
+        values: expect.any(Function),
+      }),
+    );
+    const wireValues = mockObserveBoundary.mock.calls.at(-1)?.[0]?.values;
+    expect(
+      typeof wireValues === 'function' ? wireValues() : wireValues,
+    ).toEqual([
+      { representation: 'acp_content', value: 'projected' },
+      { representation: 'acp_raw_output', value: 'projected' },
+    ]);
+  });
+
+  it('correlates the delivered replay clone inside a bulk response', () => {
+    const input = acpUpdate('original');
+    const projected = acpUpdate('projected');
+    const delivered = {
+      ...projected,
+      _meta: { 'qwen.session.recordId': 'record-secret' },
+    } as SessionUpdate;
+    associateAcpToolResultArtifact(input, {
+      state: 'none',
+      kinds: ['link'],
+    });
+    observeAcpToolResultProjection(
+      input,
+      projected,
+      'session-secret',
+      delivered,
+    );
+
+    observeAcpToolResultWire(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: { v: 1, updates: [delivered] },
+          },
+        },
+      },
+      2_000,
+    );
+
+    expect(mockObserveBoundary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stage: 'acp_wire',
+        wireUtf8Bytes: 2_001,
+        artifacts: [{ state: 'none', kinds: ['link'] }],
+      }),
+    );
+  });
+
+  it('preserves per-call artifact summaries in bulk ACP responses', () => {
+    const firstInput = acpUpdate('first-original', 'first-call');
+    const firstProjected = acpUpdate('first-projected', 'first-call');
+    const firstDelivered = { ...firstProjected };
+    const secondInput = acpUpdate('second-original', 'second-call');
+    const secondProjected = acpUpdate('second-projected', 'second-call');
+    const secondDelivered = { ...secondProjected };
+
+    associateAcpToolResultArtifact(firstInput, {
+      state: 'reusable',
+      kinds: ['file'],
+    });
+    observeAcpToolResultProjection(
+      firstInput,
+      firstProjected,
+      'session-secret',
+      firstDelivered,
+    );
+    associateAcpToolResultArtifact(secondInput, {
+      state: 'none',
+      kinds: ['image'],
+    });
+    observeAcpToolResultProjection(
+      secondInput,
+      secondProjected,
+      'session-secret',
+      secondDelivered,
+    );
+
+    observeAcpToolResultWire(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: {
+              v: 1,
+              updates: [firstDelivered, secondDelivered],
+            },
+          },
+        },
+      },
+      3_000,
+    );
+
+    expect(mockObserveBoundary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stage: 'acp_wire',
+        toolCallId: undefined,
+        toolCallIds: ['first-call', 'second-call'],
+        wireUtf8Bytes: 3_001,
+        artifacts: [
+          { state: 'reusable', kinds: ['file'] },
+          { state: 'none', kinds: ['image'] },
+        ],
+      }),
+    );
+  });
+
+  it('correlates Headless projection with its writer frame', () => {
+    const message = headlessMessage('projected');
+    observeHeadlessToolResultProjection(
+      message,
+      'original',
+      'projected',
+      'call-secret',
+      { state: 'reusable', kinds: ['file'] },
+    );
+    observeHeadlessToolResultWire(message, 'x'.repeat(777));
+
+    expect(mockObserveBoundary).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        stage: 'headless_projection_input',
+        mutated: true,
+        artifacts: [{ state: 'reusable', kinds: ['file'] }],
+        values: [{ representation: 'headless_content', value: 'original' }],
+      }),
+    );
+    expect(mockObserveBoundary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stage: 'headless_wire',
+        sessionId: 'session-secret',
+        toolCallId: 'call-secret',
+        wireUtf8Bytes: 777,
+        artifacts: [{ state: 'reusable', kinds: ['file'] }],
+        values: [{ representation: 'headless_content', value: 'projected' }],
+      }),
+    );
+  });
+
+  it('logs one exact wire event for a batch JSON frame', () => {
+    const first = headlessMessage('first-projected', 'first-call');
+    const second = headlessMessage('second-projected', 'second-call');
+    observeHeadlessToolResultProjection(
+      first,
+      'first-original',
+      'first-projected',
+      'first-call',
+      { state: 'reusable', kinds: ['file'] },
+    );
+    observeHeadlessToolResultProjection(
+      second,
+      'second-original',
+      'second-projected',
+      'second-call',
+      { state: 'none', kinds: ['image'] },
+    );
+
+    observeHeadlessJsonToolResultWire([first, second], 'x'.repeat(999));
+
+    expect(mockObserveBoundary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stage: 'headless_wire',
+        toolCallId: undefined,
+        toolCallIds: ['first-call', 'second-call'],
+        wireUtf8Bytes: 999,
+        artifacts: [
+          { state: 'reusable', kinds: ['file'] },
+          { state: 'none', kinds: ['image'] },
+        ],
+        values: [
+          {
+            representation: 'headless_content',
+            value: 'first-projected',
+          },
+          {
+            representation: 'headless_content',
+            value: 'second-projected',
+          },
+        ],
+      }),
+    );
+  });
+
+  it('does not retain objects when neither projection event is eligible', () => {
+    mockObserveBoundary.mockReturnValue(false);
+    const output = acpUpdate('small');
+    observeAcpToolResultProjection(output, output, 'session-secret');
+    mockObserveBoundary.mockClear();
+
+    observeAcpToolResultWire(
+      {
+        method: 'session/update',
+        params: { update: output },
+      },
+      10,
+    );
+
+    expect(mockObserveBoundary).not.toHaveBeenCalled();
+  });
+
+  it('swallows observer failures at projection boundaries', () => {
+    mockObserveBoundary.mockImplementation(() => {
+      throw new Error('diagnostic failure');
+    });
+    const message = headlessMessage('projected');
+
+    expect(() =>
+      observeHeadlessToolResultProjection(
+        message,
+        'original',
+        'projected',
+        'call-secret',
+        { state: 'undecided', kinds: [] },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      observeAcpToolResultProjection(
+        acpUpdate('original'),
+        acpUpdate('projected'),
+        'session-secret',
+      ),
+    ).not.toThrow();
+  });
+});

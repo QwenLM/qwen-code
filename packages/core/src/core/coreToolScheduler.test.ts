@@ -92,6 +92,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
+import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -138,6 +139,19 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 );
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const boundaryObserveMock = vi.hoisted(() =>
+  vi.fn((_observation: ToolResultBoundaryObservation) => false),
+);
+
+vi.mock(
+  '../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeToolResultBoundary: boundaryObserveMock,
+  }),
+);
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
 const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
@@ -624,6 +638,7 @@ async function waitForStatus(
 describe('CoreToolScheduler', () => {
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
+    boundaryObserveMock.mockClear();
     runSideQueryMock.mockReset();
     modifyWithEditorOverride.value = undefined;
   });
@@ -10529,6 +10544,10 @@ describe('CoreToolScheduler Plan shell routing', () => {
 });
 
 describe('CoreToolScheduler telemetry spans', () => {
+  beforeEach(() => {
+    boundaryObserveMock.mockClear();
+  });
+
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
@@ -11409,6 +11428,35 @@ describe('CoreToolScheduler telemetry spans', () => {
       'Tool execution failed with exception',
       'tool_exception',
     );
+  });
+
+  it('observes a settled producer when post-processing throws', async () => {
+    const resultFilePaths: string[] = [];
+    Object.defineProperty(resultFilePaths, Symbol.iterator, {
+      value: () => {
+        throw new Error('post-processing failed');
+      },
+    });
+    const readTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'settled result',
+        returnDisplay: 'settled result',
+        resultFilePaths,
+      }),
+    });
+
+    const { completedCalls } = await runSingleTool({
+      tools: [readTool],
+      toolName: ToolNames.READ_FILE,
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(
+      boundaryObserveMock.mock.calls
+        .map(([observation]) => observation.stage)
+        .filter((stage) => stage.startsWith('producer_')),
+    ).toEqual(['producer_input', 'producer_output']);
   });
 
   it('preserves original tool exceptions when the failure hook rejects', async () => {

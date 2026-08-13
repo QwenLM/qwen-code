@@ -17,6 +17,19 @@ const forkedAgentMocks = vi.hoisted(() => ({
   runForkedAgent: vi.fn(),
   sendMessageStream: vi.fn(),
 }));
+const boundaryMocks = vi.hoisted(() => ({
+  observe: vi.fn(() => false),
+}));
+
+vi.mock(
+  '../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeToolResultBoundary: boundaryMocks.observe,
+  }),
+);
 
 vi.mock('../utils/forkedAgent.js', () => ({
   getCacheSafeParams: vi.fn(() => ({
@@ -167,6 +180,14 @@ describe('startSpeculation', () => {
       signal: expect.any(AbortSignal),
     });
     expect(execute).toHaveBeenCalledOnce();
+    expect(boundaryMocks.observe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: 'producer',
+        toolCallId: 'call-speculation-guard-allow',
+        toolName: 'read_file',
+        values: expect.any(Function),
+      }),
+    );
 
     await abortSpeculation(state);
   });

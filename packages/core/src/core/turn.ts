@@ -17,6 +17,7 @@ import { FinishReason } from './genai-compat.js';
 import type {
   ToolCallConfirmationDetails,
   ToolArtifact,
+  ToolResultBoundaryArtifact,
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
@@ -158,6 +159,7 @@ export interface ToolCallResponseInfo {
   terminateTurn?: boolean;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
+  boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {

@@ -50,6 +50,7 @@ import {
 import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
+  ToolArtifact,
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
@@ -58,6 +59,10 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from '../../utils/tool-response-finalizer.js';
+import {
+  isToolResultBoundaryDiagnosticsEnabled,
+  toolResultBoundaryArtifact,
+} from '../../utils/tool-result-boundary-diagnostics.js';
 import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
@@ -1524,6 +1529,7 @@ export class AgentCore {
         toolName: string;
         responseParts: Part[];
         persistedOutputFiles?: string[];
+        artifacts?: ToolArtifact[];
         durationMs?: number;
       }
     >();
@@ -1719,6 +1725,14 @@ export class AgentCore {
             error: errorMessage,
             responseParts: call.response.responseParts,
             resultDisplay: call.response.resultDisplay,
+            ...(isToolResultBoundaryDiagnosticsEnabled()
+              ? {
+                  boundaryArtifact: toolResultBoundaryArtifact(
+                    call.response.persistedOutputFiles,
+                    call.response.artifacts,
+                  ),
+                }
+              : {}),
             durationMs: duration,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
@@ -1739,6 +1753,7 @@ export class AgentCore {
             toolName,
             responseParts: call.response.responseParts,
             persistedOutputFiles: call.response.persistedOutputFiles,
+            artifacts: call.response.artifacts,
             durationMs: duration,
           });
         }
@@ -1970,6 +1985,7 @@ export class AgentCore {
             toolName: response.toolName,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
           },
         ];
       });
@@ -1988,6 +2004,7 @@ export class AgentCore {
     const finalizedResponses = await finalizeToolResponses(
       this.runtimeContext,
       orderedResponses,
+      new Map(orderedResponses.map((response) => [response.callId, promptId])),
     );
     const toolResponseParts = finalizedResponses.flatMap(
       (response) => response.responseParts,
