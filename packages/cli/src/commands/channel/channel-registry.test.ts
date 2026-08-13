@@ -21,6 +21,58 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('publishes a plugin session-scope descriptor once with its runtime default', async () => {
+    registerPlugin({
+      channelType: 'valid-custom-session-scope',
+      displayName: 'Custom scope',
+      defaultSessionScope: 'thread',
+      management: {
+        fields: [
+          {
+            key: 'sessionScope',
+            label: 'Conversation scope',
+            kind: 'enum',
+            options: [
+              { value: 'user', label: 'User' },
+              { value: 'thread', label: 'Thread' },
+            ],
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+
+    const descriptor = (await supportedChannelCatalog()).find(
+      (entry) => entry.type === 'valid-custom-session-scope',
+    );
+    const scopeFields = descriptor?.fields.filter(
+      (field) => field.key === 'sessionScope',
+    );
+    expect(scopeFields).toHaveLength(1);
+    expect(scopeFields?.[0]).toMatchObject({
+      label: 'Conversation scope',
+      default: 'thread',
+    });
+  });
+
+  it('strips management for an invalid runtime session-scope default', async () => {
+    registerPlugin({
+      channelType: 'invalid-session-scope-default',
+      displayName: 'Invalid scope',
+      defaultSessionScope: 'workspace' as never,
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+
+    await expect(getPlugin('invalid-session-scope-default')).resolves.toEqual(
+      expect.objectContaining({ management: undefined }),
+    );
+  });
+
   it.each([
     {
       type: 'invalid-nested-secret',
@@ -718,6 +770,16 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    expect(
+      catalog.find((entry) => entry.type === 'dingtalk')?.fields,
+    ).toContainEqual(
+      expect.objectContaining({
+        key: 'sessionScope',
+        kind: 'enum',
+        required: true,
+        default: 'user',
+      }),
+    );
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).toContainEqual(
@@ -746,6 +808,17 @@ describe('channel registry', () => {
         }),
       );
     }
+    expect(
+      catalog.find((entry) => entry.type === 'github')?.fields,
+    ).toContainEqual(
+      expect.objectContaining({
+        key: 'sessionScope',
+        default: 'chat_thread',
+      }),
+    );
+    expect(
+      catalog.find((entry) => entry.type === 'telegram')?.fields,
+    ).not.toContainEqual(expect.objectContaining({ key: 'sessionScope' }));
     expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,
     ).toContainEqual(

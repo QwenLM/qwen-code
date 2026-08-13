@@ -6,7 +6,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
@@ -39,18 +40,153 @@ const root = fs.mkdtempSync(
 );
 try {
   testBootstrapBridgeConfiguration();
+  await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
+  testDesktopReleaseHardening();
   testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
   testUpdateManifest(path.join(root, 'manifest'));
   testElectronBridgeManifest(path.join(root, 'electron-bridge'));
   testVersionSynchronization(path.join(root, 'version'));
+  testRuntimePreparation(path.join(root, 'runtime'));
   console.log('Desktop release helper checks passed.');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+async function testBootstrapWorkspaceVisibility() {
+  const bootstrapHtml = fs.readFileSync(
+    path.join(packageDir, 'bootstrap', 'index.html'),
+    'utf8',
+  );
+  assert.match(bootstrapHtml, /class="mark" src="qwen-code-logo\.svg"/);
+  assert.ok(
+    fs.existsSync(path.join(packageDir, 'bootstrap', 'qwen-code-logo.svg')),
+    'The bootstrap splash mark must ship with the frontendDist directory.',
+  );
+  assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
+  const primary = await createBootstrapHarness();
+  const { body, commands, element, listeners, resolveBootstrapState } = primary;
+
+  listeners['runtime-starting']({
+    payload: '/Users/example/Projects/qwen-code',
+  });
+  assert.equal(body.dataset.state, 'starting');
+  assert.equal(element('#workspace').hidden, true);
+
+  listeners['runtime-failed']({ payload: 'runtime failed' });
+  assert.equal(body.dataset.state, 'error');
+  assert.equal(element('#workspace').hidden, false);
+  assert.equal(
+    element('#workspace').textContent,
+    '/Users/example/Projects/qwen-code',
+  );
+  await element('#logs').listeners.click();
+  assert.equal(element('#workspace').hidden, false);
+
+  element('#retry').listeners.click();
+  assert.equal(commands.at(-1), 'restart_runtime');
+  assert.equal(body.dataset.state, 'starting');
+  assert.equal(element('#workspace').hidden, true);
+
+  resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'starting',
+    workspace: '/Users/example/Documents',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(element('#title').textContent, 'Restarting Qwen Code');
+  assert.equal(
+    element('#workspace').hidden,
+    true,
+    'A stale bootstrap snapshot must not overwrite a newer recovery action.',
+  );
+
+  const failed = await createBootstrapHarness();
+  failed.listeners['runtime-failed']({ payload: 'runtime failed' });
+  failed.resolveBootstrapState({
+    desktopVersion: '0.2.0',
+    status: 'idle',
+    workspace: '/Users/example/Documents/Qwen',
+    error: 'runtime failed',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(failed.element('#workspace').hidden, false);
+  assert.equal(
+    failed.element('#workspace').textContent,
+    '/Users/example/Documents/Qwen',
+  );
+
+  const cancelled = await createBootstrapHarness();
+  cancelled.listeners['runtime-starting']({
+    payload: '/Users/example/Documents/Qwen',
+  });
+  cancelled.listeners['runtime-failed']({ payload: 'runtime failed' });
+  await cancelled.element('#choose').listeners.click();
+  assert.equal(cancelled.body.dataset.state, 'idle');
+  assert.equal(cancelled.element('#workspace').hidden, false);
+  assert.equal(
+    cancelled.element('#workspace').textContent,
+    '/Users/example/Documents/Qwen',
+  );
+}
+
+async function createBootstrapHarness() {
+  const elements = {};
+  const element = (selector) => {
+    elements[selector] ??= {
+      addEventListener(event, listener) {
+        this.listeners ??= {};
+        this.listeners[event] = listener;
+      },
+      style: {},
+    };
+    return elements[selector];
+  };
+  const listeners = {};
+  const commands = [];
+  const body = { dataset: {} };
+  let resolveBootstrapState;
+  const tauri = {
+    core: {
+      invoke: async (command) => {
+        commands.push(command);
+        if (command === 'bootstrap_state') {
+          return new Promise((resolve) => {
+            resolveBootstrapState = resolve;
+          });
+        }
+        if (command === 'open_logs') throw new Error('no file handler');
+        if (command === 'choose_workspace') return null;
+        if (command === 'restart_runtime') return new Promise(() => {});
+        throw new Error(`Unexpected desktop command: ${command}`);
+      },
+    },
+    event: {
+      listen: async (event, listener) => {
+        listeners[event] = listener;
+      },
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(packageDir, 'bootstrap', 'bootstrap.js'), 'utf8'),
+    {
+      document: { body, querySelector: element },
+      window: { __TAURI__: tauri },
+    },
+    { timeout: 5000 },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    body,
+    commands,
+    element,
+    listeners,
+    resolveBootstrapState: (state) => resolveBootstrapState(state),
+  };
 }
 
 function testLegacyApplicationIdentity() {
@@ -196,6 +332,225 @@ function testDesktopReleaseSigningWorkflow() {
     workflow.indexOf("name: 'Sign bundled vendor binaries (macOS)'") <
       workflow.indexOf("name: 'Build desktop installers'"),
     'vendor binaries must be signed before Tauri builds installers',
+  );
+}
+
+function testDesktopReleaseHardening() {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
+    'utf8',
+  );
+  assert.match(
+    workflow,
+    /IS_PRERELEASE" = 'true' \] && \[\[ ! "\$version" =~ \^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+-/,
+    'prerelease builds must not reuse a stable Desktop version',
+  );
+  assert.match(
+    workflow,
+    /\*-setup\.exe\|\*-setup\.exe\.sig/,
+    'Windows release collection must allow only installer executables',
+  );
+  assert.doesNotMatch(
+    workflow.slice(
+      workflow.indexOf('elif [ "$RUNNER_OS" = \'Windows\' ]'),
+      workflow.indexOf('elif [ "$RUNNER_OS" = \'Linux\' ]'),
+    ),
+    /\*\.exe\)/,
+    'Windows release collection must not include embedded executables',
+  );
+  assert.match(
+    workflow,
+    /\*\.AppImage\|\*\.AppImage\.sig\|\*\.deb\|\*\.deb\.sig/,
+    'Linux release collection must allow only installers and updater signatures',
+  );
+
+  const prepareRuntime = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'prepare-runtime.js'),
+    'utf8',
+  );
+  assert.match(
+    prepareRuntime,
+    /QWEN_DESKTOP_NODE_CACHE_DIR/,
+    'runtime preparation must cache verified Node.js archives',
+  );
+  assert.match(
+    workflow,
+    /desktop-node-v2-\$\{\{ matrix\.rust_target \}\}-\$\{\{ env\.NODE_VERSION \}\}-\$\{\{ inputs\.dry_run \}\}/,
+    'release builds must persist the bundled Node.js archive cache',
+  );
+  assert.match(workflow, /actions\/cache\/restore@/);
+  assert.match(workflow, /actions\/cache\/save@/);
+  assert.equal(
+    (
+      workflow.match(
+        /path: '\$\{\{ steps\.node-cache-path\.outputs\.path \}\}'/g,
+      ) ?? []
+    ).length,
+    2,
+    'cache restore and save must share the configured cache path',
+  );
+  assert.ok(
+    prepareRuntime.indexOf('replaceRuntime();') >
+      prepareRuntime.indexOf('writeChecksums();'),
+    'runtime replacement must happen only after assembly and checksums finish',
+  );
+}
+
+function testRuntimePreparation(directory) {
+  const testPackageDir = path.join(directory, 'packages', 'desktop-shell');
+  const testScript = path.join(testPackageDir, 'scripts', 'prepare-runtime.js');
+  const sourceRoot = path.join(directory, 'source');
+  const runtimeDir = path.join(testPackageDir, 'runtime');
+  const cacheRoot = path.join(directory, 'cache');
+  const nodeVersion = process.versions.node;
+  const archiveName = `node-v${nodeVersion}-darwin-arm64.tar.gz`;
+  const cacheDir = path.join(cacheRoot, `v${nodeVersion}`);
+  const cachedArchivePath = path.join(cacheDir, archiveName);
+  const archivePath = path.join(directory, archiveName);
+  const checksumsPath = path.join(directory, 'SHASUMS256.txt');
+  const fetchLog = path.join(directory, 'fetch.log');
+  const fetchMock = path.join(directory, 'mock-fetch.mjs');
+  const extractedRoot = path.join(
+    directory,
+    `node-v${nodeVersion}-darwin-arm64`,
+  );
+
+  fs.mkdirSync(path.join(sourceRoot, 'dist', 'web-shell', 'assets'), {
+    recursive: true,
+  });
+  fs.writeFileSync(
+    path.join(sourceRoot, 'package.json'),
+    JSON.stringify({ version: '0.0.0-test' }),
+  );
+  fs.mkdirSync(path.dirname(testScript), { recursive: true });
+  fs.copyFileSync(
+    path.join(packageDir, 'scripts', 'prepare-runtime.js'),
+    testScript,
+  );
+  fs.writeFileSync(
+    path.join(directory, '.nvmrc'),
+    `${process.versions.node.split('.')[0]}\n`,
+  );
+  fs.writeFileSync(
+    path.join(testPackageDir, 'package.json'),
+    JSON.stringify({ version: '0.0.0-test' }),
+  );
+  fs.writeFileSync(path.join(testPackageDir, 'NOTICE'), 'test notice');
+  fs.writeFileSync(path.join(sourceRoot, 'LICENSE'), 'test license');
+  for (const file of [
+    'cli.js',
+    'cli-entry.js',
+    path.join('web-shell', 'index.html'),
+    path.join('web-shell', 'assets', 'app.js'),
+  ]) {
+    fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
+  }
+  fs.mkdirSync(path.join(extractedRoot, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(extractedRoot, 'bin', 'node'), 'node');
+  fs.writeFileSync(path.join(extractedRoot, 'LICENSE'), 'node license');
+  execFileSync('tar', [
+    '-czf',
+    archivePath,
+    '-C',
+    directory,
+    path.basename(extractedRoot),
+  ]);
+  const archiveHash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(archivePath))
+    .digest('hex');
+  fs.writeFileSync(checksumsPath, `${archiveHash}  ${archiveName}\n`);
+  fs.writeFileSync(
+    fetchMock,
+    `import fs from 'node:fs';
+globalThis.fetch = async (url) => {
+  const value = String(url);
+  const source = value.endsWith('/SHASUMS256.txt')
+    ? process.env.QWEN_TEST_NODE_CHECKSUMS
+    : process.env.QWEN_TEST_NODE_ARCHIVE;
+  fs.appendFileSync(process.env.QWEN_TEST_FETCH_LOG, value + '\\n');
+  return new Response(fs.readFileSync(source), { status: 200 });
+};
+`,
+  );
+
+  const env = {
+    ...process.env,
+    QWEN_CODE_COMMIT: 'test-commit',
+    QWEN_CODE_ROOT: sourceRoot,
+    QWEN_DESKTOP_NODE_CACHE_DIR: cacheRoot,
+    QWEN_DESKTOP_SKIP_BUILD: '1',
+    QWEN_DESKTOP_TARGET: 'darwin-arm64',
+    QWEN_TEST_FETCH_LOG: fetchLog,
+    QWEN_TEST_NODE_ARCHIVE: archivePath,
+    QWEN_TEST_NODE_CHECKSUMS: checksumsPath,
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${pathToFileURL(fetchMock).href}`,
+    ]
+      .filter(Boolean)
+      .join(' '),
+    npm_execpath: process.env.npm_execpath || process.argv[1],
+  };
+  const first = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(first.status, 0, first.stderr);
+  assert.doesNotMatch(first.stdout, /Using cached Node\.js runtime/);
+  assert.ok(fs.existsSync(cachedArchivePath));
+  assert.ok(
+    fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
+  );
+
+  const second = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /Using cached Node\.js runtime/);
+
+  fs.appendFileSync(cachedArchivePath, 'tampered');
+  const poisonedHash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(cachedArchivePath))
+    .digest('hex');
+  fs.writeFileSync(
+    path.join(cacheDir, 'SHASUMS256.txt'),
+    `${poisonedHash}  ${archiveName}\n`,
+  );
+  const recoveredCache = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(recoveredCache.status, 0, recoveredCache.stderr);
+  assert.doesNotMatch(recoveredCache.stdout, /Using cached Node\.js runtime/);
+  const fetches = fs.readFileSync(fetchLog, 'utf8').trim().split('\n');
+  assert.equal(fetches.filter((url) => url.endsWith(archiveName)).length, 2);
+  assert.equal(
+    fetches.filter((url) => url.endsWith('SHASUMS256.txt')).length,
+    3,
+  );
+  assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
+
+  const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
+  fs.writeFileSync(marker, 'preserve me');
+  const strandedRoot = path.join(runtimeDir, '.prepare-stranded');
+  fs.mkdirSync(strandedRoot);
+  fs.renameSync(
+    path.join(runtimeDir, 'qwen-code'),
+    path.join(strandedRoot, 'previous'),
+  );
+  fs.rmSync(path.join(sourceRoot, 'LICENSE'));
+  const failed = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.notEqual(failed.status, 0);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'preserve me');
+  assert.deepEqual(
+    fs.readdirSync(runtimeDir).filter((entry) => entry.startsWith('.prepare-')),
+    [],
   );
 }
 

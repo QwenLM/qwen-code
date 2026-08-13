@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  GoalSnapshotV2,
   SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -17,6 +18,8 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -601,16 +604,14 @@ export interface BridgeSessionSummary {
 }
 
 /**
- * A session's live `/goal` state, as reported by the `qwen --acp` child.
- *
- * Only the active goal crosses the bridge. The child also caches the most
- * recent goal that ended on its own, but nothing on this side reads it, so it
- * is not part of the wire shape — add it back alongside the first consumer.
+ * A session's live canonical Goal state, as reported by the `qwen --acp`
+ * child. `active` remains as a compatibility projection for existing hosts.
  */
 export interface BridgeSessionGoal {
+  snapshot: GoalSnapshotV2;
   active: {
     condition: string;
-    /** Judge turns completed so far; 0 before the first stop-hook evaluation. */
+    /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
     /** The judge's verdict on the most recent turn, when it has run. */
@@ -684,6 +685,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** User-facing projection supplied by an authenticated channel worker. */
+  promptDisplayText?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -723,6 +726,8 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
+  'qwen.daemon.promptDisplayText';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -1471,9 +1476,8 @@ export interface AcpSessionBridge {
   ): Promise<{ cleared: boolean; condition?: string }>;
 
   /**
-   * Read a live session's goal state. Throws `SessionNotFoundError` when the
-   * session is not resident — goals live in the child's memory, so a
-   * non-resident session has no goal to report.
+   * Read a live session's Goal state. Throws `SessionNotFoundError` when the
+   * session is not resident because this route addresses the selected runtime.
    */
   getSessionGoal(sessionId: string): Promise<BridgeSessionGoal>;
 
@@ -1544,6 +1548,12 @@ export interface AcpSessionBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /** Change one advertised ACP configuration option for a live session. */
+  setSessionConfigOption(
+    sessionId: string,
+    req: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse>;
 
   /**
    * Switch UI language and optionally LLM output language for a live
