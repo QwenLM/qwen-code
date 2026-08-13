@@ -115,12 +115,15 @@ describe('SuggestionsDisplay mouse wiring', () => {
     expect(props.containerRef.current).not.toBeNull();
     expect(props.categoryRefs.current).toHaveLength(props.categories.length);
     expect(
-      props.categoryRefs.current.map((node) =>
-        node?.childNodes[0]?.childNodes
-          .map((child) => ('nodeValue' in child ? child.nodeValue : ''))
+      props.categoryRefs.current.map((node) => {
+        const textElement = node?.childNodes[0];
+        if (!textElement || textElement.nodeName === '#text') return '';
+
+        return textElement.childNodes
+          .map((child) => (child.nodeName === '#text' ? child.nodeValue : ''))
           .join('')
-          .trim(),
-      ),
+          .trim();
+      }),
     ).toEqual(['All', 'Files', 'Sessions']);
     expect(props.onSelectCategory).toBe(onSelectCategory);
   });
