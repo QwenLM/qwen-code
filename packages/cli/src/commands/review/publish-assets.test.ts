@@ -166,6 +166,25 @@ describe('publish-assets', () => {
     } as never);
   }
 
+  // The handler-path counterpart of run(): every handler-level leg calls
+  // this, so the yargs-facing argument shape lives in exactly one place and
+  // a one-leg-only edit (a renamed key silenced by the `as never` cast) is
+  // structurally impossible.
+  async function runHandler(
+    overrides: Record<string, unknown> = {},
+  ): Promise<void> {
+    await publishAssetsCommand.handler?.({
+      _: [],
+      $0: 'qwen',
+      pr: 8346,
+      files: [pngFile('a.png')],
+      out: join(dir, 'manifest.json'),
+      'user-authorized': false,
+      'skill-args': argsFile,
+      ...overrides,
+    } as never);
+  }
+
   it('refuses without a designated repo — exit 3, nothing written', () => {
     delete process.env['QWEN_REVIEW_ASSETS_REPO'];
     run({ files: [pngFile('a.png')] });
@@ -219,15 +238,7 @@ describe('publish-assets', () => {
     writeFileSync(argsFile, '8346\n'); // no --comment
     reviewSettingsMock.mockReturnValue({ comment: true });
     happyGh();
-    await publishAssetsCommand.handler?.({
-      _: [],
-      $0: 'qwen',
-      pr: 8346,
-      files: [pngFile('wired.png')],
-      out: join(dir, 'manifest.json'),
-      'user-authorized': false,
-      'skill-args': argsFile,
-    } as never);
+    await runHandler({ files: [pngFile('wired.png')] });
     expect(process.exitCode).toBeUndefined();
     expect(ghWithInputMock).toHaveBeenCalled();
   });
@@ -242,15 +253,7 @@ describe('publish-assets', () => {
     writeFileSync(argsFile, '8346\n'); // no --comment
     reviewSettingsMock.mockReturnValue({}); // setting off
     happyGh();
-    await publishAssetsCommand.handler?.({
-      _: [],
-      $0: 'qwen',
-      pr: 8346,
-      files: [pngFile('refused.png')],
-      out: join(dir, 'manifest.json'),
-      'user-authorized': false,
-      'skill-args': argsFile,
-    } as never);
+    await runHandler({ files: [pngFile('refused.png')] });
     expect(process.exitCode).toBe(3);
     expect(ghWithInputMock).not.toHaveBeenCalled();
     expect(ghMock).not.toHaveBeenCalled();
