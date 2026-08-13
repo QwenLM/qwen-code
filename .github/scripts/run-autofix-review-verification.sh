@@ -369,8 +369,12 @@ sensitive_class_of() {
   # scripts/tests/** is ordinary test code the gate never executes.
   local f="${1}"
   case "${f}" in
-    .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml) echo 'autofix-loop' ;;
-    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs) echo 'autofix-loop' ;;
+    *$'\n'*)
+      # A newline-bearing path cannot round-trip the line-based resolver or
+      # the class ledger — fail CLOSED as its own class instead of open.
+      echo 'suspicious-path' ;;
+    .github/workflows/qwen-autofix*.yml | .github/workflows/qwen-triage*.yml | .github/workflows/qwen-pr-safety-precheck.yml) echo 'autofix-loop' ;;
+    .github/scripts/run-autofix-review-verification.sh | .github/scripts/resolve-owning-packages.sh | .github/scripts/check-settings-schema.sh | .github/scripts/check-autofix-contracts.sh | .github/scripts/resolve-sandbox-image.mjs | .github/scripts/pr-safety-precheck.mjs) echo 'autofix-loop' ;;
     .github/workflows/* | .github/actions/*) echo 'ci-workflows' ;;
     .github/scripts/*) echo 'ci-scripts' ;;
     .github/*) echo 'gh-metadata' ;;
@@ -378,16 +382,16 @@ sensitive_class_of() {
     .qwen/*) echo 'agent-skills' ;;
     scripts/tests/*) ;;
     scripts/*) echo 'repo-scripts' ;;
-    .npmrc | .nvmrc) echo 'toolchain-config' ;;
+    .npmrc | .nvmrc | */.npmrc | */.nvmrc) echo 'toolchain-config' ;;
     package-lock.json | npm-shrinkwrap.json | */package-lock.json | */npm-shrinkwrap.json | patches/*) echo 'supply-chain' ;;
     .gitattributes | */.gitattributes) echo 'measurement-config' ;;
     *) case "${f##*/}" in
-      eslint.config.* | vitest.config.* | tsconfig.json | tsconfig.*.json)
+      eslint.config.* | eslint.legacy-filenames.mjs | vitest.config.* | tsconfig.json | tsconfig.*.json)
         # Workspace-root configs are machinery; a scaffold template deep in
         # a src tree is test/fixture data (same exemption manifests get).
         if at_workspace_root "${f}"; then
           case "${f##*/}" in
-            eslint.config.*) echo 'lint-config' ;;
+            eslint.config.* | eslint.legacy-filenames.mjs) echo 'lint-config' ;;
             vitest.config.*) echo 'test-config' ;;
             *) echo 'ts-config' ;;
           esac
@@ -403,7 +407,7 @@ manifest_scripts_changed() {
   # either side reads as {}.
   local f="${1}" from="${2}" to="${3}" filt a b
   filt='{s: (.scripts // {}), e: (.exports // {}), m: (.main // ""), t: (.types // "")}'
-  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // []), e: (.exports // {})}'
+  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // []), e: (.exports // {}), m: (.main // ""), t: (.types // "")}'
   a="$(git show "${from}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || a='{}'
   b="$(git show "${to}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || b='{}'
   [[ "${a}" != "${b}" ]]
@@ -674,8 +678,24 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
     any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
     "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
   [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'
+  # A defect claim whose EVERY resolved-Critical thread sits on a test file
+  # is a test-side claim ("this test asserts the wrong behavior"): its fixed
+  # test legitimately passes on the pre-round tree, so it takes the advisory
+  # arm, never the rejection.
+  if [[ "${BITE_ENFORCE}" == 'true' ]]; then
+    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" '
+      (add // []) as $comments
+      | ($ids | split("\n")
+          | map(sub("^rc:"; "") | sub("\r$"; "")
+            | select(test("^[0-9]+$")) | tonumber)) as $resolved
+      | [ $comments[] | select(.id as $id | $resolved | index($id) != null) | (.path // "") ]
+      | (length > 0) and all(.[];
+          test("\\.(test|spec)\\.") or test("__tests__/|__snapshots__/|test-utils/|^integration-tests/"))' \
+      "${WORKDIR}/rc.json" 2> /dev/null)" || TESTSIDE='false'
+    [[ "${TESTSIDE}" == 'true' ]] && BITE_ENFORCE='advisory'
+  fi
 fi
-if [[ "${#BITE_FILES[@]}" -gt 0 && -z "${BITE_SRC}" && "${BITE_ENFORCE}" == 'true' ]]; then
+if [[ -z "${BITE_SRC}" && ( "${BITE_ENFORCE}" == 'true' || "${BITE_ENFORCE}" == 'advisory' ) ]]; then
   # A defect-claim round that changed only tests cannot be bite-checked
   # (a fixed test legitimately passes on the pre-round tree) — surface
   # that the claim went unverified rather than skipping silently.
@@ -706,7 +726,7 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
   if [[ -n "${BITE_PKGS}" && -f "${BITE_PKGS}/package.json" ]]; then
     BITE_PKG_NAME="$(node -e 'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).name||"")' "${BITE_PKGS}/package.json" 2> /dev/null)" || BITE_PKG_NAME=''
     if [[ -n "${BITE_PKG_NAME}" ]] &&
-      git grep -q --fixed-strings "${BITE_PKG_NAME}" "${BRANCH}" -- "${BITE_FILES[@]}" 2> /dev/null; then
+      git grep -qE "[\"']${BITE_PKG_NAME}[\"'/]" "${BRANCH}" -- "${BITE_FILES[@]}" 2> /dev/null; then
       # A test importing its own package BY NAME resolves through the
       # package exports into round-built dist/ on the detached tree — the
       # fix leaks into the "pre-round" run (packages/core has no self-alias

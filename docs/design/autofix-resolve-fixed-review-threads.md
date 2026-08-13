@@ -27,7 +27,7 @@ The GitHub mutation must remain in the trusted workflow. The agent must not rece
 
 ### Verification gate
 
-Require a clean tracked worktree and index before deterministic checks, capture the commit SHA, and require both the SHA and tracked state to remain unchanged after the structural checks and again after build, typecheck, lint, and tests. Then record that captured SHA as a step output named `verified_head`. Do not emit it for no-op or failed outcomes. This rejects persistent tracked changes or commits created by branch-controlled checks; it does not claim an immutable filesystem or detect a script that temporarily changes state and restores it within one command, which remains part of the existing CI trust model.
+Require a clean tracked worktree and index before deterministic checks, capture the commit SHA, and require both the SHA and tracked state to remain unchanged after the structural checks and again after build, typecheck, lint, and tests. Then record that captured SHA as a step output named `verified_head`. Do not emit it for failed outcomes. A no-op outcome DOES emit it since the validity-gate change: the no-op head IS origin/<branch>, already verified by the previous pushed round's gate and CI, and the no-code re-verification round the bite check prescribes for re-raised findings must be able to resolve threads. This rejects persistent tracked changes or commits created by branch-controlled checks; it does not claim an immutable filesystem or detect a script that temporarily changes state and restores it within one command, which remains part of the existing CI trust model.
 
 ### Final verification selection
 

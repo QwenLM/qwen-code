@@ -8797,6 +8797,14 @@ exit 1
       'packages/cli/tsconfig.json',
       'packages/cli/src/examples/starter/tsconfig.json',
       'packages/channels/github/tsconfig.json',
+      'package-lock.json',
+      'packages/cli/package-lock.json',
+      'patches/ink+7.0.3.patch',
+      '.gitattributes',
+      'packages/core/.gitattributes',
+      'packages/desktop-shell/.npmrc',
+      'eslint.legacy-filenames.mjs',
+      '.github/workflows/qwen-pr-safety-precheck.yml',
     ]);
     expect(classes).toContain('.github/actions/a/action.yml=ci-workflows');
     expect(classes).toContain('.github/scripts/x.sh=ci-scripts');
@@ -8811,6 +8819,18 @@ exit 1
     );
     expect(classes).toContain(
       'packages/channels/github/tsconfig.json=ts-config',
+    );
+    expect(classes).toContain('package-lock.json=supply-chain');
+    expect(classes).toContain('packages/cli/package-lock.json=supply-chain');
+    expect(classes).toContain('patches/ink+7.0.3.patch=supply-chain');
+    expect(classes).toContain('.gitattributes=measurement-config');
+    expect(classes).toContain(
+      'packages/core/.gitattributes=measurement-config',
+    );
+    expect(classes).toContain('packages/desktop-shell/.npmrc=toolchain-config');
+    expect(classes).toContain('eslint.legacy-filenames.mjs=lint-config');
+    expect(classes).toContain(
+      '.github/workflows/qwen-pr-safety-precheck.yml=autofix-loop',
     );
   });
 
@@ -9134,6 +9154,7 @@ exit 1
     );
     expect(coverageOnly.out).toContain('SURVIVED');
     expect(coverageOnly.out).not.toContain('REJECT:');
+    expect(coverageOnly.advisory).toContain('test-only changes');
 
     // Contract pins: the rejection is non-retryable (a repair pass cannot
     // make a nonexistent defect reproduce), and the report step embeds the
