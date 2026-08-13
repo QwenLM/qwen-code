@@ -768,6 +768,29 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     expect(got.effortSource).toBe('forced-by-fix');
   });
 
+  it('maps a configured auto effort to the built-in rule without warning', async () => {
+    // The schema default written explicitly must behave exactly like the
+    // setting's absence. Deleting the `auto` arm of reviewDefaultsFromSettings
+    // leaves the resolved effort correct while every run warns about a value
+    // that means the default — nothing else would surface the regression.
+    reviewSettingsMock.mockReturnValue({ effort: 'auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('maps a case-variant auto effort like auto', async () => {
+    // `"Auto"` means exactly the built-in default the operator in fact gets;
+    // a case-sensitive comparison drew a factually wrong invalid-value
+    // warning on every run instead.
+    reviewSettingsMock.mockReturnValue({ effort: 'Auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
   it('discards an invalid configured effort, warning instead of dropping it silently', async () => {
     reviewSettingsMock.mockReturnValue({ effort: 'bogus' });
     const got = await verdictFor('6711\n');

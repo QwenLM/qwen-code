@@ -484,7 +484,8 @@ interface ParseArgsCliArgs {
 
 /**
  * The standing defaults from `settings.json` (`review.effort`,
- * `review.comment`), resolved for `parseReviewArgs`: `auto` effort means the
+ * `review.comment`), resolved for `parseReviewArgs`: `auto` effort — matched
+ * case-insensitively, like every other value on this path — means the
  * built-in rule, so it maps to undefined. Any other value passes through
  * raw — `parseReviewArgs` validates it exactly like an explicit `--effort`
  * (case normalization included), so a typo warns instead of dropping
@@ -497,7 +498,7 @@ function reviewDefaultsFromSettings(): {
   const review = operatorReviewSettings();
   return {
     effort:
-      review.effort === undefined || review.effort === 'auto'
+      review.effort === undefined || review.effort.toLowerCase() === 'auto'
         ? undefined
         : review.effort,
     comment: review.comment,

@@ -21,7 +21,7 @@ import {
   ensureAuthenticated,
   setGhHost,
 } from './lib/gh.js';
-import { CRITICAL_PREFIX, SUGGESTION_PREFIX } from './lib/inline-counts.js';
+import { severityOf } from './lib/inline-counts.js';
 
 interface FindingAnchor {
   path: string;
@@ -553,21 +553,21 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // stale classification (and the `blockOnExistingComments` gate that exists
   // to stop duplicate posting) silently stop seeing them. Fall back to
   // authorship for the reviewing account's own top-level comments, gated on
-  // the finding shape: every posted finding opens with a severity prefix
-  // (submit refuses unmarked comments), while a hand-written comment by the
-  // same account is not a posted finding — admitting one lets a same-line
-  // hand comment trip the overlap gate into silently dropping a genuinely
-  // new finding. Replies stay excluded either way. Attribution-off posts
-  // from OTHER accounts still escape detection — no footer, no authorship
-  // signal — and the setting's description says so.
+  // the finding shape through `severityOf` — the same trimmed predicate
+  // `submit` posts through (a body that leaves with leading whitespace must
+  // still be recognized here), while a hand-written comment by the same
+  // account is not a posted finding — admitting one lets a same-line hand
+  // comment trip the overlap gate into silently dropping a genuinely new
+  // finding. Replies stay excluded either way. Attribution-off posts from
+  // OTHER accounts still escape detection — no footer, no authorship signal
+  // — and the setting's description says so.
   const qwenComments = allComments.filter(
     (c) =>
       /via Qwen Code \/review/.test(c.body ?? '') ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
-        ((c.body ?? '').startsWith(CRITICAL_PREFIX) ||
-          (c.body ?? '').startsWith(SUGGESTION_PREFIX))),
+        severityOf(c) !== null),
   );
 
   const repliedToIds = new Set<number>();
