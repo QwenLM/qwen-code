@@ -33,6 +33,10 @@ retry_backoff_seconds="${BENCHMARK_RETRY_BACKOFF_SECONDS:-60}"
 eas_template_manifest="${EAS_TEMPLATE_MANIFEST:-${pool_root}/deploy/eas/templates.json}"
 acr_image_manifest="${ACR_IMAGE_MANIFEST:-/mnt/workspace/qwen-benchmark-eas-poc/state/acr-manifest-c104f840.json}"
 acr_image_state_dir="${ACR_IMAGE_STATE_DIR:-/mnt/data/qwen-benchmark/acr-prewarm/c104f840/state}"
+eas_agent_cache_prepare="${EAS_AGENT_CACHE_PREPARE:-/mnt/workspace/qwen-benchmark-eas-poc/deploy/prepare-eas-agent-cache.py}"
+eas_runtime_uploader="${EAS_RUNTIME_UPLOADER:-/mnt/workspace/qwen-benchmark-eas-poc/deploy/acr-upload-runtime-artifact.py}"
+eas_node_bin="${EAS_NODE_BIN:-/mnt/workspace/qwen-benchmark-cache/node/runtime/bin}"
+eas_docker_config="${EAS_DOCKER_CONFIG:-/mnt/workspace/.docker/config.json}"
 output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
 
 if [[ ! "${INSTANCE_LIMIT}" =~ ^[0-9]+$ ]] || (( INSTANCE_LIMIT < 1 || INSTANCE_LIMIT > 500 )); then
@@ -57,7 +61,15 @@ if [[ "${execution_backend}" == "harbor" ]]; then
 elif [[ "${execution_backend}" == "eas-smoke" ]]; then
   required_paths+=("${eas_template_manifest}")
 elif [[ "${execution_backend}" == "eas-harbor" ]]; then
-  required_paths+=("${acr_image_manifest}" "${acr_image_state_dir}")
+  required_paths+=(
+    "${acr_image_manifest}"
+    "${acr_image_state_dir}"
+    "${eas_agent_cache_prepare}"
+    "${eas_runtime_uploader}"
+    "${eas_node_bin}/node"
+    "${eas_node_bin}/npm"
+    "${eas_docker_config}"
+  )
 fi
 for required_path in "${required_paths[@]}"; do
   if [[ ! -e "${required_path}" ]]; then
@@ -101,8 +113,8 @@ fi
 # Cache the exact published Qwen Code version and its Node/npm runtime before
 # tasks become claimable. This normally takes seconds on a warm DSW cache and
 # does not wait for the benchmark itself.
+qwen_version="${QWEN_REF#v}"
 if [[ "${execution_backend}" == "harbor" ]]; then
-  qwen_version="${QWEN_REF#v}"
   "${python_bin}" "${agent_cache_prepare}" \
     --cache-root "${agent_cache_root}" \
     --node-version "${QWEN_BENCHMARK_NODE_VERSION:-v22.23.1}" \
@@ -114,6 +126,14 @@ elif [[ "${execution_backend}" == "eas-smoke" ]]; then
   "${pool_bin}" validate-eas-templates \
     --task-manifest "${manifest_path}" \
     --template-manifest "${eas_template_manifest}" >/dev/null
+elif [[ "${execution_backend}" == "eas-harbor" ]]; then
+  "${python_bin}" "${eas_agent_cache_prepare}" \
+    --version "${qwen_version}" \
+    --node-bin "${eas_node_bin}" \
+    --docker-config "${eas_docker_config}" \
+    --uploader "${eas_runtime_uploader}" \
+    --output-root "/mnt/workspace/qwen-benchmark-eas-poc/cache/agent-releases" \
+    > "${output_root}/eas-agent-cache.json"
 fi
 
 export BENCHMARK_POOL_DATABASE_URL="${database_url}"
