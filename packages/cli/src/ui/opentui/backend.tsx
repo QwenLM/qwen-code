@@ -613,6 +613,14 @@ function App({
   const queuedPromptsRef = useRef<string[]>([]);
   const reverseSearchRef = useRef<number>(-1);
   const reverseQueryRef = useRef<string>('');
+  const approvalModeRef = useRef(approvalMode);
+  useEffect(() => {
+    approvalModeRef.current = approvalMode;
+  }, [approvalMode]);
+  const [confirmReq, setConfirmReq] = useState<{
+    names: string;
+    resolve: (b: boolean) => void;
+  } | null>(null);
 
   // Streaming phase for the status bar / spinner / border (F1.1).
 
@@ -756,6 +764,16 @@ function App({
   }, [events, config, startStream, applyEvent]);
 
   useKeyboard((key) => {
+    if (confirmReq) {
+      if (key.name === 'y') {
+        confirmReq.resolve(true);
+        setConfirmReq(null);
+      } else if (key.name === 'n' || key.name === 'escape') {
+        confirmReq.resolve(false);
+        setConfirmReq(null);
+      }
+      return;
+    }
     if (key.name === 'c' && key.ctrl) {
       renderer.destroy();
       setTimeout(() => process.exit(0), 100);
@@ -919,9 +937,22 @@ function App({
             config,
             content,
             controller.signal,
-            options?.modelOverride
-              ? { modelOverride: options.modelOverride }
-              : undefined,
+            {
+              ...(options?.modelOverride
+                ? { modelOverride: options.modelOverride }
+                : {}),
+              ...(approvalModeRef.current === ApprovalMode.DEFAULT
+                ? {
+                    confirmBatch: (reqs: Array<{ name: string }>) =>
+                      new Promise<boolean>((resolve) => {
+                        setConfirmReq({
+                          names: reqs.map((r) => r.name).join(', '),
+                          resolve,
+                        });
+                      }),
+                  }
+                : {}),
+            },
           ))
             applyEvent(ev);
           // The turn completed: fire the submit_prompt callback (e.g. skill
@@ -1220,6 +1251,21 @@ function App({
         )}
         {/* prompt (flows after messages; top-aligned when empty) */}
         <box flexDirection="column">
+          {confirmReq && (
+            <box
+              flexDirection="column"
+              border
+              borderColor={C.yellow}
+              paddingLeft={1}
+              paddingRight={1}
+              marginTop={1}
+            >
+              <text fg={C.yellow} attributes={1}>
+                {`Approve tool: ${confirmReq.names}?`}
+              </text>
+              <text fg={C.dim}>{'press y to approve · n / esc to cancel'}</text>
+            </box>
+          )}
           <OpenTuiInputPrompt
             onSubmit={submitText}
             userMessages={userPrompts}

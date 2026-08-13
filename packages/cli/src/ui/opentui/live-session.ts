@@ -44,6 +44,13 @@ interface LooseCompletedCall {
 export interface LivePromptOptions {
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
+  /**
+   * DEFAULT-mode parity: asked once per tool batch before scheduling.
+   * Resolve true to execute, false to feed the model a cancellation.
+   */
+  confirmBatch?: (
+    reqs: Array<{ callId: string; name: string; args?: unknown }>,
+  ) => Promise<boolean>;
 }
 
 /**
@@ -116,6 +123,27 @@ export async function* livePromptEvents(
       for (const neutral of map(ev)) yield neutral;
     }
     if (pending.length === 0 || abort.aborted) return;
+
+    if (options?.confirmBatch) {
+      const approved = await options.confirmBatch(pending);
+      if (!approved) {
+        for (const r of pending)
+          yield {
+            type: 'tool-end',
+            id: r.callId,
+            success: false,
+            summary: 'cancelled',
+          };
+        nextPrompt = pending.map((r) => ({
+          functionResponse: {
+            name: r.name,
+            id: r.callId,
+            response: { error: 'Tool execution cancelled by user.' },
+          },
+        }));
+        continue;
+      }
+    }
 
     const completed = await new Promise<LooseCompletedCall[]>((resolve) => {
       const scheduler = new CoreToolScheduler({
