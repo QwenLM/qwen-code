@@ -246,6 +246,8 @@ const UNDECIDABLE_PAYLOAD_DENIAL =
   'Daemon shell guard denied a shell command whose payload could not be resolved before execution.';
 const UNRECOGNIZED_PROGRAM_DENIAL =
   'Daemon shell guard denied a shell command that may run a relocated Git command through an unrecognized program.';
+const SHADOW_REMOVAL_DENIAL =
+  'Daemon shell guard denied a shell command that removes a tracked shell definition in a way it cannot model.';
 const PROMPTLESS_PROVIDER_DENIAL =
   'Managed external tool guard cannot consult an external provider without an active prompt binding.';
 
@@ -2224,62 +2226,64 @@ async function evaluateCommandWithCwd(
         restoreShellState(subshellCwds.pop());
         subshellDepth--;
       }
-      // Removal builtins retract earlier definitions, but only the real
-      // builtin does: a function shadowing `unset`/`unalias`/`export` runs
-      // instead, so those fall through to the shadow dispatch below and remove
-      // nothing. `unalias` touches only aliases; `unset -f` (or a bare
-      // `unset NAME`, which falls back to the function when no variable
-      // shadows it) touches only functions; `unset` has no `-a` option, so it
-      // never clears wholesale — mis-modelling any of these would drop a live
-      // relocating shadow and allow the command.
-      const removalProgram = readProgramWord(run);
-      if (
-        (removalProgram === 'unset' || removalProgram === 'unalias') &&
-        !definedBodies.has(removalProgram)
+      // A removal builtin (`unset`/`unalias`/`export -n`) retracts a shadow,
+      // but deciding exactly which name it drops is general shell semantics
+      // this guard does not model: `unset NAME` removes a same-name variable
+      // before the function, `enable -n unset` turns the builtin into a no-op,
+      // a `command`/`builtin` prefix or a `( … )` subshell changes what runs,
+      // and fused flag clusters (`-nf`) hide the mode. Whenever a removal
+      // could retract a name we track as a shadow, fail closed rather than
+      // trust a now-doubtful replay of the harmless body.
+      let removalStart = 0;
+      while (
+        removalStart < run.length &&
+        (run[removalStart]!.text === 'command' ||
+          run[removalStart]!.text === 'builtin')
       ) {
-        const removesAliases = removalProgram === 'unalias';
-        // Only `unset -f` removes a function. A bare `unset NAME` unsets a
-        // same-name variable first and touches the function only when none
-        // exists; this evaluator does not track ordinary variables, so it
-        // cannot tell — leaving the function is the safe (over-deny) choice.
-        const removesFunctions =
-          !removesAliases && run.some((token) => token.text === '-f');
-        if (
-          removesAliases &&
-          run.some((token) => token.text === '-a' || token.text === '-af')
+        removalStart++;
+        while (
+          removalStart < run.length &&
+          run[removalStart]!.text.startsWith('-')
         ) {
-          // `unalias -a` clears every alias but leaves functions intact.
-          for (const [name, entry] of [...definedBodies]) {
-            if (entry.alias) definedBodies.delete(name);
-          }
-        } else if (removesAliases || removesFunctions) {
-          for (const token of run.slice(1)) {
-            if (token.text.startsWith('-')) continue;
-            const entry = definedBodies.get(token.text);
-            if (removesAliases) {
-              if (entry?.alias) definedBodies.delete(token.text);
-            } else if (!entry?.alias) {
-              // `unset -f NAME`: a function and its git/export attributes,
-              // never an alias.
-              definedBodies.delete(token.text);
-              gitShapedNames.delete(token.text);
-              exportedFunctions.delete(token.text);
-            }
-          }
+          removalStart++;
         }
-        continue;
       }
-      if (
-        removalProgram === 'export' &&
-        !definedBodies.has('export') &&
-        run.some((token) => token.text === '-n') &&
-        run.some((token) => token.text === '-f')
-      ) {
-        for (const token of run.slice(1)) {
-          if (!token.text.startsWith('-') && !token.dynamic) {
-            exportedFunctions.delete(token.text);
-          }
+      const removalTokens = run.slice(removalStart);
+      const removalProgram = readProgramWord(removalTokens);
+      const isRemoval =
+        removalProgram === 'unset' ||
+        removalProgram === 'unalias' ||
+        (removalProgram === 'export' &&
+          removalTokens.some((token) => /^-[A-Za-z]*n/.test(token.text)));
+      if (isRemoval) {
+        const clearsAll = removalTokens.some((token) =>
+          /^-[A-Za-z]*a/.test(token.text),
+        );
+        const touchesShadow = (name: string): boolean =>
+          definedBodies.has(name) ||
+          gitShapedNames.has(name) ||
+          exportedFunctions.has(name);
+        const anyShadow =
+          definedBodies.size > 0 ||
+          gitShapedNames.size > 0 ||
+          exportedFunctions.size > 0;
+        const retractsShadow =
+          (clearsAll && anyShadow) ||
+          removalTokens
+            .slice(1)
+            .some(
+              (token) =>
+                !token.text.startsWith('-') &&
+                (token.dynamic || touchesShadow(token.text)),
+            );
+        if (retractsShadow) {
+          return {
+            denial: { allowed: false, reason: SHADOW_REMOVAL_DENIAL },
+            cwdAfter: trackedCwd,
+          };
         }
+        // A removal that names only untracked variables is a genuine no-op for
+        // the shadow model.
         continue;
       }
       // A recorded function shadows a builtin or the git program, and bash

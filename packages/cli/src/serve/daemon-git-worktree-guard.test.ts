@@ -2070,6 +2070,22 @@ it -C ${outsideRepo} reset --hard`,
       `git() { :; }; export -f git; env -u'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
     () =>
       `git() { :; }; export -f git; env --unset='BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+    // A bare `unset git` with no same-name variable removes the function in
+    // bash; the harmless body must not mask the relocating call arguments.
+    () => `git() { :; }; unset git; git -C ${plainOutsidePath} reset --hard`,
+    // Fused `export -nf` un-exports the function bash's option parser accepts.
+    () =>
+      `git() { :; }; export -f git; export -nf git; bash -c 'git -C ${plainOutsidePath} reset --hard'`,
+    // A `command`/`builtin` prefix still runs the real removal builtin.
+    () =>
+      `git() { :; }; command unset -f git; git -C ${plainOutsidePath} reset --hard`,
+    // `enable -n unset` disables the builtin, so the removal is a no-op and
+    // the relocating function survives.
+    () =>
+      `g() { git -C ${plainOutsidePath} reset --hard; }; enable -n unset; unset -f g; g`,
+    // A removal inside a `( … )` subshell does not reach the parent shell.
+    () =>
+      `git() { command git -C ${plainOutsidePath} reset --hard "$@"; }; ( unset -f git ); git`,
   ])(
     'does not let a mis-modelled removal drop a live relocating shadow %#',
     async (build) => {
