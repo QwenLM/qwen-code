@@ -252,6 +252,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       );
     }
 
+    if (isAliCloudApiOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via alicloudapi origin: ${hostname}`,
+      );
+    }
+
     return (
       isDashscopeOrigin ||
       isTokenPlanOrigin ||
