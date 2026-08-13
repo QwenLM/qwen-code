@@ -876,7 +876,7 @@ describe('DaemonSessionClient', () => {
           availableSkills: ['review'],
         });
       }
-      if (req.url.endsWith('/session/s-1/tasks')) {
+      if (req.url.endsWith('/session/s-1/tasks?includeWorkflows=true')) {
         return jsonResponse(200, {
           v: 1,
           sessionId: 's-1',
@@ -996,7 +996,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/model',
       'http://daemon/session/s-1/context',
       'http://daemon/session/s-1/supported-commands',
-      'http://daemon/session/s-1/tasks',
+      'http://daemon/session/s-1/tasks?includeWorkflows=true',
       'http://daemon/session/s-1/lsp',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',

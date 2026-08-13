@@ -1798,6 +1798,7 @@ export function createServeApp(
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     sessionRestoreTimeoutMs,
     languageCodes,
+    daemonEnv: daemonEnvAtBoot,
   });
 
   if (liveVoiceSurfaceAvailable) {

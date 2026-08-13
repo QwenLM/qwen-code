@@ -1336,7 +1336,9 @@ describe('DaemonClient', () => {
         if (req.url.endsWith('/session/with%2Fslash/supported-commands')) {
           return jsonResponse(200, supportedCommands);
         }
-        if (req.url.endsWith('/session/with%2Fslash/tasks')) {
+        if (
+          req.url.endsWith('/session/with%2Fslash/tasks?includeWorkflows=true')
+        ) {
           return jsonResponse(200, tasks);
         }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
@@ -1361,7 +1363,10 @@ describe('DaemonClient', () => {
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
-        ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        [
+          'GET',
+          'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
+        ],
         ['GET', 'http://daemon/session/with%2Fslash/lsp'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([

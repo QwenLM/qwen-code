@@ -1119,6 +1119,68 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
+  it('starts a saved workflow through the session workflow action', async () => {
+    const session = createMockSession('session-a');
+    session.client.sessionWorkflowTaskAction.mockResolvedValueOnce({
+      changed: true,
+      status: 'running',
+      taskId: 'wf_5678efab',
+    });
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.runSavedWorkflow('deep-review')).resolves.toEqual({
+      started: true,
+      status: 'running',
+      taskId: 'wf_5678efab',
+    });
+    expect(session.client.sessionWorkflowTaskAction).toHaveBeenCalledWith(
+      'session-a',
+      'deep-review',
+      'run-saved',
+      'client-session-a',
+    );
+  });
+
+  it('suppresses a stale workflow-control failure after switching sessions', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const pending = createDeferred<never>();
+    sessionA.controlWorkflowTask.mockReturnValueOnce(pending.promise);
+    const addNotice = vi.fn((notice) => notice);
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: sessionA,
+    });
+
+    const result = actions.controlWorkflowTask('wf-1', 'pause');
+    sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    pending.reject(new Error('old workflow failed'));
+
+    await expect(result).rejects.toThrow('old workflow failed');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('suppresses a stale saved-workflow failure after switching sessions', async () => {
+    const sessionA = createMockSession('session-a');
+    const sessionB = createMockSession('session-b');
+    const pending = createDeferred<never>();
+    sessionA.client.sessionWorkflowTaskAction.mockReturnValueOnce(
+      pending.promise,
+    );
+    const addNotice = vi.fn((notice) => notice);
+    const { actions, sessionRef } = createActionsHarness({
+      addNotice,
+      session: sessionA,
+    });
+
+    const result = actions.runSavedWorkflow('deep-review');
+    sessionRef.current = sessionB as unknown as DaemonSessionClient;
+    pending.reject(new Error('old saved workflow failed'));
+
+    await expect(result).rejects.toThrow('old saved workflow failed');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
@@ -1631,6 +1693,7 @@ function createMockSession(
       })),
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
+      sessionWorkflowTaskAction: vi.fn(),
     },
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
@@ -1640,6 +1703,7 @@ function createMockSession(
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
+    controlWorkflowTask: vi.fn(),
   };
 }
 

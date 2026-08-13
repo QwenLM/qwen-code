@@ -154,6 +154,12 @@ describe('Session review-worktree lease sweep', () => {
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
       }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
+      }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
       // The Session constructor and Session.prompt both reach for the

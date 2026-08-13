@@ -212,6 +212,8 @@ export type DaemonNoticeOperation =
   | 'load_tasks'
   | 'load_artifacts'
   | 'cancel_task'
+  | 'control_workflow'
+  | 'run_saved_workflow'
   | 'clear_goal'
   | 'load_stats'
   | 'rewind_snapshots'
@@ -475,6 +477,19 @@ export interface DaemonSessionActions {
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }>;
+  controlWorkflowTask(
+    taskId: string,
+    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+  ): Promise<{
+    changed: boolean;
+    status?: Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>['status'];
+    taskId?: string;
+  }>;
+  runSavedWorkflow(name: string): Promise<{
+    started: boolean;
+    status?: Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>['status'];
+    taskId?: string;
+  }>;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
