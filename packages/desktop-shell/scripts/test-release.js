@@ -212,7 +212,7 @@ function testLegacyApplicationIdentity() {
   );
   assert.match(
     migrationHook,
-    /ExecWait '\"\$R0\\Uninstall Qwen Code Desktop\.exe\" \/currentuser \/S --updated _\?=\$R0'/,
+    /ExecWait '"\$R0\\Uninstall Qwen Code Desktop\.exe" \/currentuser \/S --updated _\?=\$R0'/,
   );
 }
 
