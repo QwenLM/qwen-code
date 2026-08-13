@@ -16321,7 +16321,16 @@ async function flushPromises(): Promise<void> {
 // SSE events coalesces into one reducer pass. Stay-alive mock generators never
 // end the consumer loop (which would flush synchronously), so tests that assert
 // transcript state mid-stream drain the batched dispatch here.
+// Two chained timer hops, not one: the dispatch timer and this helper's first
+// timer are registered from concurrently-draining microtask chains, so their
+// registration order is unspecified, and Node drains microtasks between timer
+// callbacks — a single hop registered first would resume the test (and its
+// assertions) before the dispatch timer ever fires. The dispatch timer is
+// always registered during the microtask drain that precedes the first hop's
+// callback, so the second hop — registered after that callback — is
+// guaranteed to fire after the dispatch has run.
 async function flushTranscriptDispatch(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();
