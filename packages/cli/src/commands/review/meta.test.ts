@@ -6,11 +6,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { ghMock, ghApiMock, ensureAuthenticatedMock, writeStdoutLineMock } =
+const { ghMock, ensureAuthenticatedMock, setGhHostMock, writeStdoutLineMock } =
   vi.hoisted(() => ({
     ghMock: vi.fn(),
-    ghApiMock: vi.fn(),
     ensureAuthenticatedMock: vi.fn(),
+    setGhHostMock: vi.fn(),
     writeStdoutLineMock: vi.fn(),
   }));
 
@@ -19,9 +19,8 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
   return {
     ...actual,
     gh: ghMock,
-    ghApi: ghApiMock,
     ensureAuthenticated: ensureAuthenticatedMock,
-    setGhHost: vi.fn(),
+    setGhHost: setGhHostMock,
   };
 });
 
@@ -32,15 +31,32 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 import { metaCommand, runMeta } from './meta.js';
 
+// GH_HOST leaks into these tests from the operator environment otherwise —
+// resolveGhHost is the real function (the mock factory spreads `...actual`),
+// so save/delete/restore it per test, the directory's established pattern.
+let savedGhHost: string | undefined;
+
+function saveAndClearGhHost(): void {
+  savedGhHost = process.env['GH_HOST'];
+  delete process.env['GH_HOST'];
+}
+
+function restoreGhHost(): void {
+  if (savedGhHost === undefined) {
+    delete process.env['GH_HOST'];
+  } else {
+    process.env['GH_HOST'] = savedGhHost;
+  }
+}
+
 describe('runMeta', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     ensureAuthenticatedMock.mockReturnValue(undefined);
+    saveAndClearGhHost();
   });
 
-  afterEach(() => {
-    delete process.env['GH_HOST'];
-  });
+  afterEach(restoreGhHost);
 
   it('resolves the cwd repository (upstream in a fork clone) with host from the URL', () => {
     ghMock.mockReturnValue(
@@ -67,6 +83,32 @@ describe('runMeta', () => {
     expect(runMeta({}).host).toBe('ghe.example.com:8443');
   });
 
+  it('aligns gh routing with the discovered host before the PR call', () => {
+    ghMock
+      .mockReturnValueOnce(
+        '{"owner":{"login":"o"},"name":"r","url":"https://ghe.example.com/o/r"}',
+      )
+      .mockReturnValueOnce('{"headRefOid":"abc","url":"u"}');
+    runMeta({ prNumber: 1 });
+    // The discovered host is applied as routing (the handler's flag/env
+    // would win if set — neither is set here).
+    expect(setGhHostMock).toHaveBeenLastCalledWith('ghe.example.com');
+    const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
+    const prViewOrder = ghMock.mock.invocationCallOrder[1];
+    expect(hostOrder).toBeLessThan(prViewOrder);
+  });
+
+  it('an operator-exported GH_HOST keeps precedence over the discovered host', () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    ghMock.mockReturnValue(
+      '{"owner":{"login":"o"},"name":"r","url":"https://other.example.com/o/r"}',
+    );
+    const result = runMeta({});
+    expect(setGhHostMock).toHaveBeenLastCalledWith('ghe.example.com');
+    // The label stays the discovered URL host — the routing won, not the URL.
+    expect(result.host).toBe('other.example.com');
+  });
+
   it('adds headSha and webUrl when a PR number is given', () => {
     ghMock.mockReturnValue(
       '{"headRefOid":"2d71a0f851c8c18462cc85b60d90973e132274d8","url":"https://github.com/QwenLM/qwen-code/pull/8981"}',
@@ -86,10 +128,21 @@ describe('runMeta', () => {
     expect(result.host).toBe('github.com');
   });
 
-  it('rejects a malformed --repo before any gh call', () => {
+  it('labels an explicit --host (port survives), and an empty flag falls through', () => {
+    ghMock.mockReturnValue('{"headRefOid":"abc","url":"u"}');
+    expect(
+      runMeta({ prNumber: 1, repo: 'o/r', host: 'ghe.example.com:8443' }).host,
+    ).toBe('ghe.example.com:8443');
+    expect(runMeta({ prNumber: 1, repo: 'o/r', host: '' }).host).toBe(
+      'github.com',
+    );
+  });
+
+  it('rejects a malformed --repo before any gh call, with or without a number', () => {
     expect(() => runMeta({ prNumber: 1, repo: '../escape' })).toThrow(
       TypeError,
     );
+    expect(() => runMeta({ repo: 'o/r/extra' })).toThrow(TypeError);
     expect(ghMock).not.toHaveBeenCalled();
   });
 });
@@ -99,7 +152,10 @@ describe('metaCommand handler', () => {
     vi.clearAllMocks();
     ensureAuthenticatedMock.mockReturnValue(undefined);
     process.exitCode = undefined;
+    saveAndClearGhHost();
   });
+
+  afterEach(restoreGhHost);
 
   it('exits 2 on a non-positive PR number without calling gh', () => {
     (metaCommand.handler as (a: unknown) => void)({
@@ -109,6 +165,32 @@ describe('metaCommand handler', () => {
     });
     expect(process.exitCode).toBe(2);
     expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a malformed --repo (usage error, not a fetch failure)', () => {
+    (metaCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: '../escape',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('threads --host to setGhHost before the first gh call', () => {
+    ghMock.mockReturnValue('{"headRefOid":"abc","url":"u"}');
+    (metaCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'o/r',
+      host: 'ghe.example.com',
+    });
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
+    const ghOrder = ghMock.mock.invocationCallOrder[0];
+    const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
+    expect(hostOrder).toBeLessThan(ghOrder);
   });
 
   it('prints the result as one JSON object', () => {

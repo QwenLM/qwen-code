@@ -23,7 +23,6 @@ import {
 interface FetchDiffArgs {
   prNumber: number;
   repo: string;
-  host?: string;
   out: string;
 }
 
@@ -37,7 +36,9 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
-  const diff = platform.fetchDiff(args.prNumber, args.repo);
+  // ghRaw keeps the diff's trailing bytes; normalise exactly one trailing
+  // newline so the written file ends cleanly without dropping content.
+  const diff = platform.fetchDiff(args.prNumber, args.repo).replace(/\n+$/, '');
 
   const diffPath = resolve(args.out);
   mkdirSync(dirname(diffPath), { recursive: true });
@@ -82,13 +83,12 @@ export const fetchDiffCommand: CommandModule = {
       const result = runFetchDiff({
         prNumber: Number(argv['pr_number']),
         repo: String(argv['repo']),
-        host,
         out: String(argv['out']),
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {
       writeStderrLineSafe(`fetch-diff: ${(err as Error).message}`);
-      process.exitCode = 1;
+      process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
 };

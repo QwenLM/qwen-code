@@ -34,8 +34,6 @@ export interface PrMeta {
 /** A closing-issue reference: discovery metadata, not the issue itself. */
 export interface ClosingIssueRef {
   number: number;
-  title: string;
-  url: string;
   /** The issue's own repo — a PR can close an issue in another repository. */
   ownerRepo: string;
 }

@@ -23,6 +23,7 @@ import {
   fullCommentBody,
   type PrMetadata,
   type RawComment,
+  type RawReview,
   latestOwnLedger,
   renderLedgerSection,
 } from './pr-context.js';
@@ -1179,5 +1180,50 @@ describe('renderLedgerSection escaping', () => {
     });
     const row = md.split('\n').find((l) => l.startsWith('| R1-1'))!;
     expect(row).toBe("| R1-1 | Suggestion | `a'.ts** bold **` | t |");
+  });
+});
+
+describe('buildMarkdown host baking', () => {
+  const meta = {
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  } as PrMetadata;
+
+  const longReview: RawReview = {
+    id: 7,
+    user: { login: 'r' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'x'.repeat(9000),
+  };
+
+  it('bakes --host into the emitted refetch command when a host is set', () => {
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      [],
+      [],
+      [longReview],
+      null,
+      'ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+  });
+
+  it('emits no --host flag when no host is set', () => {
+    const md = buildMarkdown('6711', 'o/r', meta, [], [], [longReview]);
+    expect(md).toContain('comment-body 7 --kind review --pr 6711 --repo o/r');
+    expect(md).not.toContain('--host');
   });
 });

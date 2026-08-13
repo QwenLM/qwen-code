@@ -41,6 +41,8 @@ interface PlanDiffArgs {
   /** The PR this diff came from — passed ONLY after `pr-context` succeeded. */
   pr?: number;
   repo?: string;
+  /** The PR's host — recorded so Agent 0's evidence fetch is welded with it. */
+  host?: string;
   effort?: ReviewEffort;
 }
 
@@ -53,6 +55,8 @@ type PlanDiffResult = PlanReport & {
   diffPathAbsolute: string;
   prNumber?: string;
   ownerRepo?: string;
+  /** The PR's host, when the caller passed one (GitHub Enterprise). */
+  host?: string;
   /** The review's effort, recorded so the roster reads one value everywhere. */
   effort?: ReviewEffort;
 };
@@ -89,7 +93,16 @@ function runPlanDiff(args: PlanDiffArgs): void {
     // when `pr-context` succeeded, so its presence doubles as the
     // context-availability signal.
     ...(args.pr !== undefined && args.repo !== undefined
-      ? { prNumber: String(args.pr), ownerRepo: args.repo }
+      ? {
+          prNumber: String(args.pr),
+          ownerRepo: args.repo,
+          // The host rides along so the welded Agent 0 command routes at the
+          // Enterprise host — a lightweight run never executes fetch-pr, the
+          // other writer of this fact.
+          ...(args.host !== undefined && args.host !== ''
+            ? { host: args.host }
+            : {}),
+        }
       : {}),
     // No `git show` is possible here — there is no ref to resolve a path
     // against — so per-file line counts and heaviness are unavailable. Chunk
@@ -145,6 +158,13 @@ export const planDiffCommand: CommandModule = {
       .option('repo', {
         type: 'string',
         describe: 'owner/repo of the PR, together with --pr',
+      })
+      .option('host', {
+        type: 'string',
+        describe:
+          "The PR's host (GitHub Enterprise), together with --pr/--repo — " +
+          "recorded into the plan so Agent 0's issue-evidence fetch routes " +
+          'at it; github.com when omitted',
       })
       .option('max-chunk-lines', {
         type: 'number',

@@ -78,7 +78,14 @@ Everything below was confirmed by running the commands, not from docs.
 `lib/gh.ts` is already a single transport choke point (exec, retry, pagination,
 `GH_HOST` routing, auth check). A "wrap the CLI" abstraction would leak GitHub's
 API shape into every call site. Instead, the interface captures **review
-operations**:
+operations**. The sketch below is the **end-state** interface the write
+operations join in Phase 3; Phase 1 (the `meta` / `issue-context` /
+`fetch-diff` / `comment-body` PR, #9096) ships a synchronous, read-only subset
+named `ReviewPlatformReader` with exactly the operations those four subcommands
+consume (`resolveRepo`, `getPrMeta`, `getClosingIssues`, `getIssue`,
+`fetchDiff`, `getCommentBody`) and a no-arg `getPlatformReader()` registry —
+the subset keeps the interface honest (every member has a consumer), and
+detection arrives with the second provider:
 
 ```ts
 // packages/cli/src/commands/review/lib/platform/types.ts
@@ -117,16 +124,20 @@ interface ReviewPlatform {
 The skill's own history: logic carried in prompt prose ships bugs; the tested
 implementation is a subcommand. Today the following are **prose the model
 executes**, and each becomes a subcommand (or folds into one) so that SKILL.md
-carries zero platform-specific command syntax:
+carries zero platform-specific command syntax **the model executes** (the
+write-discipline prohibitions that name `gh …` by design, the subcommand-internal
+descriptions like "queries `gh pr view`", and Step 4's scratch-repo
+render-adjudication carve-out — a deliberately raw `gh api` call, GitHub-specific
+by nature — remain, to be re-authored or gated in Phase 3):
 
-| Prose today                                                                               | New home                                                                                                                                         |
-| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `gh repo view` owner/repo/host derivation (bare PR numbers; Step 1 & 7)                   | `qwen review meta <n>` — one call returning `{platform, ownerRepo, host, headSha, webUrl}`                                                       |
-| `gh pr view --json headRefOid` head-SHA fallbacks (Step 7, 422 recovery)                  | same `meta` subcommand                                                                                                                           |
-| Agent 0's `closingIssuesReferences` + `gh issue view` pair                                | `qwen review issue-context <n> --out <file>` — emits the evidence markdown; GitHub: closing issues + bodies; Aone: workitems + fields + comments |
-| `gh pr diff` (lightweight cross-repo mode)                                                | `qwen review fetch-diff <target>`                                                                                                                |
-| `gh api repos/…/pulls/comments/<id>` refetch refs that `pr-context` emits into context.md | emit `qwen review comment-body <id>` commands instead (provider-routed)                                                                          |
-| `GH_HOST=<host>` prefixing rule for all model-run gh calls                                | gone — subcommands route internally                                                                                                              |
+| Prose today                                                                               | New home                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gh repo view` owner/repo/host derivation (bare PR numbers; Step 1 & 7)                   | `qwen review meta <n>` — one call returning `{platform, ownerRepo, host, headSha, webUrl}`                                                                  |
+| `gh pr view --json headRefOid` head-SHA fallbacks (Step 7, 422 recovery)                  | same `meta` subcommand                                                                                                                                      |
+| Agent 0's `closingIssuesReferences` + `gh issue view` pair                                | `qwen review issue-context <n> --out <file>` — emits the evidence markdown; GitHub: closing issues + bodies + comments; Aone: workitems + fields + comments |
+| `gh pr diff` (lightweight cross-repo mode)                                                | `qwen review fetch-diff <target>`                                                                                                                           |
+| `gh api repos/…/pulls/comments/<id>` refetch refs that `pr-context` emits into context.md | emit `qwen review comment-body <id>` commands instead (provider-routed)                                                                                     |
+| `GH_HOST=<host>` prefixing rule for all model-run gh calls                                | gone — subcommands route internally                                                                                                                         |
 
 This phase is GitHub-only behavior-preserving and independently shippable: it
 removes the exact class of prose-carried failures the skill has measured, even
@@ -182,12 +193,15 @@ id directly; no id↔iid mapping is needed anywhere in the pipeline.
 ### D7 — One-commit CRs and the incremental cache
 
 Under AGit-Flow, updating a CR amends the single commit: the old head SHA is
-orphaned. The GitHub incremental path (`lastCommitSha..HEAD`) cannot diff
-against an orphaned SHA via the platform compare API — but both SHAs are local
-after fetch, so ancestry is checked with pure git (`merge-base --is-ancestor`).
-Cached SHA is an ancestor → incremental; otherwise → full re-review with a
-note. `presubmit`'s head-drift check uses local git the same way instead of the
-GitHub compare API (which has no Aone equivalent).
+orphaned, so an ancestry test (`merge-base --is-ancestor <cached> <new>`) fails
+for **every** update — the amend's H2 has H1's parent, never H1 itself. The
+incremental rule for Aone therefore does not test ancestry at all: both heads
+are local after fetch, so `git diff <cachedSha>..<newSha>` **is** the update's
+delta (for a pure amend, exactly the amended lines; if the author also rebased
+onto newer master, the range additionally carries the rebase drift, which the
+re-review should see anyway). `presubmit`'s head-drift check likewise compares
+the live `sourceBranch` SHA (it is the head) against the reviewed SHA, with
+local git, not a platform compare API — none exists on Aone.
 
 ### D8 — Feature-gate GitHub-only capabilities
 
@@ -222,7 +236,12 @@ New/changed subcommands: `meta` (new), `issue-context` (new), `fetch-diff`
 `cleanup`, `test-plan` route through the registry.
 
 `agent-briefs.ts` (Agent 0 brief, scratch-repo carve-out) and `agent-prompt.ts`
-(`gh pr view` fallback warning) are re-authored to reference subcommands only.
+(`gh pr view` fallback warning) are re-authored to reference subcommands only —
+with one deliberate exception: the Step 4 render-adjudication carve-out stays a
+raw `gh api repos/$QWEN_REVIEW_SCRATCH_REPO/issues/<n>/comments` call inside the
+verifier brief, because what it adjudicates is GitHub's own rendering; it is
+GitHub-specific by nature and gains a host-routing note in SKILL.md's
+Enterprise paragraph.
 
 ## Phasing
 
@@ -251,8 +270,12 @@ New/changed subcommands: `meta` (new), `issue-context` (new), `fetch-diff`
   model remains covered by the existing `mock-provider.ts` LLM endpoint.
 - Golden-path E2E per phase against odps_src (internal, manual): local review
   of CR 28230262-class targets; write path only against a scratch CR.
-- All existing GitHub-path tests must pass unmodified at every phase (they pin
-  the no-regression contract of D1/D2).
+- Phase 0 keeps every existing GitHub-path test passing unmodified. From
+  Phase 1 on, an existing test may change only where an absorbed subcommand
+  intentionally changes output (Phase 1 itself modified the pins that asserted
+  the old emitted `gh api …` text — they now assert the `comment-body`
+  command); each such modification is called out in the phase's PR. Everything
+  else passing unmodified is the no-regression evidence.
 
 ## Open questions
 

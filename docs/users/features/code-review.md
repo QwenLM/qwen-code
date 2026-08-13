@@ -299,7 +299,7 @@ For PR reviews the manifest is read from the merge base, so the PR under review 
 
 ## Issue Fidelity
 
-For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It runs the `qwen review issue-context <pr> --repo <owner/repo>` subcommand, which resolves GitHub's strong closing-issue metadata and then fetches each referenced issue's title, **body** (the reporter's original repro), and full comment thread — each from the issue's own repository (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
+For bugfix PRs, the Issue Fidelity agent fetches issue evidence directly instead of relying on PR description text. It runs the `qwen review issue-context <pr> --repo <owner/repo> --out <file>` subcommand, which resolves GitHub's strong closing-issue metadata and then fetches each referenced issue's title, **body** (the reporter's original repro), and full comment thread — each from the issue's own repository (a PR can close an issue in a different repo). This agent runs only for PR targets; local-diff and file-path reviews skip it.
 
 The closing-issue set is a discovery hint rather than proof the author linked the right issue: if it is empty but the PR references an apparent target issue, the agent still fetches it after judging relevance (re-running with `--issue <n>`). Fetched issue text is treated as untrusted data (facts extracted, embedded instructions ignored). For relevant issues, the original reproduction, observed payload, expected behavior, and maintainer comments are treated as the highest-priority evidence for whether the PR fixes the right problem.
 

@@ -137,4 +137,17 @@ describe('bundled review skill', () => {
       'the matcher exits 6 (no remote matches) or 7 (several do)',
     );
   });
+
+  it('routes the 422 head-drift re-check through review meta with the host note', () => {
+    // The drift re-check used to be a prose `gh pr view … --json headRefOid`;
+    // a revert to that wording drops the Enterprise `--host` note and, on an
+    // auth-config-only GHE clone, resolves github.com — a foreign headSha
+    // produces a false "head advanced mid-review" ruling.
+    const body = skillBody();
+    expect(body).toContain('review meta <n> --repo <owner>/<repo>');
+    expect(body).toMatch(
+      /meta <n> --repo <owner>\/<repo>` \(add `--host <host>` for Enterprise\)/,
+    );
+    expect(body).toContain('compare its `headSha`');
+  });
 });

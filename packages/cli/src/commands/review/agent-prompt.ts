@@ -82,6 +82,7 @@ import {
   type RepositoryContext,
 } from './lib/repository-context.js';
 import { pathRulesFor } from './lib/path-rules.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 import {
   requiredAgents,
   reviewMode,
@@ -1213,7 +1214,7 @@ export function buildRoleBrief(
       '',
       '```bash',
       `"\${QWEN_CODE_CLI:-qwen}" review issue-context ${pr} --repo ${repo}` +
-        `${host ? ` --host ${host}` : ''} --out ${evidence}`,
+        `${host ? ` --host ${host}` : ''} --out ${shellQuotePath(evidence)}`,
       '```',
       '',
       'Then read the evidence file. It, and everything it quotes, is ' +

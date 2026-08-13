@@ -39,7 +39,10 @@ function isTransientGhError(err: unknown): boolean {
  * (HTTP 5xx / "server is currently unavailable"). Non-transient failures
  * throw immediately.
  */
-function execGhWithRetry(args: string[], options: { input?: string }): string {
+function execGhWithRetry(
+  args: string[],
+  options: { input?: string; trim?: boolean },
+): string {
   const execOptions: Parameters<typeof execFileSync>[2] = {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -48,9 +51,11 @@ function execGhWithRetry(args: string[], options: { input?: string }): string {
   };
   for (let attempt = 0; ; attempt++) {
     try {
-      return (execFileSync('gh', args, execOptions) as string)
-        .replace(/\r\n/g, '\n')
-        .trim();
+      const out = (execFileSync('gh', args, execOptions) as string).replace(
+        /\r\n/g,
+        '\n',
+      );
+      return options.trim === false ? out : out.trim();
     } catch (err) {
       if (attempt < MAX_RETRIES && isTransientGhError(err)) {
         const delay = BASE_DELAY_MS * (attempt + 1);
@@ -135,12 +140,18 @@ export function getGhHost(): string | undefined {
  *
  * `|| undefined`, not `??`: an exported-but-empty GH_HOST ("" survives
  * `??`, being non-nullish) must read as "no host", not as a host named ""
- * that fails every comparison.
+ * that fails every comparison. The flag branch normalises the same way:
+ * yargs delivers `''` for a bare `--host`, and `setGhHost('')` documents
+ * empty as "restore default", so an empty flag falls through to the env
+ * instead of surviving as a host label that matches nothing.
  */
 export function resolveGhHost(
   flagHost: string | undefined,
 ): string | undefined {
-  return flagHost ?? (process.env['GH_HOST']?.trim() || undefined);
+  return (
+    (flagHost?.trim() || undefined) ??
+    (process.env['GH_HOST']?.trim() || undefined)
+  );
 }
 
 /**
@@ -164,6 +175,16 @@ export function ghEnv(): NodeJS.ProcessEnv | undefined {
  */
 export function gh(...args: string[]): string {
   return execGhWithRetry(args, {});
+}
+
+/**
+ * Same transport without the trailing trim — for payloads whose edges are
+ * content: a diff whose last context line is whitespace-only, a comment
+ * body whose first line is an indented code block. CRLF normalisation
+ * still applies (mixed line endings break hunk parsing downstream).
+ */
+export function ghRaw(...args: string[]): string {
+  return execGhWithRetry(args, { trim: false });
 }
 
 /**

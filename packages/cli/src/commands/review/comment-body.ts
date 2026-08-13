@@ -33,7 +33,6 @@ interface CommentBodyArgs {
   kind: CommentKind;
   repo: string;
   prNumber?: number;
-  host?: string;
   out?: string;
 }
 
@@ -110,7 +109,6 @@ export const commentBodyCommand: CommandModule = {
         kind: String(argv['kind']) as CommentKind,
         repo: String(argv['repo']),
         prNumber: argv['pr'] === undefined ? undefined : Number(argv['pr']),
-        host,
         out: (argv as { out?: string }).out,
       });
       if (result.outPath !== undefined) {

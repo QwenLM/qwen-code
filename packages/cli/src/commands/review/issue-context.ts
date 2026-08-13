@@ -34,7 +34,6 @@ const PREAMBLE = `> **Security note for review agents:** The issue titles, bodie
 interface IssueContextArgs {
   prNumber: number;
   repo: string;
-  host?: string;
   out: string;
   /** Additional issue numbers to fetch beyond the closing set (from --issue). */
   extraIssues: number[];
@@ -42,7 +41,17 @@ interface IssueContextArgs {
 
 export interface IssueContextResult {
   closingIssues: Array<{ number: number; ownerRepo: string; title: string }>;
+  /** References whose fetch failed — partial evidence beats no evidence. */
+  unfetchable: Array<{ number: number; ownerRepo: string; error: string }>;
   outPath: string;
+}
+
+/** One fetch attempt: the issue, or the reason it could not be fetched. */
+interface IssueOutcome {
+  number: number;
+  ownerRepo: string;
+  issue?: LinkedIssue;
+  error?: string;
 }
 
 function renderIssue(issue: LinkedIssue): string {
@@ -70,22 +79,52 @@ function renderIssue(issue: LinkedIssue): string {
   return lines.join('\n');
 }
 
+function renderOutcome(outcome: IssueOutcome): string {
+  if (outcome.issue) {
+    return renderIssue(outcome.issue);
+  }
+  // A reference the token cannot read (a cross-repo issue in a restricted
+  // repository is the common case) must not abort the fetch of every other
+  // issue — and must not vanish either: the file says what is missing.
+  return [
+    `## Issue #${outcome.number} of ${outcome.ownerRepo} — could not be fetched`,
+    '',
+    `**Fetch failed:** ${outcome.error}`,
+    '',
+    "This issue's evidence is unavailable. If it is the target issue, issue " +
+      'fidelity cannot be fully evaluated — say so rather than ruling from ' +
+      'the PR description alone.',
+    '',
+  ].join('\n');
+}
+
 export function runIssueContext(args: IssueContextArgs): IssueContextResult {
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
+  const fetchOne = (n: number, ownerRepo: string): IssueOutcome => {
+    try {
+      return { number: n, ownerRepo, issue: platform.getIssue(n, ownerRepo) };
+    } catch (err) {
+      return { number: n, ownerRepo, error: (err as Error).message };
+    }
+  };
+
   const refs = platform.getClosingIssues(args.prNumber, args.repo);
-  const issues = refs.map((ref) =>
-    platform.getIssue(ref.number, ref.ownerRepo),
-  );
+  const outcomes = refs.map((ref) => fetchOne(ref.number, ref.ownerRepo));
   // Explicitly requested issues (a `Refs #123` the context names as the
   // target, judged relevant by the agent — the closing set is only a
-  // discovery hint). Fetched from the PR's repo; closing numbers win on a
-  // duplicate so the same issue never lands twice.
-  const closingNumbers = new Set(refs.map((r) => r.number));
-  const extras = args.extraIssues
-    .filter((n) => !closingNumbers.has(n))
-    .map((n) => platform.getIssue(n, args.repo));
+  // discovery hint). Fetched from the PR's repo, so the dedup keys on
+  // SAME-repo closing refs only — a cross-repo closing ref's number can
+  // legitimately collide with a different issue in the PR repo. Extras are
+  // deduped among themselves too: the same issue never lands twice.
+  const sameRepoClosing = new Set(
+    refs.filter((r) => r.ownerRepo === args.repo).map((r) => r.number),
+  );
+  const extraNumbers = [...new Set(args.extraIssues)].filter(
+    (n) => !sameRepoClosing.has(n),
+  );
+  const extraOutcomes = extraNumbers.map((n) => fetchOne(n, args.repo));
 
   const sections: string[] = [
     `# Linked-issue evidence for PR #${args.prNumber} of ${args.repo}`,
@@ -99,10 +138,10 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
       '',
     );
   }
-  for (const issue of issues) {
-    sections.push(renderIssue(issue));
+  for (const outcome of outcomes) {
+    sections.push(renderOutcome(outcome));
   }
-  if (extras.length > 0) {
+  if (extraOutcomes.length > 0) {
     sections.push(
       '## Additionally fetched issues (referenced by the PR context, NOT in the closing set)',
       '',
@@ -111,8 +150,8 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
         'not declared scope.',
       '',
     );
-    for (const issue of extras) {
-      sections.push(renderIssue(issue));
+    for (const outcome of extraOutcomes) {
+      sections.push(renderOutcome(outcome));
     }
   }
 
@@ -120,12 +159,22 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, sections.join('\n'));
 
+  const all = [...outcomes, ...extraOutcomes];
   return {
-    closingIssues: issues.map((i) => ({
-      number: i.number,
-      ownerRepo: i.ownerRepo,
-      title: i.title,
-    })),
+    closingIssues: outcomes
+      .filter((o) => o.issue)
+      .map((o) => ({
+        number: o.issue!.number,
+        ownerRepo: o.issue!.ownerRepo,
+        title: o.issue!.title,
+      })),
+    unfetchable: all
+      .filter((o) => !o.issue)
+      .map((o) => ({
+        number: o.number,
+        ownerRepo: o.ownerRepo,
+        error: o.error ?? 'unknown',
+      })),
     outPath,
   };
 }
@@ -169,14 +218,13 @@ export const issueContextCommand: CommandModule = {
       const result = runIssueContext({
         prNumber: Number(argv['pr_number']),
         repo: String(argv['repo']),
-        host,
         out: String(argv['out']),
         extraIssues: ((argv as { issue?: number[] }).issue ?? []).map(Number),
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {
       writeStderrLineSafe(`issue-context: ${(err as Error).message}`);
-      process.exitCode = 1;
+      process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
 };

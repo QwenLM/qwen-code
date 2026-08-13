@@ -9,7 +9,7 @@
 // this module owns the GitHub API *shapes* so the subcommands and the skill
 // prose never name an endpoint.
 
-import { ensureAuthenticated, gh, isOwnerRepo } from '../gh.js';
+import { ensureAuthenticated, gh, ghRaw, isOwnerRepo } from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -48,8 +48,6 @@ interface GhPrMetaView {
 /** Shape of one `closingIssuesReferences` entry. */
 interface GhClosingIssueRef {
   number: number;
-  title?: string;
-  url?: string;
   repository?: {
     name: string;
     owner?: { login: string };
@@ -111,21 +109,33 @@ export const githubReader: ReviewPlatformReader = {
 
   getClosingIssues(prNumber: number, ownerRepo: string): ClosingIssueRef[] {
     checkOwnerRepo(ownerRepo);
-    const view = ghJson<{
-      closingIssuesReferences?: GhClosingIssueRef[];
-    }>(
-      'pr',
-      'view',
-      String(prNumber),
-      '--repo',
-      ownerRepo,
-      '--json',
-      'closingIssuesReferences',
-    );
+    let view: { closingIssuesReferences?: GhClosingIssueRef[] };
+    try {
+      view = ghJson<{
+        closingIssuesReferences?: GhClosingIssueRef[];
+      }>(
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        ownerRepo,
+        '--json',
+        'closingIssuesReferences',
+      );
+    } catch (err) {
+      // `closingIssuesReferences` is a --json field only since gh v2.72.0
+      // (cli/cli#10544); older gh answers "Unknown JSON field" with no hint
+      // that the remedy is an upgrade.
+      if (/Unknown JSON field/.test((err as Error).message)) {
+        throw new Error(
+          'gh >= 2.72.0 is required for closing-issue references ' +
+            '(Unknown JSON field: "closingIssuesReferences") — upgrade gh.',
+        );
+      }
+      throw err;
+    }
     return (view.closingIssuesReferences ?? []).map((ref) => ({
       number: ref.number,
-      title: ref.title ?? '',
-      url: ref.url ?? '',
       // A PR can close an issue in a DIFFERENT repo — take the repository
       // each reference carries; only a malformed payload falls back to the
       // PR's own repo.
@@ -162,7 +172,10 @@ export const githubReader: ReviewPlatformReader = {
 
   fetchDiff(prNumber: number, ownerRepo: string): string {
     checkOwnerRepo(ownerRepo);
-    return gh('pr', 'diff', String(prNumber), '--repo', ownerRepo);
+    // ghRaw: a diff's edges are content — a trailing whitespace-only context
+    // line is part of the last hunk, and trimming it silently alters what the
+    // chunk agents review.
+    return ghRaw('pr', 'diff', String(prNumber), '--repo', ownerRepo);
   },
 
   getCommentBody(
@@ -186,6 +199,8 @@ export const githubReader: ReviewPlatformReader = {
     // Not ghApi: `--jq` emits the body as RAW text (markdown), which
     // JSON.parse would choke on — measured on the first E2E pass. `.body
     // // ""` because a null body would otherwise print the literal "null".
-    return gh('api', path, '--jq', '.body // ""');
+    // ghRaw because the body's edges are content — a leading indent is what
+    // puts a log paste inside its code block.
+    return ghRaw('api', path, '--jq', '.body // ""');
   },
 };

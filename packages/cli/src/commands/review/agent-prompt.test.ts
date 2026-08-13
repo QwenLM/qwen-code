@@ -2297,6 +2297,26 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('fixes, closes, resolves, or implements');
   });
 
+  it('welds --host into the Agent 0 command when the plan carries an Enterprise host', () => {
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p = buildRoleBrief({ ...PR_PLAN, host: 'ghe.example.com' }, '0', {
+      planPath,
+    });
+    expect(p).toContain(
+      'review issue-context 6766 --repo QwenLM/qwen-code --host ghe.example.com',
+    );
+  });
+
+  it('shell-quotes the evidence path (spaces/apostrophes in workspace paths)', () => {
+    const planPath = join(
+      resolve("/x's proj"),
+      'qwen-review-pr-6766-fetch.json',
+    );
+    const p = buildRoleBrief(PR_PLAN, '0', { planPath });
+    const quoted = `'${join(resolve("/x's proj"), 'qwen-review-pr-6766-issue-context.md').replace(/'/g, "'\\''")}'`;
+    expect(p).toContain(`--out ${quoted}`);
+  });
+
   it('refuses Agent 0 on a plan with no pull request in it', () => {
     expect(() => buildRoleBrief(PLAN, '0')).toThrow(/prNumber/);
   });

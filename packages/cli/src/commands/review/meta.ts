@@ -14,7 +14,7 @@
 // answer that PR's head SHA and canonical web URL.
 
 import type { CommandModule } from 'yargs';
-import { resolveGhHost, setGhHost } from './lib/gh.js';
+import { isOwnerRepo, resolveGhHost, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import {
   writeStdoutLine,
@@ -43,6 +43,11 @@ export function runMeta(args: MetaArgs): MetaResult {
   let host: string;
   let ownerRepo: string;
   if (args.repo !== undefined) {
+    if (!isOwnerRepo(args.repo)) {
+      throw new TypeError(
+        `expected owner/repo, got ${JSON.stringify(args.repo)}`,
+      );
+    }
     // Explicit repo: the host comes from the flag/env, defaulting to
     // github.com — there is no URL to derive it from.
     ownerRepo = args.repo;
@@ -51,6 +56,11 @@ export function runMeta(args: MetaArgs): MetaResult {
     const id = platform.resolveRepo();
     ownerRepo = `${id.owner}/${id.repo}`;
     host = id.host;
+    // The discovered host is a label only until it routes: with several gh
+    // auths (github.com + an Enterprise login) a bare `gh pr view --repo`
+    // would resolve at github.com while the output claims the URL's host.
+    // An explicit flag/env keeps precedence over the discovery.
+    setGhHost(resolveGhHost(args.host) ?? id.host);
   }
 
   const result: MetaResult = { platform: platform.kind, host, ownerRepo };
@@ -107,7 +117,7 @@ export const metaCommand: CommandModule = {
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {
       writeStderrLineSafe(`meta: ${(err as Error).message}`);
-      process.exitCode = 1;
+      process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },
 };
