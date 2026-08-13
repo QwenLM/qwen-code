@@ -557,7 +557,8 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // matches from ANY account — the marker, not authorship, is what survives
   // the strip. The authorship fallback remains for posts made before the
   // marker existed, gated on the finding shape through `severityOf` — the
-  // same trimmed predicate `submit` posts through — while a hand-written
+  // same trimmed predicate `submit` posts through (a body that leaves with
+  // leading whitespace must still be recognized here), while a hand-written
   // comment by the same account is not a posted finding: admitting one lets
   // a same-line hand comment trip the overlap gate into silently dropping a
   // genuinely new finding. Replies stay excluded either way.

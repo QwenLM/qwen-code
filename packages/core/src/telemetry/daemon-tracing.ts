@@ -23,6 +23,7 @@ import {
   formatTraceparent,
   getActiveSpanTraceContext,
 } from './trace-context.js';
+import { setSessionIdOnContext } from './session-context.js';
 
 export const DAEMON_TRACEPARENT_META_KEY = 'qwen.telemetry.traceparent';
 export const DAEMON_TRACESTATE_META_KEY = 'qwen.telemetry.tracestate';
@@ -102,18 +103,25 @@ export async function withDaemonSpan<T>(
     ...(options.startTime ? { startTime: options.startTime } : {}),
   };
   const run = async (span: Span): Promise<T> => {
-    try {
-      const result = await fn(span);
-      if (autoOkOnSuccess) {
-        span.setStatus({ code: SpanStatusCode.OK });
+    const sessionId = attributes['session.id'];
+    const scopedContext = setSessionIdOnContext(
+      otelContext.active(),
+      typeof sessionId === 'string' ? sessionId : undefined,
+    );
+    return await otelContext.with(scopedContext, async () => {
+      try {
+        const result = await fn(span);
+        if (autoOkOnSuccess) {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
+        return result;
+      } catch (error) {
+        recordDaemonError(span, error);
+        throw error;
+      } finally {
+        span.end();
       }
-      return result;
-    } catch (error) {
-      recordDaemonError(span, error);
-      throw error;
-    } finally {
-      span.end();
-    }
+    });
   };
   return options.parentContext
     ? await tracer.startActiveSpan(

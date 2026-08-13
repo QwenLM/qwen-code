@@ -489,7 +489,7 @@ export function composeReview(
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input);
+  const marker = ledgerMarkerFor(input, result.cappedBy);
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -498,11 +498,15 @@ export function composeReview(
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
  */
-function ledgerMarkerFor(input: ComposeReviewInput): string | null {
+function ledgerMarkerFor(
+  input: ComposeReviewInput,
+  cappedBy: string[],
+): string | null {
   try {
     if (!input.planPath) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       prNumber?: unknown;
+      fetchedSha?: unknown;
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -525,8 +529,30 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    return serializeLedger(
-      buildLedger(
+    // The anchor rides only when this round's scope was clean, and "clean" is
+    // the verdict this module just computed: `cappedBy` aggregates every
+    // fail-closed state — each named input pushes its own cap entry, plus the
+    // caps with no input channel at all (a chunk nobody read, findings still
+    // `— [unverified]`, the deterministic gates' enrichments). The input
+    // fields alone were measured leaking exactly those channel-less caps: a
+    // round the module stamped "could not certify that any of this diff was
+    // reviewed" still carried the anchor. One raw check stays alongside, for
+    // the sliver the cap list deliberately drops: a whitespace-only
+    // `cannotTellCriticals` entry is filtered out of the rendered caps, but
+    // Step 8's contract is "any entry" — an undecided blocker whose text was
+    // lost is still an undecided blocker. An anchor written past unreviewed
+    // or undecided scope scopes the NEXT round's incremental diff past it,
+    // and no later round ever re-covers the gap. The findings always ride —
+    // a fail-closed round's work list is still a work list; it just cannot
+    // certify a range.
+    const failClosed =
+      (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
+    const sha =
+      !failClosed && typeof plan.fetchedSha === 'string'
+        ? plan.fetchedSha
+        : undefined;
+    return serializeLedger({
+      ...buildLedger(
         prevRound + 1,
         (input.draftedComments ?? []) as Array<{
           path?: unknown;
@@ -537,7 +563,8 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           .map(stripReviewFooter)
           .filter((entry) => entry.trim() !== ''),
       ),
-    );
+      ...(sha ? { sha } : {}),
+    });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
     return null;

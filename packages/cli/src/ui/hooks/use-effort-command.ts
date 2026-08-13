@@ -50,11 +50,10 @@ export const useEffortCommand = (
         // for future sessions, but say it won't take effect until thinking is
         // re-enabled.
         if (addItem) {
-          const feedbackItem: HistoryItemWithoutId & Record<string, unknown> =
-            {
-              type: MessageType.INFO,
-              text: formatEffortChangeMessage(config, effort),
-            };
+          const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+            type: MessageType.INFO,
+            text: formatEffortChangeMessage(config, effort),
+          };
           addItem(feedbackItem, Date.now());
           config.getChatRecordingService?.()?.recordSlashCommand({
             phase: 'result',

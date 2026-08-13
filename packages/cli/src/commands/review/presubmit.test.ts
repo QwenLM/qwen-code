@@ -807,15 +807,16 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(false);
     });
 
-    it('does not author-match replies — a hand reply is not a posted finding', async () => {
+    it('does not author-match replies — even a finding-shaped reply is not a posted finding', async () => {
+      // Finding-shaped on purpose: the body PASSES the severityOf shape
+      // gate, so deleting the !c.in_reply_to_id reply guard makes this test
+      // red (mutation-verified) — only that term keeps the reply out of the
+      // dedup set.
       const result = await presubmitWithComments(
         [
           {
             id: 4,
-            // Finding-shaped on purpose: the severityOf gate alone would
-            // exclude an unmarked reply even with the reply guard deleted,
-            // so this fixture pins the `!in_reply_to_id` guard itself.
-            body: '**[Critical]** we fixed this, thanks',
+            body: '**[Critical]** confirmed, thanks',
             path: 'a.ts',
             line: 12,
             commit_id: 'abc123',

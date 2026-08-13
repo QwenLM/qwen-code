@@ -451,14 +451,28 @@ export function runSubmit(
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
     // report, and the user can ask for them to be posted.
+    // The advice must match the refusal class, or it misdirects the retry:
+    // the gate refuses either because comment was never requested (its `why`
+    // carries `` `--comment` was ``) or because the recorded arguments do not
+    // bind this target. `--comment` cannot fix the second class — the flag
+    // stands in for nothing a target binding needs, and the `review.comment`
+    // setting already stood in for the flag on exactly those refusals — so
+    // advising it there buys the futile retry loop authorization.ts's refusal
+    // wording exists to prevent.
+    const advice = auth.why.includes('`--comment` was')
+      ? `This is the correct outcome of a review the user did not ask to ` +
+        `publish — report the findings in the terminal and stop. Re-run with ` +
+        `\`--comment\`, or pass --user-authorized only after the user has ` +
+        `asked, in a message they typed, for this review to be published.`
+      : `The recorded arguments do not bind this target — report the ` +
+        `findings in the terminal and stop. Posting to this pull request ` +
+        `needs a review invoked naming it, or --user-authorized after the ` +
+        `user has asked, in a message they typed, for this review to be ` +
+        `published.`;
     writeStderrLine(
       `REFUSED to post to ${args.repo}#${args.pr}: ${auth.why}.\n` +
         `Posting is a public, irreversible write, and this run has no ` +
-        `authorisation for one. This is the correct outcome of a review the ` +
-        `user did not ask to publish — report the findings in the terminal and ` +
-        `stop. Re-run with \`--comment\`, or pass --user-authorized only after ` +
-        `the user has asked, in a message they typed, for this review to be ` +
-        `published.`,
+        `authorisation for one. ${advice}`,
     );
     writeStdoutLine(
       JSON.stringify({ posted: false, reason: auth.why }, null, 2),

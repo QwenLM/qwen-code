@@ -13,6 +13,7 @@ vi.mock('../../../config/settings.js', async (importOriginal) => {
   return { ...actual, loadSettings: loadSettingsMock };
 });
 import { operatorReviewSettings } from './review-settings.js';
+import { getDialogSettingKeys } from '../../../utils/settingsUtils.js';
 
 function setReview(review: unknown): void {
   loadSettingsMock.mockReturnValue({ merged: { review } });
@@ -87,5 +88,17 @@ describe('operatorReviewSettings', () => {
       setReview({ comment });
       expect(operatorReviewSettings().comment).toBe(false);
     }
+  });
+});
+
+describe('review settings in the /settings dialog', () => {
+  it('exposes all three settings for toggling', () => {
+    // Maintainer A/B verification of this PR caught the description claiming
+    // dialog membership while the schema shipped showInDialog: false. Pin the
+    // membership so the claim and the schema cannot drift again.
+    const dialogKeys = getDialogSettingKeys();
+    expect(dialogKeys).toContain('review.attribution');
+    expect(dialogKeys).toContain('review.effort');
+    expect(dialogKeys).toContain('review.comment');
   });
 });
