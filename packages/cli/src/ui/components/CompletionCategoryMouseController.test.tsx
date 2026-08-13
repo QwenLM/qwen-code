@@ -85,6 +85,7 @@ describe('CompletionCategoryMouseController', () => {
   });
 
   it('ignores non-press mouse events', () => {
+    vi.mocked(findElementAtMouseEvent).mockReturnValue(2);
     const handler = mountAndGetHandler();
 
     handler(makeEvent({ name: 'move', col: 19, row: 5 }));

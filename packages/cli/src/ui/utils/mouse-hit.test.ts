@@ -53,6 +53,36 @@ describe('findElementAtMouseEvent', () => {
     ).toBe(1);
   });
 
+  it('keeps the right and bottom rectangle edges exclusive', () => {
+    expect(
+      findElementAtMouseEvent(
+        container,
+        [first, second],
+        { col: 9, row: 5 },
+        40,
+        'rect',
+      ),
+    ).toBeNull();
+
+    vi.mocked(layoutRowForEvent).mockReturnValue(5);
+    expect(
+      findElementAtMouseEvent(
+        container,
+        [first, second],
+        { col: 3, row: 6 },
+        40,
+        'rect',
+      ),
+    ).toBeNull();
+  });
+
+  it('ignores mouse events before the container ref is attached', () => {
+    expect(
+      findElementAtMouseEvent(null, [first], { col: 3, row: 5 }, 40, 'row'),
+    ).toBeNull();
+    expect(layoutRowForEvent).not.toHaveBeenCalled();
+  });
+
   it('passes terminal height into the shared layout mapping', () => {
     findElementAtMouseEvent(container, [first], { col: 3, row: 5 }, 40, 'row');
 
