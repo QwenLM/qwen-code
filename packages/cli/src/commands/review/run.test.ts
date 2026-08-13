@@ -76,6 +76,15 @@ describe('buildReviewPrompt', () => {
     );
   });
 
+  it('threads --resume through, after the other flags', () => {
+    expect(buildReviewPrompt({ target: '7724', resume: true })).toBe(
+      '/review 7724 --resume',
+    );
+    expect(buildReviewPrompt({ target: '7724', resume: false })).toBe(
+      '/review 7724',
+    );
+  });
+
   it('rejects a target that would re-tokenize into extra args', () => {
     // `123 --comment` would split into a target plus a flag the child
     // honours, silently authorising a post the run never asked for.

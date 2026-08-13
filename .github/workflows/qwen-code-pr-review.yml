@@ -1326,6 +1326,7 @@ jobs:
           KIND=''
           run_review_once() {
             local attempt_timeout="$1"
+            local attempt_prompt="$2"
             OUTCOME='fatal'
             REASON=''
             KIND=''
@@ -1382,7 +1383,7 @@ jobs:
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
-              --prompt "$PROMPT" \
+              --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"
             local ps=("${PIPESTATUS[@]}")
@@ -1478,16 +1479,16 @@ jobs:
 
           # Retry budget: all attempts SHARE QWEN_TIMEOUT, so two tries can never
           # exceed the single-review budget (nor the job timeout), and that
-          # shared budget is the only thing that needs to bound them. A retry
-          # re-runs the whole review from scratch rather than resuming the failed
-          # one, so on a large PR it spends minutes re-fetching, re-chunking and
-          # re-launching agents before the first finding exists — a short retry
-          # cap makes the retry die on the clock instead of clearing the
-          # transient it was meant to clear. Every attempt therefore gets the
-          # whole remaining budget. Retry only a `retryable` outcome, only once,
-          # and only when enough budget is left for the retry to plausibly
-          # finish; below that, report the transient failure so the next run
-          # starts over with a full budget.
+          # shared budget is the only thing that needs to bound them. The retry
+          # carries `--resume`: `fetch-pr` then reuses the dead attempt's
+          # worktree, plan and agent evidence when the PR head has not moved
+          # (and silently falls back to a fresh review when it has), so the
+          # retry spends its remaining budget on the work still owed instead of
+          # re-fetching, re-chunking and re-launching what already ran. Every
+          # attempt still gets the whole remaining budget. Retry only a
+          # `retryable` outcome, only once, and only when enough budget is left
+          # for the retry to plausibly finish; below that, report the transient
+          # failure so the next run starts over with a full budget.
           BUDGET_SECONDS=$(( QWEN_TIMEOUT * 60 ))
           RETRY_BACKOFF_SECONDS=60
           RETRY_MIN_SECONDS=600
@@ -1499,7 +1500,11 @@ jobs:
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
-            run_review_once "$attempt_timeout"
+            ATTEMPT_PROMPT="$PROMPT"
+            if [ "$attempt" -gt 1 ]; then
+              ATTEMPT_PROMPT="$PROMPT --resume"
+            fi
+            run_review_once "$attempt_timeout" "$ATTEMPT_PROMPT"
             if [ "$OUTCOME" = "success" ]; then
               break
             fi

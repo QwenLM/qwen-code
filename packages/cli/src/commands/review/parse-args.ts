@@ -99,6 +99,20 @@ export interface ParsedReviewArgs {
    */
   severityFloor: ReviewSeverityFloor | 'auto';
   severityFloorSource: 'explicit' | 'configured' | 'default';
+  /**
+   * `--resume`: continue an interrupted run of this same target instead of
+   * starting over — Step 1 passes it to `fetch-pr --resume`, which rules on
+   * the on-disk state itself and silently falls back to a fresh run when the
+   * state no longer matches. Gated on PR targets: only `fetch-pr` has a
+   * resume path (a local review's diff is captured from a live working tree
+   * that has no stable interrupted state to continue).
+   */
+  resume: {
+    /** `--resume` appeared in the arguments. */
+    requested: boolean;
+    /** `--resume` applies (the target is a PR). */
+    effective: boolean;
+  };
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -267,6 +281,7 @@ export function parseReviewArgs(
 
   let commentRequestedByFlag = false;
   let fixRequested = false;
+  let resumeRequested = false;
   let explicitEffort: ReviewEffort | null = null;
   let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
 
@@ -338,6 +353,11 @@ export function parseReviewArgs(
 
     if (token === '--fix') {
       fixRequested = true;
+      continue;
+    }
+
+    if (token === '--resume') {
+      resumeRequested = true;
       continue;
     }
 
@@ -554,6 +574,13 @@ export function parseReviewArgs(
     );
   }
 
+  const resumeEffective = resumeRequested && isPr;
+  if (resumeRequested && !isPr) {
+    warnings.push(
+      'Warning: `--resume` flag is ignored because the review target is not a PR — only a PR review has interrupted state to continue.',
+    );
+  }
+
   // `--fix` edits a working tree, so it needs one that outlives the review. A
   // PR review's tree is the ephemeral worktree Step 9 removes; a `local` or
   // `file` review's tree is the user's own checkout.
@@ -715,6 +742,7 @@ export function parseReviewArgs(
     fix: { requested: fixRequested, effective: fixEffective },
     severityFloor,
     severityFloorSource,
+    resume: { requested: resumeRequested, effective: resumeEffective },
     extraTokens,
     unknownFlags,
     warnings,

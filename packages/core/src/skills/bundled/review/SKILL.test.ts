@@ -367,6 +367,20 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the resume branch on Step 1', () => {
+    // The resume flow is prose over three subcommands (`fetch-pr --resume`,
+    // `recover-findings`, the round re-entry); a later edit dropping any leg
+    // leaves `--resume` silently starting fresh runs. Pin the load-bearing
+    // sentences.
+    const body = skillBody();
+    expect(body).toContain('Resuming an interrupted run (`--resume`)');
+    expect(body).toContain('review recover-findings');
+    expect(body).toContain('`{"resumed": true, ...}`');
+    expect(body).toContain('`{"resumed": false, "resumeRefused": "<reason>"}`');
+    expect(body).toContain('resumes at round `k+1`');
+    expect(body).toContain('re-enters at `latestReverseAuditRound + 1`');
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either

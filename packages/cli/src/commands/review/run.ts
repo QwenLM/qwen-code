@@ -40,6 +40,7 @@ export interface RunReviewArgs {
   target?: string;
   effort?: string;
   comment: boolean;
+  resume: boolean;
   json: boolean;
   failOn: 'none' | 'request-changes';
   timeoutMinutes: number;
@@ -215,6 +216,7 @@ export function buildReviewPrompt(args: {
   target?: string;
   effort?: string;
   comment?: boolean;
+  resume?: boolean;
 }): string {
   const parts = ['/review'];
   // Presence, not truthiness: an EMPTY target is a target the caller named
@@ -247,6 +249,7 @@ export function buildReviewPrompt(args: {
   }
   if (args.effort) parts.push(`--effort ${args.effort}`);
   if (args.comment) parts.push('--comment');
+  if (args.resume) parts.push('--resume');
   return parts.join(' ');
 }
 
@@ -619,6 +622,12 @@ export const runCommand: CommandModule = {
         describe:
           'Authorise posting the review to GitHub (PR targets only) — same meaning as `/review <pr> --comment`',
       })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed.',
+      })
       .option('json', {
         type: 'boolean',
         default: false,
@@ -655,6 +664,7 @@ export const runCommand: CommandModule = {
       target: argv['target'] as string | undefined,
       effort: argv['effort'] as string | undefined,
       comment: Boolean(argv['comment']),
+      resume: Boolean(argv['resume']),
       json: Boolean(argv['json']),
       failOn: (argv['fail-on'] as 'none' | 'request-changes') ?? 'none',
       // `|| 120` would treat an explicit `--timeout-minutes 0` as falsy and

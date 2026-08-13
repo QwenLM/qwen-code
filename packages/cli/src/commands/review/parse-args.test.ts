@@ -1401,3 +1401,35 @@ describe('parse-args warns when the bundle is not built from these sources', () 
     expect(writeStdoutLine).toHaveBeenCalled();
   });
 });
+
+describe('--resume', () => {
+  it('is effective on a PR target', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('is effective on a PR URL target', () => {
+    const r = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/6711 --resume',
+    );
+    expect(r.resume).toEqual({ requested: true, effective: true });
+  });
+
+  it('is ignored with a warning on a local target', () => {
+    const r = parseReviewArgs('--resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
+  it('is absent by default', () => {
+    const r = parseReviewArgs('6711');
+    expect(r.resume).toEqual({ requested: false, effective: false });
+  });
+
+  it('does not change the effort resolution', () => {
+    const r = parseReviewArgs('6711 --resume');
+    expect(r.effort).toBe('high'); // the PR default, not a resume effect
+    expect(r.effortSource).toBe('default');
+  });
+});
