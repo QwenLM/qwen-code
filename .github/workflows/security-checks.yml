@@ -43,13 +43,15 @@ jobs:
 
       # Reporting-only for now: the current baseline already contains high
       # severity findings, so failing the check would block every PR. Remove
-      # continue-on-error once the baseline is clean to make this a hard gate.
+      # continue-on-error once the baseline is clean to make this a hard gate,
+      # and update scripts/tests/security-workflows.test.js with that policy.
       - name: 'Audit production dependencies'
         continue-on-error: true
         run: |
           status=0
           npm audit --omit=dev --audit-level=high || status=$?
           for lockfile in packages/*/package-lock.json; do
+            [ -f "$lockfile" ] || continue
             package_dir="${lockfile%/package-lock.json}"
             (
               cd "$package_dir"
@@ -73,7 +75,8 @@ jobs:
       # Incremental gate: the action scans the commits introduced by the PR
       # (base..head) and only fails on secrets TruffleHog could actively
       # verify, keeping false positives out. Reporting-only for the first
-      # runs; remove continue-on-error once the history has been triaged.
+      # runs; remove continue-on-error once the history has been triaged, and
+      # update scripts/tests/security-workflows.test.js with that policy.
       # `version` pins the scanner image; without it the action runs `latest`.
       - name: 'Scan for verified secrets'
         uses: 'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11' # v3.96.0
