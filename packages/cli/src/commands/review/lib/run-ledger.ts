@@ -226,7 +226,12 @@ function writeMarker(planPath: string, marker: ResumeMarker): void {
   }
 }
 
-/** Record a successful `--resume` continuation under the current session. */
+/**
+ * Record a successful `--resume` continuation under the current session.
+ * One entry per session, like the session ledger's own guard: a session
+ * resumes a run at most once, so a repeated call is a caller-side retry and
+ * must not spend the resume cap twice.
+ */
 export function recordResume(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -235,17 +240,23 @@ export function recordResume(
   const id = env['QWEN_CODE_SESSION_ID']?.trim();
   if (!id || !SESSION_ID_RE.test(id)) return;
   const marker = readResumeMarker(planPath);
+  if (marker.resumes.some((r) => r.sessionId === id)) return;
   marker.resumes.push({ sessionId: id, atMs: nowMs });
   writeMarker(planPath, marker);
 }
 
-/** Record a restart-for-head-movement (the skill's once-per-review event). */
+/**
+ * Record a restart-for-head-movement (the skill's once-per-review event).
+ * Deduplicated by reason: the event is at-most-once by rule, so a repeated
+ * identical call is a caller-side retry, not a second restart.
+ */
 export function recordRestart(
   planPath: string,
   reason: string,
   nowMs: number = Date.now(),
 ): void {
   const marker = readResumeMarker(planPath);
+  if (marker.restarts.some((r) => r.reason === reason)) return;
   marker.restarts.push({ atMs: nowMs, reason });
   writeMarker(planPath, marker);
 }

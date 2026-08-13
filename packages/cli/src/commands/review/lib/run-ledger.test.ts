@@ -196,3 +196,23 @@ describe('resume marker', () => {
     expect(RESUME_MAX).toBe(2);
   });
 });
+
+describe('marker dedup — a caller retry must not double-count', () => {
+  it('records one resume per session', () => {
+    recordResume(plan, envOf('S2'));
+    recordResume(plan, envOf('S2'));
+    expect(readResumeMarker(plan).resumes).toHaveLength(1);
+  });
+
+  it('records one restart per reason', () => {
+    recordRestart(plan, 'head-moved abc1234->def5678');
+    recordRestart(plan, 'head-moved abc1234->def5678');
+    expect(readResumeMarker(plan).restarts).toHaveLength(1);
+  });
+
+  it('still records distinct restarts', () => {
+    recordRestart(plan, 'head-moved abc1234->def5678');
+    recordRestart(plan, 'head-moved def5678->0123abc');
+    expect(readResumeMarker(plan).restarts).toHaveLength(2);
+  });
+});
