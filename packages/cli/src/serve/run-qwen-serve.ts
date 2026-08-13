@@ -79,10 +79,11 @@ import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
   allowOriginCors,
   bearerAuth,
+  denyBrowserOriginCors,
   hostAllowlist,
-  MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import type { LocalControlService } from './local-control/index.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -1476,13 +1477,6 @@ function createBootstrapServeApp(input: {
   >;
   getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
   onHealthServed?: () => void;
-  /**
-   * CORS allowlist to install. Callers that run Local Control pass the one
-   * they hold so the LAN origin can be added and removed at runtime; the
-   * middleware itself is installed once, here, because Express middleware
-   * order is fixed after the app is built.
-   */
-  originAllowlist?: MutableOriginAllowlist;
 }): Application {
   const {
     opts,
@@ -1499,24 +1493,15 @@ function createBootstrapServeApp(input: {
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
     onHealthServed,
-    originAllowlist,
   } = input;
   const app = express();
 
   installSameOriginOriginStrip(app, getPort);
-  // One middleware for both deployments. With an empty allowlist this is
-  // byte-for-byte the `denyBrowserOriginCors` behavior it replaces — every
-  // Origin-bearing request gets the same `Vary: Origin` + 403 body — so the
-  // no-`--allow-origin` posture is unchanged. The difference is that the set
-  // behind it can now gain the LAN origin when Local Control turns on.
-  app.use(
-    allowOriginCors(
-      originAllowlist ??
-        new MutableOriginAllowlist(
-          parseAllowOriginPatterns(opts.allowOrigins ?? []),
-        ),
-    ),
-  );
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
+  } else {
+    app.use(denyBrowserOriginCors);
+  }
   app.use(hostAllowlist(opts.hostname, getPort));
 
   const healthHandler = (req: Request, res: Response): void => {
@@ -3271,6 +3256,29 @@ async function runQwenServeImpl(
           }`,
         );
       }
+    }
+
+    // Before the ACP handle: `disable()` detaches the LAN listener's upgrade
+    // registration through that handle, and detaching after it is disposed
+    // would be a no-op on an already-torn-down mount.
+    //
+    // This scope is synchronous and `dispose()` is not, but the part that has
+    // to happen before the daemon goes away — revoking the pairing token and
+    // dropping the LAN origin from the CORS allowlist — runs synchronously
+    // inside it. Only closing the socket is deferred, and a socket that
+    // outlives the process by a few milliseconds can no longer authenticate
+    // anyone.
+    const localControlService = app.locals?.['localControlService'] as
+      | LocalControlService
+      | undefined;
+    if (localControlService?.active) {
+      void localControlService.dispose().catch((err: unknown) => {
+        daemonLog.warn(
+          `Local Control dispose error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
     }
 
     const acpHandle = app.locals?.['acpHandle'] as AcpHttpHandle | undefined;

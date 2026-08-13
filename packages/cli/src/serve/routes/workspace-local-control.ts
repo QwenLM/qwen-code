@@ -17,7 +17,7 @@ import type { LocalControlService } from '../local-control/service.js';
 export interface RegisterWorkspaceLocalControlRoutesDeps {
   service: LocalControlService;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
-  safeBody: (req: Request) => unknown;
+  safeBody: (req: Request) => Record<string, unknown>;
   isDaemonDraining?: () => boolean;
 }
 

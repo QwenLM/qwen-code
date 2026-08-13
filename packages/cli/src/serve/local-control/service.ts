@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { createServer as createSecureServer } from 'node:https';
 import type { Application } from 'express';
 import type { SleepInhibitorHandle } from '@qwen-code/qwen-code-core';
 import { sleepInhibitor } from '@qwen-code/qwen-code-core';
@@ -32,6 +34,12 @@ export interface LocalControlStatus {
   address?: string;
   port?: number;
   sleepInhibited?: boolean;
+  /**
+   * Whether the LAN listener is TLS-terminated. Surfaced because the UI's
+   * safety line ("Trusted Wi-Fi · Unencrypted · …") has to tell the truth
+   * about the specific session rather than assume the common case.
+   */
+  encrypted?: boolean;
   issuedAt?: number;
 }
 
@@ -58,8 +66,18 @@ export interface LocalControlServiceDeps {
   detachWebSocket(server: Server): void;
   /** Port to advertise. Read lazily — the primary listener may be on port 0. */
   getPort(): number;
-  /** Injected for tests. */
-  now?(): number;
+  /**
+   * `--tls-cert` / `--tls-key` paths, when the daemon was started with them.
+   *
+   * The LAN listener has to match the daemon's transport. Serving plaintext
+   * off a daemon the operator deliberately put behind TLS would quietly
+   * downgrade the surface that is by definition the *more* exposed of the two,
+   * and the advertised origin would not match what the browser sees.
+   *
+   * Read at enable time rather than captured at boot so a certificate renewed
+   * while the daemon was running is picked up by the next pairing.
+   */
+  tlsPaths?: { cert: string; key: string };
 }
 
 /**
@@ -103,6 +121,7 @@ export class LocalControlService {
       address: this.#selected.address,
       port: this.#deps.getPort(),
       sleepInhibited: this.#sleep !== undefined,
+      encrypted: this.#deps.tlsPaths !== undefined,
       issuedAt: this.#token.issuedAt,
     };
   }
@@ -123,7 +142,13 @@ export class LocalControlService {
     const authority = `${selected.address}:${port}`;
     const token = mintPairingToken();
 
-    const server = createServer(this.#deps.app);
+    const tls = this.#deps.tlsPaths;
+    const server = tls
+      ? createSecureServer(
+          { cert: readFileSync(tls.cert), key: readFileSync(tls.key) },
+          this.#deps.app,
+        )
+      : createServer(this.#deps.app);
     // Tag before listening. Identity must be resolvable by the first request,
     // and a request can arrive between `listen()` resolving and the next line
     // of this function running.
@@ -133,8 +158,9 @@ export class LocalControlService {
     // anything. Reversed, there is a window where the LAN listener is up but
     // the pairing token is not yet valid — the phone's first request 401s and
     // the user re-scans a QR that was never broken.
+    const scheme = tls ? 'https' : 'http';
     this.#deps.credentials.addPairingToken(token.id, token.secret);
-    this.#deps.originAllowlist.add(CORS_KEY, `http://${authority}`);
+    this.#deps.originAllowlist.add(CORS_KEY, `${scheme}://${authority}`);
 
     try {
       await listen(server, port, selected.address);
@@ -148,7 +174,7 @@ export class LocalControlService {
     this.#server = server;
     this.#token = token;
     this.#selected = selected;
-    this.#url = buildPairedUrl(authority, token.secret, options.target);
+    this.#url = buildPairedUrl(scheme, authority, token.secret, options.target);
     // Best-effort, and reported as such: the core inhibitor no-ops on headless
     // SSH sessions and on hosts without a usable backend. A phone losing its
     // session to a sleeping laptop should be explainable from the status, so
@@ -196,11 +222,12 @@ export class LocalControlService {
 }
 
 function buildPairedUrl(
+  scheme: string,
   authority: string,
   secret: string,
   target?: string,
 ): string {
-  const url = new URL(`http://${authority}`);
+  const url = new URL(`${scheme}://${authority}`);
   if (target) {
     // Parsed relative to the LAN origin so an absolute or protocol-relative
     // `target` cannot redirect the QR at a host the operator did not choose.
