@@ -70,7 +70,9 @@ jobs:
             should_run='true'
             execution_backend='${{ inputs.execution_backend }}'
             instance_limit='${{ inputs.instance_limit }}'
-            instance_id='${{ inputs.instance_id }}'
+            if [[ "${instance_limit}" == '1' ]]; then
+              instance_id='${{ inputs.instance_id }}'
+            fi
           elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-smoke-[0-9A-Za-z._-]+$ ]]; then
             should_run='true'
             execution_backend='eas-smoke'
