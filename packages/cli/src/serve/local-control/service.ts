@@ -20,6 +20,8 @@ import { selectLanAddress, type LanCandidate } from './lan-interfaces.js';
 const CORS_KEY = 'local-control';
 const MAX_CONNECTIONS = 64;
 const HEADERS_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 30_000;
+const KEEP_ALIVE_TIMEOUT_MS = 5_000;
 
 interface PairingToken {
   readonly id: string;
@@ -129,7 +131,7 @@ export class LocalControlService {
       interfaceName: this.#selected.interfaceName,
       address: this.#selected.address,
       port: this.#deps.getPort(),
-      sleepInhibited: this.#sleep !== undefined,
+      sleepInhibited: this.#sleep !== undefined && sleepInhibitor.isRunning(),
       encrypted: this.#deps.tlsPaths !== undefined,
       issuedAt: this.#token.issuedAt,
     };
@@ -160,6 +162,7 @@ export class LocalControlService {
     const tls = this.#deps.tlsPaths;
     const scheme = tls ? 'https' : 'http';
     const origin = new URL(`${scheme}://${authority}`).origin;
+    const url = buildPairedUrl(scheme, authority, token.secret, options.target);
     const server = tls
       ? createSecureServer(
           { cert: readFileSync(tls.cert), key: readFileSync(tls.key) },
@@ -168,6 +171,8 @@ export class LocalControlService {
       : createServer(this.#deps.app);
     server.maxConnections = MAX_CONNECTIONS;
     server.headersTimeout = HEADERS_TIMEOUT_MS;
+    server.requestTimeout = REQUEST_TIMEOUT_MS;
+    server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
     // Tag before listening. Identity must be resolvable by the first request,
     // and a request can arrive between `listen()` resolving and the next line
     // of this function running.
@@ -190,10 +195,11 @@ export class LocalControlService {
       throw error;
     }
 
+    server.on('error', () => undefined);
     this.#server = server;
     this.#token = token;
     this.#selected = selected;
-    this.#url = buildPairedUrl(scheme, authority, token.secret, options.target);
+    this.#url = url;
     // Best-effort, and reported as such: the core inhibitor no-ops on headless
     // SSH sessions and on hosts without a usable backend. A phone losing its
     // session to a sleeping laptop should be explainable from the status, so

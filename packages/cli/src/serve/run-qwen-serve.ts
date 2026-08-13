@@ -3384,7 +3384,7 @@ async function runQwenServeImpl(
     const localControlService = app.locals?.['localControlService'] as
       | LocalControlService
       | undefined;
-    if (localControlService?.active) {
+    if (localControlService) {
       void localControlService.dispose().catch((err: unknown) => {
         daemonLog.warn(
           `Local Control dispose error: ${

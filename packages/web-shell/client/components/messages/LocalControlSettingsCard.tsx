@@ -26,7 +26,7 @@ interface LocalControlStatus {
   address?: string;
   sleepInhibited?: boolean;
   encrypted?: boolean;
-  interfaces: LanCandidate[];
+  interfaces?: LanCandidate[];
 }
 
 async function requestLocalControl(
@@ -42,11 +42,24 @@ async function requestLocalControl(
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const payload = (await response.json()) as LocalControlStatus & {
-    error?: string;
-  };
-  if (!response.ok) throw new Error(payload.error || response.statusText);
-  return payload;
+  const text = await response.text();
+  let payload: (LocalControlStatus & { error?: string }) | undefined;
+  try {
+    payload = (text ? JSON.parse(text) : {}) as LocalControlStatus & {
+      error?: string;
+    };
+  } catch {
+    if (response.ok) throw new Error('Invalid Local Control response');
+  }
+  if (!response.ok) throw new Error(payload?.error || response.statusText);
+  return payload!;
+}
+
+function getLocalControlTarget(): string {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('daemon');
+  url.searchParams.delete('token');
+  return `${url.pathname}${url.search}`;
 }
 
 export function LocalControlSettingsCard() {
@@ -60,8 +73,9 @@ export function LocalControlSettingsCard() {
     requestLocalControl('GET', '/workspace/local-control')
       .then((next) => {
         setStatus(next);
-        if (next.interfaces.length === 1) {
-          setSelectedAddress(next.interfaces[0]!.address);
+        const interfaces = next.interfaces ?? [];
+        if (interfaces.length === 1) {
+          setSelectedAddress(interfaces[0]!.address);
         }
       })
       .catch((failure: unknown) =>
@@ -81,7 +95,7 @@ export function LocalControlSettingsCard() {
         ? undefined
         : {
             address: selectedAddress || undefined,
-            target: `${window.location.pathname}${window.location.search}`,
+            target: getLocalControlTarget(),
           };
       setStatus(await requestLocalControl('POST', path, body));
     } catch (failure) {
@@ -91,7 +105,7 @@ export function LocalControlSettingsCard() {
     }
   };
 
-  const needsSelection = (status?.interfaces.length ?? 0) > 1;
+  const needsSelection = (status?.interfaces?.length ?? 0) > 1;
 
   return (
     <div className="flex flex-col gap-4 px-5 py-4 max-md:px-4">
@@ -124,7 +138,7 @@ export function LocalControlSettingsCard() {
             />
           </SelectTrigger>
           <SelectContent>
-            {status?.interfaces.map((network) => (
+            {(status?.interfaces ?? []).map((network) => (
               <SelectItem key={network.address} value={network.address}>
                 {network.interfaceName} · {network.address}
               </SelectItem>
@@ -151,7 +165,7 @@ export function LocalControlSettingsCard() {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => navigator.clipboard.writeText(status.url!)}
+              onClick={() => void navigator.clipboard?.writeText(status.url!)}
             >
               <CopyIcon aria-hidden="true" />
               {t('common.copy')}

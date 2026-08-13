@@ -29,6 +29,10 @@ describe('listLanCandidates', () => {
         wg0: [ipv4('10.9.0.2')],
         'Tailscale Tunnel': [ipv4('10.10.0.2')],
         docker0: [ipv4('172.17.0.1')],
+        'br-123abc': [ipv4('172.18.0.1')],
+        virbr0: [ipv4('192.168.122.1')],
+        zt7nnig26: [ipv4('10.147.17.2')],
+        'vEthernet (WSL)': [ipv4('172.20.0.1')],
       }),
     ).toEqual([
       { interfaceName: 'en0', address: '192.168.1.10' },
