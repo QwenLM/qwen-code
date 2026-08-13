@@ -327,7 +327,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly client: DwsClientLike;
   private readonly imStates: ImSubscriptionState[];
   private readonly watchTodos: boolean;
-  private readonly ownUserIds = new Set<string>();
   private readonly pendingOutboundEchoes = new Map<
     string,
     { expiresAt: number }
@@ -344,7 +343,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
   private pollAbortController = new AbortController();
-  private authenticatedProfile?: string;
   private lifecycleGeneration = 0;
   private connectionStartedAt = 0;
   private lastTodoPollAt = 0;
@@ -493,17 +491,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.userInstructions,
       identity.profile,
     );
-    this.authenticatedProfile = identity.profile;
     if (this.cursor.selfProfile !== identity.profile) {
       this.cursor.selfProfile = identity.profile;
-      this.cursor.selfSenderIds = [];
       this.cursor.todosInitialized = false;
       this.cursor.todoTasks = [];
     }
-    this.ownUserIds.clear();
-    for (const senderId of this.cursor.selfSenderIds) {
-      this.ownUserIds.add(senderId);
-    }
+    this.cursor.selfSenderIds = [];
     this.connected = true;
     try {
       await Promise.all(
@@ -530,6 +523,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.lastTodoPollAt = 0;
     this.pendingOutboundEchoes.clear();
     this.todoTargets.clear();
+    for (const reactions of this.sessionReactionKeys.values()) {
+      for (const [key, { conversationId, messageId }] of reactions) {
+        if (!this.activeReactionKeys.delete(key)) continue;
+        void this.client
+          .removeImReaction(conversationId, messageId, ACK_REACTION_NAME)
+          .catch((error) =>
+            this.logReactionFailure('disconnect reaction removal', error),
+          );
+      }
+    }
     this.activeReactionKeys.clear();
     this.sessionReactionKeys.clear();
     this.stopPollLoop();
@@ -574,7 +577,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         envelope.chatId,
         result.pairing,
         envelope.threadId,
-      ).then(() => false);
+      )
+        .then(() => false)
+        .catch(() => false);
     }
     this.logPreflightRejected(`${source}_sender_denied`);
     return false;
@@ -753,10 +758,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     for (const message of notifications) {
       if (signal.aborted || !this.connected) return;
       const key = messageKey(message);
-      if (
-        this.cursor.processedMessages.includes(key) ||
-        this.ownUserIds.has(message.senderId)
-      ) {
+      if (this.cursor.processedMessages.includes(key)) {
         continue;
       }
       const notification = parseDocumentMentionNotification(message.content);
@@ -802,10 +804,17 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (signal.aborted || !this.connected) return;
       const fingerprint = todoFingerprint(task);
       if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
-      if (await this.processTodoTask(task, fingerprint, signal)) {
-        this.rememberTodoState(task.taskId, fingerprint);
-        processedTaskIds.add(task.taskId);
-        this.saveCursor();
+      try {
+        if (await this.processTodoTask(task, fingerprint, signal)) {
+          this.rememberTodoState(task.taskId, fingerprint);
+          processedTaskIds.add(task.taskId);
+          this.saveCursor();
+        }
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        process.stderr.write(
+          `[Channel:${this.name}] failed to process DWS todo ${sanitizeLogText(task.taskId, 120)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
       }
     }
 
@@ -983,8 +992,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       message.eventTime !== undefined &&
       message.eventTime < this.connectionStartedAt - 5_000
     ) {
-      this.markProcessedMessage(messageKey(message));
-      this.saveCursor();
+      if (!parseDocumentMentionNotification(message.content)) {
+        this.markProcessedMessage(messageKey(message));
+        this.saveCursor();
+      }
       return;
     }
     if (
@@ -1025,10 +1036,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
     key: string,
   ): Promise<void> {
-    if (
-      this.consumeOutboundEcho(message) ||
-      this.ownUserIds.has(message.senderId)
-    ) {
+    if (this.consumeOutboundEcho(message)) {
       this.markProcessedMessage(key);
       this.saveCursor();
       return;
@@ -1337,7 +1345,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const key = outboundEchoKey(message.conversationId, message.content);
     if (!this.pendingOutboundEchoes.has(key)) return false;
     this.pendingOutboundEchoes.delete(key);
-    this.rememberSelfSender(message.senderId);
     return true;
   }
 
@@ -1345,16 +1352,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     for (const [key, pending] of this.pendingOutboundEchoes) {
       if (pending.expiresAt <= now) this.pendingOutboundEchoes.delete(key);
     }
-  }
-
-  private rememberSelfSender(senderId: string): void {
-    if (!this.authenticatedProfile || !senderId) return;
-    this.ownUserIds.add(senderId);
-    this.cursor.selfProfile = this.authenticatedProfile;
-    this.cursor.selfSenderIds = [
-      ...this.cursor.selfSenderIds.filter((item) => item !== senderId),
-      senderId,
-    ].slice(-MAX_SELF_SENDER_IDS);
   }
 
   private async readDocumentContext(

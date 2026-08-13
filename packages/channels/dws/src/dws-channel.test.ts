@@ -609,6 +609,28 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
+  it('lets polling recover a stale replayed document notification', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const replay = message(
+      'user_im_message_receive_o2o_all',
+      'replayed-document',
+      documentMentionCard('doc-replayed', 'comment-replayed'),
+      { eventTime: Date.now() - 60_000 },
+    );
+    client.directMessages = [replay];
+
+    await client.emit(1, replay);
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-replayed',
+        threadId: 'comment-replayed',
+      }),
+    ]);
+  });
+
   it('accepts ordinary direct messages and replies to that user', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -768,6 +790,33 @@ describe('DwsChannel', () => {
     expect(client.addTodoComment).toHaveBeenCalledWith('task-new', 'response');
   });
 
+  it('continues polling after one todo detail fetch fails', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-failing', 'Unreadable task'),
+      todoTask('task-good', 'Readable task'),
+    ];
+    client.getTodoTask.mockImplementation(async (taskId) => {
+      if (taskId === 'task-failing') throw new Error('permission denied');
+      const task = client.todoTasks.find((item) => item.taskId === taskId);
+      if (!task) throw new Error(`Missing fake todo ${taskId}.`);
+      return task;
+    });
+
+    await expect(channel.poll()).resolves.toBeUndefined();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ threadId: 'task-good' }),
+    ]);
+  });
+
   it('reacts to actionable todo changes but ignores comment metadata', async () => {
     const client = new FakeDwsClient();
     client.todoTasks = [todoTask('task-1', 'Review the change')];
@@ -856,6 +905,33 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('keeps polling when a document pairing notification cannot be sent', async () => {
+    const client = new FakeDwsClient();
+    client.replyToComment.mockRejectedValueOnce(
+      new DwsCommandError('comment rejected', 'not_sent'),
+    );
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ senderPolicy: 'pairing' }),
+    );
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'document-pairing',
+        documentMentionCard('doc-pairing', 'comment-pairing'),
+      ),
+    ];
+
+    await expect(channel.poll()).resolves.toBeUndefined();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.replyToComment).toHaveBeenCalledWith(
+      'doc-pairing',
+      'comment-pairing',
+      expect.stringContaining('pairing code'),
+    );
+  });
+
   it('shows a working eyes reaction on the notification while a document task runs', async () => {
     const client = new FakeDwsClient();
     const { bridge } = await readyPolicyChannel(client);
@@ -938,6 +1014,38 @@ describe('DwsChannel', () => {
         '暗中观察',
       );
     });
+  });
+
+  it('removes an active working reaction when the channel disconnects', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(client);
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockImplementation(
+      async () =>
+        new Promise<string>((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    const delivery = client
+      .emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'running', 'do the task'),
+      )
+      .catch(() => undefined);
+
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    channel.disconnect();
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '暗中观察',
+      );
+    });
+    finishPrompt('done');
+    await delivery;
   });
 
   it('does not add a working reaction to a message rejected by pairing', async () => {
@@ -1240,14 +1348,10 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('learns its sender ID from an outbound echo when authentication omits user IDs', async () => {
+  it('does not mute a sender after consuming their matching text as an echo', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
-    const { bridge } = await readyPolicyChannel(
-      client,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'learn-self-dws',
-    );
+    const channel = await readyChannel(client, makeConfig(), 'learn-self-dws');
 
     await client.emit(
       1,
@@ -1256,15 +1360,19 @@ describe('DwsChannel', () => {
         senderName: 'DataWorksAgent',
       }),
     );
-    const pairingText = client.sendImMessage.mock.calls[0]?.[1];
-    expect(pairingText).toContain('pairing code');
+    await channel.sendMessage('cid-1', 'shared text');
 
     await client.emit(
       1,
-      message('user_im_message_receive_o2o_all', 'pairing-echo', pairingText!, {
-        senderId: 'open-self',
-        senderName: 'DataWorksAgent',
-      }),
+      message(
+        'user_im_message_receive_o2o_all',
+        'matching-peer',
+        'shared text',
+        {
+          senderId: 'open-self',
+          senderName: 'DataWorksAgent',
+        },
+      ),
     );
     await client.emit(
       1,
@@ -1276,11 +1384,13 @@ describe('DwsChannel', () => {
       ),
     );
 
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    expect(channel.inbound.map((item) => item.text)).toEqual([
+      'hello',
+      'still me',
+    ]);
   });
 
-  it('learns its sender ID from a JSON-wrapped Markdown echo', async () => {
+  it('consumes a JSON-wrapped Markdown echo', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const { bridge } = await readyPolicyChannel(
@@ -1310,7 +1420,7 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).toHaveBeenCalledOnce();
   });
 
-  it('learns its sender ID when DWS folds Markdown whitespace', async () => {
+  it('consumes an echo when DWS folds Markdown whitespace', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const { bridge } = await readyPolicyChannel(
@@ -1344,7 +1454,7 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).toHaveBeenCalledOnce();
   });
 
-  it('remembers a learned self sender ID across channel restarts', async () => {
+  it('does not persist an echo sender as the authenticated identity', async () => {
     const firstClient = new FakeDwsClient();
     firstClient.identity = { profile: 'corp-only' };
     const { channel: first } = await readyPolicyChannel(
@@ -1387,10 +1497,10 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(secondClient.sendImMessage).not.toHaveBeenCalled();
+    expect(secondClient.sendImMessage).toHaveBeenCalledOnce();
   });
 
-  it('does not reuse a learned self sender ID after the DWS profile changes', async () => {
+  it('does not carry an echo sender across DWS profiles', async () => {
     const firstClient = new FakeDwsClient();
     firstClient.identity = { profile: 'corp-one' };
     const { channel: first } = await readyPolicyChannel(

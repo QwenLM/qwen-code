@@ -139,6 +139,14 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
       reject(error);
     };
 
+    const reportError = (error: unknown): void => {
+      try {
+        onError(error instanceof Error ? error : new Error(String(error)));
+      } catch {
+        return;
+      }
+    };
+
     const stop = (): void => {
       if (stopping) return;
       stopping = true;
@@ -167,7 +175,7 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
       lineQueue = lineQueue
         .then(() => onLine(line))
         .catch((error: unknown) => {
-          onError(error instanceof Error ? error : new Error(String(error)));
+          reportError(error);
         })
         .finally(() => {
           if (!stopping) child.stdout.resume();
@@ -202,7 +210,7 @@ export const startDwsEventProcess: DwsEventProcessStarter = (
         if (state === 'pending') {
           settleStartupError(lastError ?? processError(code));
         } else if (state === 'ready' && !stopping) {
-          onError(lastError ?? processError(code));
+          reportError(lastError ?? processError(code));
         }
       });
     });

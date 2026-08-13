@@ -89,4 +89,35 @@ describe('DWS event process', () => {
       '{"sequence":3}',
     ]);
   });
+
+  it('contains errors thrown by both the line and error handlers', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const fixture = fileURLToPath(
+        new URL('./fixtures/dws-event-source.mjs', import.meta.url),
+      );
+      const subscription = await startDwsEventProcess(
+        process.execPath,
+        [fixture],
+        async () => {
+          throw new Error('line failed');
+        },
+        () => {
+          throw new Error('error handler failed');
+        },
+      );
+
+      subscription.stop();
+      await subscription.closed;
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });
