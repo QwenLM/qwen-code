@@ -581,10 +581,11 @@ describe('manifest repository context provider', () => {
       write(join(worktree, 'misc', `${index}.ts`));
     }
     // 128 === MAX_RULES: parsing at exactly the bound doubles as the
-    // accept-side pin for the provider's `>` check.
+    // accept-side pin for the provider's `>` check. `extra/**` does not
+    // exist: it keeps the scan-root ENOENT skip branch exercised.
     const rules = Array.from({ length: 128 }, () => ({
       paths: ['src/**'],
-      relatedPaths: ['src/**', 'docs/**', 'misc/**'],
+      relatedPaths: ['src/**', 'docs/**', 'misc/**', 'extra/**'],
     }));
     expect(
       provide(worktree, ['src/change.ts'], manifest({ rules }))?.relatedPaths,

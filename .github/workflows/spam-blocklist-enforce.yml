@@ -30,6 +30,11 @@ name: 'Spam blocklist enforcement'
 # Coverage limit: a review BODY (as opposed to an inline review comment) has no
 # REST delete endpoint, so the event lane minimizes it as SPAM instead and the
 # sweep skips it — there is no repo-wide "list reviews" endpoint to sweep with.
+# A review BODY on a fork PR has no lane at all: the review events run on a
+# read-only token there and the sweep cannot list reviews, so it needs manual
+# minimization. A closed+locked PR's body also stays editable by its author —
+# locking restricts comments, not body edits — so spam edited into a finished
+# PR's body is manual cleanup too.
 
 on:
   issue_comment:
@@ -230,6 +235,23 @@ jobs:
               }
             } else if (eventName === 'pull_request_review_comment') {
               const comment = payload.comment;
+              const pull = payload.pull_request;
+              // Review events on a fork PR run on a read-only GITHUB_TOKEN;
+              // every write below would 403 and red-run the lane. Defer to
+              // the lanes holding a write token: pull_request_target closes
+              // fork PRs at open time, the hourly sweep deletes comments and
+              // repairs thread state.
+              if (
+                pull?.head?.repo?.full_name &&
+                pull.head.repo.full_name !== `${owner}/${repo}` &&
+                (isBlocked(comment?.user?.login) ||
+                  isBlocked(pull.user?.login))
+              ) {
+                core.notice(
+                  'fork PR: GITHUB_TOKEN is read-only here; deferring to the sweep lane',
+                );
+                return;
+              }
               if (isBlocked(comment?.user?.login)) {
                 await run(`delete review comment ${comment.id}`, () =>
                   github.rest.pulls.deleteReviewComment({
@@ -242,7 +264,6 @@ jobs:
               // Same thread-author close as issue_comment: a legitimate
               // review on a blocklisted author's PR still closes the PR,
               // instead of leaving it to the sweep.
-              const pull = payload.pull_request;
               if (
                 pull &&
                 !(pull.state === 'closed' && pull.locked) &&
@@ -252,6 +273,21 @@ jobs:
               }
             } else if (eventName === 'pull_request_review') {
               const review = payload.review;
+              const pull = payload.pull_request;
+              // Same read-only downgrade as the review-comment lane — except
+              // a review BODY has no sweep backstop, so the notice is all the
+              // automation leaves behind: the body needs manual minimization.
+              if (
+                pull?.head?.repo?.full_name &&
+                pull.head.repo.full_name !== `${owner}/${repo}` &&
+                (isBlocked(review?.user?.login) ||
+                  isBlocked(pull.user?.login))
+              ) {
+                core.notice(
+                  'fork PR: GITHUB_TOKEN is read-only here; the review body needs manual minimization',
+                );
+                return;
+              }
               if (isBlocked(review?.user?.login)) {
                 // No REST delete for a review body; SPAM-classify it instead.
                 await run(`minimize review ${review.id}`, () =>
@@ -265,7 +301,6 @@ jobs:
                   ),
                 );
               }
-              const pull = payload.pull_request;
               if (
                 pull &&
                 !(pull.state === 'closed' && pull.locked) &&
