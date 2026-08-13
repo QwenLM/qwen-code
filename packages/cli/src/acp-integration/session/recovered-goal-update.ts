@@ -83,9 +83,10 @@ function unrestorableGoalStatus(
   replayedRecords?: readonly ChatRecord[],
   bootstrap?: HistoryReplayGoalBootstrap,
 ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
-  const active = replayedRecords?.length
-    ? findGoalToRestore(collectGoalStatusItemsFromRecords(replayedRecords))
-    : bootstrap?.goalStatus;
+  const active =
+    (replayedRecords?.length
+      ? findGoalToRestore(collectGoalStatusItemsFromRecords(replayedRecords))
+      : undefined) ?? bootstrap?.goalStatus;
   if (!active) return undefined;
   return {
     kind: 'cleared',

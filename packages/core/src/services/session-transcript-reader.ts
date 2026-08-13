@@ -48,8 +48,10 @@ import {
   type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
 import {
+  EvidenceSourceUnavailableError,
   GoalEvidenceCheckpointAccumulator,
   GoalEvidenceRecordIndexAccumulator,
+  InvalidGoalEvidenceReferenceError,
   type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecordIndexHint,
 } from '../goals/goal-evidence.js';
@@ -2218,13 +2220,22 @@ export class SessionTranscriptReader {
               : undefined;
           const pendingCheckpoint = pendingGoal?.checkpointPending;
           if (pendingCheckpoint && pendingGoal.snapshot.goal) {
-            goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
-              index.runtimeUuids.map(
-                (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
-              ),
-              pendingGoal.snapshot.goal,
-              pendingCheckpoint.permit,
-            );
+            try {
+              goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
+                index.runtimeUuids.map(
+                  (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
+                ),
+                pendingGoal.snapshot.goal,
+                pendingCheckpoint.permit,
+              );
+            } catch (error) {
+              if (!(error instanceof EvidenceSourceUnavailableError)) {
+                throw error;
+              }
+              debugLogger.warn(
+                `restore projection: deferring unavailable Goal checkpoint evidence: ${error.message}`,
+              );
+            }
           }
           goalEvidenceSet = new Set(
             goalCheckpointAccumulator?.getCandidateUuids() ?? [],
@@ -2259,7 +2270,17 @@ export class SessionTranscriptReader {
             readContext,
           );
 
-          const goalCheckpointWindow = goalCheckpointAccumulator?.finish();
+          let goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
+          try {
+            goalCheckpointWindow = goalCheckpointAccumulator?.finish();
+          } catch (error) {
+            if (!(error instanceof InvalidGoalEvidenceReferenceError)) {
+              throw error;
+            }
+            debugLogger.warn(
+              `restore projection: deferring invalid Goal checkpoint evidence: ${error.message}`,
+            );
+          }
           return { selectedGoalRecovery, goalCheckpointWindow };
         },
       );

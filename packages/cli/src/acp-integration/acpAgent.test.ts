@@ -15055,11 +15055,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       const hostPolicy = args[9] as
         | {
             sessionRestore?: {
-              projectionSource: () => Promise<unknown>;
+              projectionSource: (sessionId: string) => Promise<unknown>;
             };
           }
         | undefined;
-      const projection = await hostPolicy?.sessionRestore?.projectionSource();
+      const argv = args[1] as CliArgs;
+      const projection = argv.resume
+        ? await hostPolicy?.sessionRestore?.projectionSource(argv.resume)
+        : undefined;
       innerConfig.consumeSessionRestoreProjection.mockReturnValue(projection);
       return innerConfig as unknown as Config;
     });
@@ -15711,8 +15714,51 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const updates = response._meta?.['qwen.session.loadReplay']?.updates;
     expect(updates).toEqual([{ ...replayUpdate, timestamp: 4242 }, goalUpdate]);
     expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledOnce();
+    expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ replayedRecords: messages }),
+    );
     expect(lastSessionMock?.sendUpdate).not.toHaveBeenCalled();
     expect(lastSessionMock?.publishRecoveredGoalState).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('streams the unrestorable Goal correction after cold history replay', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const goalUpdate = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: {
+          kind: 'cleared',
+          condition: 'ship the thing',
+        },
+      },
+    };
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [goalUpdate],
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(lastSessionMock?.replayHistory).toHaveBeenCalledWith(messages, []);
+    expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ replayedRecords: messages }),
+    );
+    expect(lastSessionMock?.sendUpdate).toHaveBeenCalledWith(goalUpdate);
+    expect(
+      lastSessionMock!.replayHistory.mock.invocationCallOrder[0],
+    ).toBeLessThan(lastSessionMock!.sendUpdate.mock.invocationCallOrder[0]);
 
     mockConnectionState.resolve();
     await agentPromise;

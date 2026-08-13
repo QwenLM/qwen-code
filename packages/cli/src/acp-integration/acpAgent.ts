@@ -5155,7 +5155,7 @@ class QwenAgent implements Agent {
       const replayUsage = createReplayCumulativeUsage();
       let recoveredGoalPublicationKey: string | undefined;
       let suppressedRecoveredGoalId: string | undefined;
-      let hiddenStreamGoalUpdates: SessionUpdate[] = [];
+      let streamGoalUpdates: SessionUpdate[] = [];
       let response: LoadSessionResponse | undefined;
       const buildResponse = () =>
         profiler.timeSync('response_build', () => ({
@@ -5231,10 +5231,12 @@ class QwenAgent implements Agent {
                 );
               }
               const goalBootstrap = replayGoalBootstrap(projection);
-              if (!bulkReplay && !suppressRecoveredGoalPresentation) return;
               const rendered = await renderPreparedGoalUpdate(
                 () => config.getGoalRuntimePrepared(),
                 {
+                  ...(projection?.replay?.records
+                    ? { replayedRecords: projection.replay.records }
+                    : {}),
                   ...(suppressRecoveredGoalPresentation
                     ? { hideRuntimeGoal: true }
                     : {}),
@@ -5256,7 +5258,7 @@ class QwenAgent implements Agent {
               recoveredGoalPublicationKey = rendered.publicationKey;
               suppressedRecoveredGoalId = rendered.suppressedGoalId;
               if (!bulkReplay) {
-                hiddenStreamGoalUpdates = rendered.updates;
+                streamGoalUpdates = rendered.updates;
                 return;
               }
               const goalUpdates = rendered.updates;
@@ -5318,10 +5320,8 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
-                if (suppressRecoveredGoalPresentation) {
-                  for (const update of hiddenStreamGoalUpdates) {
-                    await createdSession.sendUpdate(update);
-                  }
+                for (const update of streamGoalUpdates) {
+                  await createdSession.sendUpdate(update);
                 }
               }
               await profiler.time('post_replay_services', async () => {
@@ -12205,10 +12205,13 @@ class QwenAgent implements Agent {
             ...(restoreOptions && sessionId
               ? {
                   sessionRestore: {
-                    projectionSource: () =>
+                    projectionSource: (restoreSessionId) =>
                       new SessionService(cwd, {
                         runtimeBaseDir: Storage.getRuntimeBaseDir(),
-                      }).readRestoreProjection(sessionId, restoreOptions),
+                      }).readRestoreProjection(
+                        restoreSessionId,
+                        restoreOptions,
+                      ),
                   },
                 }
               : {}),

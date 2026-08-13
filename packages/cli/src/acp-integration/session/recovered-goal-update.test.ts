@@ -118,6 +118,95 @@ describe('renderPreparedGoalUpdate', () => {
     ]);
   });
 
+  it('clears a replayed legacy Goal when recovery is unavailable', async () => {
+    const result = await renderPreparedGoalUpdate(
+      async () => {
+        throw new GoalPersistenceUnavailableError('unsupported record');
+      },
+      {
+        replayedRecords: [
+          {
+            uuid: 'goal-result',
+            parentUuid: null,
+            sessionId: 'session-1',
+            timestamp: new Date(0).toISOString(),
+            type: 'system',
+            subtype: 'slash_command',
+            cwd: '/tmp',
+            version: 'test',
+            systemPayload: {
+              phase: 'result',
+              rawCommand: '/goal',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind: 'set',
+                  condition: 'replayed objective',
+                  iterations: 3,
+                  setAt: 456,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    );
+
+    expect(result.updates).toEqual([
+      expect.objectContaining({
+        _meta: {
+          goalStatus: expect.objectContaining({
+            kind: 'cleared',
+            condition: 'replayed objective',
+            iterations: 3,
+            setAt: 456,
+          }),
+        },
+      }),
+    ]);
+  });
+
+  it('falls back to a page-out bootstrap when replay has no Goal card', async () => {
+    const result = await renderPreparedGoalUpdate(
+      async () => {
+        throw new GoalPersistenceUnavailableError('unsupported record');
+      },
+      {
+        replayedRecords: [
+          {
+            uuid: 'user-1',
+            parentUuid: null,
+            sessionId: 'session-1',
+            timestamp: new Date(0).toISOString(),
+            type: 'user',
+            cwd: '/tmp',
+            version: 'test',
+            message: { role: 'user', parts: [{ text: 'continue' }] },
+          },
+        ],
+        bootstrap: {
+          goalStatus: {
+            kind: 'set',
+            condition: 'page-out objective',
+            iterations: 1,
+          },
+        },
+      },
+    );
+
+    expect(result.updates).toEqual([
+      expect.objectContaining({
+        _meta: {
+          goalStatus: expect.objectContaining({
+            kind: 'cleared',
+            condition: 'page-out objective',
+            iterations: 1,
+          }),
+        },
+      }),
+    ]);
+  });
+
   it('propagates unexpected runtime failures', async () => {
     await expect(
       renderPreparedGoalUpdate(async () => {

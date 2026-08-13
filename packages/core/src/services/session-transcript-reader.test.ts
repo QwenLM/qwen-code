@@ -1964,7 +1964,7 @@ describe('SessionTranscriptReader', () => {
     expect(buildCount).toBe(1);
   });
 
-  it('preserves fail-closed pending Goal evidence errors', async () => {
+  it('defers unavailable pending Goal evidence to runtime recovery', async () => {
     const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
     const evidence = {
       ...record('evidence', null, 'result'),
@@ -1999,17 +1999,13 @@ describe('SessionTranscriptReader', () => {
     };
     await writeRecords([evidence, goalState]);
 
-    await expect(
-      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
-        sessionId,
-        { replay: { kind: 'none' } },
-      ),
-    ).rejects.toMatchObject({
-      name: 'EvidenceSourceUnavailableError',
-      code: 'cursor_not_found',
-      message:
-        'The Goal evidence cursor missing-cursor is not in the active transcript chain.',
-    });
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.goalCheckpointWindow).toBeUndefined();
+    expect(projection?.runtime.goalRecords).toHaveLength(1);
+    expect(projection?.runtime.goalRecords[0]?.uuid).toBe('goal-state');
   });
 
   it('keeps backward pages within a normal user turn boundary', async () => {
