@@ -164,6 +164,16 @@ export function getSessionRecordPath(): string {
  */
 let registeredRecordPath: string | null = null;
 
+/**
+ * Test-only: clear the registration-path capture so a suite starts each
+ * test from the unregistered state regardless of what an earlier test
+ * registered. Without a reset, tests that need the capture null only
+ * pass by accident of test order.
+ */
+export function resetRegisteredRecordPathForTest(): void {
+  registeredRecordPath = null;
+}
+
 function thisProcessRecordPath(): string {
   return registeredRecordPath ?? getSessionRecordPath();
 }
@@ -212,12 +222,16 @@ export function deriveSessionName(cwd: string, sessionId: string): string {
  * Returns true when the record was written. Returns false — without
  * writing — when the path is already held by a record carrying another
  * namespace's or another machine's identity, or one this build cannot
- * parse because of a newer schema version: a colliding session on the
- * other side may be live, and overwriting its record would hide it from
- * discovery and destroy it when we exit. Also refuses on Linux when the
- * start token is unreadable even after a retry — a tokenless record is
- * impersonable by any same-namespace reader, including another machine
- * sharing the home. In all of these cases this session simply stays
+ * parse because of a newer schema version, or one whose read failed
+ * transiently (an intact file cannot be proved unowned this moment): a
+ * colliding session on the other side may be live, and overwriting its
+ * record would hide it from discovery and destroy it when we exit.
+ * Also refuses on Linux when the start token or the PID namespace id
+ * stays unreadable after a retry — a tokenless record is impersonable
+ * by any same-namespace reader, including another machine sharing the
+ * home, and a namespace-less record is neither listed, patched nor
+ * swept by any healthy reader, so it would poison its PID slot until
+ * removed by hand. In all of these cases this session simply stays
  * undiscoverable.
  */
 export async function registerSession(
@@ -235,11 +249,28 @@ export async function registerSession(
       return false;
     }
   }
+  let pidNs = readPidNamespaceId();
+  if (process.platform === 'linux' && pidNs === null) {
+    // Same transient fd-pressure window as the start token above,
+    // retried the same way. A namespace-less record is unreclaimable
+    // litter on Linux: every healthy reader's own namespace is a
+    // number, so the namespace guard hides the record from listing AND
+    // from the sweep's unlink, every later patch fails
+    // matchesLocalIdentity, and exit leaves it in place — poisoning
+    // the PID slot for the next session. Refuse rather than write it.
+    pidNs = readPidNamespaceId();
+    if (pidNs === null) {
+      debugLogger.debug(
+        'registerSession: namespace id unreadable; refusing to write an unreclaimable record',
+      );
+      return false;
+    }
+  }
   const record: SessionRegistryRecord = {
     schemaVersion: SESSION_REGISTRY_SCHEMA_VERSION,
     pid: process.pid,
     procStart,
-    pidNs: readPidNamespaceId(),
+    pidNs,
     sessionId: fields.sessionId,
     cwd: fields.cwd,
     name: deriveSessionName(fields.cwd, fields.sessionId),
@@ -255,8 +286,17 @@ export async function registerSession(
     // boundary (host + devcontainer, sibling containers, NFS-shared
     // homes). Overwriting it would hide that session from discovery and
     // destroy its record when we exit — refuse instead. The same holds
-    // for a newer-schema record: readable, but not safely parsable.
+    // for a newer-schema record: readable, but not safely parsable. And
+    // for a read that failed transiently (EMFILE, EIO, NFS ESTALE): the
+    // file is intact and only momentarily out of reach, so the failure
+    // must not be treated as "unowned".
     const existing = await readRecord(filePath);
+    if (existing.status === 'read-error') {
+      debugLogger.debug(
+        'registerSession: record path read failed transiently; refusing to overwrite an intact record',
+      );
+      return false;
+    }
     if (existing.status === 'unsupported-version') {
       debugLogger.debug(
         'registerSession: record path held by a newer-schema record',
@@ -273,7 +313,18 @@ export async function registerSession(
     // mkdir's mode is masked by the umask, and does nothing at all when
     // the directory already exists — chmod is what actually guarantees
     // 0700 on an upgrade from a build that created it more loosely.
-    await fs.chmod(dir, REGISTRY_DIR_MODE);
+    // Filesystems without POSIX permissions (FAT/exFAT, some FUSE
+    // mounts) reject chmod with ENOSYS/ENOTSUP — tolerate exactly those
+    // the way atomicWriteFile's tryChmod does for the record itself:
+    // 0700 is unachievable there anyway, and aborting would hide this
+    // session from every `ps` for its whole lifetime. Other errors
+    // still abort the registration.
+    try {
+      await fs.chmod(dir, REGISTRY_DIR_MODE);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOSYS' && code !== 'ENOTSUP') throw error;
+    }
     await atomicWriteJSON(filePath, record, {
       mode: REGISTRY_FILE_MODE,
       forceMode: true,
@@ -325,15 +376,15 @@ export async function patchSessionRecord(
     // The identity check alone also passes for a stale record left by a
     // DEAD previous incarnation of this PID (session A dies without
     // unlinking; the PID is recycled by session B whose registration
-    // failed). When both sides carry a start token, require it to agree
-    // before merging — otherwise the patch grafts B's fields onto A's
-    // record and lists the chimera as live.
+    // failed). A tokened record therefore also requires this process's
+    // own token to be readable and to agree before merging — otherwise
+    // the patch grafts B's fields onto A's record and lists the chimera
+    // as live. When our own token is unreadable (the fd-pressure window
+    // these patches run in), "cannot compare" means "not ours", the
+    // same rule matchesLocalIdentity applies on write paths: skip this
+    // patch and let a later /clear or /cd retry it.
     const currentToken = readProcStartToken(process.pid);
-    if (
-      record.procStart !== null &&
-      currentToken !== null &&
-      record.procStart !== currentToken
-    ) {
+    if (record.procStart !== null && record.procStart !== currentToken) {
       return;
     }
     await atomicWriteJSON(
@@ -358,9 +409,16 @@ export async function unregisterSession(): Promise<void> {
     // to a live session on the other side of a shared home. Unlink only
     // what this side wrote; an unreadable one (a write torn by a crash)
     // cannot belong to anyone else and goes too. A newer-schema record
-    // is readable but not safely parsable, so it might be — leave it.
+    // is readable but not safely parsable, so it might be — leave it,
+    // and the same holds for a read that failed transiently: the file
+    // is intact and may be a foreign live record.
     const existing = await readRecord(filePath);
-    if (existing.status === 'unsupported-version') return;
+    if (
+      existing.status === 'unsupported-version' ||
+      existing.status === 'read-error'
+    ) {
+      return;
+    }
     if (existing.status === 'ok' && !matchesLocalIdentity(existing.record)) {
       return;
     }
@@ -445,6 +503,24 @@ export async function listLiveSessions(): Promise<SessionRegistryRecord[]> {
         return;
       }
 
+      // A registration can win this path between the liveness verdict
+      // and the unlink: the recycled PID passes matchesLocalIdentity
+      // against the stale record and renames its fresh record onto the
+      // path. Re-read immediately before deleting and unlink only what
+      // is still the record the verdict was computed from. `startedAt`
+      // joins the comparison because on platforms without a start token
+      // nothing else separates two incarnations of one PID number.
+      const reread = await readRecord(filePath);
+      if (
+        reread.status !== 'ok' ||
+        reread.record.pid !== record.pid ||
+        reread.record.pidNs !== record.pidNs ||
+        reread.record.procStart !== record.procStart ||
+        reread.record.startedAt !== record.startedAt
+      ) {
+        return;
+      }
+
       try {
         await fs.unlink(filePath);
       } catch {
@@ -512,17 +588,24 @@ async function sweepOrphanedTempFile(
  * One record file as read from disk: parsed, or unusable.
  *
  * `unreadable` covers a missing, corrupt or torn file — content this
- * code never wrote in a usable form. `unsupported-version` is a
- * well-formed record written by a NEWER build: readable, and it may
- * belong to a live session this build cannot parse, so the write paths
- * must treat it the way they treat a parsed foreign-identity record.
+ * code never wrote in a usable form. `read-error` is different: the
+ * stat/read itself failed with something other than ENOENT (EMFILE,
+ * EIO, NFS ESTALE), so the file is intact and only momentarily out of
+ * reach — it may belong to a live foreign session, and the write paths
+ * must refuse it the way they refuse `unsupported-version` instead of
+ * treating it as unowned. `unsupported-version` is a well-formed record
+ * written by a NEWER build: readable, and it may belong to a live
+ * session this build cannot parse, so the write paths must treat it the
+ * way they treat a parsed foreign-identity record.
  */
 type ReadRecordResult =
   | { status: 'ok'; record: SessionRegistryRecord }
   | { status: 'unreadable' }
+  | { status: 'read-error' }
   | { status: 'unsupported-version' };
 
 const UNREADABLE: ReadRecordResult = { status: 'unreadable' };
+const READ_ERROR: ReadRecordResult = { status: 'read-error' };
 const UNSUPPORTED_VERSION: ReadRecordResult = {
   status: 'unsupported-version',
 };
@@ -534,8 +617,14 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
     const stat = await fs.stat(filePath);
     if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) return UNREADABLE;
     raw = await fs.readFile(filePath, 'utf8');
-  } catch {
-    return UNREADABLE;
+  } catch (error) {
+    // ENOENT (missing, or deleted between the stat and the read) is an
+    // unowned path; any other coded failure is an intact file we cannot
+    // read this moment.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return UNREADABLE;
+    }
+    return READ_ERROR;
   }
 
   let parsed: unknown;

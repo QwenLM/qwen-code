@@ -6269,12 +6269,11 @@ describe('Server Config (config.ts)', () => {
       return checked === oldRuntimeStatusPath || checked === newDir;
     });
 
-    // `toHaveBeenCalledWith` records the call the moment the promise is
-    // created, so it cannot distinguish an awaited patch from a
-    // fire-and-forget one; the settlement log pins that the registry
-    // update completes before `relocateWorkingDirectory` resolves — the
-    // user-visible guarantee is that `ps` already shows the new
-    // directory once `/cd` returns.
+    // The registry patch rides its own chain and `/cd` deliberately does
+    // not await it: the patch writes the HOME filesystem, and awaiting
+    // it in the flush would hang `/cd` whenever HOME stalls while the
+    // project directory is healthy. The settlement log pins the new
+    // contract — `/cd` returns first, and `ps` settles a tick later.
     const settled: string[] = [];
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
@@ -6298,11 +6297,14 @@ describe('Server Config (config.ts)', () => {
     // The registry's DIRECTORY column is how a user tells two live
     // sessions apart; the switch must reach it (and the directory-derived
     // name) or `qwen sessions ps` keeps showing the folder that was left.
-    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-      cwd: newDir,
-      name: sessionRegistry.deriveSessionName(newDir, sessionId),
+    await vi.waitFor(() => {
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        cwd: newDir,
+        name: sessionRegistry.deriveSessionName(newDir, sessionId),
+      });
+      expect(settled).toContain('patch');
     });
-    expect(settled).toEqual(['patch', 'relocated']);
+    expect(settled[0]).toBe('relocated');
 
     writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();
@@ -6336,10 +6338,13 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(newDir);
 
-    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
-      cwd: newDir,
-      name: sessionRegistry.deriveSessionName(newDir, sessionId),
-    });
+    // The patch rides its own fire-and-forget chain; let it settle.
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        cwd: newDir,
+        name: sessionRegistry.deriveSessionName(newDir, sessionId),
+      }),
+    );
     expect(writeRuntimeStatusSpy).not.toHaveBeenCalled();
 
     writeRuntimeStatusSpy.mockRestore();
@@ -6386,6 +6391,73 @@ describe('Server Config (config.ts)', () => {
       qwenVersion: null,
     });
     expect(patchSessionRecordSpy).not.toHaveBeenCalled();
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('startNewSession patches the registry even when the sidecar write rejects', async () => {
+    // The sidecar (project-local chats/) and the registry (global dir)
+    // are independent failure domains: a sidecar write rejecting on a
+    // read-only or full project filesystem mid-session must not skip
+    // the registry patch, or `ps` advertises the pre-/clear session id
+    // until process exit.
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    config.markSessionRegistered();
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockRejectedValue(new Error('read-only project fs'));
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    const newSessionId = config.startNewSession('replacement-session');
+
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        sessionId: newSessionId,
+        cwd: config.getTargetDir(),
+      }),
+    );
+
+    writeRuntimeStatusSpy.mockRestore();
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory patches the registry even when the sidecar write rejects', async () => {
+    // The /cd-side mirror of the /clear pin: a rejecting sidecar write
+    // must not skip the directory patch, and its rejection must not
+    // surface through relocateWorkingDirectory either.
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    config.markSessionRegistered();
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    const writeRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'writeRuntimeStatus')
+      .mockRejectedValue(new Error('read-only project fs'));
+    vi.mocked(fs.existsSync).mockImplementation(
+      (pathToCheck) => pathToCheck.toString() === newDir,
+    );
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(undefined);
+
+    await config.relocateWorkingDirectory(newDir);
+
+    await vi.waitFor(() =>
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        cwd: newDir,
+        name: sessionRegistry.deriveSessionName(newDir, sessionId),
+      }),
+    );
 
     writeRuntimeStatusSpy.mockRestore();
     patchSessionRecordSpy.mockRestore();

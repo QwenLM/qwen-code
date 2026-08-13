@@ -2071,6 +2071,7 @@ export class Config {
   private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
+  private sessionRegistryWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
@@ -3956,7 +3957,7 @@ export class Config {
         // just read out of `qwen sessions ps`, and re-deriving it here
         // would rename a live session on every /clear for no gain — the
         // directory it names has not changed.
-        this.queueRuntimeStatusWrite(async () => {
+        this.queueSessionRegistryWrite(async () => {
           await patchSessionRecord({ sessionId: newSessionId, cwd: workDir });
         });
       }
@@ -4000,6 +4001,35 @@ export class Config {
       });
   }
 
+  /**
+   * Queue a session-registry patch on its own serial chain.
+   *
+   * The chain is separate from `runtimeStatusWrite` and is deliberately
+   * never awaited by `flushRuntimeStatusWrites`:
+   *
+   * - A sidecar write that rejects or hangs must not skip or block the
+   *   patch — the two target independent failure domains (project-local
+   *   `chats/` dir vs the global Qwen dir).
+   * - The patch writes the HOME filesystem, while `/cd` flushes the
+   *   sidecar chain: awaiting the patch there would hang `/cd` whenever
+   *   HOME stalls while the project directory is healthy. Registry
+   *   patches are best-effort by contract — `ps` settles a tick after
+   *   the transition returns — so nothing ever awaits this chain.
+   *
+   * Patches still serialize among themselves so back-to-back /clear and
+   * /cd transitions cannot interleave their read-modify-write.
+   */
+  private queueSessionRegistryWrite(write: () => Promise<void>): void {
+    this.sessionRegistryWrite = this.sessionRegistryWrite
+      .catch(() => {
+        // Keep later patches alive after a best-effort patch failure.
+      })
+      .then(write)
+      .catch(() => {
+        // ignored: registry patches must not disrupt session control flow.
+      });
+  }
+
   private async flushRuntimeStatusWrites(): Promise<void> {
     await this.runtimeStatusWrite.catch(() => {
       // ignored: runtime status is best-effort.
@@ -4008,12 +4038,10 @@ export class Config {
 
   private async refreshCurrentRuntimeStatus(workDir: string): Promise<void> {
     const sessionId = this.sessionId;
-    // Two separate queue entries, mirroring startNewSession:
-    // `writeRuntimeStatus` propagates exceptions, so sharing one closure
-    // would let a sidecar failure (read-only or full project filesystem)
-    // reject the entry before the registry patch runs — and the queue's
-    // trailing catch would swallow it, leaving `ps` advertising the
-    // folder this session left. The failure domains are independent.
+    // The sidecar write and the registry patch ride separate chains
+    // (see queueSessionRegistryWrite): a sidecar failure on the
+    // project filesystem must neither skip the patch nor hang `/cd` on
+    // the HOME write. The failure domains are independent.
     if (this.runtimeStatusEnabled) {
       const sidecarPath = this.storage.getRuntimeStatusPath(sessionId);
       this.queueRuntimeStatusWrite(async () => {
@@ -4025,7 +4053,7 @@ export class Config {
       });
     }
     if (this.sessionRegistered) {
-      this.queueRuntimeStatusWrite(async () => {
+      this.queueSessionRegistryWrite(async () => {
         // The registry's DIRECTORY column is how a user tells two live
         // sessions apart, so a mid-session directory switch has to reach
         // it too — otherwise `qwen sessions ps` keeps advertising the

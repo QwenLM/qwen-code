@@ -15,6 +15,7 @@ import {
   listLiveSessions,
   patchSessionRecord,
   registerSession,
+  resetRegisteredRecordPathForTest,
   unregisterSession,
   SESSION_REGISTRY_SCHEMA_VERSION,
 } from './session-registry.js';
@@ -83,6 +84,9 @@ const DEAD_PID = 0x7ffffffe;
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'session-registry-'));
   __setMockGlobalDir(tmpDir);
+  // The registry captures the registered path at module level; reset it
+  // so tests that need the unregistered state never ride test order.
+  resetRegisteredRecordPathForTest();
 });
 
 afterEach(async () => {
@@ -440,6 +444,95 @@ describe('registerSession', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    'refuses to write a record when the namespace id stays unreadable',
+    async () => {
+      // A namespace-less Linux record is unreclaimable litter: every
+      // healthy reader's own namespace is a number, so the namespace
+      // guard hides the record from listing AND from the sweep's unlink,
+      // every later patch fails matchesLocalIdentity, and exit leaves it
+      // in place — poisoning the PID slot for the next session.
+      vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValue(null);
+
+      expect(await registerSession({ sessionId: 's1', cwd: '/w/app' })).toBe(
+        false,
+      );
+
+      await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
+      expect(await listLiveSessions()).toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'retries the namespace id once before refusing',
+    async () => {
+      // Mirrors the start-token retry: statSync failures are transient,
+      // and only a persistent outage refuses.
+      vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValueOnce(null);
+
+      expect(await registerSession({ sessionId: 's1', cwd: '/w/app' })).toBe(
+        true,
+      );
+
+      const raw = JSON.parse(
+        await fs.readFile(getSessionRecordPath(), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(raw['pidNs']).toBeTypeOf('number');
+    },
+  );
+
+  it('refuses to overwrite a record whose read fails transiently', async () => {
+    // A stat/readFile failure with a code other than ENOENT (EMFILE,
+    // EIO, NFS ESTALE) is a momentary outage on an INTACT file — the
+    // record may belong to a live session on another machine sharing
+    // the home, so the failure must not be treated as "unowned".
+    const foreign = liveBody({ pidNs: 1, sessionId: 'theirs' });
+    await writeRaw(`${process.pid}.json`, foreign);
+    const err = new Error('stale file handle') as NodeJS.ErrnoException;
+    err.code = 'ESTALE';
+    vi.spyOn(fs, 'readFile').mockRejectedValueOnce(err);
+
+    expect(await registerSession({ sessionId: 'mine', cwd: '/w/app' })).toBe(
+      false,
+    );
+
+    expect(
+      JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+    ).toEqual(foreign);
+  });
+
+  it('still registers when the filesystem does not support chmod', async () => {
+    // FAT/exFAT/FUSE-class mounts reject chmod with ENOTSUP/ENOSYS. The
+    // record write already tolerates that (atomicWriteJSON's tryChmod),
+    // and 0700 is unachievable on such a filesystem anyway — the
+    // directory chmod must not abort registration there either, or the
+    // session stays invisible to every `ps` for its whole lifetime.
+    const err = new Error('chmod unsupported') as NodeJS.ErrnoException;
+    err.code = 'ENOTSUP';
+    vi.spyOn(fs, 'chmod').mockRejectedValue(err);
+
+    expect(await registerSession({ sessionId: 's1', cwd: '/w/app' })).toBe(
+      true,
+    );
+
+    const raw = JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8'));
+    expect(raw.sessionId).toBe('s1');
+  });
+
+  it('still fails registration on a security-relevant chmod error', async () => {
+    // The ENOSYS/ENOTSUP tolerance is narrow: sandbox EPERM, EIO and
+    // friends still abort the registration.
+    const err = new Error('operation not permitted') as NodeJS.ErrnoException;
+    err.code = 'EPERM';
+    vi.spyOn(fs, 'chmod').mockRejectedValue(err);
+
+    expect(await registerSession({ sessionId: 's1', cwd: '/w/app' })).toBe(
+      false,
+    );
+
+    await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
+  });
+
   it('leaves a newer-schema record at its path alone on every write path', async () => {
     // A record written by a newer build is readable but not safely
     // parsable, and under a shared home it may belong to a live session
@@ -599,6 +692,29 @@ describe('patchSessionRecord', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    "refuses to merge when this process's own start token is unreadable",
+    async () => {
+      // The merge path's mirror of the boot-id outage rule: under the
+      // fd-pressure window these patches run in, our own token read can
+      // fail while a DEAD previous incarnation's record holds the path.
+      // "Cannot compare" must mean "not ours" — the patch is skipped
+      // and a later /clear or /cd retries it; merging would graft this
+      // session's fields onto the stale record and list the chimera.
+      await registerSession({ sessionId: 's0', cwd: '/w/app' });
+      const before = JSON.parse(
+        await fs.readFile(getSessionRecordPath(), 'utf8'),
+      );
+      vi.spyOn(processLiveness, 'readProcStartToken').mockReturnValue(null);
+
+      await patchSessionRecord({ sessionId: 'incarnation-b' });
+
+      expect(
+        JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+      ).toEqual(before);
+    },
+  );
+
   it('preserves the identity fields across the patch merge', async () => {
     // Both production patch sites run in ordinary use; a merge that
     // drops `procStart` degrades every later liveness check to a bare
@@ -643,8 +759,15 @@ describe('patchSessionRecord', () => {
       // merge would corrupt it. A writer with an unreadable boot id
       // writes a TOKENLESS record, so refusing boot-prefixed ones here
       // costs nothing.
-      vi.spyOn(processLiveness, 'readLocalBootId').mockReturnValue(null);
       await registerSession({ sessionId: 's0', cwd: '/w/app' });
+      vi.spyOn(processLiveness, 'readLocalBootId').mockReturnValue(null);
+      // Also pin the token read to the planted record's token: left
+      // real, the stale-incarnation guard would refuse the merge on its
+      // own (a foreign boot prefix never equals this process's real
+      // token) and shadow the identity rule under test.
+      vi.spyOn(processLiveness, 'readProcStartToken').mockReturnValue(
+        'not-this-boot:1',
+      );
       const foreign = liveBody({
         procStart: 'not-this-boot:1',
         sessionId: 'theirs',
@@ -781,6 +904,60 @@ describe('unregisterSession', () => {
     },
   );
 
+  it("unlinks a corrupt record at this process's own path", async () => {
+    // A write torn by a crash at OUR path cannot belong to anyone else,
+    // and exit is the only reclaimer: listLiveSessions never deletes
+    // what it cannot parse.
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    await writeRaw(`${process.pid}.json`, 'not json at all');
+
+    await unregisterSession();
+
+    await expect(fs.stat(getSessionRecordPath())).rejects.toThrow();
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'leaves a boot-prefixed record alone on exit while the local boot id is unreadable',
+    async () => {
+      // Exit is an UNLINK path, so the outage rule applies: "cannot
+      // compare" means "not ours". The record may belong to another
+      // machine sharing the home on a PID collision, and a boot-id
+      // outage must not let exit destroy it. The unregister path has no
+      // stale-incarnation guard that could shadow the rule here.
+      vi.spyOn(processLiveness, 'readLocalBootId').mockReturnValue(null);
+      const foreign = liveBody({
+        procStart: 'not-this-boot:1',
+        sessionId: 'theirs',
+      });
+      await writeRaw(`${process.pid}.json`, foreign);
+
+      await unregisterSession();
+
+      expect(
+        JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+      ).toEqual(foreign);
+    },
+  );
+
+  it('leaves a record alone on exit when its read fails transiently', async () => {
+    // The file is intact and only momentarily unreadable (EMFILE, EIO,
+    // NFS ESTALE) — it may be a foreign live record on a PID collision,
+    // so exit must not unlink it on the strength of a read failure.
+    await registerSession({ sessionId: 's1', cwd: '/w/app' });
+    const before = JSON.parse(
+      await fs.readFile(getSessionRecordPath(), 'utf8'),
+    );
+    const err = new Error('stale file handle') as NodeJS.ErrnoException;
+    err.code = 'ESTALE';
+    vi.spyOn(fs, 'readFile').mockRejectedValueOnce(err);
+
+    await unregisterSession();
+
+    expect(
+      JSON.parse(await fs.readFile(getSessionRecordPath(), 'utf8')),
+    ).toEqual(before);
+  });
+
   it('is a no-op when nothing was registered', async () => {
     await expect(unregisterSession()).resolves.toBeUndefined();
   });
@@ -789,6 +966,18 @@ describe('unregisterSession', () => {
 describe('listLiveSessions', () => {
   it('returns an empty list when the registry does not exist', async () => {
     expect(await listLiveSessions()).toEqual([]);
+  });
+
+  it('resolves to an empty list when readdir itself fails', async () => {
+    // EACCES (a root-owned sessions/ left by a containerized run) or
+    // ESTALE/EIO on a degraded shared home must read as "no peers",
+    // never as a rejection — `ps` awaits this with no catch.
+    await writeRaw(`${process.pid}.json`, liveBody());
+    const err = new Error('permission denied') as NodeJS.ErrnoException;
+    err.code = 'EACCES';
+    vi.spyOn(fs, 'readdir').mockRejectedValueOnce(err);
+
+    await expect(listLiveSessions()).resolves.toEqual([]);
   });
 
   it('sweeps a record whose process is gone', async () => {
@@ -833,6 +1022,75 @@ describe('listLiveSessions', () => {
       await expect(fs.stat(filePath)).rejects.toThrow();
     },
   );
+
+  it('does not unlink a record replaced between the liveness verdict and the sweep', async () => {
+    // Session A died uncleanly and the sweep judges its record dead. In
+    // the window before the unlink, the recycled PID's registration
+    // passes matchesLocalIdentity against the stale record and renames
+    // its fresh record onto the same path — the sweep must not delete
+    // the fresh record it never judged, or that session runs its whole
+    // lifetime invisible to `ps`.
+    await writeRaw(
+      `${DEAD_PID}.json`,
+      liveBody({ pid: DEAD_PID, sessionId: 'stale-a', startedAt: 5 }),
+    );
+
+    const realReadFile = fs.readFile;
+    let readsOfRecord = 0;
+    let releaseReread!: () => void;
+    const rereadGate = new Promise<void>((resolve) => {
+      releaseReread = resolve;
+    });
+    vi.spyOn(fs, 'readFile').mockImplementation((async (filePath: unknown) => {
+      if (String(filePath).endsWith(`${DEAD_PID}.json`)) {
+        readsOfRecord += 1;
+        // Hold the sweep at the RE-READ (the snapshot read is the
+        // first hit) so the replacement lands in the exact window
+        // between the verdict and the re-read.
+        if (readsOfRecord === 2) await rereadGate;
+      }
+      return realReadFile(filePath as string, 'utf8');
+    }) as unknown as typeof fs.readFile);
+
+    const listing = listLiveSessions();
+    await vi.waitFor(() => expect(readsOfRecord).toBe(2));
+
+    await writeRaw(
+      `${DEAD_PID}.json`,
+      liveBody({ pid: DEAD_PID, sessionId: 'recycled-b', startedAt: 6 }),
+    );
+    releaseReread();
+
+    expect(await listing).toEqual([]);
+    await expect(
+      fs.stat(path.join(getSessionRegistryDir(), `${DEAD_PID}.json`)),
+    ).resolves.toBeDefined();
+  });
+
+  it("still lists live records when a sweep's unlink fails", async () => {
+    // The sweep's unlink can fail (EACCES, ESTALE) while the rest of
+    // the enumeration succeeds; one undeletable dead record must not
+    // reject the promise or hide the live sessions.
+    await writeRaw(
+      `${DEAD_PID}.json`,
+      liveBody({ pid: DEAD_PID, sessionId: 's-dead', startedAt: 1 }),
+    );
+    await writeRaw(
+      `${process.pid}.json`,
+      liveBody({ sessionId: 's-live', startedAt: 2 }),
+    );
+    const err = new Error('permission denied') as NodeJS.ErrnoException;
+    err.code = 'EACCES';
+    vi.spyOn(fs, 'unlink').mockRejectedValueOnce(err);
+
+    const live = await listLiveSessions();
+
+    expect(live.map((r) => r.sessionId)).toEqual(['s-live']);
+    // The failed unlink leaves the dead record for the next sweep.
+    await expect(
+      fs.stat(path.join(getSessionRegistryDir(), `${DEAD_PID}.json`)),
+    ).resolves.toBeDefined();
+  });
 
   it('neither lists nor sweeps a record from a different PID namespace, even a dead one', async () => {
     // PID numbers do not resolve across the namespace boundary: kill(pid, 0)
