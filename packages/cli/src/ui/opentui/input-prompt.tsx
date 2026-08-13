@@ -110,6 +110,10 @@ export interface InputPromptProps {
   focus?: boolean;
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
+  /** Lets the parent read/clear the composer buffer (Ctrl+Q queue). */
+  composerHandle?: {
+    current: { getText: () => string; setText: (t: string) => void } | null;
+  };
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -128,6 +132,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const { width } = useTerminalDimensions();
   const renderer = useRenderer();
   const editorRef = useRef<TextareaRenderable | null>(null);
+  useEffect(() => {
+    if (!props.composerHandle) return;
+    props.composerHandle.current = {
+      getText: () => editorRef.current?.plainText ?? '',
+      setText: (t: string) => {
+        editorRef.current?.setText(t);
+      },
+    };
+    return () => {
+      if (props.composerHandle) props.composerHandle.current = null;
+    };
+  }, [props.composerHandle]);
   const userMessagesRef = useRef(userMessages);
   userMessagesRef.current = userMessages;
 

@@ -44,6 +44,11 @@ function useEscToClose(onClose: () => void) {
     renderer.addInputHandler(onRawInput);
     return () => renderer.removeInputHandler(onRawInput);
   }, [renderer, onClose]);
+  // Fallback: also close via the parsed-key path in case the lone-ESC raw
+  // sequence is swallowed by the input parser.
+  useKeyboard((key) => {
+    if (toOriginalKey(key).name === 'escape') onClose();
+  });
 }
 
 const LABEL_W = 28;

@@ -590,6 +590,13 @@ function App({
   const startLiveTurnRef = useRef<
     ((content: PartListUnion, opts?: object) => void) | null
   >(null);
+  const composerHandle = useRef<{
+    getText: () => string;
+    setText: (t: string) => void;
+  } | null>(null);
+  const queuedPromptsRef = useRef<string[]>([]);
+  const reverseSearchRef = useRef<number>(-1);
+  const reverseQueryRef = useRef<string>('');
 
   // Streaming phase for the status bar / spinner / border (F1.1).
 
@@ -748,6 +755,37 @@ function App({
       setItems([]);
       return;
     }
+    if (key.name === 'r' && key.ctrl) {
+      // incremental reverse search over submitted prompts -> composer
+      if (reverseSearchRef.current === -1)
+        reverseQueryRef.current = (
+          composerHandle.current?.getText() ?? ''
+        ).trim();
+      const q = reverseQueryRef.current;
+      const start =
+        reverseSearchRef.current === -1
+          ? userPrompts.length - 1
+          : reverseSearchRef.current - 1;
+      for (let i = start; i >= 0; i--) {
+        if (!q || (userPrompts[i] ?? '').includes(q)) {
+          composerHandle.current?.setText(userPrompts[i] ?? '');
+          reverseSearchRef.current = i;
+          break;
+        }
+      }
+      return;
+    }
+    if (key.name === 'q' && key.ctrl) {
+      // queue the current composer text for after the in-flight turn
+      const t = (composerHandle.current?.getText() ?? '').trim();
+      if (t) {
+        queuedPromptsRef.current.push(t);
+        composerHandle.current?.setText('');
+        setToast(`⏸ queued: ${t.slice(0, 24)}`);
+        setTimeout(() => setToast(null), 1200);
+      }
+      return;
+    }
     if (key.name === 'y' && key.ctrl) {
       // retry last user prompt (mirrors original Ctrl+Y)
       const lastUser = [...items].reverse().find((i) => i.kind === 'user');
@@ -891,6 +929,8 @@ function App({
         } finally {
           if (liveAbortRef.current === controller) liveAbortRef.current = null;
           setStreaming(false);
+          const next = queuedPromptsRef.current.shift();
+          if (next) setTimeout(() => startLiveTurnRef.current?.(next), 50);
         }
       })();
     },
@@ -957,6 +997,7 @@ function App({
 
   const submitText = useCallback(
     (raw: string) => {
+      reverseSearchRef.current = -1;
       void (async () => {
         const text = raw.trim();
         if (!text) return;
@@ -1184,6 +1225,7 @@ function App({
             }}
             placeholder="Type your message or @path/to/file"
             focus={!dialog}
+            composerHandle={composerHandle}
           />
         </box>
         {/* footer */}
