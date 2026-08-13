@@ -2566,6 +2566,11 @@ export const AppContainer = (props: AppContainerProps) => {
       // (ESC, expansion errors) and built-in submit_prompt commands without
       // the modelInvocable flag are not re-armed here; consuming at the true
       // admission choke point is a deeper refactor deferred for this feature.
+      // Known gap: /cd (relocateWorkingDirectory) swaps the attached
+      // context-file set within the same session but does not re-arm the
+      // latch, so the new file set is never announced. A self-healing latch
+      // that watches the context-file set would cover /cd, /restore, and
+      // rewind centrally; deferred as a follow-up.
       const trimmedPrompt = userPromptText.trim();
       if (
         !contextFilesAnnouncedRef.current &&

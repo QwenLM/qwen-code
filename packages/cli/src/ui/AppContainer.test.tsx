@@ -183,6 +183,15 @@ vi.mock('../utils/events.js');
 vi.mock('../utils/handleAutoUpdate.js');
 vi.mock('../utils/cleanup.js');
 
+const mockLoadHierarchicalGeminiMemory = vi.hoisted(() => vi.fn());
+vi.mock('../config/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config/config.js')>();
+  return {
+    ...actual,
+    loadHierarchicalGeminiMemory: mockLoadHierarchicalGeminiMemory,
+  };
+});
+
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -6388,8 +6397,8 @@ describe('AppContainer State Management', () => {
     it('does not consume the latch on a leading /btw command', () => {
       const { addItem } = renderAnnouncementHarness(['QWEN.md']);
 
-      capturedUIActions.handleFinalSubmit('?btw side note', {
-        submittedPrompt: '?btw side note',
+      capturedUIActions.handleFinalSubmit('/btw side note', {
+        submittedPrompt: '/btw side note',
       });
       expect(announcementCalls(addItem)).toHaveLength(0);
 
@@ -6481,6 +6490,57 @@ describe('AppContainer State Management', () => {
         submittedPrompt: 'hello',
       });
       expect(announcementCalls(addItem)).toHaveLength(1);
+    });
+
+    it('performMemoryRefresh anchors on config.getWorkingDir() and updates contextFilePaths', async () => {
+      mockLoadHierarchicalGeminiMemory.mockResolvedValue({
+        memoryContent: 'content',
+        fileCount: 1,
+        contextFilePaths: ['/custom/QWEN.md'],
+        conditionalRules: [],
+        projectRoot: '/custom',
+      });
+      vi.spyOn(mockConfig, 'getWorkingDir').mockReturnValue(
+        '/custom/workspace',
+      );
+      vi.spyOn(mockConfig, 'isSafeMode').mockReturnValue(false);
+      const setContextFilePathsSpy = vi.spyOn(
+        mockConfig,
+        'setContextFilePaths',
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // performMemoryRefresh is the 12th arg (index 11) passed to
+      // useGeminiStream by AppContainer.
+      const calls = mockedUseGeminiStream.mock.calls;
+      const performMemoryRefresh = calls[
+        calls.length - 1
+      ]![11] as () => Promise<void>;
+      expect(typeof performMemoryRefresh).toBe('function');
+
+      await act(async () => {
+        await performMemoryRefresh();
+      });
+
+      expect(mockLoadHierarchicalGeminiMemory).toHaveBeenCalledWith(
+        '/custom/workspace',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
     });
   });
 });

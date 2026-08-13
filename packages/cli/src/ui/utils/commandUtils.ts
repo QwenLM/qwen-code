@@ -103,9 +103,11 @@ export const isBtwCommand = (query: string): boolean => {
  * Whether a submission consumes the one-shot context-file announcement.
  * Heuristically mirrors the downstream input classification so the latch
  * is consumed by the submission most likely to start the first main model
- * turn: blank input is dropped by the queue, btw side-questions are
- * deliberately exempt (they don't advance the main conversation even
- * though they may fork a model call), shell-mode input is intercepted, and
+ * turn: blank input is dropped by the queue, /btw side-questions are
+ * deliberately exempt (they fork via runForkedAgent without advancing the
+ * main conversation — note ?btw is NOT exempt: it is not a slash command
+ * and goes to the main model as a plain query), shell-mode input is
+ * intercepted, and
  * local slash commands resolve without a model turn — but model-invocable
  * slash commands (skills) are expanded into a submit_prompt and routed
  * before the shell-mode intercept, so they consume it even
@@ -123,7 +125,10 @@ export function consumesContextAnnouncementLatch(
   if (trimmedPrompt.length === 0) {
     return false;
   }
-  if (isBtwCommand(trimmedPrompt)) {
+  // Only /btw forks (runForkedAgent, no main turn); ?btw is not a slash
+  // command and reaches the main model as a plain query, so it must
+  // consume the latch like any other prompt.
+  if (/^\/btw(?:\s|$)/.test(trimmedPrompt)) {
     return false;
   }
   if (isSlashCommand(trimmedPrompt)) {

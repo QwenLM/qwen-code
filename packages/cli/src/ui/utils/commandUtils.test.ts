@@ -1294,10 +1294,16 @@ describe('consumesContextAnnouncementLatch', () => {
     expect(consumesContextAnnouncementLatch('', options(false))).toBe(false);
   });
 
-  it('rejects btw side-questions (deliberately exempt, not a main turn)', () => {
+  it('rejects /btw side-questions (fork via runForkedAgent, no main turn)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/btw side note', options(false)),
+    ).toBe(false);
+  });
+
+  it('consumes ?btw (not a slash command, goes to the main model)', () => {
     expect(
       consumesContextAnnouncementLatch('?btw side note', options(false)),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('rejects local slash commands (no model turn)', () => {
