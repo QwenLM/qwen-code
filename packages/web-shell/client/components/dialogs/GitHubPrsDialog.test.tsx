@@ -13,6 +13,8 @@ import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
+
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
@@ -64,6 +66,7 @@ async function flush() {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  delete (window as TauriWindow).__TAURI__;
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -105,10 +108,10 @@ describe('GitHubPrsContent', () => {
     expect(text).toContain('Approved');
   });
 
-  it('opens the pull request on GitHub when a row is clicked', async () => {
+  it('opens the pull request through the desktop opener when a row is clicked', async () => {
     workspaceGitHubPullRequests.mockResolvedValue(listPayload([pr()]));
-    const openSpy = vi.fn();
-    vi.stubGlobal('open', openSpy);
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
     mount();
     await flush();
 
@@ -116,15 +119,16 @@ describe('GitHubPrsContent', () => {
       'button[aria-label*="pull request #42"]',
     );
     expect(row).toBeTruthy();
+    let event: MouseEvent | undefined;
     await act(async () => {
-      row?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      event = new MouseEvent('click', { bubbles: true, cancelable: true });
+      row?.dispatchEvent(event);
     });
 
-    expect(openSpy).toHaveBeenCalledWith(
-      'https://github.com/o/r/pull/42',
-      '_blank',
-      'noopener,noreferrer',
-    );
+    expect(event?.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/o/r/pull/42',
+    });
   });
 
   it('renders draft and changes-requested pull requests', async () => {
