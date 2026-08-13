@@ -160,16 +160,18 @@ jobs:
             // back locked.
             const run = async (label, fn, tolerated = [404]) => {
               try {
-                await fn();
+                const result = await fn();
                 actions.push(label);
                 core.info(`ok: ${label}`);
+                return result;
               } catch (error) {
                 if (tolerated.includes(error?.status)) {
                   core.info(`already gone: ${label}`);
-                  return;
+                  return undefined;
                 }
                 failures.push(`${label}: ${error?.status ?? ''} ${error?.message ?? error}`);
                 core.warning(`failed: ${label} — ${error?.message ?? error}`);
+                return undefined;
               }
             };
 
@@ -237,6 +239,27 @@ jobs:
 
             if (eventName === 'issue_comment') {
               const comment = payload.comment;
+              const issue = payload.issue;
+              // Issue-comment events on fork PRs run on a read-only
+              // GITHUB_TOKEN just like the review lanes; every write below
+              // would 403 and red-run this one. Defer to the lanes holding
+              // a write token: pull_request_target closes fork PRs at open
+              // time, the hourly sweep deletes comments and repairs thread
+              // state. A deleted fork arrives as head.repo: null with the
+              // same read-only downgrade, so a missing head repo counts as
+              // a fork.
+              if (
+                payload.pull_request &&
+                (!payload.pull_request.head?.repo ||
+                  payload.pull_request.head.repo.full_name !== `${owner}/${repo}`) &&
+                (isBlocked(comment?.user?.login) ||
+                  isBlocked(issue?.user?.login))
+              ) {
+                core.notice(
+                  'fork PR: GITHUB_TOKEN is read-only here; deferring to the sweep lane',
+                );
+                return;
+              }
               if (isBlocked(comment?.user?.login)) {
                 await run(`delete issue comment ${comment.id}`, () =>
                   github.rest.issues.deleteComment({
@@ -252,7 +275,6 @@ jobs:
               // Skip only the finished state: a closed thread whose lock
               // failed still needs the lock, and a locked thread whose close
               // failed still needs the close.
-              const issue = payload.issue;
               if (
                 issue &&
                 !(issue.state === 'closed' && issue.locked) &&

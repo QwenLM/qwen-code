@@ -523,6 +523,66 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.equal(calls[2].params.issue_number, 77);
   });
 
+  it('closes a blocklisted PR via pulls.update when the comment is legitimate', async () => {
+    // Closing keys on the thread author, and the same-repo head must pass
+    // the fork guard: a clean reply on a spammer's PR still closes the PR.
+    const { calls } = await enforce('issue_comment', {
+      comment: { id: 9, user: { login: 'legit' } },
+      issue: {
+        number: 77,
+        user: { login: 'spamuser' },
+        state: 'open',
+        pull_request: { url: 'x' },
+      },
+      pull_request: {
+        number: 77,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: { full_name: 'QwenLM/qwen-code' } },
+      },
+    });
+    assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
+    assert.equal(calls[0].params.pull_number, 77);
+    assert.equal(calls[1].params.issue_number, 77);
+  });
+
+  it('skips a fork PR issue comment: the read-only token cannot delete it', async () => {
+    // Issue comments on fork PRs run on a read-only GITHUB_TOKEN just like
+    // review events; the write would 403 and red-run the lane. The sweep
+    // lane holds the write token and repairs within the hour.
+    const { calls, core } = await enforce('issue_comment', {
+      comment: { id: 111, user: { login: 'spamuser' } },
+      issue: { number: 5, user: { login: 'legit' }, state: 'open' },
+      pull_request: {
+        number: 5,
+        user: { login: 'legit' },
+        state: 'open',
+        head: { repo: { full_name: 'forker/qwen-code' } },
+      },
+    });
+    assert.deepEqual(names(calls), []);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
+  });
+
+  it('skips a deleted-fork PR issue comment: head.repo is null', async () => {
+    // The deleted-fork twin: head.repo: null carries the same read-only
+    // downgrade, so the guard must fire exactly as for a live fork.
+    const { calls, core } = await enforce('issue_comment', {
+      comment: { id: 111, user: { login: 'spamuser' } },
+      issue: { number: 5, user: { login: 'spamuser' }, state: 'open' },
+      pull_request: {
+        number: 5,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: null },
+      },
+    });
+    assert.deepEqual(names(calls), []);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
+  });
+
   it('locks a closed thread whose lock failed before', async () => {
     // The retry half of the lock backstop: a thread an earlier run closed
     // but failed to lock still gets the lock; only the close is skipped.
@@ -1600,9 +1660,10 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
 });
 
 describe('spam-blocklist-enforce: blocklist file', () => {
-  it('embeds the same parser and isBlocked helper in both lanes', () => {
+  it('embeds the same parser and helpers in both lanes', () => {
     // Compare the two definitions, not just their presence: one-sided drift
-    // would make the lanes disagree about who is blocklisted.
+    // would make the lanes disagree about who is blocklisted, whether a 422
+    // lock error was a race, or what a run() call returned.
     const helperOf = (job, name) => {
       const script = scriptStepOf(job).with.script;
       const start = script.indexOf(`const ${name} =`);
@@ -1625,6 +1686,14 @@ describe('spam-blocklist-enforce: blocklist file', () => {
     assert.equal(
       helperOf(doc.jobs.enforce, 'isBlocked'),
       helperOf(doc.jobs.sweep, 'isBlocked'),
+    );
+    assert.equal(
+      helperOf(doc.jobs.enforce, 'run'),
+      helperOf(doc.jobs.sweep, 'run'),
+    );
+    assert.equal(
+      helperOf(doc.jobs.enforce, 'isLocked'),
+      helperOf(doc.jobs.sweep, 'isLocked'),
     );
   });
 
