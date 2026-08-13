@@ -84,6 +84,7 @@ const GENERAL_SHORTCUTS: Array<[string, string]> = [
   ['Esc', 'help.shortcut.cancel'],
   ['Ctrl+J', 'help.shortcut.newline'],
   ['Ctrl+L', 'help.shortcut.clear'],
+  ['Ctrl+O', 'help.shortcut.compact'],
   ['Ctrl+Y', 'help.shortcut.retry'],
   ['Shift+Tab', 'help.shortcut.approvals'],
   ['Alt+Left/Right', 'help.shortcut.altWords'],

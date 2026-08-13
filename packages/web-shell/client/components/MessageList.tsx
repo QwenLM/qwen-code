@@ -46,9 +46,11 @@ import {
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
+  isAskUserQuestionToolName,
   isActiveToolStatus,
   toolContainsCallId,
 } from './messages/toolFormatting';
+import { isTodoWriteToolName } from '../utils/todos';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -64,6 +66,8 @@ interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   loadingTranscript?: boolean;
   catchingUp?: boolean;
   hasOlderHistory?: boolean;
@@ -260,8 +264,19 @@ function isForceExpandGroup(
 }
 
 function isHiddenInCompactMode(msg: Message): boolean {
-  if (msg.role === 'thinking') return true;
-  return false;
+  return msg.role === 'thinking';
+}
+
+function isStandaloneToolGroup(msg: Message): boolean {
+  return (
+    msg.role === 'tool_group' &&
+    msg.tools.some(
+      (tool) =>
+        isSubAgentToolCall(tool) ||
+        isTodoWriteToolName(tool.toolName) ||
+        isAskUserQuestionToolName(tool.toolName),
+    )
+  );
 }
 
 function mergeCompactToolGroups(
@@ -274,7 +289,11 @@ function mergeCompactToolGroups(
   while (i < messages.length) {
     const msg = messages[i];
 
-    if (msg.role !== 'tool_group' || isForceExpandGroup(msg, pendingApproval)) {
+    if (
+      msg.role !== 'tool_group' ||
+      isForceExpandGroup(msg, pendingApproval) ||
+      isStandaloneToolGroup(msg)
+    ) {
       if (!isHiddenInCompactMode(msg)) {
         result.push(msg);
       }
@@ -296,7 +315,8 @@ function mergeCompactToolGroups(
 
       if (
         next.role === 'tool_group' &&
-        !isForceExpandGroup(next, pendingApproval)
+        !isForceExpandGroup(next, pendingApproval) &&
+        !isStandaloneToolGroup(next)
       ) {
         mergeableGroups.push(next);
         lastMergedIdx = j;
@@ -320,6 +340,7 @@ function mergeCompactToolGroups(
       id: mergeableGroups[0].id,
       role: 'tool_group',
       tools: mergedTools,
+      timestamp: mergeableGroups[0].timestamp,
     });
     i = lastMergedIdx + 1;
   }
@@ -2439,6 +2460,7 @@ export const MessageList = memo(
       messages,
       pendingApproval,
       onShowContextDetail,
+      onImagePreview,
       loadingTranscript,
       catchingUp,
       hasOlderHistory = false,
@@ -4425,6 +4447,7 @@ export const MessageList = memo(
               message={displayItem.message}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onImagePreview={onImagePreview}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
               showRetryHint={showRetryHint}
@@ -4482,6 +4505,7 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onImagePreview,
         generateContent,
         headerOffset,
         visibleItems,

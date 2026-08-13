@@ -261,6 +261,60 @@ describe('read() / readLines() with malformed lines', () => {
 });
 
 describe('reader resource cleanup', () => {
+  it('propagates the caller abort reason from readLines', async () => {
+    const file = tmpFile(
+      Array.from({ length: 1_000 }, (_, index) => `{"i":${index}}`).join('\n'),
+    );
+    const controller = new AbortController();
+    const reason = new Error('jsonl scan cancelled');
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) =>
+        originalCreateReadStream(...args),
+      );
+
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1_000, {
+        signal: controller.signal,
+      });
+      expect(spy).toHaveBeenCalledWith(file, { signal: controller.signal });
+
+      controller.abort(reason);
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('observes cancellation while readLines is closing its stream', async () => {
+    const file = tmpFile('{"i":1}\n{"i":2}\n');
+    const controller = new AbortController();
+    const reason = new Error('cancelled during stream cleanup');
+    let capturedStream: fs.ReadStream | undefined;
+    const originalCreateReadStream = fs.createReadStream.bind(fs);
+    const spy = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((...args: Parameters<typeof fs.createReadStream>) => {
+        const stream = originalCreateReadStream(...args);
+        capturedStream = stream;
+        return stream;
+      });
+
+    try {
+      const readPromise = readLines<{ i: number }>(file, 1, {
+        signal: controller.signal,
+      });
+      expect(capturedStream).toBeDefined();
+      capturedStream!.once('close', () => controller.abort(reason));
+
+      await expect(readPromise).rejects.toBe(reason);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('closes the file stream after readLines stops at the requested limit', async () => {
     const file = tmpFile('{"i":1}\n{"i":2}\n{"i":3}\n');
 

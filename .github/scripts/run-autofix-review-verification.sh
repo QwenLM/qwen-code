@@ -153,13 +153,15 @@ baseline_also_fails() {
     } > "${WORKDIR}/gate-rejection.md" || true
     exit 1
   fi
+  # Every retryable exit below hands the tree to the repair agent with
+  # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
+  # tracked files only) — the mirror of the dist confound that exempted
+  # typecheck from the A/B. seed_dist_note seeds the repair feedback so
+  # the agent rebuilds before it trusts any dist-consuming check. The
+  # pre-existing exit is the exception: no repair runs for it, so the
+  # note stays out of its document.
   if [[ "${rc}" -ne 1 ]]; then
-    # Both retryable exits below hand the tree to the repair agent with
-    # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
-    # tracked files only) — the mirror of the dist confound that exempted
-    # typecheck from the A/B. The note seeds the repair feedback so the
-    # agent rebuilds before it trusts any dist-consuming check.
-    echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
+    seed_dist_note
     echo "🔁 baseline is green — the failure belongs to this round" \
       | tee -a "${GATE_LOG}"
     return 1
@@ -185,9 +187,14 @@ baseline_also_fails() {
   # verdict-less gate crash.
   # (sig_head was extracted before the detach.)
   sig_base="$(fail_signature "${ab_log}")" || true
-  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" ||
+  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" || {
+    seed_dist_note
+    echo "🔁 signature comparison failed — fail-closed, charged to the round" \
+      | tee -a "${GATE_LOG}"
     return 1
+  }
   if [[ -z "${sig_head}" || -z "${sig_base}" ]] || [[ -n "${new_in_round}" ]]; then
+    seed_dist_note
     echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
       | tee -a "${GATE_LOG}"
     return 1
@@ -211,6 +218,12 @@ fail_signature() {
   # to the round) — widening needs their position formats normalized first.
   grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+.*" "${1}" 2> /dev/null \
     | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
+}
+# The one emit point for the dist-rebuild steering note — every retryable
+# exit of baseline_also_fails after the baseline leg calls this, so the
+# guidance cannot drift across exits.
+seed_dist_note() {
+  echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
 }
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's. The
