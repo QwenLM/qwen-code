@@ -1761,7 +1761,6 @@ function publishPromptTerminal(
   entry: SessionEntry,
   pendingEntry: PendingPromptEntry,
   terminal: PromptTerminal,
-  options?: { persistIfDispatched?: boolean },
 ): void {
   if (pendingEntry.terminalPublished) {
     // Dedup here is the designed steady state, not an anomaly: deadline
@@ -1776,7 +1775,7 @@ function publishPromptTerminal(
   pendingEntry.terminalPublished = true;
   const status = rememberTerminalTurnStatus(entry, pendingEntry, terminal);
   if (
-    (!pendingEntry.dispatched || options?.persistIfDispatched === true) &&
+    !pendingEntry.dispatched &&
     pendingEntry.terminalPersistence === undefined
   ) {
     startStrictTerminalPersistence(
@@ -7973,12 +7972,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             publishPromptTerminal(entry, pendingEntry, { kind: 'cancelled' });
             return;
           }
-          publishPromptTerminal(
-            entry,
-            pendingEntry,
-            { kind: 'error', err },
-            { persistIfDispatched: true },
-          );
+          publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
         },
       );
       // Tail swallows failures so subsequent prompts still run. The caller
@@ -9862,8 +9856,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (queuedHead) return liveTurnStatus(sessionId, queuedHead);
       }
 
-      // Settled state is durable: read the agent's persisted `turn_result`
-      // records. This survives daemon restarts (the pending list does not).
+      // Read any persisted `turn_result` records from the agent. Persisted
+      // records survive daemon restarts (the pending list does not).
       const terminalBeforeRead =
         promptId !== undefined
           ? entry.terminalTurnStatuses.get(promptId)
@@ -11060,6 +11054,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       try {
         await cancelQueuedPromptsBeforeTeardown(entry);
       } catch (error) {
+        if (ci) {
+          await killChannelWithLog(
+            ci,
+            `force kill session ${JSON.stringify(sessionId)} after queued terminal persistence failed`,
+          );
+          return true;
+        }
         entry.closing = false;
         throw error;
       }

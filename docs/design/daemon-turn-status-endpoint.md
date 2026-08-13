@@ -88,8 +88,8 @@ the corresponding value was truncated.
 
 ## Persistence and the terminal overlay
 
-Settled outcomes survive daemon restarts by appending one
-`turn_result` system record to the EXISTING session transcript JSONL
+Settled outcomes that the owning session successfully records survive normal
+daemon restarts by appending one `turn_result` system record to the EXISTING session transcript JSONL
 (`<projectDir>/chats/<sessionId>.jsonl`) through the existing
 `ChatRecordingService` append path — no new files, no new write machinery:
 
@@ -114,6 +114,10 @@ Settled outcomes survive daemon restarts by appending one
 - Durable settled results require chat recording to be enabled for the
   session. Live queue state and the recent terminal overlay remain available
   while the daemon session is resident even when recording is unavailable.
+- This endpoint is a bounded turn-status lookup, not an exactly-once result
+  store. An unexpected child exit before its record is appended, daemon hard
+  stop, disabled recording, or permanent storage failure does not gain a
+  cross-restart durability guarantee from the bridge.
 
 Reads go through the `qwen/control/session/turn_status` ext-method on the
 owning ACP child: it flushes the recording service (so a just-settled turn
@@ -159,6 +163,9 @@ for a prompt admitted straight to running).
   daemon turn, or recording disabled/failed) can still return recent formal
   outcomes from the live daemon overlay. After restart or overlay eviction,
   an outcome that was never persisted yields `idle` / `prompt_not_found`.
+- Rewind clears the process-local terminal overlay and then follows the
+  child's persisted active transcript branch. With recording disabled or
+  failed, historical promptIds are therefore not retained across rewind.
 - Removing either a queued or running prompt immediately publishes one
   authoritative `cancelled` terminal and makes it pollable. Later agent
   settlement or teardown cannot replace that outcome.

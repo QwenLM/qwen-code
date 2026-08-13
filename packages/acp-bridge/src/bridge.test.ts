@@ -9867,6 +9867,19 @@ describe('createAcpSessionBridge', () => {
         promptImpl: async () => {
           throw new Error('forward boom');
         },
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? {
+                v: 1,
+                sessionId: SESS_A,
+                turnResult: {
+                  promptId: 'prompt-forward-failed',
+                  state: 'error',
+                  endedAt: 2,
+                  resultText: 'partial visible answer',
+                },
+              }
+            : {},
       });
       const cancelSpy = vi.spyOn(h.agent, 'cancel');
       const factory: ChannelFactory = async () => h.channel;
@@ -9904,15 +9917,21 @@ describe('createAcpSessionBridge', () => {
       const evt = await peerCancel;
       expect(evt.type).toBe('prompt_cancelled');
       expect((evt.data as { reason?: string }).reason).toBe('forward_failed');
-      expect(h.agent.extMethodCalls).toContainEqual({
-        method: SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
-        params: {
-          sessionId: session.sessionId,
-          turnResult: expect.objectContaining({
-            promptId: 'prompt-forward-failed',
-            state: 'error',
-          }),
-        },
+      expect(
+        h.agent.extMethodCalls.filter(
+          ({ method }) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+        ),
+      ).toHaveLength(0);
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-forward-failed',
+        ),
+      ).resolves.toMatchObject({
+        state: 'error',
+        resultText: 'partial visible answer',
       });
       // A rejected prompt request has already settled in the child. Sending a
       // late session-scoped cancel here could hit the queued successor.
@@ -12600,88 +12619,124 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it.each(['close', 'kill'] as const)(
-      'keeps the session live and retries newly cancelled persistence before %s',
-      async (operation) => {
-        let persistAvailable = false;
-        const activePrompt = deferred<PromptResponse>();
-        const handle = makeChannel({
-          promptImpl: () => activePrompt.promise,
-          extMethodImpl: (method) => {
-            if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
-              if (!persistAvailable) throw new Error('writer unavailable');
-              return {};
-            }
-            return method === SERVE_CONTROL_EXT_METHODS.sessionClose
-              ? { closed: true }
-              : {};
-          },
-        });
-        const bridge = makeBridge({
-          channelFactory: async () => handle.channel,
-        });
-        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-        const p1 = bridge.sendPrompt(
-          session.sessionId,
-          {
-            sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'active' }],
-          },
-          undefined,
-          { promptId: 'prompt-a' },
-        );
-        await vi.waitFor(() =>
-          expect(handle.agent.promptCalls).toHaveLength(1),
-        );
-        const p2 = bridge.sendPrompt(
-          session.sessionId,
-          {
-            sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'queued' }],
-          },
-          undefined,
-          { promptId: 'prompt-b' },
-        );
-        p2.catch(() => {});
+    it('keeps the session live and retries newly cancelled persistence before close', async () => {
+      let persistAvailable = false;
+      const activePrompt = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => activePrompt.promise,
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+            if (!persistAvailable) throw new Error('writer unavailable');
+            return {};
+          }
+          return method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'active' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      p2.catch(() => {});
 
-        await expect(
-          operation === 'close'
-            ? bridge.closeSession(session.sessionId)
-            : bridge.killSession(session.sessionId),
-        ).rejects.toThrow();
-        expect(bridge.sessionCount).toBe(1);
-        expect(handle.killed).toBe(false);
-        expect(
-          handle.agent.extMethodCalls.filter(
-            ({ method }) => method === SERVE_CONTROL_EXT_METHODS.sessionClose,
-          ),
-        ).toHaveLength(0);
-        await expect(
-          bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-b'),
-        ).resolves.toMatchObject({
-          state: 'cancelled',
-          stopReason: 'cancelled',
-        });
+      await expect(bridge.closeSession(session.sessionId)).rejects.toThrow();
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.killed).toBe(false);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          ({ method }) => method === SERVE_CONTROL_EXT_METHODS.sessionClose,
+        ),
+      ).toHaveLength(0);
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId, undefined, 'prompt-b'),
+      ).resolves.toMatchObject({
+        state: 'cancelled',
+        stopReason: 'cancelled',
+      });
 
-        activePrompt.resolve({ stopReason: 'end_turn' });
-        await expect(p1).resolves.toEqual({ stopReason: 'end_turn' });
-        await expect(p2).rejects.toMatchObject({ name: 'AbortError' });
-        persistAvailable = true;
-        await expect(
-          operation === 'close'
-            ? bridge.closeSession(session.sessionId)
-            : bridge.killSession(session.sessionId),
-        ).resolves.toBe(operation === 'close' ? undefined : true);
-        expect(
-          handle.agent.extMethodCalls.filter(
-            ({ method }) =>
-              method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
-          ),
-        ).toHaveLength(2);
-        expect(bridge.sessionCount).toBe(0);
-        await bridge.shutdown();
-      },
-    );
+      activePrompt.resolve({ stopReason: 'end_turn' });
+      await expect(p1).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(p2).rejects.toMatchObject({ name: 'AbortError' });
+      persistAvailable = true;
+      await expect(
+        bridge.closeSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(
+        handle.agent.extMethodCalls.filter(
+          ({ method }) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord,
+        ),
+      ).toHaveLength(2);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('force-kills the channel when newly cancelled persistence fails before kill', async () => {
+      const activePrompt = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => activePrompt.promise,
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord) {
+            throw new Error('writer unavailable');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'active' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      running.catch(() => {});
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      const queued = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      queued.catch(() => {});
+
+      const outcome = await bridge.killSession(session.sessionId).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      activePrompt.resolve({ stopReason: 'end_turn' });
+      await Promise.allSettled([running, queued]);
+      await bridge.shutdown();
+
+      expect(outcome).toEqual({ value: true });
+      expect(handle.killed).toBe(true);
+    });
 
     it.each(['close', 'kill'] as const)(
       'does not leave the session unclosable after queued persistence permanently fails before %s',
