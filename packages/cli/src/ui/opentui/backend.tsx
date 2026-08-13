@@ -290,15 +290,16 @@ function AssistantMessage(props: {
   item: Extract<LiveHistoryItem, { kind: 'assistant' }>;
 }) {
   const { item } = props;
+  const isError = item.text.startsWith('[error]');
   return (
     <box paddingLeft={1} marginTop={1} flexDirection="row">
-      <text fg={C.accent}>◆ </text>
+      <text fg={isError ? C.red : C.accent}>{isError ? '✗ ' : '◆ '}</text>
       <box flexGrow={1} flexDirection="column">
         <markdown
           content={item.text}
           streaming={item.streaming}
           syntaxStyle={SYNTAX}
-          fg={C.text}
+          fg={isError ? C.red : C.text}
         />
       </box>
     </box>
