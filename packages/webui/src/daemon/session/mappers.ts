@@ -18,6 +18,7 @@ import type {
   DaemonCommandInfo,
   DaemonConnectionState,
   DaemonModelInfo,
+  DaemonReasoningControls,
   DaemonTokenUsage,
 } from './types.js';
 
@@ -129,6 +130,42 @@ export function mapSessionContextModels(
 
   if (!currentModel && models.length === 0) return undefined;
   return { models, currentModel, contextWindow };
+}
+
+export function mapReasoningControls(
+  configOptions: unknown,
+  fallbackEffort?: string,
+): DaemonReasoningControls | undefined {
+  if (!Array.isArray(configOptions)) return undefined;
+  const option = configOptions
+    .map(getRecord)
+    .find((item) => getString(item, 'id') === 'reasoning_effort');
+  const rawOptions = option?.['options'];
+  if (!option || !Array.isArray(rawOptions)) return undefined;
+  const values = rawOptions.flatMap((item) => {
+    const value = getString(getRecord(item), 'value');
+    return value ? [value] : [];
+  });
+  if (!values.includes('none')) return undefined;
+  const efforts = values.filter((value) => value !== 'none');
+  if (efforts.length === 0) return undefined;
+  const currentValue = getString(option, 'currentValue');
+  const meta = getRecord(option['_meta']);
+  const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
+  const defaultEffort = getString(reasoningMeta, 'defaultEffort');
+  const effort =
+    [currentValue, fallbackEffort, defaultEffort].find(
+      (value): value is string =>
+        typeof value === 'string' && efforts.includes(value),
+    ) ?? efforts[0]!;
+  return { enabled: currentValue !== 'none', effort, efforts };
+}
+
+export function mapSessionContextReasoning(
+  status: DaemonSessionContextStatus | undefined,
+  fallbackEffort?: string,
+): DaemonReasoningControls | undefined {
+  return mapReasoningControls(status?.state?.configOptions, fallbackEffort);
 }
 
 export function mapSupportedCommands(
@@ -295,7 +332,12 @@ export function updateConnectionFromDaemonEvent(
     case 'model_switched': {
       const modelId = getString(getRecord(event.data), 'modelId');
       if (modelId) {
-        setConnection((current) => ({ ...current, currentModel: modelId }));
+        setConnection((current) => ({
+          ...current,
+          currentModel: modelId,
+          reasoning:
+            current.currentModel === modelId ? current.reasoning : undefined,
+        }));
       }
       break;
     }
