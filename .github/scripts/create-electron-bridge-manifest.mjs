@@ -38,6 +38,7 @@ const lines = [
 ];
 fs.writeFileSync(options.output, `${lines.join('\n')}\n`);
 
+// Keep the selection regexes in sync with create-desktop-update-manifest.mjs.
 function selectArtifact(assets, pattern) {
   const matches = assets.filter((asset) => pattern.test(asset));
   if (matches.length !== 1) {
