@@ -8442,6 +8442,211 @@ describe('Session', () => {
         );
       });
 
+      it('bridges drained audio for the active full-turn model', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: [
+            { text: 'captured screen' },
+            { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+          ],
+          returnDisplay: 'captured screen',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'screenshot_tool',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: {},
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Capture screen'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi
+          .fn()
+          .mockReturnValue({ audio: true });
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGenerator: {},
+            contentGeneratorConfig: {
+              model: 'vision-agent',
+              modalities: { image: true },
+            },
+            model: 'vision-agent',
+          }),
+        });
+        bridgeToolResultImagesSpy.mockImplementation(
+          async ({ responseParts, onFullTurnModel: selectFullTurnModel }) => {
+            selectFullTurnModel?.(
+              'vision-agent\0https://vision.example.com/v1\0',
+            );
+            return responseParts;
+          },
+        );
+        Object.assign(mockSettings.merged as Record<string, unknown>, {
+          voiceModel: 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'test-key' },
+        });
+        transcribeVoiceAudioSpy.mockResolvedValue('mid-turn transcript');
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'please listen to this audio',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-screen', name: 'screenshot_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'capture a screen' }],
+        });
+
+        expect(transcribeVoiceAudioSpy).toHaveBeenCalledOnce();
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[0]).toBe(
+          'vision-agent\0https://vision.example.com/v1\0',
+        );
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              text: expect.stringContaining('mid-turn transcript'),
+            }),
+          ]),
+        );
+        expect(secondCall?.[1].message).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ inlineData: expect.anything() }),
+          ]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          expect.not.arrayContaining([
+            expect.objectContaining({ inlineData: expect.anything() }),
+          ]),
+          'please listen to this audio',
+        );
+      });
+
+      it('fails closed when the active audio route cannot be resolved', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: [
+            { text: 'captured screen' },
+            { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+          ],
+          returnDisplay: 'captured screen',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'screenshot_tool',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: {},
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Capture screen'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi
+          .fn()
+          .mockReturnValue({ audio: true });
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('missing route')),
+        });
+        bridgeToolResultImagesSpy.mockImplementation(
+          async ({ responseParts, onFullTurnModel: selectFullTurnModel }) => {
+            selectFullTurnModel?.(
+              'vision-agent\0https://vision.example.com/v1\0',
+            );
+            return responseParts;
+          },
+        );
+        Object.assign(mockSettings.merged as Record<string, unknown>, {
+          voiceModel: 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'test-key' },
+        });
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'please listen to this audio',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-screen', name: 'screenshot_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'capture a screen' }],
+        });
+
+        expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+        const secondMessage = vi.mocked(mockChat.sendMessageStream).mock
+          .calls[1]?.[1].message as Part[];
+        expect(textParts(secondMessage).join('\n')).toContain(
+          'the active model override could not be resolved',
+        );
+        expect(secondMessage.some((part) => 'inlineData' in part)).toBe(false);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          "audio route capability check failed for 'vision-agent\0https://vision.example.com/v1': missing route",
+        );
+      });
+
       it('keeps later structured mid-turn messages when one resolution fails', async () => {
         const clampSpy = vi
           .spyOn(core, 'clampInlineMediaPart')

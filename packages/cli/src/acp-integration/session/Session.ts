@@ -199,6 +199,7 @@ import {
 import {
   formatAudioBridgeNotice,
   hasAudioParts,
+  replaceAudioPartsWithUnavailable,
   runAudioBridge,
 } from '../../services/audio-bridge-service.js';
 import {
@@ -3620,6 +3621,7 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                       promptId,
                       onFullTurnModel,
+                      () => fullTurnModelOverride,
                     );
                   nextMessage = nextAfterTools.message;
                   if (toolRun.loopDetected) {
@@ -3728,6 +3730,7 @@ export class Session implements SessionContext {
         const drained = await this.#drainMidTurnInput(pendingSend.signal, {
           watchQueuedPromptForTodoStopGuard: true,
           onFullTurnModel,
+          getModelOverride: () => modelOverride,
         });
         if (drained.parts.length > 0) {
           if (drained.hasQueuedPrompt) {
@@ -3827,6 +3830,7 @@ export class Session implements SessionContext {
           const drained = await this.#drainMidTurnInput(pendingSend.signal, {
             watchQueuedPromptForTodoStopGuard: true,
             onFullTurnModel,
+            getModelOverride: () => modelOverride,
           });
           if (drained.parts.length > 0) {
             if (drained.hasQueuedPrompt) {
@@ -4094,6 +4098,7 @@ export class Session implements SessionContext {
                     {
                       watchQueuedPromptForTodoStopGuard: true,
                       onFullTurnModel: options.onFullTurnModel,
+                      getModelOverride: options.getModelOverride,
                     },
                   );
                   if (drained.parts.length > 0) {
@@ -4569,6 +4574,7 @@ export class Session implements SessionContext {
           pendingSend.signal,
           toolPromptId,
           options.onFullTurnModel,
+          options.getModelOverride,
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.hadMidTurnUserInput) {
@@ -5006,6 +5012,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     onFullTurnModel?: (model: string) => boolean,
+    getModelOverride?: () => string | undefined,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -5020,6 +5027,7 @@ export class Session implements SessionContext {
     }
     const drained = await this.#drainMidTurnInput(abortSignal, {
       onFullTurnModel,
+      getModelOverride,
     });
     const hadMidTurnUserInput = drained.parts.length > 0;
     if (hadMidTurnUserInput) {
@@ -5156,6 +5164,7 @@ export class Session implements SessionContext {
     options: {
       watchQueuedPromptForTodoStopGuard?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      getModelOverride?: () => string | undefined;
     } = {},
   ): Promise<MidTurnDrainResult> {
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
@@ -5330,6 +5339,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     options: {
       onFullTurnModel?: (model: string) => boolean;
+      getModelOverride?: () => string | undefined;
       preserveFallbackOnAbort?: boolean;
     } = {},
   ): Promise<Part[]> {
@@ -5348,6 +5358,7 @@ export class Session implements SessionContext {
                 (signal) =>
                   this.#resolvePrompt(message.content, signal, {
                     onFullTurnModel: options.onFullTurnModel,
+                    getModelOverride: options.getModelOverride,
                   }),
               );
       } catch (messageError) {
@@ -9677,6 +9688,7 @@ export class Session implements SessionContext {
     options: {
       promptLast?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      getModelOverride?: () => string | undefined;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -9850,6 +9862,7 @@ export class Session implements SessionContext {
         partsToSend,
         abortSignal,
         options.onFullTurnModel,
+        options.getModelOverride,
       );
     }
 
@@ -9858,6 +9871,7 @@ export class Session implements SessionContext {
         [...partsToSend, ...extensionParts, ...mcpServerParts],
         abortSignal,
         options.onFullTurnModel,
+        options.getModelOverride,
       );
     }
 
@@ -9970,6 +9984,7 @@ export class Session implements SessionContext {
       processedQueryParts,
       abortSignal,
       options.onFullTurnModel,
+      options.getModelOverride,
     );
   }
 
@@ -9977,10 +9992,12 @@ export class Session implements SessionContext {
     originalParts: Part[],
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
+    getModelOverride?: () => string | undefined,
   ): Promise<Part[]> {
     const parts = await this.#applyAudioBridgeIfNeeded(
       originalParts,
       abortSignal,
+      getModelOverride?.(),
     );
     if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
       return parts;
@@ -10063,13 +10080,38 @@ export class Session implements SessionContext {
   async #applyAudioBridgeIfNeeded(
     parts: Part[],
     abortSignal: AbortSignal,
+    modelOverride?: string,
   ): Promise<Part[]> {
     if (!hasAudioParts(parts)) return parts;
+    let targetSupportsAudio: boolean | undefined;
+    if (modelOverride) {
+      const routeSelector = modelOverride.endsWith('\0')
+        ? modelOverride.slice(0, -1)
+        : modelOverride;
+      try {
+        const runtimeView = await this.config
+          .getBaseLlmClient()
+          .resolveForModel(routeSelector, { failClosed: true });
+        targetSupportsAudio =
+          runtimeView.contentGeneratorConfig.modalities?.audio === true;
+      } catch (error) {
+        debugLogger.warn(
+          `audio route capability check failed for '${routeSelector}': ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return replaceAudioPartsWithUnavailable(
+          parts,
+          'the active model override could not be resolved',
+        );
+      }
+    }
     const result = await runAudioBridge({
       config: this.config,
       settings: this.settings,
       parts,
       signal: abortSignal,
+      ...(targetSupportsAudio === undefined ? {} : { targetSupportsAudio }),
     });
     if (result.status !== 'skipped' || result.egressCount > 0) {
       try {
