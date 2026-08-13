@@ -5516,9 +5516,9 @@ class QwenAgent implements Agent {
     ) {
       meta[CHANNEL_PROMPT_META_KEY] = true;
     }
-    // Channel delivery is the second input to the same classification; gate
-    // it identically so an untrusted caller cannot opt its own turn out of
-    // loop-detected rejection through the sibling key.
+    // Channel delivery is a daemon-managed side effect (the prompt route
+    // injects it from the trusted context); an untrusted direct-ACP caller
+    // must not self-schedule its own response delivery through the key.
     if (
       this.privateParentState === 'trusted' &&
       suppliedChannelDelivery !== undefined

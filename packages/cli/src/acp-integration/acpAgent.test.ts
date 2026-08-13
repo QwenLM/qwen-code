@@ -2178,13 +2178,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('strips channel classification from untrusted callers', async () => {
-    // `qwen.channel.prompt` and `qwen.daemon.channelDelivery` both mark a
-    // turn as a channel turn, opting it out of loop-detected rejection and
-    // the repeated-failure guard. Only trusted parents (the channel bridges
-    // and the daemon bridge) may set them; an untrusted client marking its
-    // own prompt as a channel turn must not reach the session. A plain
-    // `qwen --acp` child has no expected capability and initializes
-    // untrusted.
+    // `qwen.channel.prompt` marks a turn as a channel turn, opting it out
+    // of loop-detected rejection and the repeated-failure guard, and
+    // `qwen.daemon.channelDelivery` schedules the response delivery. Only
+    // trusted parents (the channel bridges and the daemon bridge) may set
+    // them; an untrusted client marking its own prompt must not reach the
+    // session. A plain `qwen --acp` child has no expected capability and
+    // initializes untrusted.
     await setupSessionMocks('untrusted-session');
     const agentPromise = runAcpAgent(
       mockConfig,

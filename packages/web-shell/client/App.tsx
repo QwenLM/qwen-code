@@ -7120,8 +7120,14 @@ export function App({
     }
     // Same walk as the retry decision above, so turn_complete and the
     // retry affordance never disagree about whether the current turn has
-    // a turn error (e.g. across a trailing background notification).
-    lastTurnErrorIdRef.current = lastTurnError?.id ?? null;
+    // a turn error (e.g. across a trailing background notification). An
+    // error the user already retried stays suppressed, mirroring the
+    // retry affordance; loop-detected errors are never retried, so they
+    // always surface.
+    lastTurnErrorIdRef.current =
+      lastTurnError && lastTurnError.id !== retriedTurnErrorIdRef.current
+        ? lastTurnError.id
+        : null;
     const canRetry =
       connected &&
       retryableTurnError !== undefined &&
@@ -9903,17 +9909,27 @@ export function App({
             });
           }
           if (isDaemonTurnError(error)) {
-            failedTurnErrorRetryRef.current = {
-              errorId: retryErrorId,
-              text: retryText,
-              images: retryImages,
-              inputAnnotations: retryInputAnnotations,
-              owner: retryOwner,
-            };
+            // A loop-detected rejection ends the retry lineage: the
+            // retried turn itself was stopped for loop protection, so
+            // the stashed prompt must not be re-offered — resubmitting
+            // it tends to re-loop.
+            if (error.body !== 'LOOP_DETECTED') {
+              failedTurnErrorRetryRef.current = {
+                errorId: retryErrorId,
+                text: retryText,
+                images: retryImages,
+                inputAnnotations: retryInputAnnotations,
+                owner: retryOwner,
+              };
+            }
             const nextTurnError = getRetryableTurnError(
               store.getSnapshot().blocks,
             );
-            if (nextTurnError) {
+            if (
+              nextTurnError &&
+              nextTurnError.kind === 'error' &&
+              isRetryableTurnErrorKind(nextTurnError.errorKind)
+            ) {
               rearmFailedTurnErrorRetry(
                 nextTurnError,
                 store.getSnapshot().blocks,

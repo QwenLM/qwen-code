@@ -3671,9 +3671,13 @@ export class Session implements SessionContext {
       ] === true;
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
-    // #executePromptInner. The ACP boundary strips the channel-prompt key
-    // from untrusted callers, so both decisions see only trusted values.
-    const channelTurn = channelDelivery !== undefined || channelPromptTurn;
+    // #executePromptInner. Only the authenticated channel-prompt marker
+    // classifies a turn: the delivery meta is a caller-requested side
+    // effect (the response is still delivered on end_turn below), and
+    // letting it classify would let any caller opt its own turn out of
+    // loop-detected rejection and the repeated-failure guard. The ACP
+    // boundary strips the channel-prompt key from untrusted callers, so
+    // both decisions see only trusted values.
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3694,15 +3698,15 @@ export class Session implements SessionContext {
         // Channel turns are non-interactive deliveries: like cron,
         // background-notification, and goal turns they keep the graceful
         // end-turn handling so the collected response text is still
-        // delivered. Both channel mechanisms qualify — the channelDelivery
-        // meta and the CHANNEL_PROMPT_META_KEY turns sent by the channel
-        // bridges, which carry no channelDelivery capture. Goal turns
-        // bypass the bridge entirely, so a rejection there would settle
-        // the turn as failed and pause the goal without any turn_error
-        // ever being published.
-        !channelTurn && goalTurn === undefined,
+        // delivered. Only the authenticated CHANNEL_PROMPT_META_KEY turns
+        // sent by the channel bridges qualify; the delivery meta alone
+        // schedules the delivery but keeps the foreground rejection. Goal
+        // turns bypass the bridge entirely, so a rejection there would
+        // settle the turn as failed and pause the goal without any
+        // turn_error ever being published.
+        !channelPromptTurn && goalTurn === undefined,
         goalTurn,
-        channelTurn,
+        channelPromptTurn,
       );
       promptResult = result;
       releasePendingSend();

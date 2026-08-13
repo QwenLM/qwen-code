@@ -8782,11 +8782,12 @@ describe('Session', () => {
         }
       });
 
-      it('forces channel-delivery prompts off even when enforcement is configured', async () => {
-        // One server-side channel classification gates both the rejection
-        // and the guard mode: channelDelivery turns are non-interactive
-        // deliveries, so the repeated-failure guard must not stop them
-        // either — they keep running to their natural end.
+      it('keeps the configured guard for delivery-marked prompts', async () => {
+        // The delivery meta is a caller-requested side effect, not a
+        // channel classification: it schedules the delivery on end_turn
+        // but must not opt the turn out of the repeated-failure guard or
+        // loop-detected rejection, or any caller could bypass loop
+        // protection by marking its own prompt for delivery.
         recreateSessionWithGuardMode('enforce');
         try {
           const execute = installFailingTool();
@@ -8807,21 +8808,19 @@ describe('Session', () => {
                 },
               },
             }),
-          ).resolves.toEqual({ stopReason: 'end_turn' });
+          ).rejects.toMatchObject({
+            data: expect.objectContaining({
+              code: 'LOOP_DETECTED',
+              loopType: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            }),
+          });
 
           expect(execute).toHaveBeenCalledTimes(9);
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
-          expect(logRepeatedToolFailureGuardSpy).not.toHaveBeenCalled();
-          // Drain the scheduled channel delivery before teardown so the
-          // unref'd delivery timer cannot fire after the mocks reset.
-          await vi.waitFor(() => {
-            expect(mockClient.extMethod).toHaveBeenCalledWith(
-              'qwen/control/channel-delivery',
-              expect.objectContaining({
-                deliveryId: 'prompt-guard-off-delivery',
-              }),
-            );
-          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.anything(),
+          );
         } finally {
           restoreGuardMode();
         }
@@ -11818,11 +11817,11 @@ describe('Session', () => {
         });
       });
 
-      it('keeps a channel turn graceful when loop protection stops it', async () => {
-        // Channel turns are non-interactive deliveries: like cron and
-        // background-notification turns they keep the graceful end-turn so
-        // the collected response text is still delivered instead of the
-        // prompt rejecting.
+      it('rejects a delivery-marked turn when loop protection stops it', async () => {
+        // The delivery meta alone does not classify a turn as a channel
+        // turn: the loop-detected stop rejects like any foreground prompt
+        // instead of resolving end_turn, and the failed turn schedules no
+        // delivery.
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
         mockConfig.isMaxToolCallsPerTurnExplicit = vi
@@ -11865,7 +11864,12 @@ describe('Session', () => {
               },
             },
           }),
-        ).resolves.toEqual({ stopReason: 'end_turn' });
+        ).rejects.toMatchObject({
+          data: expect.objectContaining({
+            code: 'LOOP_DETECTED',
+            loopType: core.LoopType.TURN_TOOL_CALL_CAP,
+          }),
+        });
 
         expect(logLoopDetectedSpy).toHaveBeenCalledWith(
           mockConfig,
@@ -11874,22 +11878,18 @@ describe('Session', () => {
           }),
           {},
         );
-        await vi.waitFor(() => {
-          expect(mockClient.extMethod).toHaveBeenCalledWith(
-            'qwen/control/channel-delivery',
-            expect.objectContaining({
-              deliveryId: 'prompt-loop-channel',
-            }),
-          );
-        });
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
       });
 
       it('keeps a channel-prompt-meta turn graceful when loop protection stops it', async () => {
         // DaemonChannelBridge/AcpBridge channel tasks prompt with
-        // CHANNEL_PROMPT_META_KEY and no channelDelivery meta; like the
-        // channelDelivery path above they must resolve end_turn so the
-        // bridge emits promptComplete with the collected response text
-        // instead of the rejection failing the non-interactive task.
+        // CHANNEL_PROMPT_META_KEY; the authenticated classification must
+        // resolve end_turn so the bridge emits promptComplete with the
+        // collected response text instead of the rejection failing the
+        // non-interactive task.
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
         mockConfig.isMaxToolCallsPerTurnExplicit = vi

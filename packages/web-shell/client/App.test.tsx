@@ -12335,6 +12335,277 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
   });
 
+  it('does not rearm a retry when the retried turn is loop-stopped', async () => {
+    // When the retried turn itself is stopped by loop protection, the
+    // catch path must not arm retry state on the loop error: Ctrl+Y
+    // calls handleRetry() directly even while the retry button is
+    // hidden, and resubmitting the stopped prompt tends to re-loop.
+    const retrySend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(retrySend.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'repeat this';
+    await clickSubmit(container);
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+      ];
+      rerender();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    });
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls[1]?.[1];
+
+    // The loop turn_error lands before the rejection settles, so the
+    // catch walk already sees it when the re-arm runs.
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-loop',
+          promptId: 'prompt-2',
+          errorKind: 'loop_detected',
+          text: 'internal fallback',
+        },
+      ];
+      rerender();
+    });
+    act(() => {
+      retryOptions?.onAdmissionStarted?.();
+      retryOptions?.onAdmitted?.();
+    });
+
+    await act(async () => {
+      retrySend.reject(
+        Object.assign(new Error('loop protection stopped the turn'), {
+          _daemonTurnError: true,
+          body: 'LOOP_DETECTED',
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reoffer a loop-stopped retry to a later unrelated turn error', async () => {
+    // The rejection settles before the loop turn_error block commits
+    // (microtask vs transcript flush), so the catch walk still sees the
+    // original error. The stashed prompt must not survive the loop stop
+    // and be consumed by a later unrelated retryable turn error, which
+    // would resubmit the loop-stopped prompt misattributed to a turn
+    // the user never submitted.
+    const retrySend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(retrySend.promise)
+      .mockResolvedValueOnce(undefined);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = 'repeat this';
+    await clickSubmit(container);
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+      ];
+      rerender();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    });
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls[1]?.[1];
+    act(() => {
+      retryOptions?.onAdmissionStarted?.();
+      retryOptions?.onAdmitted?.();
+    });
+
+    await act(async () => {
+      retrySend.reject(
+        Object.assign(new Error('loop protection stopped the turn'), {
+          _daemonTurnError: true,
+          body: 'LOOP_DETECTED',
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-loop',
+          promptId: 'prompt-2',
+          errorKind: 'loop_detected',
+          text: 'internal fallback',
+        },
+      ];
+      rerender();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-loop',
+          promptId: 'prompt-2',
+          errorKind: 'loop_detected',
+          text: 'internal fallback',
+        },
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-3',
+          promptId: 'prompt-3',
+        },
+      ];
+      rerender();
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'y', ctrlKey: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not report the previous turn error again when a retry settles without content', async () => {
+    // The retry turn settles while the transcript still ends with the
+    // original turn error (settle precedes the transcript flush); the
+    // turn_complete for that turn must not re-report the error the user
+    // already retried.
+    const onSessionChange = vi.fn();
+    const retrySend = deferred<void>();
+    mockSessionActions.sendPrompt
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(retrySend.promise);
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    testState.prompt = 'recover this stream';
+    await clickSubmit(container);
+    onSessionChange.mockClear();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onSessionChange });
+    });
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+      ];
+      testState.streamingState = 'idle';
+      rerender({ onSessionChange });
+    });
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'turn_complete',
+      sessionId: 'session-1',
+      error: expect.objectContaining({
+        message: 'Turn error (block turn-error-1)',
+      }),
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    });
+    await act(async () => {
+      retrySend.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onSessionChange });
+    });
+    onSessionChange.mockClear();
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onSessionChange });
+    });
+
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'turn_complete',
+      sessionId: 'session-1',
+      error: undefined,
+    });
+  });
+
   it.each([
     ['a fresh prompt id', 'prompt-2'],
     ['a reused prompt id', 'prompt-1'],
