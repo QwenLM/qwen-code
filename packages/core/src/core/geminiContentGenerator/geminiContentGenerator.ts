@@ -21,7 +21,10 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
-import type { ReasoningEffort } from '../reasoning-effort.js';
+import {
+  clampReasoningEffort,
+  type ReasoningEffort,
+} from '../reasoning-effort.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   reportGeminiChunk,
@@ -220,42 +223,27 @@ export class GeminiContentGenerator implements ContentGenerator {
     }
 
     // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
-    // is no xhigh/max, so the extra-strong tiers are capped at HIGH.
-    let thinkingLevel: ThinkingLevel;
-    switch (reasoning.effort) {
-      case 'low':
-        thinkingLevel = 'LOW' as ThinkingLevel;
-        break;
-      case 'medium':
-        thinkingLevel = 'MEDIUM' as ThinkingLevel;
-        break;
-      case 'high':
-        thinkingLevel = 'HIGH' as ThinkingLevel;
-        break;
-      case 'xhigh':
-      case 'max':
-        // Gemini has no tier above HIGH; log the clamp once (mirroring the
-        // Anthropic generator's one-time clamp warning) so a /effort xhigh|max
-        // that silently runs at HIGH leaves a trace in debug logs.
-        if (!this.effortClampWarned) {
-          debugLogger.warn(
-            `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to 'HIGH'.`,
-          );
-          this.effortClampWarned = true;
-        }
-        thinkingLevel = 'HIGH' as ThinkingLevel;
-        break;
-      default: {
-        // Exhaustiveness guard: every ReasoningEffort tier is handled above, so
-        // this is unreachable. Adding a new tier without a matching case makes
-        // this a TypeScript compile error rather than a silent fall-through.
-        // (A `default` is required here by the eslint default-case rule.)
-        const _exhaustive: never = reasoning.effort;
-        void _exhaustive;
-        thinkingLevel = 'HIGH' as ThinkingLevel;
-        break;
-      }
+    // is no xhigh/max, so the extra-strong tiers clamp down via the shared
+    // rank-based clamp (the Anthropic generator uses the same helper for its
+    // own per-model ceilings).
+    const clamped = clampReasoningEffort(reasoning.effort, [
+      'low',
+      'medium',
+      'high',
+    ]);
+    if (clamped !== reasoning.effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to '${clamped.toUpperCase()}'.`,
+      );
+      this.effortClampWarned = true;
     }
+    const thinkingLevel = (
+      {
+        low: 'LOW',
+        medium: 'MEDIUM',
+        high: 'HIGH',
+      } as Record<'low' | 'medium' | 'high', ThinkingLevel>
+    )[clamped as 'low' | 'medium' | 'high'];
 
     return {
       includeThoughts: true,
