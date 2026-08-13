@@ -44,12 +44,50 @@ export function carriesCommentMarker(body: string): boolean {
   return POSTED_MARKER_RE.test(body.trimEnd());
 }
 
-/** The severity a posted marker carries, or null when absent. */
+/**
+ * The severity a posted marker carries — read ONLY from the trailing shape
+ * `submit` appends. An unanchored read returns a marker quoted or planted
+ * mid-body (the string is public; a code sample in the reviewed diff can
+ * contain it), which would let the plant choose the severity the classifier
+ * sees.
+ */
 export function commentMarkerSeverity(
   body: string,
 ): 'critical' | 'suggestion' | null {
-  const m = /<!-- qwen-review (critical|suggestion) -->/.exec(body);
+  const m = /<!-- qwen-review (critical|suggestion) -->$/.exec(body.trimEnd());
   return m === null ? null : (m[1] as 'critical' | 'suggestion');
+}
+
+/**
+ * Bare marker LINES removed from a body — used by `submit` before appending
+ * the canonical marker, so a marker quoted from the reviewed code (or
+ * planted to be mistaken for one) cannot survive next to the real one.
+ * Fence- and indentation-aware like `stripForgedFooterLines`.
+ */
+export function stripCommentMarkerLines(body: string): string {
+  if (!body.includes('<!-- qwen-review')) return body;
+  return filterLinesAware(
+    body,
+    (line) =>
+      !/^[ \t]{0,3}<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
+        line,
+      ),
+  );
+}
+
+/**
+ * A footer SPAN removed wherever it sits in a (single-line) string — the
+ * sanitation for ledger titles, where a forged footer ending the first line
+ * of a multi-line entry would otherwise survive the whole-line strips.
+ * Bounded; the optional closing `_` covers the looping-model truncation.
+ */
+const FOOTER_SPAN_RE =
+  /_— [^\n]{0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\))?_?[ \t]*/g;
+
+export function stripFooterSpans(text: string): string {
+  return text.includes(FOOTER_MARKER)
+    ? text.replace(FOOTER_SPAN_RE, '').trim()
+    : text;
 }
 
 /** The footer naming the reviewing model and the CLI version it ran under. */
@@ -112,6 +150,50 @@ export function stripReviewFooter(body: string): string {
 }
 
 /**
+ * Line-filter shared by the anywhere-strips. Tracks the markdown constructs
+ * under which a footer/marker-shaped line is a QUOTATION, not attribution:
+ * fenced code (``` and ~~~, opened with at most three spaces of indent —
+ * at four it is itself indented-code content and does not open a fence) and
+ * indented code blocks. Lines inside a simple HTML block (`<div>`, `<pre>`,
+ * … until the next blank line) are raw content and never toggle fence
+ * state. A body from which nothing was removed is returned byte-identical.
+ */
+function filterLinesAware(
+  body: string,
+  keep: (line: string) => boolean,
+): string {
+  let inFence = false;
+  let inHtml = false;
+  let removed = false;
+  const kept = body.split('\n').filter((line) => {
+    const trimmed = line.trimStart();
+    if (inHtml) {
+      if (trimmed === '') inHtml = false;
+      return true;
+    }
+    if (/^<[A-Za-z][^>]*>?[ \t]*\r?$/.test(trimmed) && !inFence) {
+      inHtml = true;
+      return true;
+    }
+    if (/^[ \t]{0,3}(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      return true;
+    }
+    if (!inFence && !/^[ \t]{4}/.test(line) && !keep(line)) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+  if (!removed) return body;
+  return kept
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+/, '')
+    .trimEnd();
+}
+
+/**
  * Footer-shaped LINES anywhere in the body — the strip for the
  * attribution-off leg. `stripReviewFooter` is trailing-anchored on purpose:
  * a footer followed by ordinary text is the model looping on the same
@@ -136,25 +218,7 @@ const FORGED_FOOTER_LINE_RE =
 
 export function stripForgedFooterLines(body: string): string {
   if (!body.includes(FOOTER_MARKER)) return body;
-  let inFence = false;
-  let removed = false;
-  const kept = body.split('\n').filter((line) => {
-    if (line.trimStart().startsWith('```')) {
-      inFence = !inFence;
-      return true;
-    }
-    if (!inFence && FORGED_FOOTER_LINE_RE.test(line)) {
-      removed = true;
-      return false;
-    }
-    return true;
-  });
-  if (!removed) return body;
-  return kept
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+/, '')
-    .trimEnd();
+  return filterLinesAware(body, (line) => !FORGED_FOOTER_LINE_RE.test(line));
 }
 
 /**

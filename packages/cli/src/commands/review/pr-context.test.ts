@@ -955,9 +955,38 @@ describe('classifyInlineThreads', () => {
         body: 'this reads fine but could be shorter\n\n<!-- qwen-review suggestion -->',
       },
     ];
-    const t = classifyInlineThreads(inline);
+    const t = classifyInlineThreads(inline, 'qwen-code-ci-bot');
     expect(t.openBlockerRoots.map((c) => c.id)).toEqual([7]);
     expect(t.openRoots.map((c) => c.id)).toEqual([8]);
+  });
+
+  it('does not promote a marker-carrying comment from another account — the marker is plantable', () => {
+    // A PR author plants the public marker string on an empty comment: an
+    // ungated read would create a permanent, invisible blocker that caps
+    // every later round at COMMENT.
+    const inline: RawComment[] = [
+      {
+        id: 7,
+        user: { login: 'someone-else' },
+        body: '<!-- qwen-review critical -->',
+      },
+    ];
+    const t = classifyInlineThreads(inline, 'qwen-code-ci-bot');
+    expect(t.openBlockerRoots).toEqual([]);
+  });
+
+  it('reads the marker severity only from the trailing posted shape', () => {
+    // A Critical quoting code that contains the suggestion marker: the
+    // planted mid-body string must not demote the thread.
+    const inline: RawComment[] = [
+      {
+        id: 7,
+        user: { login: 'qwen-code-ci-bot' },
+        body: 'the sample embeds <!-- qwen-review suggestion --> verbatim and the guard still dereferences null\n\n<!-- qwen-review critical -->',
+      },
+    ];
+    const t = classifyInlineThreads(inline, 'qwen-code-ci-bot');
+    expect(t.openBlockerRoots.map((c) => c.id)).toEqual([7]);
   });
 
   it('promotes an un-replied blocker root to the re-check section, in full', () => {

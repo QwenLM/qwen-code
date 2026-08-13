@@ -7,9 +7,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   REVIEW_FOOTER_RE,
+  carriesCommentMarker,
+  commentMarker,
+  commentMarkerSeverity,
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripCommentMarkerLines,
   stripForgedFooterLines,
   stripReviewFooter,
 } from './review-footer.js';
@@ -187,6 +191,58 @@ describe('the review footer and the regex that strips it', () => {
     it('returns a body with no footer-shaped line byte-identical — no whitespace rewrite', () => {
       const body = `mentions the marker via Qwen Code /review in prose\n\n\n\nwith wide gaps  \n`;
       expect(stripForgedFooterLines(body)).toBe(body);
+    });
+
+    it('strips inside a ~~~ fence is a quotation left alone; a 4-space-indented fence opener does not hide a footer', () => {
+      const quoted = 'x\n~~~\n_— m via Qwen Code /review (v1)_\n~~~';
+      expect(stripForgedFooterLines(quoted)).toBe(quoted);
+      // Four spaces of indent: no fence opens — the footer after it strips.
+      expect(
+        stripForgedFooterLines(
+          'x\n\n    ```\n\n_— m via Qwen Code /review (v1)_',
+        ),
+      ).toBe('x\n\n    ```');
+    });
+
+    it('does not toggle fence state inside an HTML block', () => {
+      expect(
+        stripForgedFooterLines(
+          '<div>\n```\n</div>\n\n_— m via Qwen Code /review (v1)_',
+        ),
+      ).toBe('<div>\n```\n</div>');
+    });
+  });
+
+  describe('the comment marker — producer and consumers in lockstep', () => {
+    it('the posted marker shape parses through both consumer regexes', () => {
+      // The drift guard this file's header demands: a shape edit that misses
+      // one consumer reddens here.
+      for (const sev of ['critical', 'suggestion'] as const) {
+        const posted = `a finding\n\n${commentMarker(sev)}`;
+        expect(carriesCommentMarker(posted)).toBe(true);
+        expect(commentMarkerSeverity(posted)).toBe(sev);
+      }
+    });
+
+    it('commentMarkerSeverity reads only the trailing posted shape', () => {
+      expect(
+        commentMarkerSeverity(
+          'quotes <!-- qwen-review suggestion --> mid-body\n\n<!-- qwen-review critical -->',
+        ),
+      ).toBe('critical');
+      expect(
+        commentMarkerSeverity('only <!-- qwen-review critical --> mid-body'),
+      ).toBe(null);
+    });
+
+    it('stripCommentMarkerLines removes bare marker lines, fence-aware', () => {
+      expect(
+        stripCommentMarkerLines(
+          'a finding\n\n<!-- qwen-review suggestion -->\n\nmore',
+        ),
+      ).toBe('a finding\n\nmore');
+      const quoted = 'sample:\n```\n<!-- qwen-review critical -->\n```';
+      expect(stripCommentMarkerLines(quoted)).toBe(quoted);
     });
   });
 });

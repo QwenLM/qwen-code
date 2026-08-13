@@ -77,6 +77,7 @@ import {
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripFooterSpans,
   stripForgedFooterLines,
   stripReviewFooter,
 } from './lib/review-footer.js';
@@ -379,17 +380,13 @@ function formatCannotTell(
     // model-written with no length cap — one such entry stalled a measured
     // probe for seconds at 80k characters. The marker check goes through
     // `severityOf` (trims first — a leading space used to leak the marker
-    // past this strip into the posted body).
-    const sev = severityOf({ body: source });
+    // past this strip into the posted body), and the strip is iterative —
+    // a looping model drafts stacked markers and a single slice posts the
+    // second one.
     const unmarked =
-      sev === null
+      severityOf({ body: source }) === null
         ? source
-        : source
-            .trimStart()
-            .slice(
-              (sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX).length,
-            )
-            .trim();
+        : stripSeverityPrefix(source).trim();
     const line = linkifyCommentRefs(
       unmarked.includes('\n')
         ? unmarked
@@ -1486,15 +1483,15 @@ function composeReviewBody(
 
   // Model-written blockers: quoted as-is in both halves. The marker is the
   // attributed template's severity signal; an unattributed post quotes the
-  // blocker without it — stripping one the model already wrote, exactly as
-  // `submit` strips the inline comments' prefixes, and dropping forged
-  // footer lines (the body carries no canonical footer here, so a surviving
-  // one would be the post's only attribution).
+  // blocker without it. Footers go FIRST, then the marker — a forged footer
+  // line sitting ABOVE the marker defeats the prefix strip otherwise (the
+  // body carries no canonical footer here, so a surviving forged one would
+  // be the post's only attribution).
   const bodyCriticalBlock: Bi[] = bodyCriticals
     .map((l) =>
       attribution
         ? withMarker(l)
-        : stripForgedFooterLines(stripSeverityPrefix(l)),
+        : stripSeverityPrefix(stripForgedFooterLines(l)),
     )
     .map((l) => ({ en: l, zh: l }));
 
@@ -2478,10 +2475,12 @@ export function buildLedger(
     // was silently absent from the ledger, shifting every id after it.
     const sev = severityOf(c);
     if (!sev) continue;
-    const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-    const body = (typeof c.body === 'string' ? c.body : '').trimStart();
+    const body = typeof c.body === 'string' ? c.body : '';
+    // The title strips the way the post transform strips: forged footer
+    // lines first, then the marker(s) — iteratively, a looping model drafts
+    // them stacked — then any footer span still riding the first line.
     const { id: carried, title } = titleOf(
-      body.slice(marker.length).replace(/^:?\s*/, ''),
+      stripFooterSpans(stripSeverityPrefix(stripForgedFooterLines(body))),
     );
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
@@ -2496,10 +2495,13 @@ export function buildLedger(
     });
   }
   for (const b of bodyCriticals) {
-    // Strip a model-written marker before the title goes into the ledger:
-    // the ledger marker rides the posted body as an HTML comment, and the
-    // autofix grep reads the whole body — including comments.
-    const { id: carried, title } = titleOf(stripSeverityPrefix(b));
+    // The title strips the way the visible list strips — forged footer
+    // lines, then marker(s), then any footer span still riding the first
+    // line — because the ledger marker rides the posted body as an HTML
+    // comment, and the autofix grep reads the whole body, comments included.
+    const { id: carried, title } = titleOf(
+      stripFooterSpans(stripSeverityPrefix(stripForgedFooterLines(b))),
+    );
     findings.push({
       id: idFor(carried),
       sev: 'C',

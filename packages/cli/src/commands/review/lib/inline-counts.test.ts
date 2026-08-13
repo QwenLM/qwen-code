@@ -25,10 +25,18 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     );
   });
 
-  it('keeps a marker-only body — stripping it would post an empty comment', () => {
-    expect(stripSeverityPrefix('**[Critical]**')).toBe('**[Critical]**');
-    expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe(
-      '**[Suggestion]**\n',
+  it('strips stacked markers iteratively — a looping model drafts them', () => {
+    expect(stripSeverityPrefix('**[Critical]** **[Suggestion]** broken')).toBe(
+      'broken',
     );
+    expect(
+      stripSeverityPrefix('**[Critical]****[Critical]****[Critical]** x'),
+    ).toBe('x');
+  });
+
+  it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {
+    expect(stripSeverityPrefix('**[Critical]**')).toBe('');
+    expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');
+    expect(stripSeverityPrefix('**[Critical]** **[Suggestion]**')).toBe('');
   });
 });

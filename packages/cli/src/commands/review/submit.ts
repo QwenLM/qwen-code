@@ -71,6 +71,7 @@ import {
   commentMarker,
   footerVersion,
   reviewFooter,
+  stripCommentMarkerLines,
   stripForgedFooterLines,
   stripReviewFooter,
 } from './lib/review-footer.js';
@@ -365,11 +366,11 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
     // A body that is nothing but its marker is the empty case wearing one.
     // The check must see past BOTH additions the post path can make — the
     // canonical footer (attribution on) and any markers stacked by a looping
-    // draft — so it strips iteratively and through the footer, and also
-    // refuses when what remains still opens with a marker.
+    // draft — so it strips iteratively and through the footer: nothing left
+    // means nothing was ever there but scaffolding.
     if (c.body && severityOf(c) !== null) {
       const remainder = stripReviewFooter(stripSeverityPrefix(c.body)).trim();
-      if (remainder === '' || severityOf({ body: remainder }) !== null) {
+      if (remainder === '') {
         problems.push(
           `${at} is nothing but its severity marker — redraft it with the ` +
             `finding's description; a marker alone is not a comment`,
@@ -537,6 +538,9 @@ export function runSubmit(
     // comment marker goes on in the markers' place, carrying the severity
     // the visible prefix carried: presubmit dedups on it, and pr-context
     // re-promotes an unresolved Critical to the re-check section off it.
+    // Pre-existing marker strings are stripped first — the shape is public,
+    // and a reviewed file can quote it into a comment body; only the
+    // canonical trailing marker may survive.
     comments: attribution
       ? (payload.comments ?? [])
       : (payload.comments ?? []).map((c) => {
@@ -544,7 +548,7 @@ export function runSubmit(
           const sev = severityOf(c);
           return {
             ...c,
-            body: `${stripSeverityPrefix(c.body)}\n\n${sev === null ? COMMENT_MARKER : commentMarker(sev)}`,
+            body: `${stripCommentMarkerLines(stripSeverityPrefix(c.body))}\n\n${sev === null ? COMMENT_MARKER : commentMarker(sev)}`,
           };
         }),
   };

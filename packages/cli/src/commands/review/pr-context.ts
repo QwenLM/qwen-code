@@ -454,12 +454,39 @@ export interface InlineThreads {
 }
 
 /**
+ * The one blocker test, shared by pr-context's re-check section and
+ * comment-status's report: semantic blocker prose (humans and attributed
+ * posts), plus an attribution-off Critical recognized by its invisible
+ * severity marker — gated on the reviewing account, because the marker
+ * string is public and plantable, and a planted "critical" marker on an
+ * otherwise empty comment would otherwise become a permanent, irrefutable
+ * blocker that caps every later round at COMMENT. With `me` empty the
+ * marker disjunct never fires: under-promotion loses a re-check, while
+ * over-promotion loses approvability, so empty fails toward the former.
+ */
+export function isBlockerBody(
+  body: string | undefined,
+  author: string | undefined,
+  me: string,
+): boolean {
+  if (carriesBlockerSignal(body)) return true;
+  return (
+    me !== '' &&
+    (author ?? '').toLowerCase() === me.toLowerCase() &&
+    commentMarkerSeverity(body ?? '') === 'critical'
+  );
+}
+
+/**
  * Group the flat inline-comment list into threads and classify each root.
  * The single copy of this walk: `buildMarkdown` renders from it and the
  * stdout summary counts from it, so the reported count can never diverge
  * from what the file contains.
  */
-export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
+export function classifyInlineThreads(
+  inline: RawComment[],
+  me: string = '',
+): InlineThreads {
   // Build a map id → comment, and group replies by root id, so each
   // already-discussed thread can be rendered with the reviewer's original
   // concern + the chronological reply chain. This is what tells review
@@ -494,14 +521,14 @@ export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   //
   // (This used to key on the literal `[Critical]` marker, which only /review
   // emits — a human blocker phrased any other way settled into "do NOT
-  // re-report". `carriesBlockerSignal` is the semantic test. Attribution-off
-  // posts carry no prefix at all; their severity rides the invisible comment
+  // re-report". `isBlockerBody` is the semantic test. Attribution-off posts
+  // carry no prefix at all; their severity rides the invisible comment
   // marker, so a posted Critical re-promotes through it every round —
   // including from round N+2, where the ledger no longer resurfaces a
-  // "cannot tell" ruling.)
+  // "cannot tell" ruling. The marker disjunct is gated on the reviewing
+  // account: the string is public and plantable.)
   const isBlockerRoot = (c: RawComment): boolean =>
-    carriesBlockerSignal(c.body) ||
-    commentMarkerSeverity(c.body ?? '') === 'critical';
+    isBlockerBody(c.body, c.user?.login, me);
   const repliedBlockerRoots = roots.filter(
     (c) => repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
@@ -729,6 +756,7 @@ export function buildMarkdown(
   issue: RawComment[],
   reviews: RawReview[],
   prevLedger: Ledger | null = null,
+  me: string = '',
 ): string {
   const {
     openRoots,
@@ -736,7 +764,7 @@ export function buildMarkdown(
     repliedBlockerRoots,
     repliedRoots,
     repliesByRoot,
-  } = classifyInlineThreads(inline);
+  } = classifyInlineThreads(inline, me);
   // Both replied and un-replied blocker roots go to the re-check section,
   // rendered first and in full. Un-replied ones simply have no reply chain.
   const allBlockerRoots = [...repliedBlockerRoots, ...openBlockerRoots];
@@ -965,17 +993,22 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
-  // Recover the previous round's machine ledger from this account's own last
-  // posted review, and persist it beside the context file: compose-review reads
-  // the side file for the round number, and Step 6 owes each entry a ruling.
-  // Best-effort — offline/unauthenticated just means no ledger, never a failure.
+  // The reviewing account gates BOTH the ledger recovery and the comment
+  // marker's blocker promotion. `currentUser()` is a network round-trip;
+  // with no reviews and no inline comments there is nothing for its answer
+  // to match against, so it is not made. Best-effort — offline or
+  // unauthenticated just means no ledger and no marker promotion, never a
+  // failure.
+  let me = '';
+  try {
+    me = reviews.length || inline.length ? currentUser() : '';
+  } catch {
+    me = '';
+  }
   let prevLedger: Ledger | null = null;
   try {
-    // `currentUser()` is a network round-trip; with no reviews on the PR there
-    // is nothing for its answer to match against, so it is not made.
-    prevLedger = reviews.length
-      ? latestOwnLedger(reviews, currentUser())
-      : null;
+    prevLedger =
+      reviews.length && me !== '' ? latestOwnLedger(reviews, me) : null;
   } catch {
     prevLedger = null;
   }
@@ -1007,6 +1040,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     issue,
     reviews,
     prevLedger,
+    me,
   );
 
   mkdirSync(dirname(out), { recursive: true });
@@ -1016,7 +1050,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   ).length;
   // Same walk buildMarkdown just rendered from — never a re-implementation,
   // so this count cannot silently diverge from the file's contents.
-  const threads = classifyInlineThreads(inline);
+  const threads = classifyInlineThreads(inline, me);
   const blockerCount =
     threads.repliedBlockerRoots.length +
     threads.openBlockerRoots.length +

@@ -58,6 +58,39 @@ describe('buildThreadStatuses — thread grouping', () => {
     expect(threads).toHaveLength(0);
   });
 
+  it('marks the attribution-off posted shape as a blocker, same as pr-context', () => {
+    // Parity with the context file's re-check section: a Critical posted
+    // without attribution carries its severity only in the invisible
+    // marker, and only the reviewing account's markers count.
+    const [own] = buildThreadStatuses(
+      [
+        comment({
+          id: 1,
+          user: { login: 'qwen-code-ci-bot' },
+          body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+        }),
+      ],
+      'author',
+      noChange,
+      'qwen-code-ci-bot',
+    );
+    expect(own.isBlocker).toBe(true);
+
+    const [planted] = buildThreadStatuses(
+      [
+        comment({
+          id: 1,
+          user: { login: 'someone-else' },
+          body: '<!-- qwen-review critical -->',
+        }),
+      ],
+      'author',
+      noChange,
+      'qwen-code-ci-bot',
+    );
+    expect(planted.isBlocker).toBe(false);
+  });
+
   it('survives a reply cycle without hanging', () => {
     const threads = buildThreadStatuses(
       [

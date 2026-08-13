@@ -67,15 +67,9 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
  * (`**[Critical]** **[Suggestion]** …`), and stripping only the first posts
  * the second — the bare machine marker the mode exists to remove. The
  * classification delegates to `severityOf` so "marked" keeps its ONE
- * statement.
- *
- * A body that is nothing but markers is returned unchanged: at `submit`'s
- * call site the consistency gate refuses exactly that shape before this
- * ever runs, and posting the bare marker is worse than handing the draft
- * defect back to the re-compose loop as a structured refusal. Note the
- * gate lives at that call site — `compose-review`'s body-Critical quoting
- * has no equivalent, and a marker-only entry there posts as a bare marker
- * line (the same degenerate shape attribution-on posts via `withMarker`).
+ * statement. A body that is nothing but markers strips to the empty string;
+ * `submit`'s consistency gate refuses exactly that shape before the post
+ * transform runs, so an empty result never reaches GitHub.
  */
 export function stripSeverityPrefix(body: string): string {
   let current = body;
@@ -88,7 +82,7 @@ export function stripSeverityPrefix(body: string): string {
       .trimStart()
       .slice(prefix.length)
       .replace(/^:?\s*/, '');
-    if (rest === '') return current;
+    if (rest === '') return '';
     current = rest;
   }
 }

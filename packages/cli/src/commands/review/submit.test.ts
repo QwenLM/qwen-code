@@ -744,6 +744,46 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a marker-only comment under attribution ON too — the canonical footer must not mask it', () => {
+    // normalize appends the footer before inconsistencies runs, so the gate
+    // sees '**[Critical]**\n\n_— <footer>_' here: only the footer-stripping
+    // half of the predicate catches it.
+    const review = file('marker-only-on.json', {
+      ...REVIEW,
+      comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
+    });
+
+    expect(() => runSubmit(authorized({ review }), '0.21.3')).toThrow(
+      /nothing but its severity marker/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('attribution off strips a marker line the draft quoted from the reviewed code', () => {
+    // The marker shape is public; a finding legitimately quoting it must not
+    // leave a second, planted marker next to the canonical one.
+    const review = file('planted-marker.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** the sample posts <!-- qwen-review suggestion --> verbatim\n\n<!-- qwen-review suggestion -->\n\nthat is what the guard dereferences',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    // The bare quoted marker LINE is stripped; only the canonical trailing
+    // marker remains at line level…
+    expect(inline).not.toContain('\n<!-- qwen-review suggestion -->\n');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+    // …while the inline prose mention is text, not a bare marker — kept.
+    expect(inline).toContain('posts <!-- qwen-review suggestion --> verbatim');
+  });
+
   it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
     const review = file('no-attribution-critical.json', {
       ...REVIEW,
