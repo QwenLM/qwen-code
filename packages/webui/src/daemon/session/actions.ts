@@ -24,6 +24,8 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  DaemonBranchSessionResult,
+  DaemonBranchedSession,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -1759,11 +1761,18 @@ export function createDaemonSessionActions({
       const loadGeneration = pendingSessionLoadIdRef.current;
       try {
         setSourceBoundOperationInFlight(true);
-        const branchRequest = session.client.branchSession(
-          sourceSessionId,
-          { name, atRecordId },
-          session.clientId,
-        );
+        const branchRequest: Promise<DaemonBranchSessionResult> =
+          atRecordId === undefined
+            ? session.client.branchSession(
+                sourceSessionId,
+                { name },
+                session.clientId,
+              )
+            : session.client.branchSession(
+                sourceSessionId,
+                { name, atRecordId },
+                session.clientId,
+              );
         void branchRequest.then(
           () => setSourceBoundOperationInFlight(false),
           () => setSourceBoundOperationInFlight(false),
@@ -1772,9 +1781,21 @@ export function createDaemonSessionActions({
         const switchStarted =
           isCurrentLogicalSession(session) &&
           pendingSessionLoadIdRef.current === loadGeneration;
+        const restored =
+          atRecordId === undefined
+            ? (result as DaemonBranchedSession)
+            : undefined;
         if (switchStarted) {
+          if (restored?.clientId) {
+            persistStableClientId(restored.clientId, restored.sessionId);
+          }
           void startSessionSwitch(result.sessionId, 'load').catch(
             (switchError: unknown) => {
+              if (restored?.clientId) {
+                void session.client
+                  .detachSession(restored.sessionId, restored.clientId)
+                  .catch(() => undefined);
+              }
               if (isAbortError(switchError)) return;
               dispatchActionError(
                 addNotice,
@@ -1784,6 +1805,10 @@ export function createDaemonSessionActions({
               );
             },
           );
+        } else if (restored?.clientId) {
+          void session.client
+            .detachSession(restored.sessionId, restored.clientId)
+            .catch(() => undefined);
         }
         return {
           sessionId: result.sessionId,

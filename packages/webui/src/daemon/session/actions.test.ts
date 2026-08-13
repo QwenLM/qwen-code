@@ -241,7 +241,10 @@ describe('createDaemonSessionActions', () => {
     await Promise.resolve();
     expect(sessionRef.current).toBeUndefined();
     expect(beginCrossSessionTransition).not.toHaveBeenCalled();
-    expect(source.client.detachSession).not.toHaveBeenCalled();
+    expect(source.client.detachSession).toHaveBeenCalledWith(
+      'session-b',
+      'client-b',
+    );
   });
 
   it('creates from the active session client when the connection matches', async () => {

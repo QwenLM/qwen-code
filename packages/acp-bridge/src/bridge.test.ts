@@ -10891,7 +10891,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('dispatches branchSession on the source channel without restoring it', async () => {
+    it('dispatches a historical branch on the source channel without restoring it', async () => {
       // Overlap construction: channel A hosts two sessions; killing the
       // first one fails at the agent close, so the bridge marks A dying
       // and starts a kill that never completes (factory override). The
@@ -10943,6 +10943,7 @@ describe('createAcpSessionBridge', () => {
 
       const branch = await bridge.branchSession(second.sessionId, {
         name: 'Overlap branch',
+        atRecordId: '11111111-1111-4111-8111-111111111111',
       });
       expect(branch.sessionId).toBe('branch-overlap');
 
@@ -10978,6 +10979,7 @@ describe('createAcpSessionBridge', () => {
 
       const branch = await bridge.branchSession(session.sessionId, {
         name: 'Branch 1',
+        atRecordId: '11111111-1111-4111-8111-111111111111',
       });
 
       expect(branch).toEqual({
@@ -10990,6 +10992,50 @@ describe('createAcpSessionBridge', () => {
       });
       expect(handle.agent.loadSessionCalls).toEqual([]);
 
+      await bridge.shutdown();
+    });
+
+    it('restores a latest-state branch for v1 callers', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionBranch) return {};
+          return { newSessionId: 'branch-live', title: 'Live branch' };
+        },
+        loadSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const source = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = await bridge.branchSession(source.sessionId, {
+        name: 'Live branch',
+      });
+
+      expect(branch).toMatchObject({
+        sessionId: 'branch-live',
+        displayName: 'Live branch',
+        workspaceCwd: WS_A,
+        attached: false,
+        clientId: expect.any(String),
+      });
+      expect(handle.agent.loadSessionCalls).toContainEqual(
+        expect.objectContaining({ sessionId: 'branch-live' }),
+      );
+      if (!('clientId' in branch)) {
+        throw new Error('latest-state branch was not restored');
+      }
+      await expect(
+        bridge.sendPrompt(
+          branch.sessionId,
+          {
+            sessionId: branch.sessionId,
+            prompt: [{ type: 'text', text: 'continue' }],
+          },
+          undefined,
+          { clientId: branch.clientId },
+        ),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
       await bridge.shutdown();
     });
 
@@ -19705,6 +19751,7 @@ describe('createAcpSessionBridge', () => {
 
       const branch = await bridge.branchSession(session.sessionId, {
         name: 'Branch 1',
+        atRecordId: '11111111-1111-4111-8111-111111111111',
       });
 
       expect(branch).toMatchObject({ sessionId: 'branch-1' });
@@ -19740,6 +19787,7 @@ describe('createAcpSessionBridge', () => {
       await expect(
         bridge.branchSession(session.sessionId, {
           name: 'Branch 1',
+          atRecordId: '11111111-1111-4111-8111-111111111111',
         }),
       ).rejects.toThrow();
 

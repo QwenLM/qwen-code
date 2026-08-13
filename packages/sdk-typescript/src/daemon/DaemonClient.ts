@@ -37,7 +37,11 @@ import type {
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   BranchSessionRequest,
+  DaemonBranchSessionRequest,
+  DaemonBranchSessionResult,
   DaemonBranchedSession,
+  HistoricalBranchSessionRequest,
+  DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
   DaemonRestoredSession,
@@ -2754,9 +2758,24 @@ export class DaemonClient {
 
   async branchSession(
     sessionId: string,
-    req: BranchSessionRequest = {},
+    req: HistoricalBranchSessionRequest,
     clientId?: string,
-  ): Promise<DaemonBranchedSession> {
+  ): Promise<DaemonPersistedBranchedSession>;
+  async branchSession(
+    sessionId: string,
+    req?: BranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchedSession>;
+  async branchSession(
+    sessionId: string,
+    req: DaemonBranchSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonBranchSessionResult>;
+  async branchSession(
+    sessionId: string,
+    req: DaemonBranchSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonBranchSessionResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/branch`,
       {
@@ -2764,14 +2783,14 @@ export class DaemonClient {
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           name: req.name,
-          atRecordId: req.atRecordId,
+          ...('atRecordId' in req ? { atRecordId: req.atRecordId } : {}),
         }),
       },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(res, 'POST /session/:id/branch');
         }
-        return (await res.json()) as DaemonBranchedSession;
+        return (await res.json()) as DaemonBranchSessionResult;
       },
       120_000,
     );

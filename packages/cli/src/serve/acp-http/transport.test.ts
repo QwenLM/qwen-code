@@ -181,6 +181,7 @@ class FakeBridge {
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
+  branchAttached = false;
   spawnSessionId = 'sess-1';
   honorRequestedSessionId = true;
   spawnAttached = false;
@@ -258,6 +259,10 @@ class FakeBridge {
     });
     return {
       sessionId: 'branch-1',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: this.branchAttached,
+      clientId: 'client-branch',
+      state: this.loadState,
       displayName: req.name ?? 'Branch',
       forkedFrom: { sessionId, displayName: sessionId },
     };
@@ -3558,7 +3563,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await sess.body?.cancel(); // release the long-lived SSE socket
   });
 
-  it('session/fork explicitly loads and owns the persisted branch', async () => {
+  it('session/fork owns the restored v1 branch', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 2);
@@ -3585,11 +3590,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         clientId: 'client-1',
       },
     ]);
-    expect(bridge.loadRequests).toContainEqual({
-      sessionId: 'branch-1',
-      workspaceCwd: TEST_WORKSPACE,
-      clientId: 'client-1',
-    });
+    expect(bridge.loadRequests).toEqual([]);
     const sessionStream = await openStream(connId, 'branch-1');
     expect(sessionStream.status).toBe(200);
     await post(connId, {
@@ -3600,84 +3601,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await vi.waitFor(() =>
       expect(bridge.lastSetModelContext).toMatchObject({
-        clientId: 'client-load',
+        clientId: 'client-branch',
       }),
     );
     await sessionStream.body?.cancel();
-  });
-
-  it('leaves a persisted fork untouched when the connection closes before load', async () => {
-    let releaseBranch!: () => void;
-    const branchGate = new Promise<void>((resolve) => {
-      releaseBranch = resolve;
-    });
-    const originalBranch = bridge.branchSession.bind(bridge);
-    vi.spyOn(bridge, 'branchSession').mockImplementation(async (...args) => {
-      const result = await originalBranch(...args);
-      await branchGate;
-      return result;
-    });
-    const connId = await initialize();
-    await newSession(connId);
-    await post(connId, {
-      jsonrpc: '2.0',
-      id: 23,
-      method: 'session/fork',
-      params: { sessionId: 'sess-1', name: 'Forked' },
-    });
-    await vi.waitFor(() => expect(bridge.branchRequests).toHaveLength(1));
-
-    await fetch(`${base}/acp`, {
-      method: 'DELETE',
-      headers: { 'acp-connection-id': connId },
-    });
-    releaseBranch();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(bridge.loadRequests).not.toContainEqual(
-      expect.objectContaining({ sessionId: 'branch-1' }),
-    );
-    expect(bridge.killed).not.toContain('branch-1');
-    expect(bridge.detached).not.toContainEqual(
-      expect.objectContaining({ sessionId: 'branch-1' }),
-    );
   });
 
   it.each([
     { attached: true, cleanup: 'detach' },
     { attached: false, cleanup: 'kill' },
   ] as const)(
-    '$cleanup a loaded fork when the connection closes during load',
+    '$cleanup a restored fork when the connection closes before the reply',
     async ({ attached, cleanup }) => {
-      let releaseLoad!: () => void;
-      bridge.loadAttached = attached;
+      let releaseBranch!: () => void;
+      const branchGate = new Promise<void>((resolve) => {
+        releaseBranch = resolve;
+      });
+      bridge.branchAttached = attached;
+      const originalBranch = bridge.branchSession.bind(bridge);
+      vi.spyOn(bridge, 'branchSession').mockImplementation(async (...args) => {
+        const result = await originalBranch(...args);
+        await branchGate;
+        return result;
+      });
       const connId = await initialize();
       await newSession(connId);
-      bridge.gate = new Promise<void>((resolve) => {
-        releaseLoad = resolve;
-      });
       await post(connId, {
         jsonrpc: '2.0',
         id: 24,
         method: 'session/fork',
         params: { sessionId: 'sess-1', name: 'Forked' },
       });
-      await vi.waitFor(() =>
-        expect(bridge.loadRequests).toContainEqual(
-          expect.objectContaining({ sessionId: 'branch-1' }),
-        ),
-      );
+      await vi.waitFor(() => expect(bridge.branchRequests).toHaveLength(1));
 
       await fetch(`${base}/acp`, {
         method: 'DELETE',
         headers: { 'acp-connection-id': connId },
       });
-      releaseLoad();
+      releaseBranch();
 
       if (cleanup === 'detach') {
         await vi.waitFor(() =>
           expect(bridge.detached).toContainEqual({
             sessionId: 'branch-1',
-            clientId: 'client-load',
+            clientId: 'client-branch',
           }),
         );
         expect(bridge.killed).not.toContain('branch-1');

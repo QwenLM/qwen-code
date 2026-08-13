@@ -49,12 +49,12 @@ parsing are sufficient for the current product contract.
 
 The implementation applies that boundary in four places:
 
-| Concern                           | Minimum sufficient mechanism                                                                                                | Why additional machinery is not needed                                                                                                                                                                                                                                      |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Branch publication                | Hidden operation-specific staging, publish backups first, and publish the complete transcript last                          | A random server-generated session ID and transcript-last visibility already prevent a partial session from appearing. Claims, manifests, owner markers, and a branch-only garbage collector would add a second lifecycle without improving the visible atomicity guarantee. |
-| Turn completion validation        | Initialize active-chain state once on restore, capture an in-memory cursor, and scan only records appended during the turn  | The recorder already owns append ordering through its coordinator and topology fence. Reloading and reconstructing the complete JSONL file after every `end_turn` repeats authoritative work and makes a long session cumulatively O(T²).                                   |
-| Request completion and navigation | Persist the branch, return its identity, load it separately, use a 120-second SDK bound, and reject stale navigation intent | The REST/WebUI flow does not require a live restored session before it can acknowledge creation. A durable operation ledger, query API, cancellation protocol, and exactly-once delivery are not current requirements.                                                      |
-| Checkpoint correlation            | Persist the checkpoint UUID, turn boundary, and Assistant UUID                                                              | These fields fully authenticate the branch point. `promptId` had no checkpoint consumer, so retaining it would be speculative schema growth.                                                                                                                                |
+| Concern                           | Minimum sufficient mechanism                                                                                                         | Why additional machinery is not needed                                                                                                                                                                                                                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Branch publication                | Hidden operation-specific staging, publish backups first, and publish the complete transcript last                                   | A random server-generated session ID and transcript-last visibility already prevent a partial session from appearing. Claims, manifests, owner markers, and a branch-only garbage collector would add a second lifecycle without improving the visible atomicity guarantee.                            |
+| Turn completion validation        | Initialize active-chain state once on restore, capture an in-memory cursor, and scan only records appended during the turn           | The recorder already owns append ordering through its coordinator and topology fence. Reloading and reconstructing the complete JSONL file after every `end_turn` repeats authoritative work and makes a long session cumulatively O(T²).                                                              |
+| Request completion and navigation | Persist a historical branch, return its identity, load it separately, use a 120-second SDK bound, and reject stale navigation intent | Historical branching does not require a live restored session before it can acknowledge creation. The existing no-anchor v1 API still restores the new session before returning. A durable operation ledger, query API, cancellation protocol, and exactly-once delivery are not current requirements. |
+| Checkpoint correlation            | Persist the checkpoint UUID, turn boundary, and Assistant UUID                                                                       | These fields fully authenticate the branch point. `promptId` had no checkpoint consumer, so retaining it would be speculative schema growth.                                                                                                                                                           |
 
 The accepted trade-off is that a process crash before transcript publication
 may leave a hidden temporary file or orphan backup directory, and a client may
@@ -485,21 +485,24 @@ Content-Type: application/json
 The TypeScript SDK surface becomes conceptually:
 
 ```ts
-branchSession(name?: string, atRecordId?: string): Promise<BranchResult>;
+branchSession(name?: string): Promise<RestoredBranchResult>;
+branchSession(name: string | undefined, atRecordId: string): Promise<PersistedBranchResult>;
 ```
 
-`BranchResult` contains only `sessionId`, `displayName`, and `forkedFrom`.
-Branch creation does not restore or attach the new session in the daemon. This
-keeps persistence separate from live-session admission; side-task creation,
-which requires an immediately usable live session, retains its explicit
-restore/attach path.
-The ACP-standard `session/fork` adapter also performs an explicit load after
-the persisted branch is created because that protocol promises an immediately
-owned live session; this composition does not change the daemon REST result.
+`PersistedBranchResult` contains only `sessionId`, `displayName`, and
+`forkedFrom`. Historical branch creation does not restore or attach the new
+session in the daemon. This keeps historical persistence separate from
+live-session admission; side-task creation and the existing no-anchor v1
+branch operation, which promise an immediately usable live session, retain
+their restore/attach paths.
+The ACP-standard `session/fork` adapter uses the no-anchor v1 operation because
+that protocol also promises an immediately owned live session.
 
-If `atRecordId` is omitted, the endpoint retains the current latest-state
-branch behavior. If it is present, Core requires it to be a checkpoint in the
-source session's current active branch catalog.
+If `atRecordId` is omitted, the endpoint retains the v1 latest-state contract:
+it restores or attaches the new session and returns the complete restored
+session response, including its client attachment. If it is present, Core
+requires it to be a checkpoint in the source session's current active branch
+catalog and returns the persisted branch identity for an explicit later load.
 
 An invalid, inactive, malformed, or stale checkpoint returns:
 
@@ -897,10 +900,11 @@ mutation is sent.
 
 ## 19. Compatibility and Rollout
 
-The request field, response metadata, transcript block metadata, and event
-metadata are optional, preserving compatibility with older clients and
-servers. A newer UI simply does not render historical Branch actions until it
-receives a validated anchor.
+The request field, transcript block metadata, and event metadata are optional.
+Calls that omit `atRecordId` retain the existing v1 restored-session response;
+the persisted-only response applies only to the new historical overload. A
+newer UI simply does not render historical Branch actions until it receives a
+validated anchor.
 
 Roll out in dependency order:
 

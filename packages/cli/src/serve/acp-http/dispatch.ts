@@ -48,6 +48,7 @@ import {
 } from '../auth/device-flow.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
+  type BridgeBranchedSession,
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
@@ -2142,7 +2143,7 @@ export class AcpDispatcher {
           }
           await this.withMutableOwned(conn, sessionId, id, async () => {
             const ctx = this.sessionCtx(conn, sessionId, loopback);
-            const result = await this.bridge.branchSession(
+            const result = (await this.bridge.branchSession(
               sessionId,
               {
                 name:
@@ -2151,30 +2152,22 @@ export class AcpDispatcher {
                     : undefined,
               },
               ctx,
-            );
+            )) as BridgeBranchedSession;
             if (conn.destroyed) {
-              return;
-            }
-            const restored = await this.bridge.loadSession({
-              sessionId: result.sessionId,
-              workspaceCwd: this.boundWorkspace,
-              clientId: ctx.clientId,
-            });
-            if (conn.destroyed) {
-              const cleanup = restored.attached
-                ? this.bridge.detachClient(result.sessionId, restored.clientId)
+              const cleanup = result.attached
+                ? this.bridge.detachClient(result.sessionId, result.clientId)
                 : this.bridge.killSession(result.sessionId, {
                     requireZeroAttaches: true,
                   });
               void cleanup.catch((err) =>
                 writeStderrLine(
-                  `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(result.sessionId)}) fork-race: ${logSafe(errMsg(err))}`,
+                  `qwen serve: /acp orphan ${result.attached ? 'detach' : 'kill'}(${logSafe(result.sessionId)}) fork-race: ${logSafe(errMsg(err))}`,
                 ),
               );
               return;
             }
             conn.getOrCreateSession(result.sessionId).clientId =
-              restored.clientId;
+              result.clientId;
             conn.ownSession(result.sessionId);
             const configOptions = await this.configOptionsFor(result.sessionId);
             const models = this.extractModelState(configOptions);

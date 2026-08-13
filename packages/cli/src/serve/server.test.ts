@@ -17149,6 +17149,10 @@ describe('createServeApp', () => {
         generationGuard.close();
         return {
           sessionId: staleBranchId,
+          workspaceCwd: WS_BOUND,
+          attached: false,
+          clientId: 'branch-client',
+          state: {},
           displayName: 'Stale branch',
           forkedFrom: { sessionId, displayName: 'Source' },
         };
@@ -17179,6 +17183,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(201);
         expect(res.body.sessionId).toBe(staleBranchId);
+        expect(res.body.clientId).toBe('branch-client');
         expect(killSpy).not.toHaveBeenCalled();
         expect(removeSpy).not.toHaveBeenCalled();
       } finally {

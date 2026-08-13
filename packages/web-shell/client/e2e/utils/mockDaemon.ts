@@ -6,7 +6,7 @@ import {
   type DaemonChannelsSnapshot,
   type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
-  type DaemonBranchedSession,
+  type DaemonPersistedBranchedSession,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
@@ -1307,7 +1307,7 @@ async function handleDaemonRoute(
         return;
       }
       const branch = scenario.branch;
-      const response: DaemonBranchedSession = {
+      const response: DaemonPersistedBranchedSession = {
         sessionId: branch.sessionId,
         displayName: branch.displayName,
         forkedFrom: {

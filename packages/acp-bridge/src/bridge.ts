@@ -8064,6 +8064,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new InvalidSessionMetadataError('sourceType', source.error);
       }
       const isSideTask = source.sourceType === 'side_task';
+      const restoreBranch = isSideTask || req.atRecordId === undefined;
 
       if (context?.clientId !== undefined) {
         resolveTrustedClientId(entry, context.clientId);
@@ -8086,7 +8087,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
         assertFreshSessionsAvailable();
         let admission: ReturnType<typeof reserveFreshSession> | undefined;
-        if (isSideTask) {
+        if (restoreBranch) {
           if (
             byId.size + inFlightSpawns.size + inFlightRestores.size >=
             maxSessions
@@ -8168,7 +8169,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? rawBranchName
               : result.newSessionId.slice(0, 8);
 
-          if (!isSideTask) {
+          if (!restoreBranch) {
             return {
               sessionId: result.newSessionId,
               displayName: branchDisplayName,
