@@ -52,8 +52,8 @@ const expectedManifest = {
       paths: ['packages/core/src/skills/**'],
       // Keep every bundled skill entrypoint, but deliberately leave nested
       // implementations, tests, references, and scripts to the changed-file
-      // diff. Including bundled/*/** makes the all-rule union 129 files and
-      // violates the 128-item repository-context wire contract.
+      // diff. Keeping the whole subtree is unnecessary automatic context and
+      // leaves less room under the 128-item repository-context wire contract.
       relatedPaths: [
         'packages/core/src/skills/*.ts',
         'packages/core/src/skills/bundled/*/SKILL.md',
@@ -299,14 +299,13 @@ describe('committed review context manifest', () => {
     const context = provideForRepo(probes);
     expect(context).not.toBeNull();
 
-    // The reviewed tree resolved 115/128 files, leaving 13 slots. Do not pin
+    // The reviewed tree resolved 93/128 files, leaving 35 slots. Do not pin
     // that exact count: the real provider intentionally scans the working tree,
     // so harmless untracked files and normal source growth can change it. The
     // synthetic, nonexistent changed paths above prevent changed-file exclusion
     // from understating the union. The manifest grammar has no negation globs,
-    // and hooks/** is the fastest-growing remaining group, so this bound is the
-    // deliberate alarm for future rebalancing rather than permission to
-    // truncate the result.
+    // so this bound is the deliberate alarm for future rebalancing rather than
+    // permission to truncate the result.
     expect(context?.relatedPaths.length).toBeLessThanOrEqual(MAX_ARRAY_ITEMS);
   });
 
