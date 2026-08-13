@@ -475,6 +475,11 @@ then load; it never retries create automatically.
 ### Load, resume, prompt, and repair
 
 Load and resume first validate source ownership, root, and deterministic child.
+Before shared load admission or any missing-child recreation, they check for a
+pending deletion journal. If one exists, the daemon runs bounded reconciliation
+under the exclusive lifecycle coordinator; it never recreates the normal child
+while the journal remains. A non-terminal or compromised recovery returns its
+structured deletion error instead of loading the session.
 If the child is absent, the daemon recreates it at the same path, relocates the
 session, and returns `workingDirectory.state: "recreated"` with a warning that
 deleted files were not recovered. This recreation holds the lifecycle
@@ -542,10 +547,13 @@ owner record in an owner-only user-global namespace independent of
 `QWEN_RUNTIME_DIR` and project runtime bases. Each atomically written record has
 a bounded schema containing the session ID, expected directory hash,
 transaction phase, validated Conversations-root canonical/device/inode
-identity, and the staged child's canonical/device/inode identity after rename.
-Recovery must match both recorded identities before destructive file cleanup;
-an identity mismatch or an unprovable identity fails closed and leaves files
-untouched.
+identity, the exact normal and staged canonical paths, and the validated
+child's device/inode identity captured before rename when a child exists. The
+atomic rename preserves that identity, so either path can be matched after a
+crash between rename and the staged-phase journal write. Recovery must match
+the recorded root and applicable child identity before destructive file
+cleanup; an identity mismatch or an unprovable identity fails closed and leaves
+files untouched.
 
 If both normal and staged children are absent, record that state, delete the
 transcript, and clear the journal. Missing files do not block transcript
@@ -557,13 +565,17 @@ mutation.
    owner entry.
 2. Revalidate owner, root, source, transcript, normal child, and absence of
    conflicting staged state.
-3. Persist a prepared deletion record.
+3. Persist a prepared deletion record, including the validated normal child's
+   identity and exact normal/staged paths when the child exists.
 4. If the normal child exists, atomically rename it to the exact `.deleting`
-   sibling and persist the staged phase.
+   sibling and atomically advance the journal to the staged phase. Transcript
+   deletion cannot start until that phase is durable. If the phase update
+   fails, restore the child before clearing the journal; interruption leaves a
+   prepared record whose pre-rename child identity safely drives recovery.
 5. Delete the active or archived transcript and its sidecars.
 6. If deletion reports an error, re-read the transcript and all sidecar state
    under the writer lease. Only a fully intact set permits restoring the normal
-   child and clearing the journal, followed by retryable
+   child first and clearing the journal last, followed by retryable
    `500 transcript_deletion_failed` with the session intact. A fully absent set
    commits transcript deletion and continues to step 7. Partial or unknown
    state retains the journal and staged child and returns
@@ -584,10 +596,13 @@ Recovery considers active and archived transcripts and every Conversations
 source before destructive cleanup:
 
 - Transcript and sidecars are fully intact, journal valid, staged exists, normal
-  absent, and recorded identities match: restore staged to normal and clear the
-  journal.
-- Transcript and sidecars are fully intact, normal exists, staged absent: clear
-  a prepared journal without touching the directory.
+  absent, and the recorded root/child identities match: restore staged to normal
+  first and clear the journal last, regardless of whether the durable phase is
+  prepared or staged.
+- Transcript and sidecars are fully intact, journal valid, normal exists, staged
+  absent, and the recorded root/child identities match: clear the journal
+  without touching the directory, regardless of whether its durable phase is
+  prepared or staged.
 - Transcript and sidecars are fully intact, journal valid, and both directories
   absent: finish transcript deletion and clear the journal. An intact deletion
   failure retains the journal and reports `transcript_deletion_failed` for a
@@ -600,9 +615,11 @@ source before destructive cleanup:
   directory untouched until bounded reconciliation proves a terminal state.
 - Transcript and sidecars are fully absent, both directories are absent, and
   the journal's recorded root identity matches: clear the completed journal.
-- Both normal and staged exist, the journal is invalid or missing, the hash does
-  not match, or any path fails validation: report
+- Both normal and staged exist, regardless of journal phase or validity: report
   `deletion_recovery_compromised` and leave every file untouched.
+- The journal is invalid or missing for staged state, the hash does not match,
+  any path fails validation, or any other state combination is not enumerated
+  above: report `deletion_recovery_compromised` and leave every file untouched.
 
 A staged-looking directory without a valid recovery record is never proof that
 deletion was authorized.
@@ -764,7 +781,9 @@ Suggested title: `feat(cli): Add standalone daemon session APIs`
 
 Verification covers the complete REST lifecycle, cold and archived operations,
 batch schemas, fault injection at every deletion boundary, concurrent prompts
-and maintenance, restart reconciliation, embedded-app capability absence,
+and maintenance, restart reconciliation, load while a deletion journal is
+pending, crashes between child rename and phase persistence, crashes between
+rollback restore and journal clear, embedded-app capability absence,
 multi-daemon ownership, and macOS/Linux/Windows path behavior.
 
 Estimated size: 500-850 production lines and 950-1,600 test lines.
