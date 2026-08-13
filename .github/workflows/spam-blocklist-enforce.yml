@@ -217,10 +217,15 @@ jobs:
               // The comment may have arrived on a thread the spammer also
               // opened — e.g. they bump their own spam issue. Handle the
               // thread here so the sweep is not the only path that closes it.
-              // `locked`, not `state`, is the skip condition: a closed thread
-              // whose lock failed on an earlier run still needs the lock.
+              // Skip only the finished state: a closed thread whose lock
+              // failed still needs the lock, and a locked thread whose close
+              // failed still needs the close.
               const issue = payload.issue;
-              if (issue && !issue.locked && isBlocked(issue.user?.login)) {
+              if (
+                issue &&
+                !(issue.state === 'closed' && issue.locked) &&
+                isBlocked(issue.user?.login)
+              ) {
                 await closeThread(issue.number, Boolean(issue.pull_request), issue.state);
               }
             } else if (eventName === 'pull_request_review_comment') {
@@ -238,7 +243,11 @@ jobs:
               // review on a blocklisted author's PR still closes the PR,
               // instead of leaving it to the sweep.
               const pull = payload.pull_request;
-              if (pull && !pull.locked && isBlocked(pull.user?.login)) {
+              if (
+                pull &&
+                !(pull.state === 'closed' && pull.locked) &&
+                isBlocked(pull.user?.login)
+              ) {
                 await closeThread(pull.number, true, pull.state);
               }
             } else if (eventName === 'pull_request_review') {
@@ -257,7 +266,11 @@ jobs:
                 );
               }
               const pull = payload.pull_request;
-              if (pull && !pull.locked && isBlocked(pull.user?.login)) {
+              if (
+                pull &&
+                !(pull.state === 'closed' && pull.locked) &&
+                isBlocked(pull.user?.login)
+              ) {
                 await closeThread(pull.number, true, pull.state);
               }
             } else if (eventName === 'pull_request_target') {
@@ -415,8 +428,12 @@ jobs:
             // listForRepo returns issues AND pull requests. `state: 'all'`
             // matters: a thread a previous run closed but failed to lock is
             // exactly what this backstop must repair, and `state: 'open'`
-            // would filter it out. Skip on `locked` instead, and close only
-            // what is still open.
+            // would filter it out. `locked` is not a skip condition either:
+            // the mirror leftover — a close that failed before the lock
+            // landed — is open AND locked, and only the close half repairs
+            // it (a blocklisted author can also reach that state alone by
+            // reopening their own locked thread). `locked` therefore guards
+            // only the lock call; everything still open gets closed.
             const threads =
               (await run('list threads', () =>
                 github.paginate(github.rest.issues.listForRepo, {
@@ -431,7 +448,6 @@ jobs:
               )) ?? [];
             for (const thread of threads) {
               if (!isBlocked(thread.user?.login)) continue;
-              if (thread.locked) continue;
               const isPullRequest = Boolean(thread.pull_request);
               const kind = isPullRequest ? 'pull request' : 'issue';
               if (thread.state === 'open') {
@@ -452,14 +468,16 @@ jobs:
                       }),
                 );
               }
-              await run(`lock ${kind} #${thread.number}`, () =>
-                github.rest.issues.lock({
-                  owner,
-                  repo,
-                  issue_number: thread.number,
-                  lock_reason: 'spam',
-                }),
-              );
+              if (!thread.locked) {
+                await run(`lock ${kind} #${thread.number}`, () =>
+                  github.rest.issues.lock({
+                    owner,
+                    repo,
+                    issue_number: thread.number,
+                    lock_reason: 'spam',
+                  }),
+                );
+              }
             }
 
             await core.summary

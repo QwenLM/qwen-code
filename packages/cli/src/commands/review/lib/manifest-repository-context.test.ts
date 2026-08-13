@@ -566,10 +566,10 @@ describe('manifest repository context provider', () => {
   });
 
   it('deduplicates related patterns before applying the merge bound', () => {
-    // 86 rules each contribute the same three patterns: 258 pre-dedup
+    // 128 rules each contribute the same three patterns: 384 pre-dedup
     // (OVER the cap) and 3 post-dedup (under it). A cap-before-dedup
     // regression throws here; under it, two matching rules sharing one
-    // 100-pattern list would reject a legal, human-authored manifest.
+    // 200-pattern list would reject a legal, human-authored manifest.
     const worktree = temp();
     for (let index = 0; index < 5; index++) {
       write(join(worktree, 'src', `${index}.ts`));
@@ -580,7 +580,9 @@ describe('manifest repository context provider', () => {
     for (let index = 0; index < 2; index++) {
       write(join(worktree, 'misc', `${index}.ts`));
     }
-    const rules = Array.from({ length: 86 }, () => ({
+    // 128 === MAX_RULES: parsing at exactly the bound doubles as the
+    // accept-side pin for the provider's `>` check.
+    const rules = Array.from({ length: 128 }, () => ({
       paths: ['src/**'],
       relatedPaths: ['src/**', 'docs/**', 'misc/**'],
     }));

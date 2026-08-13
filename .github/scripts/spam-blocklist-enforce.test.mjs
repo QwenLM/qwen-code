@@ -465,8 +465,10 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       'issues.update',
       'issues.lock',
     ]);
+    assert.equal(calls[1].params.issue_number, 42);
     assert.equal(calls[1].params.state, 'closed');
     assert.equal(calls[1].params.state_reason, 'not_planned');
+    assert.equal(calls[2].params.issue_number, 42);
     assert.equal(calls[2].params.lock_reason, 'spam');
   });
 
@@ -479,6 +481,8 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
     });
     assert.deepEqual(names(calls), ['issues.update', 'issues.lock']);
+    assert.equal(calls[0].params.issue_number, 42);
+    assert.equal(calls[1].params.issue_number, 42);
   });
 
   it('routes a blocklisted author bumping their own PR through pulls.update', async () => {
@@ -498,6 +502,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     ]);
     assert.equal(calls[1].params.pull_number, 77);
     assert.equal(calls[1].params.state, 'closed');
+    assert.equal(calls[2].params.issue_number, 77);
   });
 
   it('locks a closed thread whose lock failed before', async () => {
@@ -508,9 +513,10 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       issue: { number: 42, user: { login: 'spamuser' }, state: 'closed' },
     });
     assert.deepEqual(names(calls), ['issues.deleteComment', 'issues.lock']);
+    assert.equal(calls[1].params.issue_number, 42);
   });
 
-  it('leaves an already-locked thread alone', async () => {
+  it('leaves a closed and locked thread alone', async () => {
     const { calls } = await enforce('issue_comment', {
       comment: { id: 9, user: { login: 'spamuser' } },
       issue: {
@@ -521,6 +527,29 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       },
     });
     assert.deepEqual(names(calls), ['issues.deleteComment']);
+  });
+
+  it('closes a locked thread whose close failed before', async () => {
+    // The mirror half of the leftover repair: a thread an earlier run
+    // locked but failed to close — or one its author reopened after the
+    // lock — still gets the close instead of being skipped as locked.
+    const { calls } = await enforce('issue_comment', {
+      comment: { id: 9, user: { login: 'spamuser' } },
+      issue: {
+        number: 42,
+        user: { login: 'spamuser' },
+        state: 'open',
+        locked: true,
+      },
+    });
+    assert.deepEqual(names(calls), [
+      'issues.deleteComment',
+      'issues.update',
+      'issues.lock',
+    ]);
+    assert.equal(calls[1].params.issue_number, 42);
+    assert.equal(calls[1].params.state, 'closed');
+    assert.equal(calls[2].params.issue_number, 42);
   });
 
   it('deletes an inline review comment', async () => {
@@ -550,6 +579,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
     assert.equal(calls[0].params.pull_number, 60);
+    assert.equal(calls[1].params.issue_number, 60);
   });
 
   it('deletes the comment and closes the PR when both authors are blocklisted', async () => {
@@ -568,6 +598,8 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       'pulls.update',
       'issues.lock',
     ]);
+    assert.equal(calls[1].params.pull_number, 60);
+    assert.equal(calls[2].params.issue_number, 60);
   });
 
   it('minimizes a review body, which has no REST delete', async () => {
@@ -599,6 +631,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
     assert.equal(calls[0].params.pull_number, 61);
+    assert.equal(calls[1].params.issue_number, 61);
   });
 
   it('minimizes the review and closes the PR when both authors are blocklisted', async () => {
@@ -615,6 +648,8 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       'pulls.update',
       'issues.lock',
     ]);
+    assert.equal(calls[1].params.pull_number, 61);
+    assert.equal(calls[2].params.issue_number, 61);
   });
 
   it('ignores an issues event, which this workflow no longer subscribes to', async () => {
@@ -754,11 +789,14 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
           name === 'issues.update' ? new HttpError(403, 'Forbidden') : null,
       },
     );
-    assert.deepEqual(names(mutationsOf(calls)), [
+    const mutations = mutationsOf(calls);
+    assert.deepEqual(names(mutations), [
       'issues.deleteComment',
       'issues.update',
       'issues.lock',
     ]);
+    assert.equal(mutations[1].params.issue_number, 42);
+    assert.equal(mutations[2].params.issue_number, 42);
     assert.equal(core.logs.failed.length, 1);
     assert.match(core.logs.failed[0], /403/);
   });
@@ -822,6 +860,8 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
       pull_request: { number: 2, user: { login: 'spamuser' }, state: 'open' },
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
+    assert.equal(calls[0].params.pull_number, 2);
+    assert.equal(calls[1].params.issue_number, 2);
   });
 });
 
@@ -897,15 +937,19 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
       assert.equal(mutations[0].params.issue_number, 11);
       assert.equal(mutations[0].params.state, 'closed');
       assert.equal(mutations[0].params.state_reason, 'not_planned');
+      assert.equal(mutations[1].params.issue_number, 11);
       assert.equal(mutations[1].params.lock_reason, 'spam');
       assert.equal(mutations[2].params.pull_number, 12);
       assert.equal(mutations[2].params.state, 'closed');
+      assert.equal(mutations[3].params.issue_number, 12);
       assert.equal(mutations[3].params.lock_reason, 'spam');
     }));
 
-  it('skips locked threads and locks closed-but-unlocked ones', async () => {
-    // `locked`, not state, is the skip condition: a thread a previous run
-    // closed but failed to lock must get its lock on the next sweep.
+  it('locks closed-but-unlocked threads and closes locked-but-open ones', async () => {
+    // `locked` guards only the lock call, never the close: a thread a
+    // previous run closed but failed to lock must get its lock, and the
+    // mirror leftover — a close that failed before the lock landed — must
+    // still get its close on the next sweep.
     const { calls } = await sweep({
       threads: [
         {
@@ -916,6 +960,12 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
         },
         { number: 21, user: { login: 'spamuser' }, state: 'closed' },
         { number: 22, user: { login: 'spamuser' }, state: 'open' },
+        {
+          number: 23,
+          user: { login: 'spamuser' },
+          state: 'open',
+          locked: true,
+        },
       ],
     });
     const mutations = mutationsOf(calls);
@@ -923,10 +973,14 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
       'issues.lock',
       'issues.update',
       'issues.lock',
+      'issues.update',
     ]);
     assert.equal(mutations[0].params.issue_number, 21);
     assert.equal(mutations[1].params.issue_number, 22);
     assert.equal(mutations[1].params.state, 'closed');
+    assert.equal(mutations[2].params.issue_number, 22);
+    assert.equal(mutations[3].params.issue_number, 23);
+    assert.equal(mutations[3].params.state, 'closed');
   });
 
   it('scopes all three listings to the lookback window', async () => {
@@ -1073,8 +1127,15 @@ describe('spam-blocklist-enforce: blocklist file', () => {
       const start = script.indexOf(`const ${name} =`);
       // Slice to the blank line, not the first ';': once a helper gains a
       // multi-statement body, a ';' slice truncates the comparison and
-      // hides one-sided drift in any later statement.
-      return script.slice(start, script.indexOf('\n\n', start));
+      // hides one-sided drift in any later statement. `-1` (a helper that
+      // ends the script) must fall back to the end, not slice backwards.
+      const end = script.indexOf('\n\n', start);
+      const helper = script.slice(start, end === -1 ? undefined : end);
+      assert.ok(
+        helper.endsWith(';'),
+        `${name} helper looks truncated — the comparison would be one-sided`,
+      );
+      return helper;
     };
     assert.equal(
       helperOf(doc.jobs.enforce, 'parseBlocklist'),
