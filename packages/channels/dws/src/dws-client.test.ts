@@ -643,6 +643,118 @@ describe('DwsClient', () => {
     ]);
   });
 
+  it('lists pending executor todos across pages and parses creator identity', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockImplementation(async (_executable, args) => ({
+        stdout: json({
+          result: {
+            todoCards: [
+              {
+                taskId: args.includes('2') ? 'task-2' : 'task-1',
+                subject: args.includes('2') ? 'Second task' : 'First task',
+                creator: args.includes('2')
+                  ? 'bob'
+                  : { userId: 'alice', name: 'Alice' },
+                creatorName: args.includes('2') ? 'Bob' : undefined,
+              },
+            ],
+            hasMore: !args.includes('2'),
+          },
+          success: true,
+        }),
+        stderr: '',
+      }));
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:user' },
+      runner,
+    );
+
+    await expect(client.listTodoTasks()).resolves.toEqual([
+      expect.objectContaining({
+        taskId: 'task-1',
+        title: 'First task',
+        creatorId: 'alice',
+        creatorName: 'Alice',
+      }),
+      expect.objectContaining({
+        taskId: 'task-2',
+        title: 'Second task',
+        creatorId: 'bob',
+        creatorName: 'Bob',
+      }),
+    ]);
+    expect(runner.mock.calls.map((call) => call[1])).toEqual([
+      [
+        '--profile',
+        'corp:user',
+        'todo',
+        'task',
+        'list',
+        '--page',
+        '1',
+        '--size',
+        '20',
+        '--status',
+        'false',
+        '--role-types',
+        'executor',
+        '--format',
+        'json',
+      ],
+      expect.arrayContaining(['--page', '2']),
+    ]);
+  });
+
+  it('reads todo details and adds the final response as a comment', async () => {
+    const runner = vi
+      .fn<DwsCommandRunner>()
+      .mockResolvedValueOnce({
+        stdout: json({
+          result: {
+            todoDetailModel: {
+              taskId: 'task-1',
+              subject: 'Investigate the failure',
+              creatorId: 'alice',
+            },
+          },
+        }),
+        stderr: '',
+      })
+      .mockResolvedValueOnce({
+        stdout: json({ success: true }),
+        stderr: '',
+      });
+    const client = new DwsClient(
+      { executable: '/opt/dws', profile: 'corp:user' },
+      runner,
+    );
+
+    await expect(client.getTodoTask('task-1')).resolves.toMatchObject({
+      taskId: 'task-1',
+      title: 'Investigate the failure',
+      creatorId: 'alice',
+    });
+    await client.addTodoComment('task-1', 'Completed safely');
+
+    expect(runner.mock.calls[1]).toEqual([
+      '/opt/dws',
+      [
+        '--profile',
+        'corp:user',
+        'todo',
+        'comment',
+        'add',
+        '--task-id',
+        'task-1',
+        '--content',
+        'Completed safely',
+        '--format',
+        'json',
+      ],
+    ]);
+  });
+
   it('classifies a local executable spawn failure as not sent', async () => {
     const client = new DwsClient({
       executable: '/definitely-missing-qwen-dws',

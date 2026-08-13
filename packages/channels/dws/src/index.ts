@@ -17,6 +17,7 @@ export type {
   DwsImMessage,
   DwsImSource,
   DwsImTarget,
+  DwsTodoTask,
 } from './dws-client.js';
 export {
   DwsEventProcessError,
@@ -64,7 +65,7 @@ export const plugin: ChannelPlugin = {
         required: true,
         default: 'pairing',
         description:
-          'Controls which DingTalk users may start direct-message, document-notification, and non-paired group tasks',
+          'Controls which DingTalk users may start direct-message, document-notification, native-todo, and non-paired group tasks',
         options: [
           { value: 'pairing', label: 'Pairing' },
           { value: 'allowlist', label: 'Allowlist' },
@@ -76,6 +77,13 @@ export const plugin: ChannelPlugin = {
         label: 'Allowed Users',
         kind: 'string-list',
         description: 'DingTalk IDs used by Allowlist and Pairing policies',
+      },
+      {
+        key: 'watchTodos',
+        label: 'Watch Native Todos',
+        kind: 'boolean',
+        description:
+          'Poll pending todos assigned to this DWS account and run newly assigned or changed tasks',
       },
     ],
     validateConfig: (config) => {
@@ -93,6 +101,12 @@ export const plugin: ChannelPlugin = {
         config['approvalMode'] !== 'plan'
       ) {
         return 'DWS channels require approvalMode "default" or "plan".';
+      }
+      if (
+        config['watchTodos'] !== undefined &&
+        typeof config['watchTodos'] !== 'boolean'
+      ) {
+        return 'DWS watchTodos must be a boolean.';
       }
       return undefined;
     },

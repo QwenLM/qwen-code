@@ -21,6 +21,7 @@ import {
   type DwsImMessage,
   type DwsImSource,
   type DwsImTarget,
+  type DwsTodoTask,
 } from './dws-client.js';
 import {
   DwsEventProcessError,
@@ -102,6 +103,28 @@ function documentMentionCard(
   ].join('\n');
 }
 
+function todoTask(
+  taskId: string,
+  title: string,
+  overrides: Record<string, unknown> = {},
+): DwsTodoTask {
+  const data = {
+    taskId,
+    subject: title,
+    creatorId: 'alice',
+    creatorName: 'Alice',
+    priority: 20,
+    ...overrides,
+  };
+  return {
+    taskId,
+    title,
+    creatorId: 'alice',
+    creatorName: 'Alice',
+    data,
+  };
+}
+
 class FakeSubscription implements DwsEventSubscription {
   readonly stop = vi.fn(() => this.close());
   readonly closed: Promise<void>;
@@ -131,6 +154,7 @@ class FakeDwsClient implements DwsClientLike {
   };
   streams: FakeStream[] = [];
   directMessages: DwsImMessage[] = [];
+  todoTasks: DwsTodoTask[] = [];
   assertAuthenticated = vi.fn(async () => Promise.resolve(this.identity));
   sendImMessage = vi
     .fn<(target: DwsImTarget, content: string, key: string) => Promise<void>>()
@@ -156,6 +180,17 @@ class FakeDwsClient implements DwsClientLike {
     Promise.resolve('# Plan\nUse DWS.'),
   );
   replyToComment = vi.fn().mockResolvedValue(undefined);
+  listTodoTasks = vi.fn(async (_signal?: AbortSignal) =>
+    Promise.resolve(this.todoTasks),
+  );
+  getTodoTask = vi.fn(async (taskId: string, _signal?: AbortSignal) => {
+    const task = this.todoTasks.find(
+      (candidate) => candidate.taskId === taskId,
+    );
+    if (!task) throw new Error(`Missing fake todo ${taskId}.`);
+    return Promise.resolve(task);
+  });
+  addTodoComment = vi.fn().mockResolvedValue(undefined);
 
   async subscribeToIm(
     source: DwsImSource,
@@ -183,6 +218,10 @@ class TestableDwsChannel extends DwsChannel {
   responseThreadId?: string;
 
   protected override startPollLoop(): void {}
+
+  protected override get todoPollInterval(): number {
+    return 0;
+  }
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.inboundError) throw this.inboundError;
@@ -229,6 +268,10 @@ class TestableDwsChannel extends DwsChannel {
 
 class PolicyDwsChannel extends DwsChannel {
   protected override startPollLoop(): void {}
+
+  protected override get todoPollInterval(): number {
+    return 0;
+  }
 
   async poll(): Promise<void> {
     await this.pollOnce();
@@ -666,6 +709,151 @@ describe('DwsChannel', () => {
     );
 
     expect(channel.inbound).toHaveLength(1);
+  });
+
+  it('baselines existing native todos and processes newly assigned todos once', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+
+    await channel.poll();
+    expect(channel.inbound).toHaveLength(0);
+
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-new', 'Investigate the new failure'),
+    ];
+    await channel.poll();
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'todo:task-new',
+        threadId: 'task-new',
+        senderId: 'alice',
+        displayText: 'Investigate the new failure',
+        text: expect.stringContaining('Investigate the new failure'),
+        metadata: expect.stringContaining('DWS native todo ID: task-new'),
+      }),
+    ]);
+    await channel.respond('todo:task-new', 'Completed safely');
+    expect(client.addTodoComment).toHaveBeenCalledWith(
+      'task-new',
+      'Completed safely',
+    );
+
+    await channel.poll();
+    expect(channel.inbound).toHaveLength(1);
+  });
+
+  it('runs an accepted native todo and posts the final response as a comment', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+      'accepted-todos',
+    );
+    await channel.poll();
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-new', 'Investigate the new failure'),
+    ];
+
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(client.addTodoComment).toHaveBeenCalledWith('task-new', 'response');
+  });
+
+  it('reacts to actionable todo changes but ignores comment metadata', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-1', 'Review the change')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+
+    client.todoTasks = [
+      todoTask('task-1', 'Review the change', {
+        commentCount: 1,
+        modifiedTime: 1_786_592_400_000,
+        update_time: 1_786_592_400_000,
+      }),
+    ];
+    await channel.poll();
+    expect(channel.inbound).toHaveLength(0);
+
+    client.todoTasks = [
+      todoTask('task-1', 'Review the change', {
+        commentCount: 2,
+        modifiedTime: 1_786_592_430_000,
+        update_time: 1_786_592_430_000,
+        priority: 40,
+      }),
+    ];
+    await channel.poll();
+    await channel.poll();
+
+    expect(channel.inbound).toHaveLength(1);
+    expect(client.getTodoTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists native todo fingerprints across restarts', async () => {
+    const firstClient = new FakeDwsClient();
+    firstClient.todoTasks = [todoTask('task-1', 'Existing task')];
+    const first = await readyChannel(
+      firstClient,
+      makeConfig({ watchTodos: true }),
+      'persistent-todos',
+    );
+    await first.poll();
+    firstClient.todoTasks = [
+      ...firstClient.todoTasks,
+      todoTask('task-2', 'New task'),
+    ];
+    await first.poll();
+    expect(first.inbound).toHaveLength(1);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.todoTasks = firstClient.todoTasks;
+    const second = await readyChannel(
+      secondClient,
+      makeConfig({ watchTodos: true }),
+      'persistent-todos',
+    );
+    await second.poll();
+
+    expect(second.inbound).toHaveLength(0);
+  });
+
+  it('comments one pairing code while keeping the todo pending for approval', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ watchTodos: true, senderPolicy: 'pairing' }),
+      'paired-todos',
+    );
+    await channel.poll();
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-new', 'Pair before running'),
+    ];
+
+    await channel.poll();
+    await channel.poll();
+
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.addTodoComment).toHaveBeenCalledTimes(1);
+    expect(client.addTodoComment).toHaveBeenCalledWith(
+      'task-new',
+      expect.stringContaining('pairing code'),
+    );
   });
 
   it('shows a working eyes reaction on the notification while a document task runs', async () => {

@@ -16,6 +16,8 @@ const DWS_PROCESS_TIMEOUT_MS = 45_000;
 const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
 const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_MESSAGE_PAGES = 100;
+const MAX_TODO_PAGES = 50;
+const TODO_PAGE_SIZE = 20;
 export interface DwsIdentity {
   profile?: string;
 }
@@ -44,6 +46,14 @@ export interface DwsImMessage {
   senderId: string;
   senderName: string;
   eventTime?: number;
+}
+
+export interface DwsTodoTask {
+  taskId: string;
+  title: string;
+  creatorId?: string;
+  creatorName?: string;
+  data: Record<string, unknown>;
 }
 
 export interface DwsClientLike {
@@ -87,6 +97,9 @@ export interface DwsClientLike {
     commentKey: string,
     content: string,
   ): Promise<void>;
+  listTodoTasks(signal?: AbortSignal): Promise<DwsTodoTask[]>;
+  getTodoTask(taskId: string, signal?: AbortSignal): Promise<DwsTodoTask>;
+  addTodoComment(taskId: string, content: string): Promise<void>;
 }
 
 export interface DwsClientOptions {
@@ -338,6 +351,71 @@ function findMarkdown(value: unknown): string | undefined {
     if (found !== undefined) return found;
   }
   return undefined;
+}
+
+function findTodoCards(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (!isRecord(value)) return undefined;
+  if (Array.isArray(value['todoCards'])) return value['todoCards'];
+  for (const key of ['result', 'data', 'content']) {
+    const found = findTodoCards(value[key]);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function findTodoDetail(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  if (isRecord(value['todoDetailModel'])) return value['todoDetailModel'];
+  if (firstString(value, ['taskId', 'task_id'])) return value;
+  for (const key of ['result', 'data', 'content']) {
+    const found = findTodoDetail(value[key]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function parseTodoTask(
+  value: unknown,
+  fallbackTaskId?: string,
+): DwsTodoTask | undefined {
+  if (!isRecord(value)) return undefined;
+  const creator = nestedRecord(value, [
+    'creator',
+    'creatorInfo',
+    'creatorUser',
+  ]);
+  const taskId =
+    firstString(value, ['taskId', 'task_id', 'id']) ?? fallbackTaskId;
+  if (!taskId) return undefined;
+  return {
+    taskId,
+    title: firstString(value, ['subject', 'title', 'name']) ?? taskId,
+    creatorId:
+      firstString(value, [
+        'creatorId',
+        'creator_id',
+        'creator',
+        'creatorUserId',
+        'creatorUid',
+        'creatorStaffId',
+      ]) ??
+      (creator
+        ? firstString(creator, [
+            'userId',
+            'uid',
+            'staffId',
+            'openDingTalkId',
+            'id',
+          ])
+        : undefined),
+    creatorName:
+      firstString(value, ['creatorName', 'creator_name']) ??
+      (creator
+        ? firstString(creator, ['name', 'nick', 'displayName'])
+        : undefined),
+    data: value,
+  };
 }
 
 function unwrapEvent(value: unknown): Record<string, unknown> | undefined {
@@ -737,6 +815,76 @@ export class DwsClient implements DwsClientLike {
       documentId,
       '--comment-key',
       commentKey,
+      '--content',
+      content,
+    ]);
+  }
+
+  async listTodoTasks(signal?: AbortSignal): Promise<DwsTodoTask[]> {
+    const tasks = new Map<string, DwsTodoTask>();
+    for (let page = 1; page <= MAX_TODO_PAGES; page++) {
+      signal?.throwIfAborted();
+      const response = await this.run(
+        [
+          'todo',
+          'task',
+          'list',
+          '--page',
+          String(page),
+          '--size',
+          String(TODO_PAGE_SIZE),
+          '--status',
+          'false',
+          '--role-types',
+          'executor',
+        ],
+        signal,
+      );
+      const cards = findTodoCards(response);
+      if (!cards) {
+        throw new Error('DWS todo response did not contain a todoCards list.');
+      }
+      for (const card of cards) {
+        const task = parseTodoTask(card);
+        if (!task) {
+          throw new Error('DWS todo response contained a task without taskId.');
+        }
+        tasks.set(task.taskId, task);
+      }
+      if (findScalar(response, new Set(['hasMore'])) !== true) {
+        return [...tasks.values()];
+      }
+      if (cards.length === 0) {
+        throw new Error(
+          'DWS todo pagination returned an empty page with hasMore.',
+        );
+      }
+    }
+    throw new Error(`DWS todo pagination exceeded ${MAX_TODO_PAGES} pages.`);
+  }
+
+  async getTodoTask(
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<DwsTodoTask> {
+    const response = await this.run(
+      ['todo', 'task', 'get', '--task-id', taskId],
+      signal,
+    );
+    const task = parseTodoTask(findTodoDetail(response), taskId);
+    if (!task) {
+      throw new Error('DWS todo detail response did not contain task data.');
+    }
+    return task;
+  }
+
+  async addTodoComment(taskId: string, content: string): Promise<void> {
+    await this.run([
+      'todo',
+      'comment',
+      'add',
+      '--task-id',
+      taskId,
       '--content',
       content,
     ]);

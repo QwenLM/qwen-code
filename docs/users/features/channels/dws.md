@@ -34,6 +34,7 @@ Add a channel to `~/.qwen/settings.json`:
       "profile": "profile-name-or-corp-id",
       "senderPolicy": "pairing",
       "groupPolicy": "pairing",
+      "watchTodos": true,
       "groups": {
         "*": { "requireMention": true }
       },
@@ -50,7 +51,7 @@ Add a channel to `~/.qwen/settings.json`:
 qwen channel pairing approve dws-work CODE
 ```
 
-`senderPolicy` controls direct-message senders, document-notification authors, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
+`senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 
@@ -65,6 +66,14 @@ There is no document or knowledge-base watch list. To start a document task:
 The channel extracts the document ID, comment key, and request from that notification. It reads the referenced document for context, adds DingTalk's `暗中观察` eyes reaction while the task runs, and replies to the original document comment. The real-time DWS event stream is used when it contains the card; a five-second incremental history check covers cards omitted by the current event stream.
 
 Comments that do not generate a notification are ignored by design. Duplicate notification messages for the same document comment execute only once. Document tasks follow `senderPolicy` and require `approvalMode` `default` or `plan`; `default` is used when omitted.
+
+## Native Todo Changes
+
+Set `watchTodos: true` to poll the selected DWS profile's pending native todos where the account is an executor. The option defaults to `false` so adding a DWS channel never executes existing todos implicitly.
+
+The first successful scan establishes a baseline and does not start historical todos. Later scans run a task when a todo is newly assigned, reopened, or its actionable fields change, including its title, priority, deadline, or assignees. The final response is added as a comment on the originating todo. Comment-only metadata and modification timestamps are excluded from change detection so the channel's own response cannot trigger a loop. Completion or removal drops the todo from the pending set; reopening it creates a new trigger.
+
+Native todos follow `senderPolicy` using the todo creator identity. Under `pairing`, the channel adds one pairing-code comment and keeps the todo pending; after the creator is approved locally, a later poll can process the unchanged todo. Polling runs every 30 seconds and remains scoped to the pinned profile's current organization.
 
 ## Starting and Verifying
 

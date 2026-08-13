@@ -18,6 +18,7 @@ describe('DWS channel plugin', () => {
       'groupPolicy',
       'senderPolicy',
       'allowedUsers',
+      'watchTodos',
     ]);
   });
 
@@ -40,6 +41,10 @@ describe('DWS channel plugin', () => {
       plugin.management?.fields.find((field) => field.key === 'senderPolicy')
         ?.default,
     ).toBe('pairing');
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'watchTodos')
+        ?.default,
+    ).toBeUndefined();
   });
 
   it('ignores removed source settings', () => {
@@ -63,5 +68,8 @@ describe('DWS channel plugin', () => {
     expect(
       plugin.management?.validateConfig?.({ profile: 'corp:a,corp:b' }),
     ).toContain('exactly one login profile');
+    expect(
+      plugin.management?.validateConfig?.({ watchTodos: 'true' }),
+    ).toContain('must be a boolean');
   });
 });
