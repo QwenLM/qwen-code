@@ -1761,4 +1761,21 @@ describe('ChatPane', () => {
     expect(setApprovalMode).toHaveBeenCalledWith('yolo');
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
+
+  it('does not show Connection lost for a planned SSE reconnect countdown', () => {
+    connectionState.status = 'disconnected';
+    connectionState.error = 'Reconnecting in 1000ms';
+    render();
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+    expect(container!.textContent).not.toContain('Connection lost');
+  });
+
+  it('shows Connection lost for a real connection error', () => {
+    connectionState.status = 'error';
+    connectionState.error = 'Unauthorized';
+    render();
+    const alert = container!.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain('Connection lost');
+    expect(alert?.textContent).toContain('Unauthorized');
+  });
 });

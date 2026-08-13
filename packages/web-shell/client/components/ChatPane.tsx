@@ -49,6 +49,7 @@ import type {
 } from '../hooks/useComposerCore';
 import { useQueuedPrompts } from '../hooks/useQueuedPrompts';
 import { isAskUserPermission } from '../utils/askUserPermission';
+import { shouldSurfaceDaemonConnectionError } from '../utils/sessionErrors';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
@@ -947,7 +948,7 @@ export function ChatPane({
         </header>
       )}
 
-      {connection.error && (
+      {shouldSurfaceDaemonConnectionError(connection) && (
         <div className={styles.connectionError} role="alert">
           <span className={styles.connectionErrorText}>
             {t('splitView.paneConnectionError')}: {connection.error}

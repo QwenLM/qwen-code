@@ -194,7 +194,10 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { isSessionDisconnectedError } from './utils/sessionErrors';
+import {
+  isSessionDisconnectedError,
+  shouldSurfaceDaemonConnectionError,
+} from './utils/sessionErrors';
 import { useMessagesFromBlocks } from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
@@ -7201,12 +7204,18 @@ export function App({
     onTranscriptChange?.(blocks);
   }, [blocks, onTranscriptChange]);
 
+  const connectionError = connection.error;
+  const connectionStatus = connection.status;
   useEffect(() => {
-    if (connection.error) {
-      const error = new Error(connection.error);
-      onError?.(error);
+    if (
+      shouldSurfaceDaemonConnectionError({
+        status: connectionStatus,
+        error: connectionError,
+      })
+    ) {
+      onError?.(new Error(connectionError));
     }
-  }, [connection.error, onError]);
+  }, [connectionError, connectionStatus, onError]);
 
   useLayoutEffect(() => {
     setCurrentModel(connection.currentModel ?? '');
