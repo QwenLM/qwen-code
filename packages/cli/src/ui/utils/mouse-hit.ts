@@ -38,6 +38,7 @@ export function findElementAtMouseEvent(
   event: Pick<MouseEvent, 'col' | 'row'>,
   terminalHeight: number,
   mode: ElementHitMode,
+  indexOffset = 0,
 ): number | null {
   if (!container) return null;
 
@@ -61,7 +62,11 @@ export function findElementAtMouseEvent(
       if (!element) continue;
       const rect = measureElementPosition(element);
       if (rect.height <= 0) continue;
-      rects.push({ index, top: rect.y, height: rect.height });
+      rects.push({
+        index: indexOffset + index,
+        top: rect.y,
+        height: rect.height,
+      });
     }
     return findItemAtLayoutRow(rects, point.y);
   }

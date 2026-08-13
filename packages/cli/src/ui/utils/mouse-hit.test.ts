@@ -110,6 +110,19 @@ describe('findElementAtMouseEvent', () => {
     ).toBeNull();
   });
 
+  it('returns full-list indices for a visible row slice', () => {
+    expect(
+      findElementAtMouseEvent(
+        container,
+        [first, second],
+        { col: 3, row: 5 },
+        40,
+        'row',
+        7,
+      ),
+    ).toBe(7);
+  });
+
   it('keeps zero-width list rows hittable through their container width', () => {
     vi.mocked(measureElementPosition).mockImplementation((node) =>
       node === container
@@ -129,11 +142,14 @@ describe('findElementAtMouseEvent', () => {
   });
 
   it('ignores missing and degenerate child elements', () => {
-    vi.mocked(measureElementPosition).mockImplementation((node) =>
-      node === container
+    vi.mocked(measureElementPosition).mockImplementation((node) => {
+      if (node === null) {
+        throw new Error('null children must not be measured');
+      }
+      return node === container
         ? { x: 0, y: 0, width: 20, height: 2 }
-        : { x: 0, y: 4, width: 0, height: 1 },
-    );
+        : { x: 0, y: 4, width: 0, height: 1 };
+    });
 
     expect(
       findElementAtMouseEvent(

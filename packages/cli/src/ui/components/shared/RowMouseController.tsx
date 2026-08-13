@@ -61,16 +61,15 @@ export function RowMouseController({
   const { rows: terminalHeight } = useTerminalSize();
 
   const resolveIndex = useCallback(
-    (event: MouseEvent): number | null => {
-      const visiblePosition = findElementAtMouseEvent(
+    (event: MouseEvent): number | null =>
+      findElementAtMouseEvent(
         containerRef.current,
         itemRefs.current,
         event,
         terminalHeight,
         'row',
-      );
-      return visiblePosition === null ? null : scrollOffset + visiblePosition;
-    },
+        scrollOffset,
+      ),
     [containerRef, itemRefs, scrollOffset, terminalHeight],
   );
 
