@@ -196,6 +196,17 @@ const LAYER_RECEIPT_LINE_RE =
   /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z0-9-]*)/i;
 
 /**
+ * Tests the text immediately AFTER a captured id: an optional run of trailing
+ * punctuation/symbols followed by any non-space, non-punctuation code point means
+ * the id is STITCHED to more of a visible word GitHub renders as one token (a
+ * letter/digit/mark/connector — `toctou_x`, `toctoué` — or a punctuation-then-more
+ * run — `toctou.x`, `toctou‐x` — or the dropped-node sentinel — `` toctou`x` ``).
+ * A clean receipt has nothing but trailing punctuation before the next space:
+ * `toctou`, `toctou.`, `toctou — note` all pass.
+ */
+const TRAILING_STITCH = /^[\p{P}\p{S}]*[^\s\p{P}\p{S}]/u;
+
+/**
  * The one CommonMark tokenizer this module uses. A hand-rolled fence/blockquote
  * scanner diverged from the spec round after round — a second parser is a
  * divergence hunt, and this skill's own lesson is that the oracle must come from
@@ -287,7 +298,11 @@ function* usedLines(finalText: string): Generator<string> {
           prose += '\n';
         else if (
           c.type === 'html_inline' &&
-          /^<br\b[^>]*\/?>$/i.test(c.content)
+          // A real GitHub break: `<br>`, self-closing, or with attributes — but
+          // NOT a `<br-…>` custom element (a hyphen keeps the tag name going, and
+          // GitHub strips the non-allowlisted tag, leaving no break). After `br`
+          // the tag must END, or continue with whitespace/slash then attributes.
+          /^<br(?:[\s/][^>]*)?>$/i.test(c.content)
         )
           prose += '\n';
         else if (
@@ -317,11 +332,13 @@ export function parseLayerReceipts(
 ): Set<string> {
   const ids = new Set<string>();
   // Cheap pre-filter. It reads RAW text but the parser reads DECODED, markup-joined
-  // prose, so it must not veto a marker whose two words are split by inline markup
-  // (`Layer *walked*`) or whose letters are entity-encoded (`Layer&#32;walked`).
-  // Skip only when both words are absent AND no entity could decode into them.
+  // prose, so it must not veto a marker whose words are split by inline markup —
+  // even MID-word (`La*yer* walked`, `Layer wal*ked*`) — or entity-encoded
+  // (`Layer&#32;walked`). Skip only when BOTH words are absent AND no entity could
+  // decode into them; a single surviving word (or any entity) runs the full parse.
   if (
-    (!/layer/i.test(finalText) || !/walked/i.test(finalText)) &&
+    !/layer/i.test(finalText) &&
+    !/walked/i.test(finalText) &&
     !/&[#a-z]/i.test(finalText)
   )
     return ids;
@@ -329,15 +346,16 @@ export function parseLayerReceipts(
   for (const line of usedLines(finalText)) {
     const m = LAYER_RECEIPT_LINE_RE.exec(line);
     if (!m) continue;
-    // Trailing stitch: the id capture is un-anchored at its end, so any character
-    // that stitches onto the id disqualifies the receipt — GitHub renders one word
-    // (`toctoux`, `toctou_x`, `toctoué`), never a receipt. Two guards: the dropped
-    // node sentinel, and any word constituent (letter, number, combining mark, or
-    // connector) — the mirror of the leading-stitch guard. A break, space, dash or
-    // other punctuation after the id is a real boundary and stays credited.
-    const after = m[0].length;
-    if (line.charCodeAt(after) === DROPPED_INLINE.charCodeAt(0)) continue;
-    if (/^[\p{L}\p{N}\p{M}\p{Pc}]/u.test(line.slice(after))) continue;
+    // Trailing stitch: the id capture is un-anchored at its end, so anything that
+    // renders JOINED to the id disqualifies the receipt — GitHub shows one token
+    // (`toctoux`, `toctou_x`, `toctou.x`, `toctou‐x`, `toctou` + a dropped node),
+    // never a receipt. A clean receipt's id ends its visible word: the run up to
+    // the next space must be nothing but trailing PUNCTUATION/symbols (`toctou`,
+    // `toctou.`, `toctou — note`). So reject when that run holds any non-space,
+    // non-punctuation code point — a letter, digit, mark, connector, OR the
+    // dropped-node sentinel — after an optional punctuation prefix. This one rule
+    // is the mirror of the leading-stitch guard and subsumes the sentinel check.
+    if (TRAILING_STITCH.test(line.slice(m[0].length))) continue;
     const id = m[1].toLowerCase();
     if (known.has(id)) ids.add(id);
   }

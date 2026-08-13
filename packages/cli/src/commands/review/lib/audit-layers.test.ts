@@ -246,8 +246,30 @@ describe('parseLayerReceipts', () => {
       'Layer walked: toctou&#65400;', // fullwidth `x` (letter)
       'Layer walked: toctou&#1635;', // Arabic-Indic digit three
       'Layer walked: toctou&#769;x', // U+0301 combining acute on the id
+      // Punctuation or a symbol stitched between the id and more word content also
+      // renders one joined token GitHub never reads as a receipt — pure ASCII, no
+      // entity needed. A trailing dash the id class does not swallow (U+2010, not
+      // ASCII `-`) is the same shape.
+      'Layer walked: toctou.x', // period
+      'Layer walked: toctou/x', // slash
+      'Layer walked: toctou)x', // close paren
+      'Layer walked: toctou$x', // currency symbol
+      'Layer walked: toctou&#8208;x', // U+2010 hyphen (a `\p{Pd}` dash)
+      'Layer walked: lexing.extra', // id then `.` then more of the word
+      'Layer walked: toctou.,x', // chained punctuation then word
+      'Layer walked: toctou.<b>x</b>', // punctuation then a dropped node
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
+    // Trailing PUNCTUATION with nothing stuck after it is a real boundary — the id
+    // still ends its visible word — so these stay credited.
+    for (const q of [
+      'Layer walked: toctou', // end of line
+      'Layer walked: toctou.', // sentence period
+      'Layer walked: toctou,', // comma
+      'Layer walked: toctou. note', // period then a space
+    ]) {
+      expect([...parseLayerReceipts(q)]).toEqual(['toctou']);
+    }
     // A link's VISIBLE text is prose and still counts, and a hard break BEFORE a
     // whole marker leaves the marker at the start of its own visible line.
     expect([
@@ -264,6 +286,12 @@ describe('parseLayerReceipts', () => {
       expect([...parseLayerReceipts(`x${br}Layer walked: toctou`)]).toEqual([
         'toctou',
       ]);
+    }
+    // But NOT a `<br-…>` custom element or `<brfoo>` — GitHub strips the
+    // non-allowlisted tag, leaving no break, so the marker stays mid-line. The
+    // break test must not fabricate a receipt from these (a dropped `\b` would).
+    for (const notBr of ['<br-foo>', '<brfoo>', '<BR-FOO>', '<br->']) {
+      expect(parseLayerReceipts(`x${notBr}Layer walked: toctou`).size).toBe(0);
     }
     // A paragraph-LEADING entity newline collapses to a space GitHub renders at
     // paragraph start, so the marker stays a visible receipt.
@@ -306,12 +334,24 @@ describe('parseLayerReceipts', () => {
       '&#76;ayer walked: toctou', // entity-encoded leading `L`
       'Layer&nbsp;walked: toctou', // named entity → visible nbsp space
       // The two words split by inline markup that the reconstructed prose rejoins:
-      // the raw view has no adjacent "layer walked", but the render does.
-      'Layer *walked*: toctou', // emphasis boundary
-      'Layer [walked: toctou](/u)', // link boundary
+      // the raw view has no adjacent "layer walked", but the render does — the
+      // split can even fall MID-word, so the prefilter cannot require either whole
+      // word to survive it (only that both are not wholly absent).
+      'Layer *walked*: toctou', // emphasis boundary between the words
+      'Layer [walked: toctou](/u)', // link boundary between the words
+      'La*yer* walked: toctou', // emphasis MID-word in "layer"
+      'Layer wal*ked*: toctou', // emphasis MID-word in "walked"
     ]) {
       expect([...parseLayerReceipts(q)]).toEqual(['toctou']);
     }
+    // The combining grapheme joiner (U+034F) — the one enumerated non-`\p{Cf}`
+    // member of the fold class — renders as nothing, so a marker wearing it is a
+    // real receipt. Pin it: dropping U+034F from the class silently loses this.
+    expect([
+      ...parseLayerReceipts(
+        'Layer walked: lexing — real\nLayer walked&#847;: toctou',
+      ),
+    ]).toEqual(['lexing', 'toctou']);
   });
 
   it('credits a marker rendered as VISIBLE prose in any block, not just a paragraph', () => {
