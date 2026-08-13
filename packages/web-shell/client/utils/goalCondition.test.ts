@@ -13,7 +13,28 @@ import {
   goalArgOf,
   isGoalClearCommand,
   isGoalClearKeyword,
+  parseWebShellGoalCommand,
 } from './goalCondition';
+
+describe('parseWebShellGoalCommand', () => {
+  it.each([
+    ['/goal', { kind: 'status' }],
+    ['/goal ship it', { kind: 'set', objective: 'ship it' }],
+    ['/goal set ship it', { kind: 'set', objective: 'ship it' }],
+    ['/goal edit safer', { kind: 'edit', objective: 'safer' }],
+    ['/goal pause', { kind: 'pause' }],
+    ['/goal resume', { kind: 'resume' }],
+    ['/goal clear', { kind: 'clear' }],
+    ['/goal stop', { kind: 'clear' }],
+  ])('parses %s', (input, expected) => {
+    expect(parseWebShellGoalCommand(input)).toEqual(expected);
+  });
+
+  it('rejects set and edit without an objective', () => {
+    expect(parseWebShellGoalCommand('/goal set').kind).toBe('error');
+    expect(parseWebShellGoalCommand('/goal edit').kind).toBe('error');
+  });
+});
 
 describe('goalArgOf', () => {
   it('returns an empty string for a bare /goal', () => {

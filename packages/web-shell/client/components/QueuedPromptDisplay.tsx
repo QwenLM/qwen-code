@@ -9,8 +9,10 @@ import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
+import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
 import type { getTranslator } from '../i18n';
+import { isCommandPrompt } from '../utils/localCommandQueue';
 import {
   useWebShellCustomization,
   type UserMessageContentParser,
@@ -130,6 +132,7 @@ export interface QueuedPrompt {
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
   midTurnFailedAction?: 'delete' | 'edit';
+  isInserting?: boolean;
   isEditing?: boolean;
   isRemoving?: boolean;
   payloadCompleteness?: 'complete' | 'summary-only';
@@ -142,6 +145,7 @@ export function QueuedPromptDisplay({
   t,
   canMutateMidTurn = false,
   onDelete,
+  onInsert,
   onEdit,
   onRestoreUnknown,
   onDiscardUnknown,
@@ -150,6 +154,7 @@ export function QueuedPromptDisplay({
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
   onDelete: (id: number) => void;
+  onInsert: (id: number) => void;
   onEdit: (id: number) => void;
   onRestoreUnknown?: (id: number) => void;
   onDiscardUnknown?: (id: number) => void;
@@ -181,7 +186,7 @@ export function QueuedPromptDisplay({
     );
 
   return (
-    <div className={styles.queuedPrompts}>
+    <div className={styles.queuedPrompts} data-web-shell-queued-prompts="">
       {mayContainDuplicateAdmission ? (
         <div className={styles.queuedPromptAmbiguity} role="status">
           {t('queue.mayCorrespond')}
@@ -205,18 +210,27 @@ export function QueuedPromptDisplay({
           isAdmissionUnknown && prompt.payloadAvailable !== false;
         const showActions = !isMidTurnPending || canMutateMidTurn;
         const isRemoving = prompt.isRemoving === true;
+        const isInserting = prompt.isInserting === true;
+        const canInsert =
+          canMutateMidTurn &&
+          prompt.serverState === undefined &&
+          prompt.serverPromptId === undefined &&
+          !isMidTurnPending &&
+          imageCount === 0;
         const hasStateSpinner =
           isSubmitting ||
           prompt.midTurnState === 'submitting' ||
           prompt.isEditing === true ||
-          isRemoving;
+          isRemoving ||
+          isInserting;
         const isBusy =
           isSubmitting ||
           isRunning ||
           isMidTurnLocked ||
           isAdmissionUnknown ||
           prompt.isEditing === true ||
-          isRemoving;
+          isRemoving ||
+          isInserting;
         const isEditDisabled = isBusy || isSummaryOnly;
         let editTitle = t('queue.editTip');
         if (isEditDisabled) {
@@ -266,7 +280,8 @@ export function QueuedPromptDisplay({
             isMidTurnPending ||
             isAdmissionUnknown ||
             prompt.isEditing ||
-            isRemoving ? (
+            isRemoving ||
+            isInserting ? (
               <span
                 className={`${styles.queuedPromptState}${
                   hasStateSpinner ? ` ${styles.queuedPromptStateLoading}` : ''
@@ -281,13 +296,15 @@ export function QueuedPromptDisplay({
                     ? t('queue.removing')
                     : prompt.isEditing
                       ? t('queue.editing')
-                      : isMidTurnPending
-                        ? t('queue.midTurnQueued')
-                        : isAdmissionUnknown
-                          ? t('queue.admissionUnknown')
-                          : isQueued
-                            ? t('queue.serverQueued')
-                            : t('queue.submitting')}
+                      : isInserting
+                        ? t('queue.inserting')
+                        : isMidTurnPending
+                          ? t('queue.midTurnQueued')
+                          : isAdmissionUnknown
+                            ? t('queue.admissionUnknown')
+                            : isQueued
+                              ? t('queue.serverQueued')
+                              : t('queue.submitting')}
                 </span>
               </span>
             ) : null}
@@ -319,6 +336,29 @@ export function QueuedPromptDisplay({
                 </>
               ) : showActions && !isAdmissionUnknown ? (
                 <>
+                  {canInsert && (
+                    <button
+                      type="button"
+                      className={styles.queuedPromptAction}
+                      onClick={() => onInsert(prompt.id)}
+                      disabled={isBusy || isCommandPrompt(prompt.text)}
+                      aria-label={t('queue.insert')}
+                      title={
+                        isCommandPrompt(prompt.text)
+                          ? t('queue.insertCommandDisabled')
+                          : isBusy
+                            ? t('queue.submittingDisabled')
+                            : t('queue.insertTip')
+                      }
+                    >
+                      <span
+                        className={styles.queuedPromptActionIcon}
+                        style={cssUrlVar('--queued-icon-url', insertIconUrl)}
+                        aria-hidden="true"
+                      />
+                      {t('queue.insert')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={styles.queuedPromptAction}

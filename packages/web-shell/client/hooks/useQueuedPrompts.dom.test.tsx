@@ -83,6 +83,7 @@ function mount(
   canMutateMidTurn = true,
   connected = false,
   writeBlocked = false,
+  holdQueuedPromptsLocally = false,
 ) {
   const editor = {
     getText: vi.fn(() => ''),
@@ -101,10 +102,12 @@ function mount(
     state,
     activeSessionId,
     blocked,
+    hold,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
     blocked: boolean;
+    hold: boolean;
   }) {
     latest = useQueuedPrompts({
       connected,
@@ -116,6 +119,7 @@ function mount(
       // This suite pins the legacy local-fallback lifecycle.
       canQueryMidTurn: false,
       streamingState: state,
+      holdQueuedPromptsLocally: hold,
       sessionActions,
       store,
       editorRef: { current: editor as never },
@@ -127,21 +131,25 @@ function mount(
 
   let activeSessionId = 'session-1';
   let blocked = writeBlocked;
+  let held = holdQueuedPromptsLocally;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
     replaceOwner = false,
     nextWriteBlocked = blocked,
+    nextHold = held,
   ) => {
     if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
     blocked = nextWriteBlocked;
+    held = nextHold;
     act(() =>
       root.render(
         <Harness
           state={state}
           activeSessionId={activeSessionId}
           blocked={blocked}
+          hold={held}
         />,
       ),
     );
@@ -183,6 +191,74 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it('holds Goal follow-ups locally until an explicit insert', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'inserted-1',
+    });
+    mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('wait for explicit insert'));
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'wait for explicit insert' },
+    ]);
+
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+      'wait for explicit insert',
+      {},
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'wait for explicit insert',
+        midTurnState: 'queued',
+        midTurnMessageId: 'inserted-1',
+      },
+    ]);
+  });
+
+  it('submits locally held Goal follow-ups after the Goal stops', () => {
+    const { actions } = createActions();
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('run after goal'));
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+
+    render('idle', 'session-1', false, false, false);
+
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'run after goal',
+      expect.objectContaining({ optimisticUserMessage: false }),
+    );
+  });
+
+  it('keeps locally held Goal follow-ups isolated across session switches', () => {
+    const { actions } = createActions();
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('stay with session one'));
+    render('responding', 'session-2', true, false, true);
+    expect(latest.queuedPrompts).toEqual([]);
+
+    act(() => latest.enqueuePrompt('stay with session two'));
+    render('responding', 'session-1', true, false, true);
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'stay with session one' },
+    ]);
+
+    render('responding', 'session-2', true, false, true);
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'stay with session two' },
+    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+  });
+
   it('restores an unaccepted mid-turn prompt when its owner is replaced', () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(

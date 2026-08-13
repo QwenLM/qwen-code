@@ -1582,6 +1582,7 @@ describe('ChatPane', () => {
   });
 
   it('enables mid-turn queue mutations only when advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     connectionState.capabilities = {
       features: ['session_mid_turn_message_mutation'],
     };
@@ -1591,6 +1592,7 @@ describe('ChatPane', () => {
   });
 
   it('disables mid-turn queue mutations when not advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     render();
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
   });

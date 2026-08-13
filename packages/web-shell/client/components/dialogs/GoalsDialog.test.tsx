@@ -19,12 +19,29 @@ interface MockGoal {
   setAt: number;
   lastReason?: string;
   hasActivePrompt: boolean;
+  snapshot: {
+    v: 2;
+    activity: 'idle' | 'running' | 'verifying';
+    goal: {
+      goalId: string;
+      revision: number;
+      objective: string;
+      status: 'active' | 'paused' | 'blocked' | 'usage_limited';
+      evidenceCursor: { recordId: string | null };
+      turnCount: number;
+      activeTimeMs: number;
+      createdAt: number;
+      updatedAt: number;
+      lastReason?: string;
+    };
+  };
 }
 
 const { actions } = vi.hoisted(() => ({
   actions: {
     listGoals: vi.fn(),
     clearGoal: vi.fn(),
+    controlGoal: vi.fn(),
   },
 }));
 
@@ -90,6 +107,9 @@ async function mount(
     droppedCount: opts.droppedCount ?? 0,
   });
   actions.clearGoal.mockResolvedValue({ cleared: true });
+  actions.controlGoal.mockResolvedValue({
+    snapshot: { v: 2, activity: 'idle', goal: null },
+  });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -107,15 +127,38 @@ async function mount(
   await flush();
 }
 
-const baseGoal = (over: Partial<MockGoal> = {}): MockGoal => ({
-  sessionId: 'sess-1',
-  displayName: 'fix-ci',
-  condition: 'all tests pass',
-  iterations: 0,
-  setAt: Date.now() - 5000,
-  hasActivePrompt: false,
-  ...over,
-});
+const baseGoal = (over: Partial<MockGoal> = {}): MockGoal => {
+  const setAt = over.setAt ?? Date.now() - 5000;
+  const condition = over.condition ?? 'all tests pass';
+  const iterations = over.iterations ?? 0;
+  const lastReason = over.lastReason;
+  const hasActivePrompt = over.hasActivePrompt ?? false;
+  return {
+    sessionId: 'sess-1',
+    displayName: 'fix-ci',
+    condition,
+    iterations,
+    setAt,
+    hasActivePrompt,
+    ...over,
+    snapshot: over.snapshot ?? {
+      v: 2,
+      activity: hasActivePrompt ? 'running' : 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: condition,
+        status: 'active',
+        evidenceCursor: { recordId: 'cursor-1' },
+        turnCount: iterations,
+        activeTimeMs: 0,
+        createdAt: setAt,
+        updatedAt: setAt,
+        ...(lastReason ? { lastReason } : {}),
+      },
+    },
+  };
+};
 
 beforeEach(() => {
   vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -199,32 +242,36 @@ describe('GoalsDialog', () => {
     expect(onOpenSession).toHaveBeenCalledWith('sess-1');
   });
 
-  it('clears a goal after confirmation and reloads the list', async () => {
+  it('clears a goal immediately and reloads the list', async () => {
     await mount([baseGoal()]);
     actions.listGoals.mockResolvedValue({ goals: [], droppedCount: 0 });
 
     click(document.querySelector('button[aria-label="Clear goal"]'));
     await flush();
 
-    expect(window.confirm).toHaveBeenCalled();
-    expect(actions.clearGoal).toHaveBeenCalledWith('sess-1');
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(actions.controlGoal).toHaveBeenCalledWith('sess-1', {
+      action: 'clear',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 1,
+    });
     expect(document.body.textContent).toContain('No active goals');
   });
 
-  it('does not clear when the confirmation is declined', async () => {
+  it('does not require confirmation to clear', async () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     await mount([baseGoal()]);
 
     click(document.querySelector('button[aria-label="Clear goal"]'));
     await flush();
 
-    expect(actions.clearGoal).not.toHaveBeenCalled();
+    expect(actions.controlGoal).toHaveBeenCalled();
   });
 
   it('surfaces a clear failure through onError', async () => {
     const onError = vi.fn();
     await mount([baseGoal()], { onError });
-    actions.clearGoal.mockRejectedValue(new Error('session is gone'));
+    actions.controlGoal.mockRejectedValue(new Error('session is gone'));
 
     click(document.querySelector('button[aria-label="Clear goal"]'));
     await flush();
@@ -255,7 +302,7 @@ describe('GoalsDialog', () => {
     await mount([baseGoal()]);
     // After mount: the helper itself stubs clearGoal with a resolved value.
     let release: (() => void) | undefined;
-    actions.clearGoal.mockImplementation(
+    actions.controlGoal.mockImplementation(
       () =>
         new Promise((resolve) => {
           release = () => resolve({ cleared: true });
@@ -271,13 +318,13 @@ describe('GoalsDialog', () => {
     click(clearButton());
     await flush();
 
-    expect(actions.clearGoal).toHaveBeenCalledTimes(1);
+    expect(actions.controlGoal).toHaveBeenCalledTimes(1);
     expect(clearButton()?.disabled).toBe(true);
 
     // A second click while the first is still in flight must do nothing.
     click(clearButton());
     await flush();
-    expect(actions.clearGoal).toHaveBeenCalledTimes(1);
+    expect(actions.controlGoal).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       release?.();
@@ -318,19 +365,16 @@ describe('GoalsDialog', () => {
     expect(onCreateGoal).toHaveBeenCalledWith(condition);
   });
 
-  it('rejects a clear keyword, which would drop the goal instead of setting it', async () => {
+  it('accepts a clear word as a literal objective in the create form', async () => {
     const onCreateGoal = vi.fn();
     await mount([], { onCreateGoal });
 
     click(findButton('New goal'));
-    // `/goal clear` clears; a form that accepted it would spawn a session that
-    // immediately drops its own goal.
     setTextarea('  Clear  ');
     click(findButton('Set goal'));
     await flush();
 
-    expect(onCreateGoal).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain('clears a goal rather than');
+    expect(onCreateGoal).toHaveBeenCalledWith('Clear');
   });
 
   it('discards the typed condition when the form is cancelled', async () => {

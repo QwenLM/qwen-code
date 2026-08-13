@@ -44,6 +44,8 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
+  GoalControlRequest,
+  GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 
 import { type SessionGitIntent } from './components/GitModePopover';
@@ -84,6 +86,9 @@ import type {
 } from './hooks/useComposerCore';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import { GoalStatusStrip } from './components/GoalStatusStrip';
+import composerStatusStyles from './components/ComposerStatusStack.module.css';
+import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
@@ -150,11 +155,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
-import {
-  goalArgOf,
-  isGoalClearCommand,
-  isGoalClearKeyword,
-} from './utils/goalCondition';
+import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
@@ -245,11 +246,6 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
-import {
-  GOAL_STATUS_ACTIVE_EVENT,
-  parseGoalStatusMessage,
-  serializeGoalStatusMessage,
-} from './components/messages/GoalStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -476,11 +472,6 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
-}
-
-interface ActiveGoalStatus {
-  condition: string;
-  setAt: number;
 }
 
 interface SendPromptOptionsWithRetry {
@@ -734,40 +725,6 @@ function retryTranscriptIdentityMatches(
         getRetryableTurnError(blocks),
         transcriptIdentity.identity,
       );
-}
-
-type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
-  text: string;
-  source?: string;
-  data?: unknown;
-};
-
-function parseGoalStatusFromBlock(block: DaemonTranscriptBlock) {
-  const statusBlock = block as GoalStatusTranscriptBlock;
-  if (statusBlock.source !== 'goal') return null;
-  return (
-    parseGoalStatusMessage(statusBlock.data) ??
-    parseGoalStatusMessage(statusBlock.text)
-  );
-}
-
-function getLatestActiveGoalFromBlocks(
-  blocks: readonly DaemonTranscriptBlock[],
-): ActiveGoalStatus | null {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    if (block.kind !== 'status') continue;
-    const status = parseGoalStatusFromBlock(block);
-    if (!status) continue;
-    if (status.kind === 'set' || status.kind === 'checking') {
-      return {
-        condition: status.condition,
-        setAt: status.setAt ?? block.serverTimestamp ?? block.createdAt,
-      };
-    }
-    return null;
-  }
-  return null;
 }
 
 interface LocalAnchoredMessage {
@@ -4029,13 +3986,21 @@ export function App({
   useEffect(() => {
     assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
   }, [composerRef]);
-  const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
-  useLayoutEffect(() => setActiveGoal(null), [logicalSessionKey]);
+  const [goalSnapshot, setGoalSnapshot] = useState<GoalSnapshotV2 | null>(null);
+  const goalSnapshotRef = useRef<GoalSnapshotV2 | null>(null);
+  goalSnapshotRef.current = goalSnapshot;
+  const [goalControlBusy, setGoalControlBusy] = useState(false);
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    setGoalSnapshot(null);
+    setGoalControlBusy(false);
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [logicalSessionKey]);
   const [isCreatingMissingSession, setIsCreatingMissingSession] =
     useState(false);
   const creatingMissingSessionRef = useRef(false);
-  const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
-  activeGoalRef.current = activeGoal;
   const {
     followupState,
     onAcceptFollowup,
@@ -5345,30 +5310,6 @@ export function App({
   } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
-  /**
-   * The session a failed `/goal` submit left behind.
-   *
-   * Setting a goal starts a fresh session and then sends `/goal <condition>`
-   * into it, but the daemon session is not created by the "new session" step —
-   * `ensureSessionForPrompt` creates it lazily *inside* `sendPrompt`. So a
-   * prompt that fails leaves a session that exists but never got its goal.
-   *
-   * The Goals form keeps the condition and lets the user retry. Without this
-   * ref every retry would abandon that session and create another, piling up
-   * blank chats in the sidebar. Remembering it lets the retry reuse it — no
-   * session is ever deleted.
-   *
-   * Only valid while the Goals page stays mounted. The moment the user leaves,
-   * that session is reachable from the composer and may stop being a scratch
-   * session, so the effect below forgets it: a later goal then starts a fresh
-   * session rather than landing on top of a conversation.
-   */
-  const strandedGoalSessionRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (mainView !== 'goals') {
-      strandedGoalSessionRef.current = undefined;
-    }
-  }, [mainView]);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
@@ -6084,6 +6025,7 @@ export function App({
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
+    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -6098,6 +6040,7 @@ export function App({
     canMutateMidTurn,
     canQueryMidTurn,
     streamingState,
+    holdQueuedPromptsLocally: goalSnapshot?.goal?.status === 'active',
     sessionActions,
     store,
     editorRef,
@@ -7341,43 +7284,29 @@ export function App({
   ]);
 
   useEffect(() => {
-    const nextGoal = getLatestActiveGoalFromBlocks(blocks);
-    setActiveGoal((current) => {
-      if (!nextGoal) return current ? null : current;
-      if (
-        current?.condition === nextGoal.condition &&
-        current.setAt === nextGoal.setAt
-      ) {
-        return current;
-      }
-      return nextGoal;
-    });
-  }, [blocks]);
+    setGoalSnapshot(connection.goalState ?? null);
+  }, [connection.goalState, connection.sessionId]);
 
+  const connectionGoalComplete =
+    connection.goalState?.goal?.status === 'complete';
   useEffect(() => {
-    const onGoalStatusActive = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          active?: boolean;
-          condition?: string;
-          setAt?: number;
-        }>
-      ).detail;
-      if (!detail?.active) {
-        setActiveGoal(null);
-        return;
-      }
-      if (!detail.condition) return;
-      setActiveGoal({
-        condition: detail.condition,
-        setAt: detail.setAt ?? Date.now(),
-      });
-    };
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [
+    connection.goalState?.goal?.goalId,
+    connection.sessionId,
+    connectionGoalComplete,
+  ]);
 
-    window.addEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
-    return () =>
-      window.removeEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
-  }, []);
+  const activeGoal =
+    goalSnapshot?.goal && goalSnapshot.goal.status !== 'complete'
+      ? {
+          condition: goalSnapshot.goal.objective,
+          setAt: goalSnapshot.goal.createdAt,
+        }
+      : null;
+  const liveGoalSnapshot =
+    goalSnapshot?.goal?.status === 'complete' ? null : goalSnapshot;
 
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
@@ -8331,61 +8260,57 @@ export function App({
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
 
-  const dispatchGoalSet = useCallback(
-    (condition: string, setAt: number) => {
-      setActiveGoal({ condition, setAt });
-      store.dispatch([
-        {
-          type: 'status',
-          text: serializeGoalStatusMessage({
-            kind: 'set',
-            condition,
-            setAt,
-          }),
-        },
-      ]);
-    },
-    [store],
-  );
+  const refreshGoal = useCallback(async () => {
+    const owner = sessionOwnerGuard.capture();
+    const response = await sessionActions.getGoal();
+    if (owner.isCurrent()) setGoalSnapshot(response.snapshot);
+    return response.snapshot;
+  }, [sessionActions, sessionOwnerGuard]);
 
-  const dispatchGoalCleared = useCallback(
-    (goal: ActiveGoalStatus | null) => {
-      if (!goal) return;
-      store.dispatch([
-        {
-          type: 'status',
-          text: serializeGoalStatusMessage({
-            kind: 'cleared',
-            condition: goal.condition,
-            durationMs: Date.now() - goal.setAt,
-          }),
-        },
-      ]);
-      setActiveGoal(null);
-    },
-    [store],
-  );
+  const controlCurrentGoal = useCallback(
+    async (
+      action: 'create' | 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
+      objective?: string,
+    ) => {
+      const snapshot = await refreshGoal();
+      const goal = snapshot.goal;
+      let request: GoalControlRequest;
+      if (action === 'create' || action === 'replace') {
+        if (!objective) throw new Error(t('goals.error.emptyCondition'));
+        request = goal
+          ? {
+              action: 'replace',
+              objective,
+              expectedGoalId: goal.goalId,
+              expectedRevision: goal.revision,
+            }
+          : { action: 'create', objective };
+      } else {
+        if (!goal) throw new Error(t('goals.error.goalUnavailable'));
+        request = {
+          action,
+          ...(action === 'edit'
+            ? { objective: objective ?? goal.objective }
+            : {}),
+          expectedGoalId: goal.goalId,
+          expectedRevision: goal.revision,
+        } as GoalControlRequest;
+      }
 
-  const handleBusyGoalClear = useCallback(
-    (text: string) => {
-      if (sessionWriteBlocked) return false;
-      if (!requireActiveSessionForLocalCommand()) return false;
       const owner = sessionOwnerGuard.capture();
-      store.appendLocalUserMessage(text);
-      sessionActions.clearGoal().catch((error: unknown) => {
-        if (!owner.isCurrent()) return;
-        reportError(error, 'Failed to clear /goal');
-      });
-      return true;
+      setGoalControlBusy(true);
+      try {
+        const response = await sessionActions.controlGoal(request);
+        if (owner.isCurrent()) setGoalSnapshot(response.snapshot);
+        return response.snapshot;
+      } catch (error) {
+        if (owner.isCurrent()) await refreshGoal().catch(() => undefined);
+        throw error;
+      } finally {
+        if (owner.isCurrent()) setGoalControlBusy(false);
+      }
     },
-    [
-      reportError,
-      requireActiveSessionForLocalCommand,
-      sessionWriteBlocked,
-      sessionActions,
-      sessionOwnerGuard,
-      store,
-    ],
+    [refreshGoal, sessionActions, sessionOwnerGuard, t],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -8411,69 +8336,67 @@ export function App({
   );
 
   const handleGoalSlashCommand = useCallback(
-    (
-      text: string,
-      images?: PromptImage[],
-      opts?: {
-        sendToDaemon?: boolean;
-        commitComposerAccepted?: ComposerSubmitCommit;
-      },
-    ) => {
-      const goalArg = goalArgOf(text);
-      const sendToDaemon = opts?.sendToDaemon ?? true;
-      const sendGoalPrompt = () => {
-        const owner = { current: sessionOwnerGuard.capture() };
-        const deferComposerCommit =
-          Boolean(onSubmitBeforeRef.current) ||
-          createSessionPromiseRef.current !== null;
-        const clearComposerOnPromptStart =
-          !connectionRef.current.sessionId || deferComposerCommit;
-        sendPrompt(text, images, {
-          ownerRef: owner,
-          clearComposerOnPromptStart,
-          commitComposerAccepted: clearComposerOnPromptStart
-            ? opts?.commitComposerAccepted
-            : undefined,
-        }).catch((error: unknown) => {
-          if (!owner.current.isCurrent()) return;
-          reportError(error, 'Failed to send /goal command');
-        });
-        return clearComposerOnPromptStart ? false : true;
-      };
-
-      if (goalArg && isGoalClearKeyword(goalArg)) {
-        if (!sendToDaemon) {
-          store.appendLocalUserMessage(text);
-          dispatchGoalCleared(activeGoalRef.current);
-          return true;
-        }
-        return handleBusyGoalClear(text);
-      } else if (goalArg) {
-        if (!sendToDaemon) {
-          store.appendLocalUserMessage(text);
-          dispatchGoalSet(goalArg, Date.now());
-          return true;
-        }
-        return sendGoalPrompt();
+    (text: string) => {
+      const operation = parseWebShellGoalCommand(text);
+      if (operation.kind === 'status') {
+        openGoals();
+        return true;
+      }
+      if (operation.kind === 'error') {
+        reportError(new Error(operation.message), 'Invalid /goal command');
+        return true;
       }
 
-      // Bare `/goal` opens the Goals page instead of asking the daemon to print
-      // its status as text — the same move `/schedule` makes. Nothing is sent,
-      // so the composer is cleared by returning true.
-      openGoals();
+      void (async () => {
+        if (!connectionRef.current.sessionId) {
+          await ensureSessionForPrompt();
+        }
+        if (!connectionRef.current.sessionId) {
+          throw new Error(t('localCommand.noSession'));
+        }
+        store.appendLocalUserMessage(text);
+        const action = operation.kind === 'set' ? 'replace' : operation.kind;
+        const objective =
+          operation.kind === 'set' || operation.kind === 'edit'
+            ? operation.objective
+            : undefined;
+        await controlCurrentGoal(action, objective);
+      })().catch((error: unknown) => {
+        reportError(error, `Failed to ${operation.kind} /goal`);
+      });
       return true;
     },
     [
-      dispatchGoalCleared,
-      dispatchGoalSet,
-      handleBusyGoalClear,
+      controlCurrentGoal,
+      ensureSessionForPrompt,
       openGoals,
       reportError,
-      sendPrompt,
-      sessionOwnerGuard,
       store,
-      connectionRef,
+      t,
     ],
+  );
+
+  const runGoalControl = useCallback(
+    (action: 'pause' | 'resume' | 'clear') => {
+      void controlCurrentGoal(action).catch((error: unknown) => {
+        reportError(error, t(`goals.error.${action}Failed`));
+      });
+    },
+    [controlCurrentGoal, reportError, t],
+  );
+
+  const handleGoalEditSave = useCallback(
+    (objective: string) => {
+      setGoalEditError(null);
+      void controlCurrentGoal('edit', objective)
+        .then(() => setGoalEditOpen(false))
+        .catch((error: unknown) => {
+          setGoalEditError(
+            error instanceof Error ? error.message : String(error),
+          );
+        });
+    },
+    [controlCurrentGoal],
   );
 
   const hiddenCommands = useMemo(
@@ -8519,7 +8442,9 @@ export function App({
         pushToast('warning', t('editor.connectionDisconnected'));
         return false;
       }
-      const promptBlocked = streamingStateRef.current !== 'idle';
+      const promptBlocked =
+        streamingStateRef.current !== 'idle' ||
+        goalSnapshotRef.current?.goal?.status === 'active';
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
@@ -8697,21 +8622,7 @@ export function App({
             return true;
           }
           if (cmd === 'goal') {
-            // A bare `/goal` just opens the Goals page; it neither sends a
-            // prompt nor touches the session, so it works mid-turn too.
-            if (!goalArgOf(text)) {
-              openGoals();
-              return true;
-            }
-            if (promptBlocked) {
-              if (isGoalClearCommand(text)) {
-                return handleBusyGoalClear(text);
-              }
-              return blockLocalCommandDuringTurn();
-            }
-            return handleGoalSlashCommand(text, images, {
-              commitComposerAccepted,
-            });
+            return handleGoalSlashCommand(text);
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -9592,7 +9503,6 @@ export function App({
       closeMobileDrawer,
       openPanel,
       openScheduledTasks,
-      openGoals,
       createNewSession,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -9601,7 +9511,6 @@ export function App({
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
-      handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
@@ -10985,6 +10894,19 @@ export function App({
               />
             </DialogShell>
           )}
+          {goalEditOpen && goalSnapshot?.goal && (
+            <GoalEditDialog
+              objective={goalSnapshot.goal.objective}
+              saving={goalControlBusy}
+              error={goalEditError}
+              onSave={handleGoalEditSave}
+              onClose={() => {
+                if (goalControlBusy) return;
+                setGoalEditOpen(false);
+                setGoalEditError(null);
+              }}
+            />
+          )}
           {showAuthDialog && (
             <DialogShell
               title={t('auth.title')}
@@ -11716,69 +11638,14 @@ export function App({
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
                       onCreateGoal={async (condition) => {
-                        // Setting a goal registers the Stop hook AND kicks off
-                        // the first turn, so it has to travel the prompt path.
-                        // Start a FRESH session so the goal loop doesn't take
-                        // over the conversation the user was already having.
-                        //
-                        // Unless a previous attempt in this same visit to the
-                        // page already made one and then failed to send: that
-                        // session never got its goal and is still current, so
-                        // reuse it. Creating another would strand it, and a user
-                        // retrying a few times would end up with a column of
-                        // blank chats in the sidebar.
-                        //
-                        // Leaving the page forgets it (see the effect on
-                        // `strandedGoalSessionRef`), so this can never reuse a
-                        // session the user has since talked to.
-                        const stranded = strandedGoalSessionRef.current;
-                        const canReuseStranded =
-                          stranded !== undefined &&
-                          connectionRef.current.sessionId === stranded;
-                        if (!canReuseStranded) {
-                          // `keepView`: createNewSession switches to the chat by
-                          // default, which would unmount this form before the
-                          // prompt is even sent and leave a later rejection with
-                          // nowhere to render — the exact failure the deferred
-                          // switch below exists to prevent.
-                          const created = await createNewSession(undefined, {
-                            keepView: true,
-                          });
-                          // createNewSession already surfaced the failure; don't
-                          // drop the goal into the wrong (still-current) session.
-                          // `false` keeps the form open with the typed condition
-                          // still in it — returning normally would read as
-                          // "created" and reset it.
-                          if (!created) return false;
-                          onSessionIdChange?.(undefined);
-                        }
-                        // Switch to the chat only once the prompt is admitted.
-                        // Switching first unmounts the Goals page, and a later
-                        // rejection would then have nowhere to render: the user
-                        // would land in an empty session with no explanation.
-                        // Letting this reject keeps the error in the form the
-                        // user is looking at.
-                        const owner = {
-                          current: sessionOwnerGuard.capture(),
-                        };
-                        try {
-                          await sendPrompt(`/goal ${condition}`, undefined, {
-                            clearComposerOnPromptStart: true,
-                            ownerRef: owner,
-                          });
-                          if (!owner.current.isCurrent()) return false;
-                        } catch (error) {
-                          // `sendPrompt` creates the session lazily, so by now
-                          // one may exist even though the prompt never landed.
-                          // Remember it so the retry reuses it rather than
-                          // stranding it.
-                          if (owner.current.isCurrent()) {
-                            strandedGoalSessionRef.current =
-                              connectionRef.current.sessionId;
-                          }
-                          throw error;
-                        }
-                        strandedGoalSessionRef.current = undefined;
+                        const created = await createNewSession(undefined, {
+                          keepView: true,
+                        });
+                        if (!created) return false;
+                        await ensureSessionForPrompt();
+                        if (!connectionRef.current.sessionId) return false;
+                        await controlCurrentGoal('create', condition);
+                        onSessionIdChange?.(undefined);
                         setMainView('chat');
                       }}
                       onOpenSession={(sessionId) => {
@@ -11834,6 +11701,7 @@ export function App({
                         onError={reportError}
                         onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
+                        onOpenGoals={openGoals}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
@@ -12269,15 +12137,37 @@ export function App({
                             )}
                           </div>
                         )}
-                        <QueuedPromptDisplay
-                          prompts={queuedPrompts}
-                          t={t}
-                          canMutateMidTurn={canMutateMidTurn}
-                          onDelete={removeQueuedPrompt}
-                          onEdit={editQueuedPrompt}
-                          onRestoreUnknown={restoreUnknownQueuedPrompt}
-                          onDiscardUnknown={discardUnknownQueuedPrompt}
-                        />
+                        {(queuedPrompts.length > 0 ||
+                          liveGoalSnapshot?.goal) && (
+                          <div
+                            className={composerStatusStyles.root}
+                            data-testid="composer-status-stack"
+                          >
+                            <QueuedPromptDisplay
+                              prompts={queuedPrompts}
+                              t={t}
+                              canMutateMidTurn={canMutateMidTurn}
+                              onDelete={removeQueuedPrompt}
+                              onInsert={insertQueuedPrompt}
+                              onEdit={editQueuedPrompt}
+                              onRestoreUnknown={restoreUnknownQueuedPrompt}
+                              onDiscardUnknown={discardUnknownQueuedPrompt}
+                            />
+                            {liveGoalSnapshot?.goal && (
+                              <GoalStatusStrip
+                                snapshot={liveGoalSnapshot}
+                                busy={goalControlBusy}
+                                onEdit={() => {
+                                  setGoalEditError(null);
+                                  setGoalEditOpen(true);
+                                }}
+                                onPause={() => runGoalControl('pause')}
+                                onResume={() => runGoalControl('resume')}
+                                onClear={() => runGoalControl('clear')}
+                              />
+                            )}
+                          </div>
+                        )}
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
                             <CustomComposerHeader
@@ -12438,6 +12328,7 @@ export function App({
                                     (connection.contextWindow ?? 0)
                                   : 0
                               }
+                              goalSnapshot={goalSnapshot}
                               activeGoal={activeGoal}
                               tasks={footerTasks}
                               availableModes={MODES_CYCLE}
@@ -12465,6 +12356,7 @@ export function App({
                                   (connection.contextWindow ?? 0)
                                 : 0
                             }
+                            goalSnapshot={goalSnapshot}
                             activeGoal={activeGoal}
                             tasks={footerTasks}
                             availableModes={MODES_CYCLE}
@@ -12501,7 +12393,7 @@ export function App({
                               ? backgroundTasks
                               : []
                           }
-                          activeGoal={activeGoal}
+                          activeGoal={null}
                           onOpenGoals={openGoals}
                           hideSettings={hideSettings}
                           onToggleShortcuts={handleToggleShortcuts}
