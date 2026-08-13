@@ -19,7 +19,7 @@ agent_cache_prepare="${pool_root}/service/deploy/prepare-agent-cache.py"
 database_url="${BENCHMARK_POOL_DATABASE_URL:-postgresql://qwen_benchmark@127.0.0.1:55432/qwen_benchmark_dsw_release_v1}"
 execution_backend="${BENCHMARK_EXECUTION_BACKEND:-harbor}"
 model_env_file="${MODEL_ENV_FILE:-/mnt/workspace/qwen-benchmark-eas-poc/config/model.env}"
-if [[ "${execution_backend}" == "eas" && -s "${model_env_file}" ]]; then
+if [[ "${execution_backend}" == "eas-harbor" && -s "${model_env_file}" ]]; then
   set -a
   # This file contains only OPENAI_BASE_URL and OPENAI_MODEL; the API key is
   # deliberately stored in a separate 0600 file consumed by the Executor.
@@ -31,6 +31,8 @@ dataset_revision="2"
 max_attempts="${BENCHMARK_MAX_ATTEMPTS:-4}"
 retry_backoff_seconds="${BENCHMARK_RETRY_BACKOFF_SECONDS:-60}"
 eas_template_manifest="${EAS_TEMPLATE_MANIFEST:-${pool_root}/deploy/eas/templates.json}"
+acr_image_manifest="${ACR_IMAGE_MANIFEST:-/mnt/workspace/qwen-benchmark-eas-poc/state/acr-manifest-c104f840.json}"
+acr_image_state_dir="${ACR_IMAGE_STATE_DIR:-/mnt/data/qwen-benchmark/acr-prewarm/c104f840/state}"
 output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
 
 if [[ ! "${INSTANCE_LIMIT}" =~ ^[0-9]+$ ]] || (( INSTANCE_LIMIT < 1 || INSTANCE_LIMIT > 500 )); then
@@ -45,15 +47,17 @@ if [[ ! "${retry_backoff_seconds}" =~ ^[0-9]+$ ]]; then
   echo "BENCHMARK_RETRY_BACKOFF_SECONDS must be a non-negative integer" >&2
   exit 2
 fi
-if [[ "${execution_backend}" != "harbor" && "${execution_backend}" != "eas" && "${execution_backend}" != "eas-smoke" ]]; then
-  echo "BENCHMARK_EXECUTION_BACKEND must be harbor, eas, or eas-smoke" >&2
+if [[ "${execution_backend}" != "harbor" && "${execution_backend}" != "eas-harbor" && "${execution_backend}" != "eas-smoke" ]]; then
+  echo "BENCHMARK_EXECUTION_BACKEND must be harbor, eas-harbor, or eas-smoke" >&2
   exit 2
 fi
 required_paths=("${pool_bin}" "${python_bin}" "${dataset_root}")
 if [[ "${execution_backend}" == "harbor" ]]; then
   required_paths+=("${agent_cache_prepare}")
-elif [[ "${execution_backend}" == "eas" || "${execution_backend}" == "eas-smoke" ]]; then
+elif [[ "${execution_backend}" == "eas-smoke" ]]; then
   required_paths+=("${eas_template_manifest}")
+elif [[ "${execution_backend}" == "eas-harbor" ]]; then
+  required_paths+=("${acr_image_manifest}" "${acr_image_state_dir}")
 fi
 for required_path in "${required_paths[@]}"; do
   if [[ ! -e "${required_path}" ]]; then
@@ -106,7 +110,7 @@ if [[ "${execution_backend}" == "harbor" ]]; then
     --qwen-version "${qwen_version}" \
     --npm-registry "${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}" \
     > "${output_root}/agent-cache-manifest-path.txt"
-elif [[ "${execution_backend}" == "eas" || "${execution_backend}" == "eas-smoke" ]]; then
+elif [[ "${execution_backend}" == "eas-smoke" ]]; then
   "${pool_bin}" validate-eas-templates \
     --task-manifest "${manifest_path}" \
     --template-manifest "${eas_template_manifest}" >/dev/null
@@ -114,24 +118,32 @@ fi
 
 export BENCHMARK_POOL_DATABASE_URL="${database_url}"
 "${pool_bin}" init-db >/dev/null
+submit_args=(
+  --idempotency-key "${BENCHMARK_IDEMPOTENCY_KEY}"
+  --suite "dsw_release_swe_verified_v1"
+  --dataset "swe-bench/swe-bench-verified"
+  --dataset-revision "${dataset_revision}"
+  --task-prefix "swe-bench/"
+  --qwen-ref "${QWEN_REF}"
+  --qwen-commit "${QWEN_COMMIT}"
+  --model "${model_name}"
+  --manifest "${manifest_path}"
+  --max-attempts "${max_attempts}"
+  --retry-backoff-seconds "${retry_backoff_seconds}"
+  --infra-failure-threshold 0
+  --repository "${GITHUB_REPOSITORY}"
+  --release-id "${RELEASE_ID}"
+  --release-tag "${RELEASE_TAG}"
+  --github-run-url "${GITHUB_RUN_URL:-}"
+)
+if [[ "${execution_backend}" == "eas-harbor" ]]; then
+  submit_args+=(
+    --acr-manifest "${acr_image_manifest}"
+    --acr-state-dir "${acr_image_state_dir}"
+  )
+fi
 submit_json="$(
-  "${pool_bin}" submit \
-    --idempotency-key "${BENCHMARK_IDEMPOTENCY_KEY}" \
-    --suite "dsw_release_swe_verified_v1" \
-    --dataset "swe-bench/swe-bench-verified" \
-    --dataset-revision "${dataset_revision}" \
-    --task-prefix "swe-bench/" \
-    --qwen-ref "${QWEN_REF}" \
-    --qwen-commit "${QWEN_COMMIT}" \
-    --model "${model_name}" \
-    --manifest "${manifest_path}" \
-    --max-attempts "${max_attempts}" \
-    --retry-backoff-seconds "${retry_backoff_seconds}" \
-    --infra-failure-threshold 0 \
-    --repository "${GITHUB_REPOSITORY}" \
-    --release-id "${RELEASE_ID}" \
-    --release-tag "${RELEASE_TAG}" \
-    --github-run-url "${GITHUB_RUN_URL:-}"
+  "${pool_bin}" submit "${submit_args[@]}"
 )"
 run_id="$(
   "${python_bin}" -c '
