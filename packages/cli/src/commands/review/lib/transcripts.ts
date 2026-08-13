@@ -40,6 +40,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { ToolNames } from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
+import { priorSessionIds } from './run-ledger.js';
 
 /** One subagent, as the harness recorded it. */
 export interface AgentRecord {
@@ -91,6 +92,12 @@ export interface AgentRecord {
   finalText: string;
   /** When the transcript was last written. */
   mtimeMs: number;
+  /**
+   * True when this record came from an EARLIER attempt's session directory —
+   * a resumed run reading the interrupted attempt's evidence. Absent on
+   * records from the current session, so existing readers are unchanged.
+   */
+  fromPriorSession?: boolean;
 }
 
 /** Why no transcripts could be read. Never conflated with "the agents idled". */
@@ -386,6 +393,89 @@ export function readTranscripts(
     if (!rec) continue;
     if (since !== undefined && rec.mtimeMs < since) continue;
     out.push(rec);
+  }
+  return out;
+}
+
+/**
+ * Every transcript directory this RUN may have written to: the current
+ * session's, plus the directories of earlier attempts recorded in the run
+ * ledger (a resumed run continues in a new session; see `run-ledger.ts`).
+ *
+ * Directory names are assembled here from the env's project dir and the
+ * ledger's validated session ids — never taken from a caller. The current
+ * session's directory is always first.
+ */
+export function transcriptDirsForRun(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const { projectDir, dir } = transcriptPaths(env);
+  const dirs = [dir];
+  for (const id of priorSessionIds(planPath, env)) {
+    const prior = join(projectDir, 'subagents', id);
+    if (!dirs.includes(prior)) dirs.push(prior);
+  }
+  return dirs;
+}
+
+/**
+ * Every subagent THIS RUN launched, across all of the run's sessions.
+ *
+ * The single-session `readTranscripts` contract is preserved exactly for the
+ * current session: an unreadable current directory is an infrastructure fact
+ * and throws. A prior session's directory that cannot be read is different —
+ * its absence only means the earlier attempt's evidence is invisible, and the
+ * failure direction of invisible evidence is "require the work again", which
+ * every downstream gate already implements. So prior directories are skipped
+ * silently, never fabricated and never fatal.
+ *
+ * `since` stays the plan's mtime: a resumed run deliberately does not rewrite
+ * the plan, which is what keeps the first attempt's records inside the fence.
+ *
+ * `currentDirOptional` exists for exactly one caller shape: a resumed run
+ * reading the PREVIOUS attempt's evidence before this session has launched
+ * any agent — the harness creates `subagents/<session>` on the first launch,
+ * so at that moment the current directory legitimately does not exist. A
+ * missing ENVIRONMENT (no session id, no project dir) still throws: that is
+ * an infrastructure fact whichever session it is.
+ */
+export function readRunTranscripts(
+  planPath: string,
+  since?: number,
+  env: NodeJS.ProcessEnv = process.env,
+  diffPath?: string,
+  opts: { currentDirOptional?: boolean } = {},
+): AgentRecord[] {
+  // Validates the env first, so the optional-dir branch below can only ever
+  // be absorbing "no directory yet", never "no environment".
+  transcriptPaths(env);
+  let out: AgentRecord[];
+  try {
+    out = readTranscripts(since, env, diffPath);
+  } catch (err) {
+    if (
+      !(err instanceof TranscriptsUnavailableError) ||
+      opts.currentDirOptional !== true
+    ) {
+      throw err;
+    }
+    out = [];
+  }
+  for (const dir of transcriptDirsForRun(planPath, env).slice(1)) {
+    let names: string[];
+    try {
+      names = listAgentTranscriptFiles(dir);
+    } catch {
+      continue; // Earlier attempt's evidence invisible → its work is re-owed.
+    }
+    for (const name of names) {
+      const rec = parseTranscript(join(dir, name), diffPath);
+      if (!rec) continue;
+      if (since !== undefined && rec.mtimeMs < since) continue;
+      rec.fromPriorSession = true;
+      out.push(rec);
+    }
   }
   return out;
 }

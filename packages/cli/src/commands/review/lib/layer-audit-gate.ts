@@ -55,7 +55,7 @@
 // floor.
 
 import { statSync, readFileSync } from 'node:fs';
-import { readTranscripts } from './transcripts.js';
+import { readRunTranscripts } from './transcripts.js';
 import { bakedRanges, openedTheTerritory } from './retirement.js';
 import {
   repositoryContextOf,
@@ -95,8 +95,9 @@ function readReverseAuditReturns(
 ): AuditorReturns {
   try {
     const since = statSync(planPath).mtimeMs;
-    const auditors = readTranscripts(since, env, diffPath).filter((t) =>
-      t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY),
+    // Run-scoped: a resumed run's earlier auditors ran in a different session.
+    const auditors = readRunTranscripts(planPath, since, env, diffPath).filter(
+      (t) => t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY),
     );
     const corroborated = auditors
       .filter(
