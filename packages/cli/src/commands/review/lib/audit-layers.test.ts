@@ -235,6 +235,17 @@ describe('parseLayerReceipts', () => {
       'Layer walked: toctou&#8203;x', // U+200B zero-width space
       'Layer walked: toctou&#173;x', // U+00AD soft hyphen
       'Layer walked: toctou&#8288;`x`', // U+2060 word joiner + code span
+      'Layer walked: toctou&#8294;x', // U+2066 bidi isolate — `\p{Cf}`, not an enum gap
+      'Layer walked: toctou&#65039;x', // U+FE0F variation selector
+      'Layer walked: toctou&#6157;x', // U+180D Mongolian free variation selector
+      // A VISIBLE word constituent stitched onto the id (letter, digit, connector,
+      // combining mark) also renders one word GitHub never reads as a receipt —
+      // and needs no entity to reach: pure ASCII `toctou_x` leaks without the guard.
+      'Layer walked: toctou_x — note', // underscore (connector punctuation)
+      'Layer walked: toctoué', // trailing letter
+      'Layer walked: toctou&#65400;', // fullwidth `x` (letter)
+      'Layer walked: toctou&#1635;', // Arabic-Indic digit three
+      'Layer walked: toctou&#769;x', // U+0301 combining acute on the id
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
     // A link's VISIBLE text is prose and still counts, and a hard break BEFORE a
@@ -247,8 +258,9 @@ describe('parseLayerReceipts', () => {
     ]);
     // A `<br>` IS a visible line break on GitHub, so a marker after it starts its
     // own line — a real receipt (the entity LF above collapses; a `<br>` does not).
-    // Pin the regex's tolerances (`\/?`, case) so a regression cannot drop them.
-    for (const br of ['<br>', '<br/>', '<BR>', '<br >']) {
+    // Pin the regex's tolerances (`\/?`, case, attributes) so a regression cannot
+    // drop them — GitHub strips a `<br>`'s attributes but keeps the break.
+    for (const br of ['<br>', '<br/>', '<BR>', '<br >', '<br class="a">']) {
       expect([...parseLayerReceipts(`x${br}Layer walked: toctou`)]).toEqual([
         'toctou',
       ]);
@@ -293,6 +305,10 @@ describe('parseLayerReceipts', () => {
       'Layer&#32;walked: toctou', // entity space separator
       '&#76;ayer walked: toctou', // entity-encoded leading `L`
       'Layer&nbsp;walked: toctou', // named entity → visible nbsp space
+      // The two words split by inline markup that the reconstructed prose rejoins:
+      // the raw view has no adjacent "layer walked", but the render does.
+      'Layer *walked*: toctou', // emphasis boundary
+      'Layer [walked: toctou](/u)', // link boundary
     ]) {
       expect([...parseLayerReceipts(q)]).toEqual(['toctou']);
     }

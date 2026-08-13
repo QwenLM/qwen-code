@@ -195,9 +195,6 @@ export function renderShellLayerBriefList(
 const LAYER_RECEIPT_LINE_RE =
   /^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*[*_~]{0,3}layer\s+walked[*_~]{0,3}[ \t]*[:：][\s*_~`]*([a-z][a-z0-9-]*)/i;
 
-/** Cheap pre-filter so the line walk skips returns with no marker at all. */
-const LAYER_HINT_RE = /layer\s+walked/i;
-
 /**
  * The one CommonMark tokenizer this module uses. A hand-rolled fence/blockquote
  * scanner diverged from the spec round after round — a second parser is a
@@ -216,17 +213,21 @@ const MD = new MarkdownIt({ html: true });
 // marker only ever begins a reconstructed line when it truly begins a visible one.
 const DROPPED_INLINE = '\u0000';
 
-// Code points GitHub renders as NOTHING: zero-width, format, and bidi controls,
-// the line/paragraph separators, VT, and BOM. markdown-it decodes numeric
-// entities at parse time, so any of these can land inside a text child
-// (`&#8203;`, `&#8232;`). JS `\s` matches some and none render, so left in the
-// prose view they would glue a marker phrase GitHub shows fused (`layerwalked`)
-// or wedge invisibly between an id and the text after it — either way crediting a
-// receipt that never renders. Deleted from the text view so the reconstruction is
-// what a human sees; a wedge sitting just before a REAL break still leaves a clean
-// line-leading receipt (which a post-id guard on these characters would not).
+// Code points GitHub renders as NOTHING: every format character (`\p{Cf}` —
+// zero-width spaces/joiners, bidi controls AND isolates, BOM, soft hyphen, …)
+// and variation selector, plus VT, the combining grapheme joiner, and the line/
+// paragraph separators (which are not `\p{Cf}`). A Unicode PROPERTY class, not a
+// hand-enumerated one, so it cannot silently MISS a member the way a list does —
+// enumerating them by hand is what left the bidi isolates open. Same family the
+// sanitizer's `PROMPT_UNSAFE_INVISIBLES` (channels/base) guards, the same drift-
+// proof way. markdown-it decodes numeric entities at parse time, so any of these
+// can land in a text child (`&#8203;`, `&#8294;`). Left in the prose view they
+// would glue a marker phrase GitHub shows fused (`layerwalked`) or wedge
+// invisibly between an id and the text after it; deleted from the text view so
+// the reconstruction is what a human sees (a wedge just before a REAL break still
+// leaves a clean line-leading receipt).
 const INVISIBLE_FORMAT =
-  /[\u000B\u00AD\u034F\u061C\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\u206A-\u206F\uFEFF]/g; // eslint-disable-line no-control-regex, no-misleading-character-class
+  /[\p{Cf}\p{Variation_Selector}\u000B\u034F\u2028\u2029]/gu; // eslint-disable-line no-control-regex, no-misleading-character-class
 
 /**
  * The lines an auditor is USING, not quoting — the VISIBLE PROSE markdown-it
@@ -284,7 +285,10 @@ function* usedLines(finalText: string): Generator<string> {
             .replace(INVISIBLE_FORMAT, '');
         else if (c.type === 'softbreak' || c.type === 'hardbreak')
           prose += '\n';
-        else if (c.type === 'html_inline' && /^<br\s*\/?>$/i.test(c.content))
+        else if (
+          c.type === 'html_inline' &&
+          /^<br\b[^>]*\/?>$/i.test(c.content)
+        )
           prose += '\n';
         else if (
           c.type === 'code_inline' ||
@@ -312,20 +316,28 @@ export function parseLayerReceipts(
   taxonomy: readonly DefectLayer[] = SHELL_MODEL_LAYERS,
 ): Set<string> {
   const ids = new Set<string>();
-  // The prefilter reads RAW text but the parser now reads entity-DECODED prose,
-  // so an entity that decodes into the marker phrase (`Layer&#32;walked`) must
-  // not be vetoed here: skip the fast path only when no entity could decode.
-  if (!LAYER_HINT_RE.test(finalText) && !/&[#a-z]/i.test(finalText)) return ids;
+  // Cheap pre-filter. It reads RAW text but the parser reads DECODED, markup-joined
+  // prose, so it must not veto a marker whose two words are split by inline markup
+  // (`Layer *walked*`) or whose letters are entity-encoded (`Layer&#32;walked`).
+  // Skip only when both words are absent AND no entity could decode into them.
+  if (
+    (!/layer/i.test(finalText) || !/walked/i.test(finalText)) &&
+    !/&[#a-z]/i.test(finalText)
+  )
+    return ids;
   const known = new Set(taxonomy.map((l) => l.id));
   for (const line of usedLines(finalText)) {
     const m = LAYER_RECEIPT_LINE_RE.exec(line);
     if (!m) continue;
-    // Trailing stitch: the id capture is un-anchored at its end, so a dropped
-    // inline node touching the id (`Layer walked: toctou` + `` `x` ``) truncates
-    // the visible token `toctoux` back to the known prefix `toctou`. GitHub
-    // renders one stitched word, not a receipt, so a sentinel immediately after
-    // the id disqualifies it — the mirror of the leading-stitch guard.
-    if (line.charCodeAt(m[0].length) === DROPPED_INLINE.charCodeAt(0)) continue;
+    // Trailing stitch: the id capture is un-anchored at its end, so any character
+    // that stitches onto the id disqualifies the receipt — GitHub renders one word
+    // (`toctoux`, `toctou_x`, `toctoué`), never a receipt. Two guards: the dropped
+    // node sentinel, and any word constituent (letter, number, combining mark, or
+    // connector) — the mirror of the leading-stitch guard. A break, space, dash or
+    // other punctuation after the id is a real boundary and stays credited.
+    const after = m[0].length;
+    if (line.charCodeAt(after) === DROPPED_INLINE.charCodeAt(0)) continue;
+    if (/^[\p{L}\p{N}\p{M}\p{Pc}]/u.test(line.slice(after))) continue;
     const id = m[1].toLowerCase();
     if (known.has(id)) ids.add(id);
   }
