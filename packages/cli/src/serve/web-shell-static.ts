@@ -31,15 +31,62 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "img-src 'self' data: blob:",
   "connect-src 'self'",
   "worker-src 'self' blob:",
-  // MCP Apps run in the daemon's dedicated loopback sandbox origin. The host
-  // swaps localhost/127.0.0.1 when the shell itself is daemon-served so the
-  // sandbox and host never share an origin.
-  'frame-src http://localhost:* http://127.0.0.1:*',
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
   // attacker origin.
   "base-uri 'none'",
 ];
+
+/**
+ * Loopback origins the Web Shell may frame for the MCP App sandbox, pinned to
+ * the request's Host port. Wildcard ports would let a compromised shell embed
+ * any loopback listener.
+ */
+export function loopbackSandboxOrigins(
+  hostHeader: string | undefined,
+): string[] {
+  const port = portFromHostHeader(hostHeader);
+  const suffix = port ? `:${port}` : '';
+  return [
+    `http://localhost${suffix}`,
+    `http://127.0.0.1${suffix}`,
+    `http://[::1]${suffix}`,
+  ];
+}
+
+export function portFromHostHeader(
+  hostHeader: string | undefined,
+): string | undefined {
+  if (!hostHeader) return undefined;
+  if (hostHeader.startsWith('[')) {
+    const end = hostHeader.indexOf(']');
+    if (end === -1) return undefined;
+    const rest = hostHeader.slice(end + 1);
+    return rest.startsWith(':') && /^\d+$/u.test(rest.slice(1))
+      ? rest.slice(1)
+      : undefined;
+  }
+  const colon = hostHeader.lastIndexOf(':');
+  if (colon === -1) return undefined;
+  const port = hostHeader.slice(colon + 1);
+  return /^\d+$/u.test(port) ? port : undefined;
+}
+
+export function buildWebShellPermissionsPolicy(
+  sandboxOrigins: readonly string[] = [],
+): string {
+  const clipboardAllowlist =
+    sandboxOrigins.length > 0
+      ? `self ${sandboxOrigins.map((origin) => `"${origin}"`).join(' ')}`
+      : 'self';
+  return [
+    'camera=()',
+    'microphone=(self)',
+    'geolocation=()',
+    'payment=()',
+    `clipboard-write=(${clipboardAllowlist})`,
+  ].join(', ');
+}
 
 /**
  * Build the Web Shell CSP. `frame-ancestors` defaults to `'none'` (the caller
@@ -51,11 +98,13 @@ const WEB_SHELL_CSP_DIRECTIVES = [
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
+  frameSrcOrigins: readonly string[] = loopbackSandboxOrigins(undefined),
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  return [...WEB_SHELL_CSP_DIRECTIVES, fa].join('; ');
+  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
+  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -128,10 +177,11 @@ export function isPreAuthWebShellRequest(req: Request): boolean {
 function createSendIndex(
   webShellDir: string,
   frameAncestors: readonly string[] = [],
-): (res: Response) => void {
+): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
-  const csp = buildWebShellCsp(frameAncestors);
-  return (res: Response): void => {
+  return (req: Request, res: Response): void => {
+    const sandboxOrigins = loopbackSandboxOrigins(req.get('host'));
+    const csp = buildWebShellCsp(frameAncestors, sandboxOrigins);
     res
       .status(200)
       .set('Content-Security-Policy', csp)
@@ -140,10 +190,12 @@ function createSendIndex(
       .set(
         // `microphone=(self)` lets the same-origin Web Shell document request
         // the mic for voice dictation (the prompt won't even appear under an
-        // empty `microphone=()` allowlist). Still blocks cross-origin iframes;
-        // camera/geolocation/payment stay disabled (unused).
+        // empty `microphone=()` allowlist). Camera/geolocation stay disabled:
+        // the MCP App inner iframe is opaque-origin, so those grants cannot
+        // work there, and this header also blocks delegating them to the
+        // cross-origin sandbox.
         'Permissions-Policy',
-        'camera=(), microphone=(self), geolocation=(), payment=()',
+        buildWebShellPermissionsPolicy(sandboxOrigins),
       )
       .set('Cache-Control', 'no-cache');
     // X-Frame-Options can't express an allowlist, so only send the hard DENY
@@ -229,10 +281,10 @@ export function mountWebShellAssets(
     }
     res.status(404).type('text/plain').send('Not found');
   });
-  app.get('/', (_req: Request, res: Response) => sendIndex(res));
+  app.get('/', (req: Request, res: Response) => sendIndex(req, res));
   app.get('/session/:id', (req: Request, res: Response, next: NextFunction) => {
     if (!isDocumentNavigation(req)) return next();
-    sendIndex(res);
+    sendIndex(req, res);
   });
 }
 
@@ -273,6 +325,6 @@ export function mountWebShellSpaFallback(
         `qwen serve: Web Shell SPA fallback served for ${req.method} ${req.originalUrl}`,
       );
     }
-    sendIndex(res);
+    sendIndex(req, res);
   });
 }

@@ -57,6 +57,7 @@ export function buildMcpAppCsp(csp?: McpAppResourceCsp): string {
     `connect-src 'self' ${connections}`.trim(),
     `worker-src 'self' blob: ${resources}`.trim(),
     frames ? `frame-src ${frames}` : "frame-src 'none'",
+    "form-action 'none'",
     "object-src 'none'",
     baseUris ? `base-uri ${baseUris}` : "base-uri 'none'",
   ].join('; ');
@@ -82,10 +83,8 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
         inner.style.cssText = 'width:100%;height:100%;border:0;background:transparent';
         document.body.appendChild(inner);
 
+        // Opaque inner origin cannot use camera/mic; geo stays host-blocked.
         const allowFeatures = {
-          camera: 'camera',
-          microphone: 'microphone',
-          geolocation: 'geolocation',
           clipboardWrite: 'clipboard-write',
         };
         window.addEventListener('message', (event) => {

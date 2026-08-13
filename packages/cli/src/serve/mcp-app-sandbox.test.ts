@@ -31,7 +31,25 @@ describe('MCP App sandbox', () => {
     expect(buildMcpAppCsp(parsed)).toContain(
       "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://*.example.com",
     );
+    expect(buildMcpAppCsp(parsed)).toContain("form-action 'none'");
     expect(buildMcpAppCsp(parsed)).not.toContain('bad.test');
+  });
+
+  it('keeps declared frame and base-uri origins', () => {
+    const parsed = parseMcpAppCsp(
+      JSON.stringify({
+        frameDomains: ['https://frames.example.com'],
+        baseUriDomains: ['https://base.example.com'],
+      }),
+    );
+
+    expect(buildMcpAppCsp(parsed)).toContain(
+      'frame-src https://frames.example.com',
+    );
+    expect(buildMcpAppCsp(parsed)).toContain(
+      'base-uri https://base.example.com',
+    );
+    expect(buildMcpAppCsp(parsed)).toContain("form-action 'none'");
   });
 
   it('serves the proxy with CSP and no-store headers', async () => {
@@ -45,6 +63,9 @@ describe('MCP App sandbox', () => {
       "frame-src 'none'",
     );
     expect(response.headers['cache-control']).toContain('no-store');
+    expect(response.headers['content-security-policy']).toContain(
+      "form-action 'none'",
+    );
     expect(response.text).toContain('ui/notifications/sandbox-proxy-ready');
     expect(response.text).toContain(
       "inner.setAttribute('sandbox', 'allow-scripts allow-forms')",
@@ -52,6 +73,10 @@ describe('MCP App sandbox', () => {
     expect(response.text).not.toContain(
       "inner.setAttribute('sandbox', 'allow-scripts allow-same-origin",
     );
+    expect(response.text).toContain("clipboardWrite: 'clipboard-write'");
+    expect(response.text).not.toContain("camera: 'camera'");
+    expect(response.text).not.toContain("microphone: 'microphone'");
+    expect(response.text).not.toContain("geolocation: 'geolocation'");
     expect(response.text).toContain('inner.srcdoc = params.html');
     expect(response.text).toContain("event.origin === 'null'");
   });

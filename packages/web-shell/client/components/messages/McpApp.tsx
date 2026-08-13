@@ -74,12 +74,33 @@ export function resolveMcpAppSandboxUrl(
   }
 }
 
+function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
+  return {
+    theme,
+    platform: 'web' as const,
+    displayMode: 'inline' as const,
+    availableDisplayModes: ['inline' as const],
+    containerDimensions: { maxHeight: 640 },
+  };
+}
+
 export function McpApp({ display }: { display: McpAppDisplay }) {
   const daemonBaseUrl = useContext(McpAppHostContext);
   const theme = useTheme();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const bridgeRef = useRef<AppBridge | null>(null);
+  const displayRef = useRef(display);
+  const themeRef = useRef(theme);
+  displayRef.current = display;
+  themeRef.current = theme;
   const [height, setHeight] = useState(260);
   const [error, setError] = useState<string>();
+  const cspKey = display.csp ? JSON.stringify(display.csp) : '';
+  const permissionsKey = display.permissions
+    ? JSON.stringify(display.permissions)
+    : '';
+  const toolArgumentsKey = JSON.stringify(display.toolArguments);
+  const toolResultKey = JSON.stringify(display.toolResult);
   const sandboxUrl = useMemo(() => {
     if (!daemonBaseUrl || typeof window === 'undefined') return undefined;
     const resolved = resolveMcpAppSandboxUrl(
@@ -88,49 +109,47 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     );
     if (!resolved) return undefined;
     const url = new URL(resolved);
-    if (display.csp) url.searchParams.set('csp', JSON.stringify(display.csp));
+    if (cspKey) url.searchParams.set('csp', cspKey);
     return url.toString();
-  }, [daemonBaseUrl, display.csp]);
+  }, [daemonBaseUrl, cspKey]);
 
   useEffect(() => {
     setError(undefined);
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
     let initialized = false;
+    const current = displayRef.current;
     const bridge = new AppBridge(
       null,
       { name: 'qwen-code-web-shell', version: '0.0.1' },
       {
         sandbox: {
-          ...(display.csp ? { csp: display.csp } : {}),
-          ...(display.permissions ? { permissions: display.permissions } : {}),
+          ...(current.csp ? { csp: current.csp } : {}),
+          ...(current.permissions ? { permissions: current.permissions } : {}),
         },
       },
-      {
-        hostContext: {
-          theme,
-          platform: 'web',
-          displayMode: 'inline',
-          availableDisplayModes: ['inline'],
-          containerDimensions: { maxHeight: 640 },
-        },
-      },
+      { hostContext: mcpAppHostContext(themeRef.current) },
     );
+    bridgeRef.current = bridge;
 
     bridge.onsandboxready = () => {
+      const resource = displayRef.current;
       void bridge
         .sendSandboxResourceReady({
-          html: display.html,
-          ...(display.csp ? { csp: display.csp } : {}),
-          ...(display.permissions ? { permissions: display.permissions } : {}),
+          html: resource.html,
+          ...(resource.csp ? { csp: resource.csp } : {}),
+          ...(resource.permissions
+            ? { permissions: resource.permissions }
+            : {}),
         })
         .catch((reason: unknown) => setError(String(reason)));
     };
     bridge.oninitialized = () => {
       initialized = true;
+      const resource = displayRef.current;
       void bridge
-        .sendToolInput({ arguments: display.toolArguments })
-        .then(() => bridge.sendToolResult(display.toolResult))
+        .sendToolInput({ arguments: resource.toolArguments })
+        .then(() => bridge.sendToolResult(resource.toolResult))
         .catch((reason: unknown) => setError(String(reason)));
     };
     bridge.onsizechange = ({ height: requestedHeight }) => {
@@ -155,6 +174,8 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       .catch((reason: unknown) => setError(String(reason)));
 
     return () => {
+      bridgeRef.current = null;
+      iframe.removeAttribute('src');
       if (initialized) {
         void bridge
           .teardownResource({}, { timeout: 500 })
@@ -164,7 +185,20 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       }
       void bridge.close().catch(() => {});
     };
-  }, [display, sandboxUrl, theme]);
+  }, [
+    sandboxUrl,
+    display.serverName,
+    display.resourceUri,
+    display.html,
+    cspKey,
+    permissionsKey,
+    toolArgumentsKey,
+    toolResultKey,
+  ]);
+
+  useEffect(() => {
+    bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
+  }, [theme]);
 
   if (!sandboxUrl) {
     return <div className={styles.fallback}>{display.fallbackText}</div>;
