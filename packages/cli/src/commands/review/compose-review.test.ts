@@ -4250,14 +4250,22 @@ describe('the ledger marker reaches the POSTED body', () => {
   it('withholds the sha on a fail-closed input — the findings still ride', () => {
     // Same conditions under which Step 8 forbids advancing the cache's
     // lastCommitSha: an anchor written past unreviewed scope lets the next
-    // round's incremental range skip it forever. Each case rides the clean
-    // covered plan, so the withholding is attributable to the named input,
-    // not to the module-computed cap the previous test pins.
+    // round's incremental range skip it forever. Each named input reaches the
+    // predicate through the cap entry composeReviewBody pushes for it — the
+    // predicate reads the module's own verdict, not a parallel list — except
+    // the last case: a whitespace-only cannotTellCriticals entry is filtered
+    // out of the rendered caps (nothing to render), but an undecided blocker
+    // whose text was lost is still an undecided blocker, so the one raw
+    // input check must catch what the cap list deliberately drops. That case
+    // asserts cappedBy is EMPTY, which is exactly why it exists: delete the
+    // raw check and only this case fails (measured — a mutant keeping only
+    // `cappedBy.length > 0` survived every other test in the suite).
     for (const failClosed of [
       { unreviewedDimensions: ['security — the agent whiffed twice'] },
       { cannotTellCriticals: ['a.ts:3 — could not fetch the full body'] },
       { uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
       { contextUnavailable: true },
+      { cannotTellCriticals: [' '] },
     ]) {
       const r = composeReview({
         planPath: coveredPlan(['verify', 'reverse-audit'], {
@@ -4277,6 +4285,13 @@ describe('the ledger marker reaches the POSTED body', () => {
       // Keyed by the fail-closed input so a regression names its condition.
       expect({ ...failClosed, sha: ledger?.sha }).toEqual({ ...failClosed });
       expect(ledger?.findings).toHaveLength(1);
+      if (
+        Array.isArray(failClosed.cannotTellCriticals) &&
+        failClosed.cannotTellCriticals[0] === ' '
+      ) {
+        // The raw-check-only case: no cap fires, the input alone withholds.
+        expect(r.cappedBy).toEqual([]);
+      }
     }
   });
 

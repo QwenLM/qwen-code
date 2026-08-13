@@ -141,6 +141,28 @@ describe('ledger marker', () => {
       '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"dropped":3,"sha":"abc1234"} -->',
     );
     expect(handEdited!.sha).toBeUndefined();
+    // The count cap binds on READ too: a hand-edited marker carrying MORE
+    // valid entries than the serializer would ever emit — and no `dropped` —
+    // is truncated by this parser, and the entries it sliced off are dropped
+    // findings. Leaving the anchor on it would certify a range whose work
+    // list this very parse made partial (probe-measured on the shipped code:
+    // 51 entries parsed to 50 and KEPT the sha).
+    const overCount = parseLedger(
+      `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 2,
+        sha: 'abc1234def567890',
+        findings: Array.from({ length: LEDGER_MAX_FINDINGS + 1 }, (_, i) => ({
+          id: `R2-${i}`,
+          sev: 'C',
+          file: 'a.ts',
+          title: 't',
+        })),
+      })} -->`,
+    )!;
+    expect(overCount.findings).toHaveLength(LEDGER_MAX_FINDINGS);
+    expect(overCount.dropped).toBe(1);
+    expect(overCount.sha).toBeUndefined();
   });
 
   it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {

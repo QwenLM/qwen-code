@@ -57,9 +57,12 @@ export interface Ledger {
    * previous findings from the posted body but had nowhere to recover "last
    * reviewed at", so its incremental range always degraded to the full diff.
    * Absent on a fail-closed round ON PURPOSE — a run that left scope
-   * unreviewed must not hand the next round an anchor that scopes past it
-   * (the same rule Step 8 applies to the cache's `lastCommitSha`). The
-   * findings still ride; only the anchor is withheld.
+   * unreviewed must not hand the next round an anchor that scopes past it.
+   * "Fail-closed" here is the net `ledgerMarkerFor` computes (any undecided
+   * blocker, or any cap in the verdict the module itself derived), and Step
+   * 8's cache-skip rule names the same net for `lastCommitSha` — the two
+   * anchors must not disagree about what a clean round is. The findings
+   * still ride; only the anchor is withheld.
    */
   sha?: string;
 }
@@ -177,16 +180,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
       return null;
     }
     if (!Array.isArray(raw.findings)) return null;
-    const findings = raw.findings
-      .filter(
-        (f): f is LedgerFinding =>
-          !!f &&
-          typeof f.id === 'string' &&
-          (f.sev === 'C' || f.sev === 'S') &&
-          typeof f.file === 'string' &&
-          typeof f.title === 'string' &&
-          (f.line === undefined || Number.isInteger(f.line)),
-      )
+    const valid = raw.findings.filter(
+      (f): f is LedgerFinding =>
+        !!f &&
+        typeof f.id === 'string' &&
+        (f.sev === 'C' || f.sev === 'S') &&
+        typeof f.file === 'string' &&
+        typeof f.title === 'string' &&
+        (f.line === undefined || Number.isInteger(f.line)),
+    );
+    const findings = valid
       .slice(0, LEDGER_MAX_FINDINGS)
       // Normalise on READ too: the caps are the serializer's contract, and a
       // hand-edited marker is not bound by it.
@@ -195,10 +198,15 @@ export function parseLedger(body: string | undefined): Ledger | null {
         title: f.title.slice(0, LEDGER_MAX_TITLE),
         file: f.file.slice(0, LEDGER_MAX_FILE),
       }));
-    const dropped =
+    const declared =
       Number.isInteger(raw.dropped) && (raw.dropped as number) > 0
         ? (raw.dropped as number)
-        : undefined;
+        : 0;
+    // The count cap binds on READ as it does on write: valid entries this
+    // parser sliced off ARE dropped findings, and a hand-edited marker whose
+    // list was truncated here must not read as complete — nor keep an anchor
+    // the serializer's own truncation path would have refused to certify.
+    const dropped = declared + (valid.length - findings.length) || undefined;
     const sha =
       // Normalised on READ as the serializer holds on WRITE: a hand-edited
       // marker carrying both `dropped` and `sha` would certify a range its

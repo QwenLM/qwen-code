@@ -531,24 +531,24 @@ function ledgerMarkerFor(
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    // The anchor rides only when this round's scope was clean. The four named
-    // inputs are the conditions under which Step 8 forbids advancing the
-    // cache's `lastCommitSha`; `cappedBy` folds in the verdict this module
-    // just computed itself — the caps with no input channel at all (a chunk
-    // nobody read, findings still `— [unverified]`, the deterministic gates'
-    // enrichments). The input fields alone were measured leaking: a round the
-    // module stamped "could not certify that any of this diff was reviewed"
-    // still carried the anchor. An anchor written past unreviewed or
-    // undecided scope scopes the NEXT round's incremental diff past it, and
-    // no later round ever re-covers the gap. The findings always ride — a
-    // fail-closed round's work list is still a work list; it just cannot
+    // The anchor rides only when this round's scope was clean, and "clean" is
+    // the verdict this module just computed: `cappedBy` aggregates every
+    // fail-closed state — each named input pushes its own cap entry, plus the
+    // caps with no input channel at all (a chunk nobody read, findings still
+    // `— [unverified]`, the deterministic gates' enrichments). The input
+    // fields alone were measured leaking exactly those channel-less caps: a
+    // round the module stamped "could not certify that any of this diff was
+    // reviewed" still carried the anchor. One raw check stays alongside, for
+    // the sliver the cap list deliberately drops: a whitespace-only
+    // `cannotTellCriticals` entry is filtered out of the rendered caps, but
+    // Step 8's contract is "any entry" — an undecided blocker whose text was
+    // lost is still an undecided blocker. An anchor written past unreviewed
+    // or undecided scope scopes the NEXT round's incremental diff past it,
+    // and no later round ever re-covers the gap. The findings always ride —
+    // a fail-closed round's work list is still a work list; it just cannot
     // certify a range.
     const failClosed =
-      (input.unreviewedDimensions?.length ?? 0) > 0 ||
-      (input.cannotTellCriticals?.length ?? 0) > 0 ||
-      (input.uncoverableChunks?.length ?? 0) > 0 ||
-      input.contextUnavailable === true ||
-      cappedBy.length > 0;
+      (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
     const sha =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
