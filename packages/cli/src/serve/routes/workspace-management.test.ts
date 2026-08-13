@@ -306,6 +306,40 @@ describe('owned workspace runtime publication', () => {
     );
   });
 
+  it('rejects and disposes a primary owned-runtime candidate', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-primary', {
+      primary: true,
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).rejects.toThrow('Daemon-owned workspace runtime must not be primary');
+
+    expect(registry.add).not.toHaveBeenCalled();
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
   it('disposes a candidate rejected by final pre-publication validation', async () => {
     const registry = createMockRegistry([
       makeRuntime('/primary', { primary: true }),

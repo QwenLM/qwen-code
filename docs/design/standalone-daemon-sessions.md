@@ -224,14 +224,14 @@ session child for one daemon ownership lifetime. The owner keeps each child's
 validated identity by session ID and compares it before every later use; an
 owned `0700` directory substituted at the same path is still compromised.
 Identity may be established only at first materialization, after a daemon
-restart with no pending deletion journal, or by explicit repair when the path
-was proven absent. Archive does not reset it, and the normal-to-staged deletion
-rename preserves it. After a restart, a securely recreated root and child at
-the expected canonical paths may be accepted only after recovery journals have
-been reconciled; the feature does not promise persistent inode attestation
-across clean restarts. Windows validates canonical path and link/reparse
-behavior exposed by the platform without claiming POSIX owner/mode or ACL
-guarantees.
+restart with no pending deletion journal, or when load, resume, or explicit
+repair recreates a path proven absent while holding the lifecycle coordinator.
+Archive does not reset it, and the normal-to-staged deletion rename preserves
+it. After a restart, a securely recreated root and child at the expected
+canonical paths may be accepted only after recovery journals have been
+reconciled; the feature does not promise persistent inode attestation across
+clean restarts. Windows validates canonical path and link/reparse behavior
+exposed by the platform without claiming POSIX owner/mode or ACL guarantees.
 
 The transcript and runtime configuration remain stored under the Conversations
 runtime root. The session's effective tool and shell working directory is its
@@ -258,9 +258,13 @@ tooling cannot enforce.
 The Conversations root is not a user workspace. Use a default-deny user-workspace
 resolver and a separate explicit internal resolver. Generic registration,
 settings, trust, Git, files, shell, extensions, skills, MCP control, memory
-control, channels, scheduled-task administration, workspace voice, and
-workspace-qualified ACP WebSocket routes must reject a request that resolves to
-the internal runtime.
+control, workspace voice, and workspace-qualified ACP WebSocket routes must
+reject a request that resolves to the internal runtime. Generic channel and
+scheduled-task administration is also denied. Compatibility exceptions preserve
+the existing Live behavior on the workspace-qualified surfaces: channel
+management remains read-only, and Live-owned scheduled tasks retain list,
+update, delete, and manual-run access. These exceptions authorize only Live
+state and do not expose standalone sessions or standalone durable scheduling.
 
 Audit every direct registry consumer, including HTTP routes, ACP and voice
 WebSocket upgrades, capabilities, session creation and restore, workspace
@@ -401,11 +405,12 @@ not accept it as input, and WebShell does not expose it as a project.
 
 The SDK provides capability-gated create, list, exact get, load, resume, repair,
 rename, export, archive, unarchive, and delete methods. It generates the UUID
-before create, exposes that UUID on an outcome-unknown transport error, performs
-exact lookup, and never retries creation automatically. `DaemonSessionClient`
-stores an explicit restore strategy: workspace sessions restore by cwd, while
-standalone sessions use the dedicated route. Daemon responses are
-runtime-validated in both browser and Node builds.
+before create, exposes that UUID on either a structured
+`standalone_creation_outcome_unknown` response or an outcome-unknown transport
+error, performs exact lookup, and never retries creation automatically.
+`DaemonSessionClient` stores an explicit restore strategy: workspace sessions
+restore by cwd, while standalone sessions use the dedicated route. Daemon
+responses are runtime-validated in both browser and Node builds.
 
 ## Lifecycle and consistency
 
@@ -432,7 +437,14 @@ logical transaction:
 8. Commit the durable session before attempting to write the HTTP response.
 
 Before source persistence, failure closes the ACP session, releases the UUID,
-and removes only an empty child. After source persistence, transcript existence
+and removes only an empty child after closure succeeds. If ACP-session closure
+fails, the UUID remains reserved as `creating`, the Conversations runtime is
+quarantined, and its shared ACP child is torn down to eliminate the unpersisted
+orphan before the UUID can be released. Exact lookup returns
+`202 state: "creating"` until teardown confirms that no orphan remains, then
+returns `404`; a connected create request receives
+`500 standalone_creation_outcome_unknown` with the UUID and must poll exact
+lookup rather than retry create. After source persistence, transcript existence
 is the durable outcome marker. Under the lifecycle lock, the daemon first closes
 the ACP session, removes only an empty child, and then attempts orphan transcript
 cleanup. Cleanup is complete only after ACP session teardown succeeds, the empty
@@ -441,7 +453,8 @@ released. Complete cleanup returns
 `500 standalone_creation_rolled_back` with the UUID and is safe to retry with
 that UUID. If ACP-session closure or transcript cleanup fails, or the process
 crashes, the daemon preserves the transcript and UUID and reports
-`standalone_creation_outcome_unknown` so the client can query exact identity.
+`500 standalone_creation_outcome_unknown` with the UUID so the client can query
+exact identity.
 Once source persistence has succeeded, transcript deletion is not attempted
 unless ACP session teardown and empty-child removal have both succeeded; a
 partial unwind therefore remains discoverable by exact lookup. The design does
@@ -457,8 +470,10 @@ then load; it never retries create automatically.
 Load and resume first validate source ownership, root, and deterministic child.
 If the child is absent, the daemon recreates it at the same path, relocates the
 session, and returns `workingDirectory.state: "recreated"` with a warning that
-deleted files were not recovered. A suspicious existing path fails closed and
-is never chmodded, replaced, or deleted.
+deleted files were not recovered. This recreation holds the lifecycle
+coordinator and establishes the new validated child identity before returning.
+A suspicious existing path fails closed and is never chmodded, replaced, or
+deleted.
 
 Before every standalone prompt is admitted, revalidate the root, exact child,
 and current session cwd while holding the shared lifecycle admission boundary.
@@ -490,9 +505,12 @@ archive, deletion, restart ownership, and UI management.
 
 Use one per-session lifecycle coordinator rather than separate repair, archive,
 or deletion locks. Shared prompt/read admission and exclusive repair, archive,
-unarchive, delete, and rename mutations all use this coordinator. Transcript
-mutation also acquires the existing writer lease. Cross-daemon Conversations
-ownership is the outer boundary; ambiguous ownership never permits fallback.
+unarchive, delete, and rename mutations all use this coordinator. Closing
+active ownership means closing new prompt admission, waiting for the active
+prompt to settle or cancel, closing the session in the shared Conversations ACP
+child, and removing it from the live owner index. Transcript mutation also
+acquires the existing writer lease. Cross-daemon Conversations ownership is the
+outer boundary; ambiguous ownership never permits fallback.
 
 ### Archive, rename, and export
 
@@ -510,7 +528,7 @@ directory.
 WebShell retains its second confirmation and explains that deletion removes the
 transcript and private files. The daemon then acquires the exclusive lifecycle
 coordinator and writer lease, closes prompt admission, and tears down active
-ownership.
+ownership before changing either the directory or transcript.
 
 Deletion uses a small durable recovery journal beside the stable Conversations
 owner record in an owner-only user-global namespace independent of
@@ -527,17 +545,20 @@ transcript, and clear the journal. Missing files do not block transcript
 deletion. If either path exists but fails validation, stop before transcript
 mutation.
 
-1. Revalidate owner, root, source, transcript, normal child, and absence of
+1. If the session has active ownership, wait for its prompt to settle or cancel,
+   close its ACP session in the shared Conversations child, and remove its live
+   owner entry.
+2. Revalidate owner, root, source, transcript, normal child, and absence of
    conflicting staged state.
-2. Persist a prepared deletion record.
-3. If the normal child exists, atomically rename it to the exact `.deleting`
+3. Persist a prepared deletion record.
+4. If the normal child exists, atomically rename it to the exact `.deleting`
    sibling and persist the staged phase.
-4. Delete the active or archived transcript and its sidecars.
-5. If deletion reports an error, re-read the transcript and all sidecar state
+5. Delete the active or archived transcript and its sidecars.
+6. If deletion reports an error, re-read the transcript and all sidecar state
    under the writer lease. Only a fully intact set permits restoring the normal
    child and clearing the journal, followed by retryable
    `500 transcript_deletion_failed` with the session intact. A fully absent set
-   commits transcript deletion and continues to step 6. Partial or unknown
+   commits transcript deletion and continues to step 7. Partial or unknown
    state retains the journal and staged child and returns
    `transcript_deletion_outcome_unknown`; recovery must reconcile it before any
    rollback or recursive cleanup. If restoring a fully intact set fails, leave
@@ -545,7 +566,7 @@ mutation.
    `working_directory_recovery_failed`. If both children were already absent,
    retain the journal on intact, partial, or unknown deletion failure so an
    exact retry or bounded reconciliation can finish the authorized deletion.
-6. If transcript deletion succeeds, recursively remove only the exact validated
+7. If transcript deletion succeeds, recursively remove only the exact validated
    staged child, then clear the journal.
 
 Final removal failure does not resurrect the transcript. Return the session ID
@@ -581,25 +602,25 @@ deletion was authorized.
 
 ### Failure contract
 
-| Condition                                                 | Result                                           |
-| --------------------------------------------------------- | ------------------------------------------------ |
-| Invalid/forbidden field or malformed UUID                 | `400 invalid_request`                            |
-| Session is absent or not standalone                       | `404 standalone_session_not_found`               |
-| UUID/source/orphan-directory/session-state conflict       | `409 standalone_session_conflict`                |
-| UUID creation is currently in flight                      | Exact lookup returns `202 state: "creating"`     |
-| Private child disappeared before prompt                   | `409 working_directory_missing`                  |
-| Existing managed path fails validation                    | `409 working_directory_compromised`              |
-| Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`              |
-| Create crossed persistence and cleanup completed          | `500 standalone_creation_rolled_back` with UUID  |
-| Transcript deletion failed and directory state recovered  | `500 transcript_deletion_failed`                 |
-| Transcript or sidecar deletion outcome is partial/unknown | `500 transcript_deletion_outcome_unknown`        |
-| Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`          |
-| Create crossed persistence but cleanup outcome is unknown | `standalone_creation_outcome_unknown` with UUID  |
-| Conversations root identity or trust fails                | `503 conversation_root_compromised`              |
-| Runtime owner record is unsafe                            | `503 conversation_runtime_ownership_compromised` |
-| Another daemon owns the runtime                           | `503 conversation_runtime_in_use`                |
-| Conversations runtime cannot be initialized               | `503 conversation_runtime_unavailable`           |
-| Transcript was deleted but final file cleanup failed      | `200` with `fileCleanupPending`                  |
+| Condition                                                 | Result                                              |
+| --------------------------------------------------------- | --------------------------------------------------- |
+| Invalid/forbidden field or malformed UUID                 | `400 invalid_request`                               |
+| Session is absent or not standalone                       | `404 standalone_session_not_found`                  |
+| UUID/source/orphan-directory/session-state conflict       | `409 standalone_session_conflict`                   |
+| UUID creation is currently in flight                      | Exact lookup returns `202 state: "creating"`        |
+| Private child disappeared before prompt                   | `409 working_directory_missing`                     |
+| Existing managed path fails validation                    | `409 working_directory_compromised`                 |
+| Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`                 |
+| Create crossed persistence and cleanup completed          | `500 standalone_creation_rolled_back` with UUID     |
+| Transcript deletion failed and directory state recovered  | `500 transcript_deletion_failed`                    |
+| Transcript or sidecar deletion outcome is partial/unknown | `500 transcript_deletion_outcome_unknown`           |
+| Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`             |
+| Create cleanup outcome is unknown                         | `500 standalone_creation_outcome_unknown` with UUID |
+| Conversations root identity or trust fails                | `503 conversation_root_compromised`                 |
+| Runtime owner record is unsafe                            | `503 conversation_runtime_ownership_compromised`    |
+| Another daemon owns the runtime                           | `503 conversation_runtime_in_use`                   |
+| Conversations runtime cannot be initialized               | `503 conversation_runtime_unavailable`              |
+| Transcript was deleted but final file cleanup failed      | `200` with `fileCleanupPending`                     |
 
 Structured errors include the session ID when known, identify retryability, and
 never expose untrusted filesystem paths. Logs and telemetry record route,
@@ -699,6 +720,9 @@ Suggested title: `feat(cli): Add standalone session creation and restore`
 - Add a focused `StandaloneSessionService` for required-UUID creation, exact
   lookup, listing, load, resume, directory repair, prompt preflight, and
   working-directory warnings.
+- Add the per-session lifecycle coordinator needed for shared prompt/load
+  admission and exclusive repair; PR3 extends the same coordinator to the
+  remaining lifecycle mutations.
 - Implement the persistence-boundary-aware creation transaction and
   response-loss semantics.
 - Route projectless Live task creation through the standalone service.
@@ -723,9 +747,9 @@ Suggested title: `feat(cli): Add standalone daemon session APIs`
 
 - Register the complete route set and exact request/response schemas.
 - Add active/archived rename and export.
-- Add archive/unarchive integration, the unified lifecycle coordinator,
-  deletion journal, exact staged cleanup, crash reconciliation, and
-  `fileCleanupPending`.
+- Add archive/unarchive integration, extend the lifecycle coordinator across
+  rename/archive/unarchive/delete, and add the deletion journal, exact staged
+  cleanup, crash reconciliation, and `fileCleanupPending`.
 - Advertise `standalone_sessions_v1` only when every dependency is present.
 - Add daemon integration tests and the required E2E plan under
   `.qwen/e2e-tests/`.
@@ -748,8 +772,8 @@ Suggested title: `feat(sdk): Add standalone session APIs`
   explicit `{ kind: 'standalone' }` context.
 - Add capability-gated methods for the complete lifecycle that never accept
   `workspaceCwd`.
-- Generate UUID before create, expose it on outcome-unknown errors, perform
-  exact lookup, and never retry automatically.
+- Generate UUID before create, expose it on structured or transport-level
+  outcome-unknown errors, perform exact lookup, and never retry automatically.
 - Store explicit workspace and standalone restore strategies.
 - Runtime-validate daemon responses and preserve browser/Node behavior.
 

@@ -127,6 +127,8 @@ describe('ConversationRuntimeManager', () => {
 
     expect(publishRuntime).toHaveBeenCalledOnce();
     expect(workspace.revalidate).toHaveBeenCalledTimes(2);
+    expect(workspace.assertExactRoot).toHaveBeenCalledTimes(2);
+    expect(workspace.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
     expect(bridge.preheat).not.toHaveBeenCalled();
     expect(bridge.setLiveScreenContextCaptureHandler).not.toHaveBeenCalled();
     expect(bridge.setLiveTaskToolRequestHandler).not.toHaveBeenCalled();
@@ -224,6 +226,26 @@ describe('ConversationRuntimeManager', () => {
         removable: true,
       }),
     },
+    {
+      name: 'missing provenance',
+      runtime: createRuntime({
+        workspaceId: 'conversations',
+        workspaceCwd: root.canonicalRoot,
+        primary: false,
+        trusted: true,
+        removable: false,
+      }),
+    },
+    {
+      name: 'missing removability',
+      runtime: createRuntime({
+        workspaceId: 'conversations',
+        workspaceCwd: root.canonicalRoot,
+        primary: false,
+        provenance: 'live-conversation',
+        trusted: true,
+      }),
+    },
   ])('rejects an existing runtime with invalid $name', async ({ runtime }) => {
     const publishRuntime = vi.fn();
     const manager = new ConversationRuntimeManager({
@@ -275,6 +297,27 @@ describe('ConversationRuntimeManager', () => {
 
     await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
     expect(publishRuntime).not.toHaveBeenCalled();
+  });
+
+  it('rejects a published cached runtime after it is removed without republishing', async () => {
+    const candidate = createOwnedRuntime();
+    const registry = createRegistry();
+    const publishRuntime = vi.fn(async (_cwd, validate) => {
+      await validate(candidate);
+      registry.add(candidate);
+      return candidate;
+    });
+    const manager = new ConversationRuntimeManager({
+      workspace: createWorkspace(),
+      registry,
+      publishRuntime,
+    });
+    await manager.ensure();
+    registry.beginDrain(candidate);
+    registry.completeDrain(candidate);
+
+    await expect(manager.ensure()).rejects.toThrow(/no longer an active/);
+    expect(publishRuntime).toHaveBeenCalledOnce();
   });
 
   it('rejects a cached runtime replaced by another active generation', async () => {
@@ -341,6 +384,26 @@ describe('ConversationRuntimeManager', () => {
         removable: true,
       }),
     },
+    {
+      name: 'missing provenance',
+      runtime: createRuntime({
+        workspaceId: 'conversations',
+        workspaceCwd: root.canonicalRoot,
+        primary: false,
+        trusted: true,
+        removable: false,
+      }),
+    },
+    {
+      name: 'missing removability',
+      runtime: createRuntime({
+        workspaceId: 'conversations',
+        workspaceCwd: root.canonicalRoot,
+        primary: false,
+        provenance: 'live-conversation',
+        trusted: true,
+      }),
+    },
   ])(
     'rejects a publication candidate with invalid $name',
     async ({ runtime }) => {
@@ -392,6 +455,44 @@ describe('ConversationRuntimeManager', () => {
     await expect(manager.ensure()).resolves.toBe(candidate);
     expect(registry.getByWorkspaceCwd('/work/wrong')).toBeUndefined();
     expect(publishRuntime).toHaveBeenCalledTimes(2);
+  });
+
+  it('publishes with the revalidated canonical root', async () => {
+    const canonicalRoot = '/canonical/conversations';
+    const revalidatedRoot = {
+      ...root,
+      configuredRoot: '/configured/conversations',
+      canonicalRoot,
+    };
+    const workspace = {
+      revalidate: vi.fn(async () => revalidatedRoot),
+      assertExactRoot: vi.fn(async () => revalidatedRoot),
+    } satisfies Pick<ConversationWorkspace, 'revalidate' | 'assertExactRoot'>;
+    const registry = createRegistry();
+    const candidate = createRuntime({
+      workspaceId: 'conversations',
+      workspaceCwd: canonicalRoot,
+      primary: false,
+      provenance: 'live-conversation',
+      trusted: true,
+      removable: false,
+    });
+    const publishRuntime = vi.fn(async (_cwd, validate) => {
+      await validate(candidate);
+      registry.add(candidate);
+      return candidate;
+    });
+    const manager = new ConversationRuntimeManager({
+      workspace,
+      registry,
+      publishRuntime,
+    });
+
+    await expect(manager.ensure()).resolves.toBe(candidate);
+    expect(publishRuntime).toHaveBeenCalledWith(
+      canonicalRoot,
+      expect.any(Function),
+    );
   });
 
   it('retries after a published runtime stops being active before publication returns', async () => {
