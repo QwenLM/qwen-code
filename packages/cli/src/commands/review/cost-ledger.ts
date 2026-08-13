@@ -43,6 +43,7 @@ import {
   textOf,
 } from './lib/transcripts.js';
 import { labelFromIdentityLine } from './lib/agent-identity.js';
+import { priorSessionIds } from './lib/run-ledger.js';
 
 interface CostLedgerArgs {
   plan: string;
@@ -67,6 +68,14 @@ interface Ledger {
   totals: Omit<StreamCost, 'id' | 'label'> & { wallSeconds: number };
   main: StreamCost | null;
   agents: StreamCost[];
+  /**
+   * How many EARLIER sessions of this run (a resumed review) contributed
+   * streams. Zero on a run that never resumed; the field then reads as "this
+   * ledger is one session's". The interrupted attempt's cost is part of the
+   * review's cost — a resume that hid it would report a review as cheaper
+   * than it was.
+   */
+  priorSessions: number;
 }
 
 interface UsageEvent {
@@ -316,9 +325,6 @@ export function computeLedger(
         `${(err as Error).message}`,
     );
   }
-  const main =
-    mainEvents.length > 0 ? foldEvents('main', 'main loop', mainEvents) : null;
-
   let files: string[];
   try {
     files = listAgentTranscriptFiles(dir);
@@ -339,29 +345,63 @@ export function computeLedger(
 
   const agents: StreamCost[] = [];
   const agentEvents: UsageEvent[] = [];
-  for (const f of files) {
-    const full = join(dir, f);
-    let mtimeMs: number;
-    try {
-      mtimeMs = statSync(full).mtimeMs;
-    } catch {
-      continue; // Gone between listing and stat.
+  const readAgentDir = (agentDir: string, names: string[]): number => {
+    let streams = 0;
+    for (const f of names) {
+      const full = join(agentDir, f);
+      let mtimeMs: number;
+      try {
+        mtimeMs = statSync(full).mtimeMs;
+      } catch {
+        continue; // Gone between listing and stat.
+      }
+      // The transcript dir is session-scoped and never pruned: files from
+      // earlier reviews this session predate the floor, and a file whose last
+      // write predates it cannot hold an above-floor record — the same
+      // membership test `readTranscripts` applies. Skip it without opening.
+      if (mtimeMs < floorMs) continue;
+      let read: { events: UsageEvent[]; launch: string };
+      try {
+        read = readUsage(full, floorMs);
+      } catch {
+        continue; // This agent's record is lost; the rest still count.
+      }
+      if (read.events.length === 0) continue;
+      const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
+      agents.push(foldEvents(id, labelOf(read.launch, id), read.events));
+      agentEvents.push(...read.events);
+      streams++;
     }
-    // The transcript dir is session-scoped and never pruned: files from
-    // earlier reviews this session predate the floor, and a file whose last
-    // write predates it cannot hold an above-floor record — the same
-    // membership test `readTranscripts` applies. Skip it without opening.
-    if (mtimeMs < floorMs) continue;
-    let read: { events: UsageEvent[]; launch: string };
+    return streams;
+  };
+  readAgentDir(dir, files);
+
+  // Earlier sessions of THIS run (a resumed review): their cost is part of
+  // the review's cost. Unlike the current session, a prior session whose
+  // records cannot be read only makes the ledger a floor, not a fabrication —
+  // so unreadable prior state is skipped, never fatal, and the count of
+  // sessions that did contribute is reported.
+  const priorMainEvents: UsageEvent[] = [];
+  let priorSessions = 0;
+  for (const id of priorSessionIds(planPath, env)) {
+    let contributed = 0;
     try {
-      read = readUsage(full, floorMs);
+      const events = readUsage(
+        join(projectDir, 'chats', `${id}.jsonl`),
+        floorMs,
+      ).events;
+      priorMainEvents.push(...events);
+      contributed += events.length;
     } catch {
-      continue; // This agent's record is lost; the rest still count.
+      // The prior attempt's chat is lost; its agents may still count.
     }
-    if (read.events.length === 0) continue;
-    const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
-    agents.push(foldEvents(id, labelOf(read.launch, id), read.events));
-    agentEvents.push(...read.events);
+    const priorDir = join(projectDir, 'subagents', id);
+    try {
+      contributed += readAgentDir(priorDir, listAgentTranscriptFiles(priorDir));
+    } catch {
+      // No prior agent dir is a real state (it died before launching any).
+    }
+    if (contributed > 0) priorSessions++;
   }
   agents.sort((a, b) => b.inputTokens - a.inputTokens);
 
@@ -380,11 +420,18 @@ export function computeLedger(
     );
   }
 
+  // One `main` row for the run: a resumed run's orchestrator turns span two
+  // chat files, but they are the same loop doing the same job. Folded after
+  // the emptiness check above, which is deliberately about the CURRENT
+  // session only — prior events must not vouch for a broken current chat.
+  const allMainEvents = [...priorMainEvents, ...mainEvents];
+  const main = foldEvents('main', 'main loop', allMainEvents);
+
   // The same events the per-stream rows fold, folded once more — one
   // accumulator, so a new usage counter cannot land in the rows and miss the
   // headline.
   const totals = foldEvents('totals', 'totals', [
-    ...mainEvents,
+    ...allMainEvents,
     ...agentEvents,
   ]);
   const wallSeconds =
@@ -398,7 +445,12 @@ export function computeLedger(
       : 0;
 
   const { id: _i, label: _l, ...totalsRest } = totals;
-  return { totals: { ...totalsRest, wallSeconds }, main, agents };
+  return {
+    totals: { ...totalsRest, wallSeconds },
+    main,
+    agents,
+    priorSessions,
+  };
 }
 
 /** The printed block: one summary line, the main loop, the top consumers. */
@@ -418,6 +470,11 @@ export function renderLedger(ledger: Ledger): string {
     lines.push(
       `  main loop: ${plural(m.calls, 'call')} · ${human(m.inputTokens)} in · ` +
         `${human(m.outputTokens)} out`,
+    );
+  }
+  if (ledger.priorSessions > 0) {
+    lines.push(
+      `  resumed run: totals include ${plural(ledger.priorSessions, 'earlier session')} of this review`,
     );
   }
   if (ledger.agents.length > 0) {

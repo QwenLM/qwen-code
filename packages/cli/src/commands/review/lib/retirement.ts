@@ -42,7 +42,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
-import { readTranscripts, type AgentRecord } from './transcripts.js';
+import { readRunTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import {
   INLINE_LAYER_WALKED_RE,
@@ -661,7 +661,11 @@ export function scheduleReverseAuditRound(
   // retries with the least time left. A record older than the plan is the
   // dead attempt's, and reads as absent.
   const since = statSync(planPath).mtimeMs;
-  const transcripts = readTranscripts(since, env, diffPath);
+  // Run-scoped: a resumed run's earlier rounds ran in a different session,
+  // and their dry receipts are exactly what lets the continuation retire
+  // territory instead of re-auditing it. The fence stays the plan's mtime,
+  // which a resume deliberately leaves untouched.
+  const transcripts = readRunTranscripts(planPath, since, env, diffPath);
   const built = readRecordedPrompts(planPath, since);
 
   // The prior-round records: one per (chunk, round) prompt this CLI built.

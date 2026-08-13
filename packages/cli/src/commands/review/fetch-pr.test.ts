@@ -624,3 +624,75 @@ describe('countDiffChangedLines', () => {
     expect(countDiffChangedLines(d)).toBe(4);
   });
 });
+
+describe('fetch-pr diff identity (diffSha256)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+  });
+
+  async function reportFor() {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: '/tmp/fetch-report.json',
+      maxChunkLines: 400,
+    } as unknown as Parameters<typeof handler>[0]);
+    const call = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    if (!call) throw new Error('report was not written');
+    return JSON.parse(String(call[1]));
+  }
+
+  it('hashes the captured diff bytes — the resume check compares against this', async () => {
+    const diff = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: 'base123',
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation((...args: string[]) =>
+      args.includes('diff') ? Buffer.from(diff) : Buffer.from(''),
+    );
+
+    const report = await reportFor();
+    const { createHash } = await import('node:crypto');
+    expect(report.diffSha256).toBe(
+      createHash('sha256').update(Buffer.from(diff)).digest('hex'),
+    );
+  });
+
+  it('is null when no diff was captured', async () => {
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    const report = await reportFor();
+    expect(report.diffSha256).toBeNull();
+  });
+});

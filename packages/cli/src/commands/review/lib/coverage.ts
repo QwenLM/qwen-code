@@ -54,7 +54,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 import {
-  readTranscripts,
+  readRunTranscripts,
   wasGivenTheDiff,
   TranscriptsUnavailableError,
   type AgentRecord,
@@ -82,6 +82,14 @@ export interface CoverageFromTranscripts {
   ok: boolean;
   /** How many subagent transcripts the harness wrote for this run. */
   agents: number;
+  /**
+   * Agents whose certified work came from an EARLIER attempt's session — a
+   * resumed run crediting the interrupted attempt's evidence. Zero on any run
+   * that never resumed. Counted only for records that clear the same bar as
+   * everyone else (verbatim-delivered CLI prompt plus an opened brief or an
+   * opened diff); reading the prior directory grants nothing by itself.
+   */
+  recoveredAgents: number;
   /**
    * Chunk agents launched with a prompt that never named the diff.
    *
@@ -390,7 +398,16 @@ export function coverageFromTranscripts(
   env: NodeJS.ProcessEnv = process.env,
 ): CoverageFromTranscripts {
   const { plan, mtimeMs } = readPlan(planPath);
-  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  // The RUN's transcripts, not the session's: a resumed run (`--resume`)
+  // continues in a new session, and the interrupted attempt's evidence lives
+  // under the session id the run ledger recorded. Same fence (the plan's
+  // mtime), which a resume deliberately leaves untouched.
+  const records = readRunTranscripts(
+    planPath,
+    mtimeMs,
+    env,
+    plan.diffPathAbsolute,
+  );
   const built = readRecordedPrompts(planPath);
 
   const blindAgents: string[] = [];
@@ -958,6 +975,45 @@ export function coverageFromTranscripts(
     (id) => !covered.has(id) && !uncoverable.has(id),
   );
 
+  // Prior-attempt records that clear the SAME certification bar as a live
+  // launch — the resumed run's recovered work. The bar is deliberately the
+  // pairing predicates above, not "the file existed": a fabricated ledger
+  // entry can point the reader at a directory, but only a harness transcript
+  // whose launch verbatim-contains a CLI-built prompt and shows the brief or
+  // the diff actually opened earns a count here.
+  const certifies = (r: AgentRecord): boolean => {
+    const c = assignedChunk(r);
+    if (c !== null) {
+      const b = builtOf(`chunk-${c}`);
+      return (
+        b !== undefined &&
+        wasDeliveredVerbatim(r.launchPrompt, b) &&
+        r.diffToolCalls > 0
+      );
+    }
+    for (const key of built.keys()) {
+      const b = builtOf(key);
+      if (b === undefined) continue;
+      if (wasDeliveredVerbatim(r.launchPrompt, b) && openedBriefOf(r, key)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const recoveredAgents = records.filter(
+    (r) => r.fromPriorSession && certifies(r),
+  ).length;
+  if (recoveredAgents > 0) {
+    disclose(
+      'review continuity',
+      `resumed — ${recoveredAgents} agent result(s) recovered from an interrupted earlier attempt`,
+      {
+        subjectZh: '评审续跑',
+        reasonZh: `本次为续跑 — 复用了上一次中断运行的 ${recoveredAgents} 个 agent 结果`,
+      },
+    );
+  }
+
   return {
     ok:
       blindAgents.length === 0 &&
@@ -972,6 +1028,7 @@ export function coverageFromTranscripts(
       uncoverable.size === 0 &&
       missingChunks.length === 0,
     agents: records.length,
+    recoveredAgents,
     blindAgents,
     idleAgents,
     unopenedAgents,
@@ -1337,7 +1394,14 @@ export function verificationGaps(
   env: NodeJS.ProcessEnv = process.env,
 ): VerificationReport {
   const { plan, mtimeMs } = readPlan(planPath);
-  const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
+  // Run-scoped for the same reason as `coverageFromTranscripts`: a resumed
+  // run's Step 4/5 evidence may sit in the interrupted attempt's session dir.
+  const records = readRunTranscripts(
+    planPath,
+    mtimeMs,
+    env,
+    plan.diffPathAbsolute,
+  );
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];
   const remediation: string[] = [];

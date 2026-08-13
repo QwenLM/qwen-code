@@ -1338,3 +1338,112 @@ describe('cost-ledger command boundary — informational, never a failure', () =
     expect(existsSync(join(blocked, 'ledger.json'))).toBe(false);
   });
 });
+
+describe('cost-ledger — a resumed run bills the whole review', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function fixture(): {
+    plan: string;
+    env: NodeJS.ProcessEnv;
+    project: string;
+  } {
+    const project = mkdtempSync(join(tmpdir(), 'ledger-resume-'));
+    dirs.push(project);
+    mkdirSync(join(project, 'chats'), { recursive: true });
+    mkdirSync(join(project, 'subagents', SESSION), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+    );
+    const plan = join(project, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: join(project, 'diff.txt'),
+        diffLines: 10,
+        chunks: [{ id: 1, startLine: 1, endLine: 10 }],
+      }),
+    );
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    return {
+      plan,
+      project,
+      env: {
+        QWEN_CODE_PROJECT_DIR: project,
+        QWEN_CODE_SESSION_ID: SESSION,
+      } as NodeJS.ProcessEnv,
+    };
+  }
+
+  /** The ledger `fetch-pr` writes, naming the interrupted attempt S0. */
+  function runLedger(plan: string, project: string): void {
+    const d = join(project, 'plan-prompts');
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, 'run-sessions.json'),
+      JSON.stringify([
+        { sessionId: 'S0', atMs: Date.parse('2026-08-03T10:00:30Z') },
+        { sessionId: SESSION, atMs: Date.parse('2026-08-03T10:09:00Z') },
+      ]),
+    );
+  }
+
+  it("folds the interrupted attempt's main loop and agents into the totals", () => {
+    const { plan, env, project } = fixture();
+    runLedger(plan, project);
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+    );
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 2_000, output: 200 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.main?.calls).toBe(2);
+    expect(ledger.main?.inputTokens).toBe(1_500);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.totals.inputTokens).toBe(3_500);
+  });
+
+  it('reports zero prior sessions without a ledger — and reads nothing extra', () => {
+    const { plan, env, project } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(0);
+    expect(ledger.main?.calls).toBe(1);
+    expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it('counts a prior session with agents but a lost chat file', () => {
+    const { plan, env, project } = fixture();
+    runLedger(plan, project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 2_000, output: 200 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.agents).toHaveLength(1);
+    expect(ledger.totals.inputTokens).toBe(2_500);
+  });
+});

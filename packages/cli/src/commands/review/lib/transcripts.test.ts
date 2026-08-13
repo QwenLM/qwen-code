@@ -11,11 +11,19 @@
 // evidence" rather than throw and take the whole coverage check down.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  utimesSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   readTranscripts,
+  readRunTranscripts,
+  transcriptDirsForRun,
   wasGivenTheDiff,
   transcriptDir,
   TranscriptsUnavailableError,
@@ -252,5 +260,143 @@ describe('wasGivenTheDiff', () => {
 
   it('is false for an empty prompt', () => {
     expect(wasGivenTheDiff(rec(''), '/d.txt')).toBe(false);
+  });
+});
+
+describe('readRunTranscripts — the run across its sessions', () => {
+  // A minimal valid transcript: launch prompt only.
+  const transcript = (agentId: string): string =>
+    JSON.stringify({
+      agentId,
+      agentName: 'general-purpose',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: `launch ${agentId}` }] },
+    }) + '\n';
+
+  // The run ledger fetch-pr would have written: sessions S0 (interrupted
+  // attempt) then S1 (current). Entries must postdate the plan's epoch.
+  function planWithLedger(...sessionIds: string[]): string {
+    const plan = join(dir, 'qwen-review-pr-7-fetch.json');
+    writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
+    const recordDir = join(dir, 'qwen-review-pr-7-fetch-prompts');
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'run-sessions.json'),
+      JSON.stringify(
+        sessionIds.map((id) => ({ sessionId: id, atMs: Date.now() })),
+      ),
+    );
+    return plan;
+  }
+
+  function priorFile(session: string, name: string, contents: string): void {
+    mkdirSync(join(dir, 'subagents', session), { recursive: true });
+    writeFileSync(join(dir, 'subagents', session, name), contents);
+  }
+
+  it('unions prior-session transcripts, marked fromPriorSession', () => {
+    const plan = planWithLedger('S0', 'S1');
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => [r.agentId, r.fromPriorSession === true])).toEqual([
+      ['a1', false],
+      ['a0', true],
+    ]);
+  });
+
+  it('reads only the current session when no ledger exists', () => {
+    // The orphan-invisibility guard: without a ledger entry, a prior
+    // session's transcripts do not exist to any reader.
+    const plan = join(dir, 'qwen-review-pr-7-fetch.json');
+    writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
+  it('skips a prior session whose directory is gone, silently', () => {
+    const plan = planWithLedger('S0', 'S1');
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
+  it('still throws when the CURRENT session dir is absent', () => {
+    const plan = planWithLedger('S0', 'S1');
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    expect(() =>
+      readRunTranscripts(plan, undefined, {
+        QWEN_CODE_PROJECT_DIR: dir,
+        QWEN_CODE_SESSION_ID: 'S-gone',
+      }),
+    ).toThrow(TranscriptsUnavailableError);
+  });
+
+  it('applies the since fence to prior-session records too', () => {
+    const plan = planWithLedger('S0', 'S1');
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+    const past = new Date(Date.now() - 3600_000);
+    utimesSync(join(dir, 'subagents', 'S0', 'agent-a0.jsonl'), past, past);
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, Date.now() - 60_000, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
+  it('lists the current session dir first, priors after, deduplicated', () => {
+    const plan = planWithLedger('S0', 'S0', 'S1');
+    expect(transcriptDirsForRun(plan, ENV)).toEqual([
+      join(dir, 'subagents', 'S1'),
+      join(dir, 'subagents', 'S0'),
+    ]);
+  });
+});
+
+describe('readRunTranscripts — currentDirOptional', () => {
+  const transcript = (agentId: string): string =>
+    JSON.stringify({
+      agentId,
+      agentName: 'general-purpose',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: `launch ${agentId}` }] },
+    }) + '\n';
+
+  it('absorbs a missing CURRENT dir when asked — the pre-launch resume read', () => {
+    const plan = join(dir, 'qwen-review-pr-7-fetch.json');
+    writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
+    const recordDir = join(dir, 'qwen-review-pr-7-fetch-prompts');
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'run-sessions.json'),
+      JSON.stringify([{ sessionId: 'S0', atMs: Date.now() }]),
+    );
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
+      transcript('a0'),
+    );
+
+    const env = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S-new' };
+    // Without the option: the current dir is still load-bearing.
+    expect(() => readRunTranscripts(plan, undefined, env)).toThrow(
+      TranscriptsUnavailableError,
+    );
+    const recs = readRunTranscripts(plan, undefined, env, undefined, {
+      currentDirOptional: true,
+    });
+    expect(recs.map((r) => [r.agentId, r.fromPriorSession === true])).toEqual([
+      ['a0', true],
+    ]);
+  });
+
+  it('still throws on a missing ENVIRONMENT even with the option', () => {
+    const plan = join(dir, 'qwen-review-pr-7-fetch.json');
+    writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
+    expect(() =>
+      readRunTranscripts(plan, undefined, {}, undefined, {
+        currentDirOptional: true,
+      }),
+    ).toThrow(TranscriptsUnavailableError);
   });
 });

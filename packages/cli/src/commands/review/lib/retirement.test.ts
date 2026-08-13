@@ -1683,3 +1683,124 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.converged).toBe(false);
   });
 });
+
+describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', () => {
+  let dir: string;
+  let plan: string;
+  let diff: string;
+  let seq = 0;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'retirement-resume-'));
+    plan = join(dir, 'plan.json');
+    writeFileSync(plan, '{}');
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    diff = join(dir, 'diff.txt');
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'S1';
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  });
+
+  afterEach(() => {
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function record(round: number, chunk: number, body: string): string {
+    const prompt = `reverse-audit ${body}`;
+    recordPrompt(
+      plan,
+      `reverse-audit--chunk-${chunk}--round-${round}--abc123`,
+      prompt,
+    );
+    return prompt;
+  }
+
+  /** A dry-receipt transcript, written into the named session's dir. */
+  function transcriptIn(session: string, launchPrompt: string): void {
+    const id = `aud-${++seq}`;
+    const base = {
+      agentId: id,
+      agentName: 'general-purpose',
+      sessionId: session,
+    };
+    const lines = [
+      JSON.stringify({
+        ...base,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: launchPrompt }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: diff, offset: 0, limit: 100 },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'diff bytes' },
+              },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: DRY }] },
+      }),
+    ];
+    writeFileSync(
+      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+      lines.join('\n') + '\n',
+    );
+  }
+
+  function ledger(...ids: string[]): void {
+    const d = promptRecordDir(plan);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, 'run-sessions.json'),
+      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    );
+  }
+
+  it('retires a chunk on dry receipts the interrupted attempt earned', () => {
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('keeps every chunk hot when no ledger names the prior session', () => {
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+});

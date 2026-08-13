@@ -25,6 +25,7 @@ import {
   mkdirSync,
   utimesSync,
   readdirSync,
+  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2156,5 +2157,88 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.gaps).toHaveLength(1);
     expect(r.gaps[0].subject).toBe('reverse audit');
+  });
+});
+
+describe('coverage — a resumed run credits the prior attempt through the ledger', () => {
+  // The run ledger `fetch-pr` writes: S0 is the interrupted attempt, S1 the
+  // resumed continuation this suite's ENV runs as. Entries carry a current
+  // atMs, which sits inside the epoch fence of the backdated plan.
+  function ledger(planPath: string, ...ids: string[]): void {
+    const d = promptRecordDir(planPath);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, 'run-sessions.json'),
+      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    );
+  }
+
+  /** Re-home a transcript written by `transcript()` into another session. */
+  function moveToSession(id: string, session: string): void {
+    mkdirSync(join(dir, 'subagents', session), { recursive: true });
+    renameSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+    );
+  }
+
+  it('passes 3D on work the interrupted attempt completed, and discloses it', () => {
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1', good(1), { calls: 3 });
+    moveToSession('a1', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(true);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.recoveredAgents).toBeGreaterThanOrEqual(1);
+    expect(
+      r.disclosures.some(
+        (d) => d.subject === 'review continuity' && /resumed/.test(d.reason),
+      ),
+    ).toBe(true);
+  });
+
+  it('sees nothing from a prior session the ledger never recorded', () => {
+    // The orphan-invisibility guard: no ledger entry, no evidence — a
+    // fabricated directory cannot vouch for itself.
+    const p = plan();
+    transcript('a1', good(1), { calls: 3 });
+    moveToSession('a1', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.missingChunks).toEqual([1]);
+    expect(r.recoveredAgents).toBe(0);
+  });
+
+  it("lets a compliant relaunch supersede the prior attempt's failure", () => {
+    // Attempt 1's chunk-1 agent idled before the crash; the resumed run
+    // relaunched it properly. The prior failure must not pin `ok` false.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1', good(1), { calls: 0 });
+    moveToSession('a1', 'S0');
+    transcript('a1b', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(true);
+    expect(r.idleAgents).toEqual([]);
+    // The idle prior record certifies nothing, so it is not "recovered".
+    expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('emits no continuity disclosure on a run that never resumed', () => {
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.recoveredAgents).toBe(0);
+    expect(r.disclosures.some((d) => d.subject === 'review continuity')).toBe(
+      false,
+    );
   });
 });
