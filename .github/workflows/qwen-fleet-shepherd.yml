@@ -395,13 +395,18 @@ jobs:
           # human's fresh command comment, or a fresh takeover labeled
           # event) as an RFC3339 timestamp, or '' when none. A command counts
           # only while FRESH (grace window), UNSUPERSEDED by a refusal ack,
-          # and from a write/maintain/admin author — scanned newest-first so
-          # a stranger's echo can't SHADOW a maintainer's command (R5-5),
-          # with permission reads bounded at 2 per PR. Sets PERM_READ_FAILED
-          # when a command's permission check could not be evaluated — the
-          # caller fails CLOSED on that (defer; never trust-on-error, R5-4).
+          # and from a write/maintain/admin author — scanned newest-first,
+          # deduped BY AUTHOR so a stranger posting two commands can't burn
+          # the 2-permission-read budget and shadow a maintainer's command
+          # (R5-5/R6-3). Sets PERM_READ_FAILED when a command's permission
+          # check could not be evaluated — the caller fails CLOSED on that
+          # (defer; never trust-on-error, R5-4). Results are returned via the
+          # RESUME_OUT global — NOT stdout — because a `$(...)` call site
+          # would run the function in a subshell and silently drop
+          # PERM_READ_FAILED (the R5-4 defer was dead code that way).
           compute_resume_ts() {
             local ic="$1" ev="$2"
+            RESUME_OUT=''
             PERM_READ_FAILED=''
             local resume refusal
             resume="$(jq -r --arg ab "${AUTOFIX_BOT}" '
@@ -413,12 +418,13 @@ jobs:
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | test("<!-- takeover-ack (fork-refused|base-refused|skip-blocked) -->"))
                 | .created_at ] | max // ""' "${ic}")"
+            # Fresh command candidates: newest-first, ONE row per author.
             local cands cts cauthor cage cperm reads=0
             cands="$(jq -r '
               [ .[] | select(((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /takeover"
                              or ((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /retry")
                 | {ts: (.created_at // ""), login: (.user.login // "")} ]
-              | sort_by(.ts) | reverse | .[] | "\(.ts)\t\(.login)"' "${ic}")"
+              | sort_by(.ts) | reverse | unique_by(.login) | .[] | "\(.ts)\t\(.login)"' "${ic}")"
             while IFS=$'\t' read -r cts cauthor; do
               [[ -z "${cts}" || -z "${cauthor}" ]] && continue
               [[ "${cts}" > "${resume}" ]] || continue
@@ -446,7 +452,7 @@ jobs:
             if [[ -n "${evt}" && ! "${resume}" > "${evt}" ]]; then
               resume="${evt}"
             fi
-            printf '%s' "${resume}"
+            RESUME_OUT="${resume}"
           }
 
           # CI-status classifiers shared by BOTH dashboard loops, so a
@@ -471,16 +477,22 @@ jobs:
           if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
             --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup,labels \
             > /tmp/fleet-raw.json 2> /dev/null; then
-            # A failed fleet fetch must not masquerade as an empty fleet: the
-            # walk is skipped AND the dashboard keeps its previous body rather
-            # than being overwritten with a misleading empty table.
-            echo "::warning::fleet enumeration failed; skipping this tick's walk and dashboard update"
-            exit 0
+            # A failed fleet fetch must not masquerade as an empty fleet —
+            # but it also must not exit (B5): the takeover/needs-human
+            # processing below is fed by its OWN enumerations, so it keeps
+            # running, and the dashboard write still happens (carrying the
+            # liveness watermark). Degrade to a loud error row instead.
+            FLEET_OK=false
+            echo "::warning::fleet enumeration failed; the bot-fleet table shows an error row this tick"
+            DASH_ROWS='| — | — | ⚠️ fleet enumeration unreadable this tick | fail closed — fleet levers skipped |\n'
+          else
+            FLEET_OK=true
+            jq --arg skip "${SKIP_LABEL}" \
+              '[.[] | select(.isCrossRepository == false) | select([.labels[]?.name] | index($skip) | not)]' \
+              /tmp/fleet-raw.json > /tmp/fleet.json
           fi
-          jq --arg skip "${SKIP_LABEL}" \
-            '[.[] | select(.isCrossRepository == false) | select([.labels[]?.name] | index($skip) | not)]' \
-            /tmp/fleet-raw.json > /tmp/fleet.json
 
+          if [[ "${FLEET_OK}" == "true" ]]; then
           while IFS= read -r ROW; do
             [[ -z "${ROW}" ]] && continue
             PR="$(jq -r '.number' <<< "${ROW}")"
@@ -614,6 +626,7 @@ jobs:
             echo "🐑 #${PR} [${STATUS_NOTE}] → ${ACTION_NOTE}"
             DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | ${NH_PREFIX}${STATUS_NOTE} | ${ACTION_NOTE} |\n"
           done < <(jq -c '.[]' /tmp/fleet.json)
+          fi # FLEET_OK
 
           # ---- takeover pool: dashboard rows + the auto-release lever -----
           # These PRs are managed by the autofix loop, not the shepherd —
@@ -795,7 +808,11 @@ jobs:
                 #      pickup — an hours-wide window).
                 # The permission read fails CLOSED: PERM_READ_FAILED defers
                 # the release below instead of trusting on error (R5-4).
-                RESUME_TS="$(compute_resume_ts /tmp/tk-ic.json /tmp/tk-ev.json)"
+                # Direct call, NOT $(...) — the function returns its result
+                # in RESUME_OUT/PERM_READ_FAILED globals, and a subshell
+                # would drop them.
+                compute_resume_ts /tmp/tk-ic.json /tmp/tk-ev.json
+                RESUME_TS="${RESUME_OUT}"
                 # The stop reason comes from the terminal round's headline —
                 # the scan-side notice always says "round cap" even when a
                 # breaker (consecutive failures, time budget) fired first.
@@ -857,7 +874,7 @@ jobs:
                     elif ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ic2.json \
                       || ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ev2.json; then
                       NOTE='evidence re-check unreadable — release deferred (fail closed)'
-                    elif RESUME_NOW="$(compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json)"; [[ -n "${RESUME_NOW}" && ! "${TERM_TS}" > "${RESUME_NOW}" ]]; then
+                    elif compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json; RESUME_NOW="${RESUME_OUT}"; [[ -n "${RESUME_NOW}" && ! "${TERM_TS}" > "${RESUME_NOW}" ]]; then
                       # R5-6: the resume evidence above was read at loop
                       # entry — a re-arm landing since must veto NOW. The
                       # re-fetch + recompute runs immediately before the

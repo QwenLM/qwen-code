@@ -3123,6 +3123,20 @@ describe('qwen-autofix workflow', () => {
     expect(gate('autofix/managed autofix/takeover', 'true')).toContain(
       'PROCEED',
     );
+    // B12: the consent re-read FAILS CLOSED for standard bot PRs too — an
+    // unreadable `gh pr view` must skip the write entirely (a collapse to
+    // '' would ignore a concurrently added skip). The block sits BEFORE the
+    // consent gate.
+    expect(reviewScanJob).toContain(
+      'cap notice skipped: label state unreadable (fail closed)',
+    );
+    const unreadableIdx = reviewScanJob.indexOf(
+      'if [[ -z "${LIVE_LABELS_JSON}" ]]; then',
+    );
+    expect(unreadableIdx).toBeGreaterThan(-1);
+    expect(unreadableIdx).toBeLessThan(
+      reviewScanJob.indexOf('if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "*'),
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');

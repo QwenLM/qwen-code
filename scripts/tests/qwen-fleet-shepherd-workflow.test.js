@@ -208,9 +208,25 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toMatch(
       /if \[\[ "\$\{MERGEABLE\}" == "CONFLICTING" \]\]; then[\s\S]{0,900}gh api "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/comments" --paginate/,
     );
-    // A failed fleet fetch skips the walk AND preserves the previous
-    // dashboard body — never an empty-table overwrite.
-    expect(workflow).toContain('fleet enumeration failed; skipping this tick');
+    // A failed fleet fetch must not masquerade as an empty fleet — and it
+    // must not exit either (B5): the takeover/needs-human processing runs
+    // off its OWN enumerations, so the fleet failure degrades to a loud
+    // error row and the tick falls through to the dashboard write (which
+    // carries the liveness watermark). No `exit` after the warning.
+    expect(workflow).toContain(
+      'fleet enumeration failed; the bot-fleet table shows an error row this tick',
+    );
+    expect(workflow).not.toMatch(
+      /fleet enumeration failed[\s\S]{0,200}exit( 0| 1)?\b/,
+    );
+    expect(workflow).toContain(
+      '⚠️ fleet enumeration unreadable this tick | fail closed — fleet levers skipped',
+    );
+    // The fleet walk is gated on FLEET_OK so the error row is the only row.
+    expect(workflow).toContain('FLEET_OK=false');
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{FLEET_OK\}" == "true" \]\]; then\n\s+while IFS= read -r ROW; do/,
+    );
     // Per-tick blast-radius caps.
     expect(workflow).toContain("MAX_SYNCS_PER_TICK: '3'");
     expect(workflow).toContain("MAX_CONFLICT_DISPATCHES_PER_TICK: '2'");
@@ -749,7 +765,7 @@ exit 1`;
           'bash',
           [
             '-c',
-            `${gnuDateShim}\n${resumeFn.replace(/\n {10}/g, '\n')}\ncompute_resume_ts "${dir}/ic.json" "${dir}/ev.json"\necho "PERM_FAILED=$PERM_READ_FAILED"`,
+            `${gnuDateShim}\n${resumeFn.replace(/\n {10}/g, '\n')}\ncompute_resume_ts "${dir}/ic.json" "${dir}/ev.json"\necho "TS=$RESUME_OUT"\necho "PERM_FAILED=$PERM_READ_FAILED"`,
           ],
           {
             env: {
@@ -764,7 +780,8 @@ exit 1`;
             encoding: 'utf8',
           },
         ).trim();
-        const [ts, flag] = out.split('PERM_FAILED=');
+        const ts = out.match(/^TS=(.*)$/m)?.[1] ?? '';
+        const flag = out.match(/^PERM_FAILED=(.*)$/m)?.[1] ?? '';
         return { ts, flag };
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -1424,14 +1441,17 @@ exit 1`;
     expect(workflow).toMatch(
       /if \[\[ -n "\$\{evt\}" && ! "\$\{resume\}" > "\$\{evt\}" \]\]; then\n\s+resume="\$\{evt\}"/,
     );
-    // R2-21: the single compute_resume_ts call runs BEFORE the evaluation
-    // chain consumes RESUME_TS — and the R5-6 pre-write recompute exists.
+    // R2-21: the compute_resume_ts call runs BEFORE the evaluation chain
+    // consumes RESUME_TS — and the R5-6 pre-write recompute exists. Both
+    // call sites use the global-return form (a `$(...)` subshell would drop
+    // PERM_READ_FAILED — the R5-4 defer would be dead code).
     expect(workflow).toMatch(
-      /RESUME_TS="\$\(compute_resume_ts \/tmp\/tk-ic\.json \/tmp\/tk-ev\.json\)"[\s\S]*?if \[\[ -z "\$\{TERM_TS\}" \]\]/,
+      /compute_resume_ts \/tmp\/tk-ic\.json \/tmp\/tk-ev\.json\n\s+RESUME_TS="\$\{RESUME_OUT\}"[\s\S]*?if \[\[ -z "\$\{TERM_TS\}" \]\]/,
     );
     expect(workflow).toContain(
-      'RESUME_NOW="$(compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json)"',
+      'compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json; RESUME_NOW="${RESUME_OUT}"',
     );
+    expect(workflow).not.toContain('$(compute_resume_ts');
     // R5-4: a failed permission read defers the release (fail closed),
     // pinned at both evaluation points.
     expect(

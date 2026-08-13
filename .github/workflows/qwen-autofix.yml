@@ -1840,12 +1840,16 @@ jobs:
               # (R4-32) — or the PR keeps the takeover label while losing
               # its escalation label, and the release ack posted here would
               # latch RELEASE_ACKED, blocking every automated path that
-              # could re-apply it.
+              # could re-apply it. The flag is keyed on the EXIT STATUS, not
+              # the output text: a 200 success carries the remaining-labels
+              # body and a network error carries no "HTTP" token, so any
+              # text sniff fails one direction or the other (R6-1/R6-19).
+              LBL_DEL_FAILED=false
               if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
+                [[ "${REMOVE_ERR}" == *404* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"; }
               fi
               REMOVED_OK=true
-              if [[ "${REMOVE_ERR}" == *"HTTP "* && "${REMOVE_ERR}" != *404* ]]; then
+              if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
                 REMOVED_OK=false
               fi
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
@@ -2988,8 +2992,17 @@ jobs:
                 # Consent may have moved since PR_META: skip wins everywhere,
                 # and a takeover notice additionally requires the label to
                 # still be present — a label removed (or skip added) moments
-                # ago must not receive a stale 'paused' notice.
-                LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                # ago must not receive a stale 'paused' notice. The read
+                # FAILS CLOSED (mirrors takeover-ack): an unreadable label
+                # state must not get a notice or the escalation label —
+                # collapsing the failure to '' would ignore a concurrently
+                # added skip for standard bot PRs.
+                LIVE_LABELS_JSON="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null || echo '')"
+                LIVE_LABELS="$(jq -r '[.labels[]?.name] | join(" ")' <<< "${LIVE_LABELS_JSON}" 2> /dev/null || echo '')"
+                if [[ -z "${LIVE_LABELS_JSON}" ]]; then
+                  echo "🧭 cap notice skipped: label state unreadable (fail closed) on #${PR}"
+                  continue
+                fi
                 if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]] \
                   || [[ "${HAS_TAKEOVER}" == "true" && " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* ]]; then
                   echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
@@ -3005,7 +3018,13 @@ jobs:
                 if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                   echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
                 elif [[ "${RELEASE_ACKED}" != "0" && "${IS_BOT_AUTHOR}" != "true" ]]; then
-                  echo "🧭 cap label/notice skipped: PR was released after its last re-arm (#${PR})"
+                  # R6-4: an events-API outage is NOT a release — report it
+                  # as what it is, or the log lies during an incident.
+                  if [[ "${RELEASE_ACKED}" == "unreadable" ]]; then
+                    echo "🧭 cap label/notice skipped: release history unreadable (fail closed) on #${PR}"
+                  else
+                    echo "🧭 cap label/notice skipped: PR was released after its last re-arm (#${PR})"
+                  fi
                 else
                   # The escalation label rides EVERY cap detection, noticed
                   # or not: the once-per-window dedup suppresses repeat
