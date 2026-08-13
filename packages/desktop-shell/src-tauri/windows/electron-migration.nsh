@@ -7,6 +7,7 @@
   StrCpy $R1 $R1 17
   ${If} $R0 != ""
   ${AndIf} $R1 == "Qwen Code Desktop"
+  ${AndIf} ${FileExists} "$R0\Uninstall Qwen Code Desktop.exe"
     ExecWait '"$R0\Uninstall Qwen Code Desktop.exe" /currentuser /S --updated _?=$R0' $R2
     ${If} $R2 != 0
       Abort "Could not remove the previous Qwen Code Desktop installation."

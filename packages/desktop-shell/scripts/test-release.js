@@ -214,6 +214,10 @@ function testLegacyApplicationIdentity() {
   );
   assert.match(
     migrationHook,
+    /\$\{AndIf\} \$\{FileExists\} "\$R0\\Uninstall Qwen Code Desktop\.exe"/,
+  );
+  assert.match(
+    migrationHook,
     /ExecWait '"\$R0\\Uninstall Qwen Code Desktop\.exe" \/currentuser \/S --updated _\?=\$R0'/,
   );
   assert.match(migrationHook, /\$\{If\} \$R2 != 0\s*\n\s*Abort/);
