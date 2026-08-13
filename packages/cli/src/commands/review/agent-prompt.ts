@@ -500,6 +500,13 @@ export function buildChunkAgentPrompt(
       '',
       `    Uncoverable: chunk ${chunk.id} — line exceeds the read limit`,
     );
+    // Return the receipt and stop. An unreachable chunk's ONE instruction is to
+    // return the Uncoverable line, so it must not also carry the ordinary review
+    // block (dimensions, the shape lens, the finding format) — that is the
+    // two-masters contradiction the modeled-system and tool-budget blocks already
+    // guard against with `!unreachable`; returning here makes the whole ordinary
+    // contract do the same by construction.
+    return parts.join('\n');
   } else if (chunk.oversized) {
     parts.push(
       '',

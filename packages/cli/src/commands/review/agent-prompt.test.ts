@@ -167,6 +167,16 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(p).not.toContain('Covered: chunk 15');
   });
 
+  it('gives an unreachable chunk only the Uncoverable receipt — no review block or shape lens', () => {
+    // R4-1: an unreachable chunk's one instruction is to return the Uncoverable
+    // line; carrying the dimension review, the shape lens, or the finding format
+    // beside it is the two-masters contradiction the modeled/budget blocks already
+    // guard against. It returns after the receipt.
+    const p = buildChunkAgentPrompt(PLAN, 15);
+    expect(p).not.toContain(ENUMERATION_TRAP_LENS);
+    expect(p).not.toContain('## What to review');
+  });
+
   it('drops a malformed files[] entry instead of rendering "undefined"', () => {
     // The plan is cast off disk unchecked. A bad entry would otherwise print
     // `- undefined (new-side lines undefined-undefined)` and send the agent
