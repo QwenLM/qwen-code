@@ -43,6 +43,11 @@ fn def() -> &'static ToolDef {
                 "value": {
                     "description": "New value for `key`. JSON type depends on the key."
                 },
+                "coordinate_space": {
+                    "type": "string",
+                    "enum": ["pixels"],
+                    "description": "Pin this driver runtime to pixel coordinates for a host with fixed pixel schemas."
+                },
                 "max_image_dimension": {
                     "type": "integer",
                     "description": "Max dimension for screenshot resizing (0 = no limit)."

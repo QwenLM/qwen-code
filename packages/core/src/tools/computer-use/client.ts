@@ -15,6 +15,7 @@ import { binaryPath } from './constants.js';
 
 export const DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_COMPUTER_USE_IDLE_TIMEOUT_MS = 2_147_483_647;
+const DEFAULT_MAX_IMAGE_DIMENSION = 1568;
 
 export function computerUseMcpEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -51,8 +52,8 @@ export interface ComputerUseClientOptions {
   onProgress?: (message: string) => void;
   /**
    * Longest-edge pixel cap applied to cua-driver screenshots via `set_config`
-   * after every (re)connect. `undefined` leaves cua-driver's built-in default
-   * (1568) untouched; `0` disables resizing. See {@link resolveMaxImageDimension}.
+   * after every (re)connect. `undefined` restores cua-driver's built-in default
+   * (1568); `0` disables resizing. See {@link resolveMaxImageDimension}.
    */
   maxImageDimension?: number;
   /**
@@ -73,6 +74,7 @@ export class ComputerUseClient {
   private startPromise: Promise<void> | undefined;
   private activeCalls = 0;
   private recordingActive = false;
+  private recordingOwnerSession: string | undefined;
   private idleStopTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: ComputerUseClientOptions) {
@@ -86,7 +88,7 @@ export class ComputerUseClient {
    * Set the screenshot longest-edge cap applied on the next (re)connect via
    * `set_config`. Cheap to call before every `start()`; the value is only
    * pushed to cua-driver inside `doStart` (once per spawn, re-applied after a
-   * reconnect). `undefined` means "don't override".
+   * reconnect). `undefined` restores the driver default.
    */
   setMaxImageDimension(value: number | undefined): void {
     this.maxImageDimension = value;
@@ -169,44 +171,58 @@ export class ComputerUseClient {
       { capabilities: {} },
     );
     await client.connect(transport);
+    try {
+      await this.applyRuntimeConfig(client, progress);
+    } catch (error) {
+      await client.close().catch(() => {});
+      throw error;
+    }
     this.client = client;
-    await this.applyRuntimeConfig(client, progress);
   }
 
   /**
-   * Push session-level runtime config to a freshly connected daemon. Today
-   * that is just `max_image_dimension` (the screenshot longest-edge cap),
-   * applied via the `set_config` tool when an override is configured.
+   * Push session-level runtime config to a freshly connected daemon. The
+   * pixel-coordinate contract is mandatory because Qwen uses checked-in pixel
+   * schemas. The screenshot cap is reset on every connection so a persisted
+   * Linux/Windows override cannot leak into a later unset configuration.
    *
-   * Runs once per spawn — including after the reconnect in `callTool`, since a
-   * daemon restart resets runtime config to its persisted default. Best-effort:
-   * a failed `set_config` must NOT abort startup (the driver is still usable at
-   * its default dimension), so the error is surfaced via `progress` and
-   * swallowed. Calls the inner client directly to avoid recursing through
-   * `callTool`'s reconnect path.
+   * Runs once per spawn — including after reconnect. Coordinate negotiation
+   * fails closed; image-cap configuration remains best-effort. Calls the inner
+   * client directly to avoid recursing through `callTool`'s reconnect path.
    */
   private async applyRuntimeConfig(
     client: Client,
     progress: (message: string) => void,
   ): Promise<void> {
-    if (this.maxImageDimension === undefined) return;
+    const coordinateResult = (await client.callTool({
+      name: 'set_config',
+      arguments: { key: 'coordinate_space', value: 'pixels' },
+    })) as CallToolResult;
+    if (coordinateResult.isError) {
+      throw new Error(
+        callToolErrorText(
+          coordinateResult,
+          'set_config coordinate_space returned isError=true',
+        ),
+      );
+    }
+
+    const maxImageDimension =
+      this.maxImageDimension ?? DEFAULT_MAX_IMAGE_DIMENSION;
     try {
       const result = (await client.callTool({
         name: 'set_config',
-        arguments: { max_image_dimension: this.maxImageDimension },
+        arguments: { max_image_dimension: maxImageDimension },
       })) as CallToolResult;
       if (result.isError) {
         throw new Error(
-          result.content
-            .map((block) => (block.type === 'text' ? block.text : ''))
-            .filter(Boolean)
-            .join('\n') || 'set_config returned isError=true',
+          callToolErrorText(result, 'set_config returned isError=true'),
         );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       progress(
-        `Computer Use: could not apply max_image_dimension=${this.maxImageDimension} (${msg}); using driver default.`,
+        `Computer Use: could not apply max_image_dimension=${maxImageDimension} (${msg}); using current driver value.`,
       );
     }
   }
@@ -243,7 +259,7 @@ export class ComputerUseClient {
           name,
           arguments: args,
         })) as CallToolResult;
-        this.trackRecordingLifecycle(name, result);
+        this.trackRecordingLifecycle(name, args, result);
         return result;
       } catch (err) {
         if (!isTransportClosedError(err)) throw err;
@@ -272,7 +288,7 @@ export class ComputerUseClient {
               name,
               arguments: args,
             })) as CallToolResult;
-            this.trackRecordingLifecycle(name, result);
+            this.trackRecordingLifecycle(name, args, result);
             return result;
           } catch (retryErr) {
             if (!isTransportClosedError(retryErr)) throw retryErr;
@@ -293,6 +309,7 @@ export class ComputerUseClient {
   async stop(): Promise<void> {
     this.clearIdleStopTimer();
     this.recordingActive = false;
+    this.recordingOwnerSession = undefined;
     const client = this.client;
     this.client = undefined;
     if (client) {
@@ -329,19 +346,47 @@ export class ComputerUseClient {
     this.idleStopTimer = undefined;
   }
 
-  private trackRecordingLifecycle(name: string, result: CallToolResult): void {
+  private trackRecordingLifecycle(
+    name: string,
+    args: Record<string, unknown>,
+    result: CallToolResult,
+  ): void {
     if (name === 'stop_recording') {
       // The driver disables recording before surfacing video-finalization
       // errors, so clear the flag even on isError — otherwise the idle
       // timer never re-arms.
       this.recordingActive = false;
+      this.recordingOwnerSession = undefined;
       return;
     }
     if (result.isError) return;
     if (name === 'start_recording') {
       this.recordingActive = true;
+      const session = args['session'];
+      this.recordingOwnerSession =
+        typeof session === 'string' && session.length > 0 ? session : undefined;
+      return;
+    }
+    if (
+      name === 'end_session' &&
+      typeof args['session'] === 'string' &&
+      args['session'] === this.recordingOwnerSession
+    ) {
+      // The driver does not return a successful end_session response until
+      // the matching recording has finalized.
+      this.recordingActive = false;
+      this.recordingOwnerSession = undefined;
     }
   }
+}
+
+function callToolErrorText(result: CallToolResult, fallback: string): string {
+  return (
+    result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .filter(Boolean)
+      .join('\n') || fallback
+  );
 }
 
 function normalizeIdleTimeoutMs(value: number | undefined): number {

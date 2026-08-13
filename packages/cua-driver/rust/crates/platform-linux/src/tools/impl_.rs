@@ -6542,6 +6542,7 @@ impl Tool for SetConfigTool {
             input_schema: json!({"type":"object","properties":{
                 "key":{"type":"string","description":"Name of a single config field to write ({key, value} shape). Pair with `value`."},
                 "value":{"description":"New value for `key`. JSON type depends on the key."},
+                "coordinate_space":{"type":"string","enum":["pixels"],"description":"Pin this driver runtime to pixel coordinates for a host with fixed pixel schemas."},
                 "capture_mode":{"type":"string","enum":["ax","vision"],"description":"Legacy per-field shape. Default capture mode for get_window_state. (\"som\"/\"screenshot\" still decode as deprecated aliases.)"},
                 "max_image_dimension":{"type":"integer","description":"Legacy per-field shape. Max dimension for screenshot resizing (0 = no limit)."},
                 "experimental_pip":{"type":"boolean","description":"Enable the experimental PiP preview window (applies next restart; Linux backend stubbed)."},

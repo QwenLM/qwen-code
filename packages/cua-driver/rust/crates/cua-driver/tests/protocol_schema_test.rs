@@ -71,12 +71,40 @@ fn tools_list_schema_shape() {
         browser_state["annotations"]["readOnlyHint"], true,
         "get_browser_state must remain side-effect free"
     );
+    for name in ["browser_pointer", "browser_download"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} not found in tools/list"));
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} required should be an array"));
+        assert!(
+            !required.iter().any(|field| field == "session"),
+            "{name} must accept the daemon session mirror without a public session: {required:?}"
+        );
+    }
     for field in ["pid", "window_id", "target_id", "tab_id", "session"] {
         assert!(
             browser_state["inputSchema"]["properties"][field].is_object(),
             "get_browser_state schema missing {field}"
         );
     }
+    let set_config = tools
+        .iter()
+        .find(|tool| tool["name"] == "set_config")
+        .expect("set_config not found in tools/list");
+    assert!(
+        enum_contains(
+            &set_config["inputSchema"]["properties"]["coordinate_space"],
+            "pixels"
+        ),
+        "set_config must expose the runtime pixel-coordinate contract"
+    );
+    assert!(
+        properties("start_recording")["session"].is_object(),
+        "start_recording must expose session ownership"
+    );
     assert_eq!(
         browser_state["inputSchema"]["properties"]["include_screenshot"]["default"], false,
         "get_browser_state should advertise opt-in exact-tab capture"
@@ -225,9 +253,9 @@ fn tools_list_schema_shape() {
         );
     }
 
-    // capture_mode enum restriction. On macOS, capture_mode is a per-call param
-    // on get_window_state (removed from set_config — behavior knobs are per-call
-    // now, not settings). On Windows it is still also a set_config field.
+    // capture_mode compatibility. On macOS it is a deprecated, ignored
+    // per-call parameter and must accept old aliases. On Windows it remains a
+    // restricted set_config field.
     #[cfg(target_os = "macos")]
     {
         let gws = tools
@@ -235,8 +263,10 @@ fn tools_list_schema_shape() {
             .find(|t| t["name"] == "get_window_state")
             .expect("get_window_state not found in tools/list");
         assert!(
-            gws["inputSchema"]["properties"]["capture_mode"]["enum"].is_array(),
-            "get_window_state capture_mode should have enum: {:?}",
+            gws["inputSchema"]["properties"]["capture_mode"]
+                .get("enum")
+                .is_none(),
+            "deprecated get_window_state capture_mode should accept legacy values: {:?}",
             gws["inputSchema"]["properties"]
         );
     }
@@ -252,6 +282,29 @@ fn tools_list_schema_shape() {
             sc["inputSchema"]["properties"]
         );
     }
+}
+
+#[test]
+fn runtime_coordinate_space_can_be_pinned_to_pixels() {
+    let mut d = RawDriver::spawn().expect("spawn source-built driver for coordinate test");
+    d.send(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+    d.recv();
+
+    d.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "set_config",
+            "arguments": { "key": "coordinate_space", "value": "pixels" }
+        }
+    }));
+    let response = d.recv();
+    assert_ne!(response["result"]["isError"], true, "{response:?}");
+    assert_eq!(
+        response["result"]["structuredContent"]["coordinate_space"], "pixels",
+        "{response:?}"
+    );
 }
 
 #[test]

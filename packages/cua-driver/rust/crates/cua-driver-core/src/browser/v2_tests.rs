@@ -1885,6 +1885,14 @@ async fn protected_browser_scope_reproves_live_origin_and_omits_sensitive_url_te
         .await
         .unwrap()
         .unwrap();
+    let mut mirror_args = args.clone();
+    mirror_args.as_object_mut().unwrap().remove("session");
+    mirror_args["_session_id"] = json!(SESSION);
+    let mirrored = browser_protected_resource_scope(&f.engine, &mirror_args, "browser_click")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mirrored, first);
     assert_eq!(first["live_origin"], "https://fixture.test");
     assert!(
         !first.to_string().contains("secret"),

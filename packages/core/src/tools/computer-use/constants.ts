@@ -169,8 +169,7 @@ export const MAX_IMAGE_DIMENSION_ENV = 'QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION';
  * `undefined` if it isn't one. A valid override is a non-negative integer
  * (`0` = no resizing / full resolution). Anything else — negative (incl. the
  * `-1` "use default" sentinel), fractional, NaN/Infinity, or empty — yields
- * `undefined`, meaning "don't override; let cua-driver use its built-in
- * default (1568)".
+ * `undefined`, meaning "use cua-driver's built-in default (1568)".
  */
 function coerceImageDimension(
   value: string | number | undefined,
@@ -188,7 +187,7 @@ function coerceImageDimension(
  *
  *   1. `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env var (if a valid override)
  *   2. the `tools.computerUse.maxImageDimension` setting
- *   3. `undefined` → no override; cua-driver keeps its built-in default (1568)
+ *   3. `undefined` → reset cua-driver to its built-in default (1568)
  *
  * A valid override is a non-negative integer (`0` disables resizing). Negative
  * values (incl. the `-1` setting default), non-integers, and blanks mean "no

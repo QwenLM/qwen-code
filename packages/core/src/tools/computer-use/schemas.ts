@@ -1573,6 +1573,12 @@ export const COMPUTER_USE_SCHEMAS: Record<
     parameterSchema: {
       type: 'object',
       properties: {
+        coordinate_space: {
+          description:
+            'Pin this driver runtime to pixel coordinates for a host with fixed pixel schemas.',
+          enum: ['pixels'],
+          type: 'string',
+        },
         experimental_pip: {
           description:
             'Enable the experimental picture-in-picture preview window. Applies on next daemon restart.',
@@ -2144,7 +2150,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
           type: 'string',
         },
       },
-      required: ['session', 'target_id', 'tab_id', 'ref', 'destination_root'],
+      required: ['target_id', 'tab_id', 'ref', 'destination_root'],
       additionalProperties: false,
     },
     annotations: {
@@ -2215,7 +2221,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
           type: 'number',
         },
       },
-      required: ['target_id', 'tab_id', 'session', 'action'],
+      required: ['target_id', 'tab_id', 'action'],
       additionalProperties: false,
     },
     annotations: {
@@ -2240,6 +2246,11 @@ export const COMPUTER_USE_SCHEMAS: Record<
           description:
             'Capture the main display to <output_dir>/recording.mp4. Default: false. Set to true to also capture the main display to recording.mp4 (otherwise only the per-turn screenshots + JSON are recorded). On macOS this uses native ScreenCaptureKit (no extra TCC prompt, macOS 15.0+); on Windows + Linux it requires ffmpeg on PATH.',
           type: 'boolean',
+        },
+        session: {
+          description:
+            'Optional session that owns this recording. Ending the same session stops the recording.',
+          type: 'string',
         },
       },
       required: ['output_dir'],

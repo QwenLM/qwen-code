@@ -24,7 +24,8 @@ preserving the existing lazy install and per-tool confirmation experience.
    stronger authorization host continue to fail closed.
 4. Enforce absolute pixel coordinates for the Qwen Code integration. The MCP
    child strips `CUA_DRIVER_RS_COORDINATE_SPACE` and
-   `CUA_DRIVER_RS_COORDINATE_SCALE` so runtime behavior cannot drift from the
+   `CUA_DRIVER_RS_COORDINATE_SCALE`, then Qwen Code pins the connected runtime
+   to pixels before exposing it, so a persistent daemon cannot drift from the
    checked-in absolute-coordinate schemas.
 5. Enable `MCP_MODEL_PAYLOAD_FILTER=1` for the built-in MCP process because this
    is a model-facing route owned by Qwen Code.
@@ -67,7 +68,7 @@ working first-install path.
 - Schema regeneration must report exactly 54 tools from the local 0.17.0
   binary without leaking coordinate-mode overrides into generated schemas.
 - The mirror job itself enforces the asset contract in-workflow: it depends on
-  the release job, downloads exactly the seven downloader-consumed assets plus
+  the release job, downloads exactly the six platform archives plus
   `checksums.txt`, verifies them with `sha256sum -c`, and re-downloads the
   mirrored files to compare before finishing.
 - A release-candidate E2E run must verify first install, macOS TCC attribution,

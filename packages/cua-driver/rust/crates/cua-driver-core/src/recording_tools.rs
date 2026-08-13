@@ -103,6 +103,10 @@ impl Tool for StartRecordingTool {
                             screenshots + JSON are recorded). On macOS this uses native \
                             ScreenCaptureKit (no extra TCC prompt, macOS 15.0+); on \
                             Windows + Linux it requires ffmpeg on PATH."
+                    },
+                    "session": {
+                        "type": "string",
+                        "description": "Optional session that owns this recording. Ending the same session stops the recording."
                     }
                 },
                 "additionalProperties": false

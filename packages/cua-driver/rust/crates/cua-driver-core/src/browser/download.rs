@@ -67,7 +67,7 @@ impl BrowserDownloadTool {
                             "description": "Absolute, existing, canonical directory approved to receive the download."
                         }
                     },
-                    "required": ["session", "target_id", "tab_id", "ref", "destination_root"],
+                    "required": ["target_id", "tab_id", "ref", "destination_root"],
                     "additionalProperties": true
                 }),
                 read_only: false,
@@ -89,7 +89,10 @@ fn consent_required() -> ToolResult {
 }
 
 fn explicit_session(args: &Value) -> Result<String, ToolResult> {
-    let session = args.require_str("session")?;
+    let session = args
+        .opt_str("session")
+        .or_else(|| args.opt_str("_session_id"))
+        .unwrap_or_else(|| "default".into());
     if session.trim().is_empty() || session == "default" {
         return Err(ToolResult::error(
             "browser_download requires an explicit non-default session",
@@ -508,6 +511,14 @@ impl Tool for BrowserDownloadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_session_mirror_satisfies_explicit_session_requirement() {
+        assert_eq!(
+            explicit_session(&json!({ "_session_id": "transport-session" })).unwrap(),
+            "transport-session"
+        );
+    }
 
     #[test]
     fn destination_must_be_absolute_existing_canonical_directory() {

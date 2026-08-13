@@ -62,6 +62,7 @@ describe('ComputerUseClient', () => {
     process.env['CUA_DRIVER_RS_COORDINATE_SPACE'] = '1';
     process.env['CUA_DRIVER_RS_COORDINATE_SCALE'] = '1000';
     sdkMocks.transportOptions.mockClear();
+    sdkMocks.callTool.mockResolvedValue({ content: [] });
     const client = new ComputerUseClient({ binary: '/fake/cua-driver' });
     try {
       await client.start();
@@ -147,7 +148,11 @@ describe('applyRuntimeConfig (set_config on connect)', () => {
       maxImageDimension: 1024,
     });
     await invokeApply(c, inner, vi.fn());
-    expect(inner.callTool).toHaveBeenCalledWith({
+    expect(inner.callTool).toHaveBeenNthCalledWith(1, {
+      name: 'set_config',
+      arguments: { key: 'coordinate_space', value: 'pixels' },
+    });
+    expect(inner.callTool).toHaveBeenNthCalledWith(2, {
       name: 'set_config',
       arguments: { max_image_dimension: 1024 },
     });
@@ -160,22 +165,43 @@ describe('applyRuntimeConfig (set_config on connect)', () => {
     const c = new ComputerUseClient({ binary: '/fake/cua-driver' });
     c.setMaxImageDimension(0);
     await invokeApply(c, inner, vi.fn());
-    expect(inner.callTool).toHaveBeenCalledWith({
+    expect(inner.callTool).toHaveBeenNthCalledWith(2, {
       name: 'set_config',
       arguments: { max_image_dimension: 0 },
     });
   });
 
-  it('does nothing when no override is set (driver keeps its built-in default)', async () => {
-    const inner: Inner = { callTool: vi.fn() };
+  it('restores the built-in image cap when no override is set', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockResolvedValue({ content: [] }),
+    };
     const c = new ComputerUseClient({ binary: '/fake/cua-driver' });
     await invokeApply(c, inner, vi.fn());
-    expect(inner.callTool).not.toHaveBeenCalled();
+    expect(inner.callTool).toHaveBeenNthCalledWith(2, {
+      name: 'set_config',
+      arguments: { max_image_dimension: 1568 },
+    });
+  });
+
+  it('aborts startup when the daemon cannot guarantee pixel coordinates', async () => {
+    const inner: Inner = {
+      callTool: vi.fn().mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'coordinate mode unavailable' }],
+        isError: true,
+      }),
+    };
+    const c = new ComputerUseClient({ binary: '/fake/cua-driver' });
+    await expect(invokeApply(c, inner, vi.fn())).rejects.toThrow(
+      'coordinate mode unavailable',
+    );
   });
 
   it('never aborts startup when set_config fails — warns via progress and swallows', async () => {
     const inner: Inner = {
-      callTool: vi.fn().mockRejectedValue(new Error('boom')),
+      callTool: vi
+        .fn()
+        .mockResolvedValueOnce({ content: [] })
+        .mockRejectedValueOnce(new Error('boom')),
     };
     const progress = vi.fn();
     const c = new ComputerUseClient({
@@ -190,10 +216,13 @@ describe('applyRuntimeConfig (set_config on connect)', () => {
 
   it('treats an MCP isError set_config result as a best-effort failure', async () => {
     const inner: Inner = {
-      callTool: vi.fn().mockResolvedValue({
-        content: [{ type: 'text', text: 'authorization required' }],
-        isError: true,
-      }),
+      callTool: vi
+        .fn()
+        .mockResolvedValueOnce({ content: [] })
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'authorization required' }],
+          isError: true,
+        }),
     };
     const progress = vi.fn();
     const c = new ComputerUseClient({
@@ -410,6 +439,48 @@ describe('idle shutdown', () => {
     expect(inner.close).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-arms idle shutdown when end_session stops the owned recording', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner: FakeInner = {
+      callTool: vi.fn().mockResolvedValue(successResult),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    installInner(c, inner);
+
+    await c.callTool('start_recording', {
+      output_dir: '/tmp/recording',
+      session: 'owned-session',
+    });
+    await c.callTool('end_session', { session: 'owned-session' });
+    await vi.advanceTimersByTimeAsync(25);
+    expect(inner.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the driver alive when end_session leaves another recording active', async () => {
+    vi.useFakeTimers();
+    const c = new ComputerUseClient({
+      binary: '/fake/cua-driver',
+      idleTimeoutMs: 25,
+    });
+    const inner: FakeInner = {
+      callTool: vi.fn().mockResolvedValue(successResult),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    installInner(c, inner);
+
+    await c.callTool('start_recording', {
+      output_dir: '/tmp/recording',
+      session: 'owned-session',
+    });
+    await c.callTool('end_session', { session: 'other-session' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(inner.close).not.toHaveBeenCalled();
   });
 
   it.each([NaN, Infinity, -Infinity])(

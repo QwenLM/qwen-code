@@ -2,7 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -564,7 +567,7 @@ pub struct ToolRegistry {
     protected_resource_grants: Arc<crate::consent::ProtectedResourceGrants>,
     protected_resource_ownership: Arc<crate::consent::ProtectedResourceOwnershipStore>,
     /// Opt-in 0-1000 coordinate translation at the canonical native boundary.
-    normalized_coordinates: bool,
+    normalized_coordinates: AtomicBool,
 }
 
 impl ToolRegistry {
@@ -616,16 +619,16 @@ impl ToolRegistry {
             approval_broker,
             protected_resource_grants,
             protected_resource_ownership,
-            normalized_coordinates: crate::coord_norm::default_normalized(),
+            normalized_coordinates: AtomicBool::new(crate::coord_norm::default_normalized()),
         }
     }
 
-    pub fn set_coordinate_space_normalized(&mut self, enabled: bool) {
-        self.normalized_coordinates = enabled;
+    pub fn set_coordinate_space_normalized(&self, enabled: bool) {
+        self.normalized_coordinates.store(enabled, Ordering::SeqCst);
     }
 
     pub fn coordinate_space_normalized(&self) -> bool {
-        self.normalized_coordinates
+        self.normalized_coordinates.load(Ordering::SeqCst)
     }
 
     /// Return the runtime-owned broker for adapter construction.
@@ -790,7 +793,7 @@ impl ToolRegistry {
             "schema_version": TOOLS_LIST_SCHEMA_VERSION,
             "enforcement_adapters": crate::authorization::enforcement_adapter_inventory_json(),
         });
-        if self.normalized_coordinates {
+        if self.coordinate_space_normalized() {
             crate::coord_norm::rewrite_coord_desc(&mut result);
         }
         result
@@ -1010,7 +1013,7 @@ impl ToolRegistry {
         // Convert only the private dispatch copy. Authorization, consent,
         // manifests, recordings, and replay continue to use the caller's
         // normalized arguments, while platform workers receive pixels.
-        if self.normalized_coordinates {
+        if self.coordinate_space_normalized() {
             let pid = args.opt_i64("pid").unwrap_or(0);
             let window_id = args.opt_u64("window_id").unwrap_or(0);
             let (width, height) = crate::coord_norm::get_size(pid, window_id).unwrap_or((0, 0));
@@ -1225,41 +1228,49 @@ impl ToolRegistry {
                 return refusal;
             }
         }
-        if has_adapter("browser_bound_input")
-            && tool
-                .protected_resource_ownership("browser_bound_input", &public_args)
+        if has_adapter("browser_bound_input") {
+            let browser_runtime_session = runtime_session
+                .clone()
+                .or_else(|| args.opt_str("_session_id"));
+            let mut browser_args = public_args.clone();
+            if let Some(session) = args.get("_session_id") {
+                browser_args["_session_id"] = session.clone();
+            }
+            if tool
+                .protected_resource_ownership("browser_bound_input", &browser_args)
                 .await
                 != ProtectedResourceOwnership::DriverOwned
-        {
-            let approved_scope = match self
-                .authorize_attested_resource(
-                    tool.as_ref(),
-                    "browser_bound_input",
-                    crate::authorization::RiskClass::R2,
-                    &public_args,
-                    context,
-                    runtime_session.as_deref(),
-                    "Allow Cua to control this exact authenticated browser tab",
-                    Duration::from_secs(30 * 60),
-                    Duration::from_secs(8 * 60 * 60),
-                )
-                .await
             {
-                Ok(scope) => scope,
-                Err(refusal) => return refusal,
-            };
-            if let Err(refusal) = self
-                .validate_attested_resource(
-                    tool.as_ref(),
-                    "browser_bound_input",
-                    &public_args,
-                    context,
-                    runtime_session.as_deref(),
-                    &approved_scope,
-                )
-                .await
-            {
-                return refusal;
+                let approved_scope = match self
+                    .authorize_attested_resource(
+                        tool.as_ref(),
+                        "browser_bound_input",
+                        crate::authorization::RiskClass::R2,
+                        &browser_args,
+                        context,
+                        browser_runtime_session.as_deref(),
+                        "Allow Cua to control this exact authenticated browser tab",
+                        Duration::from_secs(30 * 60),
+                        Duration::from_secs(8 * 60 * 60),
+                    )
+                    .await
+                {
+                    Ok(scope) => scope,
+                    Err(refusal) => return refusal,
+                };
+                if let Err(refusal) = self
+                    .validate_attested_resource(
+                        tool.as_ref(),
+                        "browser_bound_input",
+                        &browser_args,
+                        context,
+                        browser_runtime_session.as_deref(),
+                        &approved_scope,
+                    )
+                    .await
+                {
+                    return refusal;
+                }
             }
         }
         if has_adapter("process_control")
@@ -1357,8 +1368,20 @@ impl ToolRegistry {
             })
             .flatten();
 
-        let mut result = tool.invoke(args.clone()).await;
-        if self.normalized_coordinates {
+        let mut result = if resolved_name == "set_config" {
+            match coordinate_space_config(&args) {
+                Some(Ok(())) => {
+                    self.set_coordinate_space_normalized(false);
+                    ToolResult::text("Config updated: coordinate_space=pixels")
+                        .with_structured(serde_json::json!({ "coordinate_space": "pixels" }))
+                }
+                Some(Err(message)) => ToolResult::error(message),
+                None => tool.invoke(args.clone()).await,
+            }
+        } else {
+            tool.invoke(args.clone()).await
+        };
+        if self.coordinate_space_normalized() {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
             crate::coord_norm::ingest_zoom_size(resolved_name, &args, &result);
@@ -3917,6 +3940,44 @@ fn is_existing_profile_prepare(tool_name: &str, args: &Value) -> bool {
             == Some("existing_profile")
 }
 
+fn coordinate_space_config(args: &Value) -> Option<Result<(), String>> {
+    let value = if args.get("key").and_then(Value::as_str) == Some("coordinate_space") {
+        let has_other_public_field = args.as_object().is_some_and(|arguments| {
+            arguments
+                .keys()
+                .any(|key| !matches!(key.as_str(), "key" | "value") && !key.starts_with('_'))
+        });
+        if has_other_public_field {
+            return Some(Err(
+                "coordinate_space must be configured separately".to_owned()
+            ));
+        }
+        args.get("value")
+    } else if let Some(value) = args.get("coordinate_space") {
+        let has_other_public_field = args.as_object().is_some_and(|arguments| {
+            arguments
+                .keys()
+                .any(|key| key != "coordinate_space" && !key.starts_with('_'))
+        });
+        if has_other_public_field {
+            return Some(Err(
+                "coordinate_space must be configured separately".to_owned()
+            ));
+        }
+        Some(value)
+    } else {
+        return None;
+    };
+    let mode = match value.and_then(Value::as_str) {
+        Some(mode) => mode,
+        None => return Some(Err("coordinate_space must be \"pixels\"".to_owned())),
+    };
+    Some(match mode {
+        "pixels" => Ok(()),
+        _ => Err("coordinate_space must be \"pixels\"".to_owned()),
+    })
+}
+
 fn recording_args_for(tool_name: &str, args: &Value) -> Value {
     let mut redacted = args.clone();
     if let Some(arguments) = redacted.as_object_mut() {
@@ -3949,8 +4010,10 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
                 }
             }
             "launch_app" => {
-                if arguments.contains_key("urls") {
-                    arguments.insert("urls".to_owned(), Value::String("[redacted]".to_owned()));
+                for field in ["urls", "additional_arguments"] {
+                    if arguments.contains_key(field) {
+                        arguments.insert(field.to_owned(), Value::String("[redacted]".to_owned()));
+                    }
                 }
             }
             "browser_prepare" => {
@@ -4065,6 +4128,33 @@ mod capability_tests {
     use super::*;
 
     #[test]
+    fn coordinate_space_config_accepts_only_pixel_pinning() {
+        assert_eq!(
+            coordinate_space_config(&serde_json::json!({
+                "key": "coordinate_space",
+                "value": "pixels"
+            })),
+            Some(Ok(()))
+        );
+        assert!(coordinate_space_config(&serde_json::json!({
+            "key": "coordinate_space",
+            "value": "normalized"
+        }))
+        .is_some_and(|result| result.is_err()));
+        assert!(coordinate_space_config(&serde_json::json!({
+            "coordinate_space": "pixels",
+            "max_image_dimension": 1024
+        }))
+        .is_some_and(|result| result.is_err()));
+        assert!(coordinate_space_config(&serde_json::json!({
+            "key": "coordinate_space",
+            "value": "pixels",
+            "max_image_dimension": 1024
+        }))
+        .is_some_and(|result| result.is_err()));
+    }
+
+    #[test]
     fn browser_prepare_recording_redacts_authority_and_transport_secrets() {
         let recorded = recording_args_for(
             "browser_prepare",
@@ -4153,9 +4243,14 @@ mod capability_tests {
 
         let launched = recording_args_for(
             "launch_app",
-            &serde_json::json!({"bundle_id": "com.apple.Finder", "urls": ["/private/folder"]}),
+            &serde_json::json!({
+                "bundle_id": "com.apple.Finder",
+                "urls": ["/private/folder"],
+                "additional_arguments": ["--access-token=private-token"]
+            }),
         );
         assert_eq!(launched["urls"], "[redacted]");
+        assert_eq!(launched["additional_arguments"], "[redacted]");
 
         let serialized = serde_json::json!([
             dialog,
@@ -4181,6 +4276,7 @@ mod capability_tests {
             "private desktop input",
             "private field value",
             "/private/folder",
+            "private-token",
         ] {
             assert!(
                 !serialized.contains(forbidden),

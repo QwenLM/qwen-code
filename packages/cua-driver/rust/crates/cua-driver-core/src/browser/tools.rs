@@ -98,16 +98,22 @@ pub(crate) fn browser_resource_ownership(
     engine: &BrowserEngine,
     args: &Value,
 ) -> ProtectedResourceOwnership {
-    let Some(session) = args
-        .get("session")
-        .and_then(Value::as_str)
+    let public_session = args
+        .opt_str("session")
+        .filter(|session| !session.is_empty());
+    let Some(session) = public_session
+        .clone()
+        .or_else(|| args.opt_str("_session_id"))
         .filter(|session| !session.is_empty())
     else {
         return ProtectedResourceOwnership::UserOwned;
     };
-    let runtime_session = crate::tool::current_dispatch_authorization_context()
-        .map(|context| context.runtime_session_key(session))
-        .unwrap_or_else(|| session.to_owned());
+    let runtime_session = public_session
+        .and_then(|public| {
+            crate::tool::current_dispatch_authorization_context()
+                .map(|context| context.runtime_session_key(&public))
+        })
+        .unwrap_or_else(|| session.clone());
     let pid = args.get("pid").and_then(Value::as_i64).or_else(|| {
         args.get("target_id")
             .and_then(Value::as_str)
@@ -116,7 +122,7 @@ pub(crate) fn browser_resource_ownership(
     });
     if pid.is_some_and(|pid| {
         engine.is_driver_owned_pid_for_session(&runtime_session, pid)
-            || engine.is_driver_owned_pid_for_session(session, pid)
+            || engine.is_driver_owned_pid_for_session(&session, pid)
     }) {
         ProtectedResourceOwnership::DriverOwned
     } else {
@@ -129,9 +135,12 @@ pub(crate) async fn browser_protected_resource_scope(
     args: &Value,
     tool_name: &str,
 ) -> Result<Option<Value>, String> {
-    let session = args
-        .get("session")
-        .and_then(Value::as_str)
+    let public_session = args
+        .opt_str("session")
+        .filter(|session| !session.is_empty());
+    let session = public_session
+        .clone()
+        .or_else(|| args.opt_str("_session_id"))
         .filter(|session| !session.is_empty())
         .ok_or_else(|| "the browser operation requires an explicit session".to_owned())?;
     let target_id = args
@@ -144,9 +153,12 @@ pub(crate) async fn browser_protected_resource_scope(
         .and_then(Value::as_str)
         .filter(|tab| !tab.is_empty())
         .ok_or_else(|| "the browser operation requires an exact tab_id".to_owned())?;
-    let runtime_session = crate::tool::current_dispatch_authorization_context()
-        .map(|context| context.runtime_session_key(session))
-        .unwrap_or_else(|| session.to_owned());
+    let runtime_session = public_session
+        .and_then(|public| {
+            crate::tool::current_dispatch_authorization_context()
+                .map(|context| context.runtime_session_key(&public))
+        })
+        .unwrap_or_else(|| session.clone());
     let (validated, live_origin) = engine
         .attest_protected_tab(&runtime_session, target_id, tab_id)
         .await
@@ -819,9 +831,7 @@ impl Tool for BrowserNavigateTool {
             || lower.starts_with("https://")
             || lower.starts_with("about:"))
         {
-            return ToolResult::error(format!(
-                "browser_navigate only accepts http/https/about URLs, got: {url}"
-            ));
+            return ToolResult::error("browser_navigate only accepts http/https/about URLs");
         }
 
         let _mutation = match self
@@ -2919,13 +2929,17 @@ mod tests {
     #[tokio::test]
     async fn mutations_reject_bad_url_and_bad_route_before_binding() {
         let e = engine();
+        let private_url = "file:///Users/private/secret.txt?token=hidden";
         let nav = BrowserNavigateTool::new(e.clone())
             .invoke(json!({
-                "target_id": "bt1", "tab_id": "tab1", "url": "file:///etc/passwd",
+                "target_id": "bt1", "tab_id": "tab1", "url": private_url,
                 "_session_id": "run-1"
             }))
             .await;
         assert_eq!(nav.is_error, Some(true));
+        assert!(nav.content.iter().all(|content| {
+            !matches!(content, Content::Text { text, .. } if text.contains(private_url))
+        }));
 
         let click = BrowserClickTool::new(e)
             .invoke(json!({
