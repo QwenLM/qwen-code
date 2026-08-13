@@ -2958,8 +2958,7 @@ export class CoreToolScheduler {
                 // pmForcedAsk fallback isn't an audit-worthy event.
                 if (
                   isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write'
+                  outcome.reason === 'classifier_unavailable'
                 ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
                   autoModeFallbackMessage = outcome.message;
@@ -2967,6 +2966,11 @@ export class CoreToolScheduler {
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
                   );
+                } else if (
+                  outcome.reason === 'external_write' &&
+                  outcome.message
+                ) {
+                  autoModeFallbackMessage = outcome.message;
                 }
                 break;
               default: {
@@ -6192,8 +6196,7 @@ export class CoreToolScheduler {
             case 'fallback':
               if (
                 isDenialFallbackReason(outcome.reason) ||
-                outcome.reason === 'classifier_unavailable' ||
-                outcome.reason === 'external_write'
+                outcome.reason === 'classifier_unavailable'
               ) {
                 this.autoModeFallbackCallIds.add(pendingTool.request.callId);
                 if (outcome.message) {
@@ -6208,6 +6211,18 @@ export class CoreToolScheduler {
                 }
                 debugLogger.warn(
                   `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                );
+              } else if (
+                outcome.reason === 'external_write' &&
+                outcome.message
+              ) {
+                this.setStatusInternal(
+                  pendingTool.request.callId,
+                  'awaiting_approval',
+                  decorateClassifierUnavailableConfirmation(
+                    pendingTool.confirmationDetails,
+                    outcome.message,
+                  ),
                 );
               }
               break;

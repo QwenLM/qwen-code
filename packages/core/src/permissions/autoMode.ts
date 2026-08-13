@@ -578,6 +578,14 @@ export function applyAutoModeDecision(
       config.setAutoModeDenialState(recordAllow(denialState));
       return { kind: 'approved' };
     case 'fallback':
+      if (decision.reason === 'external_write') {
+        return {
+          kind: 'fallback',
+          reason: 'external_write',
+          message:
+            'Writes outside the workspace require manual approval in AUTO mode.',
+        };
+      }
       return { kind: 'fallback', reason: decision.reason };
     default: {
       const _exhaustive: never = decision;
