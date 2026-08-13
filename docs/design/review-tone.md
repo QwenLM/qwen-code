@@ -1,35 +1,32 @@
-# Design: plain-prose posted reviews; markers follow `review.attribution`
+# Design: readable posted reviews — plain prose; markers follow `review.attribution`
 
 ## Problem statement
 
-A review posted by `/review --comment` is recognisably machine-written even
-with the attribution footer off (#8994's `review.attribution: false`). The
-remaining tells:
+A review posted by `/review --comment` is written in a template voice rather
+than a reviewer's voice. The worst offender is the inline comment body format
+dictated by the skill: a `— Failure scenario: <trigger> → <wrong outcome>`
+clause with a label and arrow notation no human would type. Template
+scaffolding costs every reader time — the failure scenario is information,
+but the label and the arrows around it are not.
 
-1. **Inline comment bodies** follow a fixed template dictated by
-   `SKILL.md`'s comment-body spec: a `**[Critical]**` / `**[Suggestion]**`
-   bracket prefix, an em-dash-joined `Failure scenario: <trigger> → <wrong
-outcome>` clause, a ` ```suggestion ` block, and the footer. The bracket
-   prefix and the arrow-notation failure scenario are shapes no human
-   reviewer types.
-2. **Review body** fixed copy in `compose-review.ts`: `No issues found.
-LGTM! ✅`, `⚠️ Downgraded from …`.
+Two other artifacts look like tells but are not: `LGTM! ✅` and the `⚠️`
+glyph are things human reviewers type constantly, and they aid scanning.
+Readability — not concealment — is the criterion, and by that criterion they
+stay.
 
-Projects whose communities are hostile to AI assistance treat these artifacts
-as bot output on sight, regardless of content quality.
+## Decision: plain prose unconditionally; machine-readable markers follow `review.attribution`
 
-## Decision: plain prose unconditionally; markers follow `review.attribution`
+The posted text splits into two layers, and they get different treatment:
 
-The "AI flavour" splits into two kinds of ingredient, and they get different
-treatment:
-
-- **Phrasing — the `— Failure scenario: <trigger> → <wrong outcome>` label,
-  the arrow notation, `LGTM! ✅`, the `⚠️` glyph** — is template voice, and
-  plainer prose is more readable for _every_ audience, including the
-  openly-attributed posts on this repository's own PRs. It goes natural
-  **unconditionally**, in both attribution modes. No setting, no register
-  branch: the model writes one style, and `submit`/`compose-review` never
-  re-introduce the scaffolding.
+- **Phrasing — the `Failure scenario:` label, the `<trigger> → <wrong
+outcome>` arrow notation, the section-header voice** — is template
+  scaffolding. Plain sentences carry the same information more readably for
+  _every_ audience, including the openly-attributed posts on this
+  repository's own PRs. Phrasing goes plain **unconditionally**, in both
+  attribution modes. No setting, no register branch: the model writes one
+  style. The evidence rule is unchanged — the concrete trigger and wrong
+  outcome must be in the sentences; the scaffolding is gone, the evidence
+  is not.
 - **Markers — the `**[Critical]**`/`**[Suggestion]**` prefixes and the
   footer** — are machine-readable signals, not prose style:
   `qwen-autofix.yml`'s Critical-only mode greps posted bodies for
@@ -40,7 +37,7 @@ treatment:
   machine contract too.
 
 No new setting. `review.attribution: false` (#8994) now means "post without
-any AI-attribution signal": no footer, no severity markers.
+any machine-readable attribution signal": no footer, no severity markers.
 
 Rationale over a separate `review.tone`: two registers would double the
 prompt and test surface for a phrasing that is strictly worse; the only
@@ -55,7 +52,7 @@ is exactly what attribution already governs.
 | Inline comment body (model-written) | Body format spec                                                                         | `packages/core/src/skills/bundled/review/SKILL.md` (Step 7)       |
 | Comment normalization at post time  | Strips forged footers; appends canonical footer (attribution on)                         | `packages/cli/src/commands/review/submit.ts`                      |
 | Severity counting                   | `submit` counts `**[Critical]**` / `**[Suggestion]**` prefixes off the attached comments | `packages/cli/src/commands/review/lib/inline-counts.ts`           |
-| Review body (deterministic)         | Fixed bilingual copy, emoji, `<details>` fold                                            | `packages/cli/src/commands/review/compose-review.ts`              |
+| Review body (deterministic)         | Fixed bilingual copy, `<details>` fold                                                   | `packages/cli/src/commands/review/compose-review.ts`              |
 | Settings resolution                 | `operatorReviewSettings()` — operator scopes only                                        | `packages/cli/src/commands/review/lib/review-settings.ts` (#8994) |
 
 Two constraints discovered during investigation:
@@ -81,16 +78,10 @@ template at all — no new plumbing anywhere.
    happens in the final `post` object only: the payload keeps its canonical
    marked shape, so severity counting, the unmarked-comment gate, and the
    ledger all ran on the marked comments before the transform.
-2. **`compose-review.ts`** — fixed copy goes plain **in both modes**:
-   `No issues found. LGTM! ✅` → `No issues found.`; every fixed `⚠️ `
-   clause (downgrade, nothing-certified, unverified-findings) drops the
-   glyph but keeps the sentence. Body Criticals and the cannot-tell list
-   keep their `**[Critical]**` marker when attribution is on (autofix greps
-   it) and lose it when off.
-3. **`pr-context.ts`** — `CANONICAL_LGTM_RE` matches both the legacy
-   `No issues found. LGTM! ✅` shape and the new bare `No issues found.`,
-   so old and new auto-posted approvals alike stay out of later reviews'
-   context files.
+2. **`compose-review.ts`** — body Criticals and the cannot-tell list keep
+   their `**[Critical]**` marker when attribution is on (autofix greps it)
+   and lose it when off. All other fixed copy is unchanged — `LGTM! ✅`
+   and the `⚠️` clauses stay in both modes.
 
 ### Known tradeoffs (disclosed, accepted)
 
@@ -100,12 +91,12 @@ template at all — no new plumbing anywhere.
   findings; dropping it would break multi-round re-reviews. It stays.
 - Markerless, footerless Criticals are recognized on later rounds only by
   the semantic blocker patterns (`carriesBlockerSignal`), exactly like a
-  human's comment. That is the unavoidable price of looking human: the
-  machine cannot tell its own comments apart either.
+  human's comment. That is the unavoidable price of posting without markers:
+  the machine cannot tell its own comments apart either.
 
 ### Prompt layer (SKILL.md, dogfooded)
 
-4. Step 7's comment-body paragraph drops the labelled template **as the
+3. Step 7's comment-body paragraph drops the labelled template **as the
    only register**: write each description as plain reviewer prose in the
    PR's language — no `Failure scenario:` label, no `→` notation; state the
    problem, when it bites, and the fix in ordinary sentences. The evidence
@@ -121,26 +112,27 @@ template at all — no new plumbing anywhere.
 
 - Verdict semantics, severity definitions, exclusion criteria, the reverse
   audit, presubmit, authorization. Presentation only.
-- Language matching and the bilingual `<details>中文说明</details>` fold —
-  language policy, not a tone artifact.
+- The fixed review-body copy: `LGTM! ✅`, the `⚠️` clauses, the bilingual
+  `<details>中文说明</details>` fold — humans type the first two, and the
+  fold is language policy.
 - ` ```suggestion ` blocks.
 - qwen-code's own autofix: `qwen-autofix.yml` keys off prefix + footer, and
   this repository's CI reviews run with attribution on, so every string the
   workflow greps for still appears in its posts.
-- The `parse-args` verdict shape: prose style is no longer conditional, so
-  the orchestrator has nothing to branch on.
+- The `parse-args` verdict shape: prose style is not conditional, so the
+  orchestrator has nothing to branch on.
 
 ## Files affected
 
-| File                                                                         | Change                                                               |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `packages/cli/src/commands/review/submit.ts`                                 | Prefix strip in the attribution-off post transform                   |
-| `packages/cli/src/commands/review/compose-review.ts`                         | Plain fixed copy in both modes; body-list markers follow attribution |
-| `packages/cli/src/commands/review/pr-context.ts`                             | `CANONICAL_LGTM_RE` matches both LGTM shapes                         |
-| `packages/core/src/skills/bundled/review/SKILL.md`                           | Plain-prose body format as the only register                         |
-| `docs/users/configuration/settings.md`, `docs/users/features/code-review.md` | Widen `review.attribution` description                               |
-| `packages/cli/src/config/settingsSchema.ts` + regenerated IDE schema         | Attribution description widened (no new key)                         |
-| Collocated `*.test.ts`                                                       | Pin both modes; plain copy in each                                   |
+| File                                                                         | Change                                             |
+| ---------------------------------------------------------------------------- | -------------------------------------------------- |
+| `packages/cli/src/commands/review/submit.ts`                                 | Prefix strip in the attribution-off post transform |
+| `packages/cli/src/commands/review/compose-review.ts`                         | Body-list markers follow attribution               |
+| `packages/cli/src/commands/review/lib/inline-counts.ts`                      | `stripSeverityPrefix` beside `severityOf`          |
+| `packages/core/src/skills/bundled/review/SKILL.md`                           | Plain-prose body format as the only register       |
+| `docs/users/configuration/settings.md`, `docs/users/features/code-review.md` | Widen `review.attribution` description             |
+| `packages/cli/src/config/settingsSchema.ts` + regenerated IDE schema         | Attribution description widened (no new key)       |
+| Collocated `*.test.ts`                                                       | Pin both modes; fixed copy identical in each       |
 
 Base branch: `pr-8994` (the setting this couples to exists only there).
 

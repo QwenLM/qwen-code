@@ -444,7 +444,7 @@ describe('composeReview — the C/S table', () => {
   it('C=0, S=0 → APPROVE with the LGTM body', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toBe(`No issues found.\n\n${FOOTER}`);
+    expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
   });
 
   it('includes the injected CLI version without breaking the stable marker', () => {
@@ -457,7 +457,7 @@ describe('composeReview — the C/S table', () => {
 
   it('omits the footer entirely when attribution is off', () => {
     const r = composeReview(base({}), '0.21.2', false);
-    expect(r.body).toBe('No issues found.');
+    expect(r.body).toBe('No issues found. LGTM! ✅');
     expect(r.body).not.toContain(MODEL);
   });
 
@@ -465,7 +465,7 @@ describe('composeReview — the C/S table', () => {
     // Before the gate, an attribution-off run still died over the field the
     // footer — provably never rendered — names.
     const r = composeReview(base({ modelId: '' }), '0.21.2', false);
-    expect(r.body).toBe('No issues found.');
+    expect(r.body).toBe('No issues found. LGTM! ✅');
   });
 
   it('attribution off: a footer-unsafe modelId composes — nothing renders it', () => {
@@ -474,17 +474,14 @@ describe('composeReview — the C/S table', () => {
       '0.21.2',
       false,
     );
-    expect(r.body).toBe('No issues found.');
+    expect(r.body).toBe('No issues found. LGTM! ✅');
   });
 
-  it('the clean-approve sentence carries no template markers in either mode', () => {
-    // Plain prose is the only register now — attribution changes the footer,
-    // not the phrasing.
+  it('the clean-approve copy is identical in both modes — attribution changes the footer, not the phrasing', () => {
+    // LGTM and the emoji stay: humans write both, and they aid scanning.
     for (const attribution of [true, false]) {
       const r = composeReview(base({}), '0.21.2', attribution);
-      expect(r.body).not.toContain('LGTM');
-      expect(r.body).not.toContain('✅');
-      expect(r.body).not.toContain('⚠️');
+      expect(r.body).toContain('No issues found. LGTM! ✅');
     }
   });
 
@@ -551,7 +548,7 @@ describe('composeReview — the low-signal Approve disclosure', () => {
   it('a zero-finding APPROVE over a non-trivial source diff carries the marker — event and body unchanged', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toBe(`No issues found.\n\n${FOOTER}`);
+    expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
     // The fixture's roster: two chunk agents plus the test matrix.
     expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
     expect(verdictLine(r)).toBe(
@@ -1140,18 +1137,8 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
     expect(r.body).toContain(
-      'Downgraded from Approve to Comment: self-PR; CI still running.',
+      '⚠️ Downgraded from Approve to Comment: self-PR; CI still running.',
     );
-    // No warning glyph — the fixed copy reads as plain prose in every mode.
-    expect(r.body).not.toContain('⚠️');
-  });
-
-  it('the nothing-certified opener carries no warning glyph either', () => {
-    const r = composeReview(base({ planPath: undefined }), '0.21.2', false);
-    expect(r.body).toContain(
-      'This run could not certify that any of this diff was reviewed.',
-    );
-    expect(r.body).not.toContain('⚠️');
   });
 
   it('a downgraded Approve never certifies "no blockers" in the same body (the downgrade names failing CI two clauses earlier)', () => {
@@ -1182,7 +1169,7 @@ describe('composeReview — presubmit downgrades', () => {
     );
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
-    expect(r.body).toContain('Downgraded from Request changes to Comment');
+    expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
     expect(r.body).not.toContain('**[Critical]**');
   });
 
@@ -1210,7 +1197,7 @@ describe('composeReview — presubmit downgrades', () => {
     );
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
-    expect(r.body).toContain('Downgraded from Request changes to Comment');
+    expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
     expect(r.body).toContain('**[Critical]** unmappable blocker');
     const sentenceIdx = r.body.indexOf('Downgraded');
     const blockerIdx = r.body.indexOf('unmappable blocker');
@@ -2274,7 +2261,7 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).toBe('COMMENT');
     expect(r.body).toMatch(
-      /^This run could not certify that any of this diff was reviewed\./,
+      /^⚠️ This run could not certify that any of this diff was reviewed\./,
     );
     expect(r.body).toContain('Suggestions are inline.');
     expect(r.body).not.toContain('Reviewed.');

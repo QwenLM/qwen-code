@@ -1464,8 +1464,8 @@ function composeReviewBody(
     uncoverable.length > 0;
   const coverageOpener: Bi | undefined = nothingCertified
     ? {
-        en: 'This run could not certify that any of this diff was reviewed.',
-        zh: '本次运行无法证明这个 diff 的任何部分经过了审查。',
+        en: '⚠️ This run could not certify that any of this diff was reviewed.',
+        zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
       }
     : hasCoverageGaps
       ? {
@@ -1508,14 +1508,14 @@ function composeReviewBody(
     : findingsFileUnreadable
       ? [
           {
-            en: 'The reverse-audit findings file could not be read at compose time, so this run cannot show its findings were verified.',
-            zh: '组合评审时无法读取反向审计发现文件，本次运行无法证明其发现已经过验证。',
+            en: '⚠️ The reverse-audit findings file could not be read at compose time, so this run cannot show its findings were verified.',
+            zh: '⚠️ 组合评审时无法读取反向审计发现文件，本次运行无法证明其发现已经过验证。',
           },
         ]
       : [
           {
-            en: `${unverifiedTagCount} finding(s) still carried the \`— [unverified]\` tag when the loop ended — the verifier never ruled on them, and they are not confirmed.`,
-            zh: `循环结束时仍有 ${unverifiedTagCount} 条发现带着 \`— [unverified]\` 标记——验证者从未对它们作出裁决，它们不算已确认。`,
+            en: `⚠️ ${unverifiedTagCount} finding(s) still carried the \`— [unverified]\` tag when the loop ended — the verifier never ruled on them, and they are not confirmed.`,
+            zh: `⚠️ 循环结束时仍有 ${unverifiedTagCount} 条发现带着 \`— [unverified]\` 标记——验证者从未对它们作出裁决，它们不算已确认。`,
           },
         ];
 
@@ -1567,7 +1567,7 @@ function composeReviewBody(
       event,
       body: render(
         [
-          { en: 'No issues found.', zh: '未发现问题。' },
+          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
           ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
@@ -1598,8 +1598,8 @@ function composeReviewBody(
     const reasons = downgradeReasons.join('; ');
     const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
     clauses.push({
-      en: `Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
-      zh: `已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
+      en: `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
+      zh: `⚠️ 已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
     });
   }
 

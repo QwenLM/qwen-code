@@ -199,10 +199,6 @@ describe('isReviewWorthShowing', () => {
     expect(isReviewWorthShowing(undefined)).toBe(false);
   });
 
-  it('filters the attribution-off shape — the bare sentence, no LGTM, no footer', () => {
-    expect(isReviewWorthShowing('No issues found.')).toBe(false);
-  });
-
   it('shows a body that OPENS with the template but carries more (a relocated blocker once hid behind a prefix match)', () => {
     expect(
       isReviewWorthShowing(
