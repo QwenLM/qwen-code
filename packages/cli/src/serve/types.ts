@@ -127,15 +127,17 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on the number of raw events retained in the in-flight
-   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
-   * to 10 000. Must be a positive safe integer.
+   * Per-session cap on replay entries retained in the in-flight live journal.
+   * Compatible text/thought chunks share bounded entries. Threaded into
+   * `BridgeOptions.maxJournalEvents`. Defaults to 10 000. Must be a positive
+   * safe integer.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session byte cap on the in-flight live journal. Threaded into
-   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
-   * safe integer.
+   * Per-session source-event byte cap on the in-flight live journal.
+   * Truncation drops whole entries, so the retained tail can be much smaller
+   * than the cap. Threaded into `BridgeOptions.maxJournalBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer.
    */
   maxJournalBytes?: number;
   /**
@@ -153,11 +155,13 @@ export interface ServeOptions {
    */
   workspace?: string;
   /**
-   * Project-memory partitioning for every runtime owned by this daemon.
+   * Project-memory partitioning for every runtime owned by `runQwenServe`.
    * `workspace` keys memory by the exact registered workspace; `git-root`
    * preserves the legacy behavior that shares memory among workspaces
    * resolved to the same Git root. When omitted,
-   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment.
+   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment before
+   * defaulting to `workspace`. Direct `createServeApp` callers must instead
+   * provide the scope through `deps.daemonEnv`.
    */
   memoryProjectScope?: MemoryProjectScope;
   /**

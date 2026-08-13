@@ -48,7 +48,12 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
-import { ghWithInput, resolveGhHost, setGhHost } from './lib/gh.js';
+import {
+  ghWithInput,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
@@ -368,28 +373,12 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-/**
- * `owner/repo` — and neither half may be a dot segment.
- *
- * The character class alone admits `../repo`, `owner/..` and `./repo`: `.` and
- * `..` are made of legal characters and mean something else entirely once they
- * reach a URL path.
- */
-const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
-function isRepo(repo: string): boolean {
-  const parts = repo.split('/');
-  return (
-    parts.length === 2 &&
-    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
-  );
-}
-
 export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
-  if (!isRepo(args.repo)) {
+  if (!isOwnerRepo(args.repo)) {
     throw new Error(
       `--repo ${JSON.stringify(args.repo)} is not <owner>/<repo>.`,
     );
