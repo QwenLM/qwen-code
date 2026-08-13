@@ -6,7 +6,9 @@
 
 import type {
   ApprovalMode,
+  GoalControlRequest,
   GoalSnapshotV2,
+  GoalStateResponse,
   SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -1474,6 +1476,13 @@ export interface AcpSessionBridge {
   clearSessionGoal(
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
+
+  /** Atomically apply a typed Goal lifecycle control in a live session. */
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<GoalStateResponse>;
 
   /**
    * Read a live session's Goal state. Throws `SessionNotFoundError` when the

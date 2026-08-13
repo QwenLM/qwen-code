@@ -13,6 +13,10 @@ import {
   DaemonSessionClient,
   type DaemonSessionSubscribeOptions,
 } from '../../src/daemon/DaemonSessionClient.js';
+import type {
+  GoalControlRequest,
+  GoalSnapshotV2,
+} from '../../src/daemon/types.js';
 import { AutoReconnectTransport } from '../../src/daemon/AutoReconnectTransport.js';
 import {
   DaemonTransportClosedError,
@@ -20,6 +24,22 @@ import {
   type DaemonTransportSubscribeOptions,
   type DaemonTransportType,
 } from '../../src/daemon/DaemonTransport.js';
+
+const GOAL_SNAPSHOT: GoalSnapshotV2 = {
+  v: 2,
+  activity: 'idle',
+  goal: {
+    goalId: 'goal-1',
+    revision: 4,
+    objective: 'ship it',
+    status: 'paused',
+    evidenceCursor: { recordId: null },
+    turnCount: 1,
+    activeTimeMs: 2000,
+    createdAt: 1000,
+    updatedAt: 3000,
+  },
+};
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -139,6 +159,42 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('binds Goal reads and controls to the session and client identity', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { snapshot: GOAL_SNAPSHOT }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const request: GoalControlRequest = {
+      action: 'resume',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    };
+
+    await expect(session.goal()).resolves.toEqual({ snapshot: GOAL_SNAPSHOT });
+    await expect(session.controlGoal(request)).resolves.toEqual({
+      snapshot: GOAL_SNAPSHOT,
+    });
+
+    expect(calls.map(({ url, method }) => ({ url, method }))).toEqual([
+      { url: 'http://daemon/session/s-1/goal', method: 'GET' },
+      { url: 'http://daemon/session/s-1/goal', method: 'POST' },
+    ]);
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+    ]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual(request);
+  });
+
   it('creates or attaches a daemon session and exposes session metadata', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {

@@ -46,6 +46,8 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalStateResponse,
   PermissionResponse,
   PromptResult,
   SetModelResult,
@@ -762,6 +764,18 @@ export class DaemonSessionClient {
 
   async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
     return await this.client.sessionGoalClear(this.sessionId, this.clientId);
+  }
+
+  async goal(): Promise<GoalStateResponse> {
+    return await this.client.sessionGoal(this.sessionId, this.clientId);
+  }
+
+  async controlGoal(request: GoalControlRequest): Promise<GoalStateResponse> {
+    return await this.client.sessionGoalControl(
+      this.sessionId,
+      request,
+      this.clientId,
+    );
   }
 
   async stats(): Promise<DaemonSessionStatsStatus> {

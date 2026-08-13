@@ -79,6 +79,8 @@ import {
   type PrepareExtensionInstallOptions,
   type PreparedExtensionMutation,
   type SessionListItem,
+  type GoalControlRequest,
+  type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -766,6 +768,12 @@ interface FakeBridgeOpts {
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
+  controlSessionGoalImpl?: (
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ snapshot: GoalSnapshotV2 }>;
+  getSessionGoalImpl?: AcpSessionBridge['getSessionGoal'];
   continueSessionImpl?: (sessionId: string) => Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
@@ -1052,6 +1060,11 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   clearSessionGoalCalls: string[];
+  controlSessionGoalCalls: Array<{
+    sessionId: string;
+    request: GoalControlRequest;
+    context?: BridgeClientRequestContext;
+  }>;
   continueSessionCalls: string[];
   continueSessionContexts: Array<BridgeClientRequestContext | undefined>;
   sessionHooksCalls: string[];
@@ -1217,6 +1230,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
+  const controlSessionGoalCalls: FakeBridge['controlSessionGoalCalls'] = [];
   const continueSessionCalls: string[] = [];
   const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
     [];
@@ -1558,6 +1572,34 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
+  const controlSessionGoalImpl =
+    opts.controlSessionGoalImpl ??
+    (async (_sessionId, request) => ({
+      snapshot: {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal:
+          request.action === 'create'
+            ? null
+            : {
+                goalId: request.expectedGoalId,
+                revision: request.expectedRevision,
+                objective: 'ship it',
+                status: 'active' as const,
+                evidenceCursor: { recordId: null },
+                turnCount: 0,
+                activeTimeMs: 0,
+                createdAt: 1,
+                updatedAt: 1,
+              },
+      },
+    }));
+  const getSessionGoalImpl =
+    opts.getSessionGoalImpl ??
+    (async () => ({
+      snapshot: { v: 2 as const, activity: 'idle' as const, goal: null },
+      active: null,
+    }));
   const continueSessionImpl =
     opts.continueSessionImpl ??
     (async () => ({ accepted: false, interruption: 'none' as const }));
@@ -1797,6 +1839,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
+    controlSessionGoalCalls,
     continueSessionCalls,
     continueSessionContexts,
     sessionHooksCalls,
@@ -2082,6 +2125,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
+    },
+    async controlSessionGoal(sessionId, request, context) {
+      controlSessionGoalCalls.push({
+        sessionId,
+        request,
+        ...(context ? { context } : {}),
+      });
+      return controlSessionGoalImpl(sessionId, request, context);
+    },
+    async getSessionGoal(sessionId) {
+      return getSessionGoalImpl(sessionId);
     },
     async continueSession(sessionId, context) {
       continueSessionCalls.push(sessionId);
@@ -9006,6 +9060,86 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: true, condition: 'ship it' });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+    });
+
+    it('reads and controls the canonical session Goal', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'ship it',
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 1,
+          activeTimeMs: 1000,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      };
+      const bridge = fakeBridge({
+        getSessionGoalImpl: async () => ({ snapshot, active: null }),
+        controlSessionGoalImpl: async () => ({ snapshot }),
+        knownClientIds: ['client-1'],
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const read = await request(app)
+        .get('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      const controlled = await request(app)
+        .post('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 3,
+        });
+
+      expect(read.status).toBe(200);
+      expect(read.body).toEqual({ snapshot });
+      expect(controlled.status).toBe(200);
+      expect(controlled.body).toEqual({ snapshot });
+      expect(bridge.controlSessionGoalCalls).toEqual([
+        {
+          sessionId: 's-1',
+          request: {
+            action: 'pause',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 3,
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('rejects an invalid Goal control before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'pause', expectedGoalId: 'goal-1' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_goal_control_request');
+      expect(bridge.controlSessionGoalCalls).toEqual([]);
     });
 
     it('maps goal clear bridge errors', async () => {

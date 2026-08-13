@@ -116,6 +116,8 @@ import type {
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
   HeartbeatResult,
+  GoalControlRequest,
+  GoalStateResponse,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -2953,6 +2955,29 @@ export class DaemonClient {
         }
         return (await res.json()) as { cleared: boolean; condition?: string };
       },
+    );
+  }
+
+  async sessionGoal(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return await this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'GET /session/:id/goal',
+      { clientId },
+    );
+  }
+
+  async sessionGoalControl(
+    sessionId: string,
+    request: GoalControlRequest,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return await this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'POST /session/:id/goal',
+      { method: 'POST', body: request, clientId },
     );
   }
 
