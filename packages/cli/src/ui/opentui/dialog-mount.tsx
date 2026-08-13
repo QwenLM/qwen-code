@@ -52,6 +52,10 @@ import {
   OpenTuiEffortDialog,
 } from './dialogs-modes.js';
 import {
+  OpenTuiMemoryDialog,
+  OpenTuiStatusLineDialog,
+} from './dialogs-memory-status.js';
+import {
   addPermissionRule,
   applyModelSelection,
   applyThemeSelection,
@@ -376,6 +380,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           onClose={onClose}
         />
+      )}
+      {dialog.dialog === 'memory' && (
+        <OpenTuiMemoryDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'statusline' && (
+        <OpenTuiStatusLineDialog settings={settings} onClose={onClose} />
       )}
     </box>
   );

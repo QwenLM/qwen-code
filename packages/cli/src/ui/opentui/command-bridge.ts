@@ -46,6 +46,8 @@ export type MountedDialog =
   | { dialog: 'skills_manage' }
   | { dialog: 'approval-mode' }
   | { dialog: 'effort' }
+  | { dialog: 'memory' }
+  | { dialog: 'statusline' }
   | {
       dialog: 'model';
       mode: ModelDialogMode;
@@ -127,6 +129,10 @@ export function resolveDialogRequest(
       return { kind: 'mount', dialog: { dialog: 'approval-mode' } };
     case 'effort':
       return { kind: 'mount', dialog: { dialog: 'effort' } };
+    case 'memory':
+      return { kind: 'mount', dialog: { dialog: 'memory' } };
+    case 'statusline':
+      return { kind: 'mount', dialog: { dialog: 'statusline' } };
     case 'model':
       return {
         kind: 'mount',
@@ -139,8 +145,6 @@ export function resolveDialogRequest(
         },
       };
     case 'editor':
-    case 'statusline':
-    case 'memory':
     case 'auth':
     case 'trust':
     case 'delete':

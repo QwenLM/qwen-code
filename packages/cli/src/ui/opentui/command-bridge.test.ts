@@ -97,8 +97,6 @@ describe('resolveDialogRequest', () => {
   it('represents unsupported dialog kinds explicitly', () => {
     const unsupported: OpenTuiDialogRequest[] = [
       { dialog: 'editor' },
-      { dialog: 'statusline' },
-      { dialog: 'memory' },
       { dialog: 'auth' },
       { dialog: 'trust' },
       { dialog: 'delete' },
