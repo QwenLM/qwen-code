@@ -9,6 +9,7 @@ export default defineConfig({
       'packages/sdk-typescript',
       'packages/channels/base',
       'packages/channels/dingtalk',
+      'packages/channels/dws',
       'packages/channels/telegram',
       'packages/channels/weixin',
       'packages/channels/qqbot',

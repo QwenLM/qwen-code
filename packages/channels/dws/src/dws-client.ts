@@ -1,0 +1,765 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFile } from 'node:child_process';
+import { dwsProcessEnvironment } from './dws-environment.js';
+import {
+  startDwsEventProcess,
+  type DwsEventProcessStarter,
+  type DwsEventSubscription,
+} from './dws-event-stream.js';
+
+const DWS_PROCESS_TIMEOUT_MS = 45_000;
+const MINIMUM_DWS_VERSION = [1, 0, 57] as const;
+const DWS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_MESSAGE_PAGES = 100;
+export interface DwsIdentity {
+  profile?: string;
+}
+
+export type DwsImSource =
+  | { kind: 'at' }
+  | { kind: 'direct' }
+  | { kind: 'group-all' }
+  | { kind: 'group'; conversationId: string };
+
+export type DwsImTarget =
+  | { kind: 'group'; conversationId: string }
+  | { kind: 'direct'; openDingTalkId: string };
+
+export interface DwsImMessage {
+  type:
+    | 'user_im_message_receive_at'
+    | 'user_im_message_receive_o2o'
+    | 'user_im_message_receive_o2o_all'
+    | 'user_im_message_receive_group'
+    | 'user_im_message_receive_group_all';
+  eventId: string;
+  messageId: string;
+  conversationId: string;
+  content: string;
+  senderId: string;
+  senderName: string;
+  eventTime?: number;
+}
+
+export interface DwsClientLike {
+  assertCompatible?(signal?: AbortSignal): Promise<void>;
+  assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity>;
+  subscribeToIm(
+    source: DwsImSource,
+    onMessage: (message: DwsImMessage) => void | Promise<void>,
+    onError: (error: Error) => void,
+  ): Promise<DwsEventSubscription>;
+  sendImMessage(
+    target: DwsImTarget,
+    content: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+  replyToImMessage(
+    conversationId: string,
+    messageId: string,
+    senderId: string,
+    content: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+  addImReaction(
+    conversationId: string,
+    messageId: string,
+    reactionName: string,
+  ): Promise<void>;
+  removeImReaction(
+    conversationId: string,
+    messageId: string,
+    reactionName: string,
+  ): Promise<void>;
+  listDirectMessages(
+    startTime: number,
+    endTime: number,
+    signal?: AbortSignal,
+  ): Promise<DwsImMessage[]>;
+  readDocument(documentId: string, signal?: AbortSignal): Promise<string>;
+  replyToComment(
+    documentId: string,
+    commentKey: string,
+    content: string,
+  ): Promise<void>;
+}
+
+export interface DwsClientOptions {
+  executable: string;
+  profile?: string;
+}
+
+export type DwsCommandRunner = (
+  executable: string,
+  args: string[],
+  signal?: AbortSignal,
+) => Promise<{ stdout: string; stderr: string }>;
+
+export type DwsCommandOutcome = 'not_sent' | 'unknown';
+
+export class DwsCommandError extends Error {
+  constructor(
+    message: string,
+    readonly outcome: DwsCommandOutcome,
+  ) {
+    super(message);
+    this.name = 'DwsCommandError';
+  }
+}
+
+const DWS_NOT_SENT_ERROR_CODES = new Set([
+  'E2BIG',
+  'EACCES',
+  'ELOOP',
+  'ENOENT',
+  'ENOEXEC',
+  'ENOTDIR',
+]);
+
+function runDwsProcess(
+  executable: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      executable,
+      args,
+      {
+        encoding: 'utf8',
+        env: dwsProcessEnvironment(),
+        maxBuffer: DWS_MAX_OUTPUT_BYTES,
+        timeout: DWS_PROCESS_TIMEOUT_MS,
+        windowsHide: true,
+        signal,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const code = (error as NodeJS.ErrnoException & { code?: unknown })
+            .code;
+          const outcome =
+            typeof code === 'string' && DWS_NOT_SENT_ERROR_CODES.has(code)
+              ? 'not_sent'
+              : 'unknown';
+          reject(
+            new DwsCommandError(
+              `DWS command failed${code === undefined ? '' : ` (${String(code)})`}.`,
+              outcome,
+            ),
+          );
+          return;
+        }
+        resolve({ stdout: String(stdout), stderr: String(stderr) });
+      },
+    );
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function firstString(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): string | undefined {
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate;
+    }
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return String(candidate);
+    }
+  }
+  return undefined;
+}
+
+function nestedRecord(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const candidate = value[key];
+    if (isRecord(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function findScalar(
+  value: unknown,
+  keys: ReadonlySet<string>,
+): string | number | boolean | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findScalar(item, keys);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  for (const [key, candidate] of Object.entries(value)) {
+    if (
+      keys.has(key) &&
+      (typeof candidate === 'string' ||
+        typeof candidate === 'number' ||
+        typeof candidate === 'boolean')
+    ) {
+      return candidate;
+    }
+  }
+  for (const candidate of Object.values(value)) {
+    const found = findScalar(candidate, keys);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+interface DwsProfileEntry {
+  profile: string;
+  current: boolean;
+}
+
+function collectProfiles(
+  value: unknown,
+  profiles: DwsProfileEntry[] = [],
+): DwsProfileEntry[] {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectProfiles(item, profiles);
+    }
+    return profiles;
+  }
+  if (!isRecord(value)) return profiles;
+  const explicit = firstString(value, ['profile']);
+  const corpId = firstString(value, ['corpId', 'corp_id']);
+  const profile = explicit ?? corpId;
+  if (profile) {
+    profiles.push({
+      profile,
+      current: value['isCurrent'] === true || value['is_current'] === true,
+    });
+  }
+  for (const candidate of Object.values(value)) {
+    collectProfiles(candidate, profiles);
+  }
+  return profiles;
+}
+
+function resolveProfile(
+  value: unknown,
+  selected?: string,
+): DwsProfileEntry | undefined {
+  const profiles = collectProfiles(value);
+  const candidates = selected
+    ? profiles.filter((item) => item.profile === selected)
+    : profiles.filter((item) => item.current);
+  const unique = [
+    ...new Map(candidates.map((item) => [item.profile, item])).values(),
+  ];
+  return unique.length === 1 ? unique[0] : undefined;
+}
+
+function parseJson(text: string, description: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`DWS returned invalid JSON for ${description}.`);
+  }
+}
+
+function parseOutput(stdout: string): unknown {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    throw new DwsCommandError('DWS returned an empty response.', 'unknown');
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseJson(trimmed, 'a command response');
+  } catch (error) {
+    throw new DwsCommandError(
+      error instanceof Error ? error.message : 'DWS returned invalid JSON.',
+      'unknown',
+    );
+  }
+  if (isRecord(parsed) && parsed['success'] === false) {
+    throw new Error('DWS request failed.');
+  }
+  return parsed;
+}
+
+function parseVersion(value: unknown): number[] | undefined {
+  const version = findScalar(value, new Set(['version']));
+  if (typeof version !== 'string') return undefined;
+  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)/u);
+  return match ? match.slice(1).map(Number) : undefined;
+}
+
+function versionAtLeast(actual: number[], minimum: readonly number[]): boolean {
+  for (let index = 0; index < minimum.length; index++) {
+    const difference = (actual[index] ?? 0) - (minimum[index] ?? 0);
+    if (difference !== 0) return difference > 0;
+  }
+  return true;
+}
+
+function findConversationList(value: unknown): unknown[] | undefined {
+  if (!isRecord(value)) return undefined;
+  const conversations = value['conversationMessagesList'];
+  if (Array.isArray(conversations)) return conversations;
+  for (const key of ['result', 'data', 'content']) {
+    const found = findConversationList(value[key]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function formatDwsDateTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+  ].join(' ');
+}
+
+function findMarkdown(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (!isRecord(value)) return undefined;
+  const direct = firstString(value, ['markdown']);
+  if (direct !== undefined) return direct;
+  for (const key of ['result', 'data', 'content']) {
+    const found = findMarkdown(value[key]);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function unwrapEvent(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const data = value['data'];
+  if (typeof data === 'string') {
+    const parsed = parseJson(data, 'an event payload');
+    if (isRecord(parsed)) return parsed;
+  }
+  if (isRecord(data)) return data;
+  return value;
+}
+
+function messageContent(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{')) return value;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!isRecord(parsed)) return value;
+    return firstString(parsed, ['content', 'text']) ?? value;
+  } catch {
+    return value;
+  }
+}
+
+function eventTime(
+  ...records: Array<Record<string, unknown> | undefined>
+): number | undefined {
+  for (const record of records) {
+    if (!record) continue;
+    const value =
+      record['event_time'] ??
+      record['eventTime'] ??
+      record['timestamp'] ??
+      record['create_time'] ??
+      record['createTime'];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value < 1_000_000_000_000 ? value * 1_000 : value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        return numeric < 1_000_000_000_000 ? numeric * 1_000 : numeric;
+      }
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+export function parseDwsImEvent(line: string): DwsImMessage {
+  const outer = parseJson(line, 'an event');
+  const outerRecord = isRecord(outer) ? outer : undefined;
+  const event = unwrapEvent(outer);
+  if (!event) throw new Error('DWS event payload is not an object.');
+  const payload = nestedRecord(event, ['payload']);
+  const body =
+    nestedRecord(event, ['body']) ??
+    (payload ? nestedRecord(payload, ['body']) : undefined);
+  const type = firstString(event, ['type', 'event_type', 'eventType']);
+  if (
+    type !== 'user_im_message_receive_at' &&
+    type !== 'user_im_message_receive_o2o' &&
+    type !== 'user_im_message_receive_o2o_all' &&
+    type !== 'user_im_message_receive_group' &&
+    type !== 'user_im_message_receive_group_all'
+  ) {
+    throw new Error(`Unsupported DWS event type: ${type ?? 'unknown'}.`);
+  }
+  const messageId =
+    firstString(event, ['message_id', 'messageId', 'openMessageId']) ??
+    (body ? firstString(body, ['openMessageId', 'messageId']) : undefined);
+  const conversationId =
+    firstString(event, [
+      'conversation_id',
+      'conversationId',
+      'openConversationId',
+    ]) ??
+    (body
+      ? firstString(body, ['openConversationId', 'conversationId'])
+      : undefined);
+  const senderId =
+    firstString(event, [
+      'sender_open_dingtalk_id',
+      'senderOpenDingTalkId',
+      'sender_id',
+      'senderId',
+    ]) ??
+    (body
+      ? firstString(body, ['senderOpenDingTalkId', 'senderId'])
+      : undefined);
+  if (!messageId || !conversationId || !senderId) {
+    throw new Error(
+      'DWS message event is missing message, conversation, or sender identity.',
+    );
+  }
+  return {
+    type,
+    eventId: firstString(event, ['event_id', 'eventId', 'id']) ?? messageId,
+    messageId,
+    conversationId,
+    content: messageContent(event['content'] ?? body?.['content']),
+    senderId,
+    senderName:
+      firstString(event, ['sender', 'sender_name', 'senderName']) ??
+      (body ? firstString(body, ['sender', 'senderName']) : undefined) ??
+      senderId,
+    eventTime: eventTime(event, body, outerRecord),
+  };
+}
+
+function eventKey(source: DwsImSource): string {
+  switch (source.kind) {
+    case 'at':
+      return 'user_im_message_receive_at';
+    case 'direct':
+      return 'user_im_message_receive_o2o_all';
+    case 'group-all':
+      return 'user_im_message_receive_group_all';
+    case 'group':
+      return 'user_im_message_receive_group';
+    default:
+      throw new Error('Unsupported DWS IM source.');
+  }
+}
+
+export class DwsClient implements DwsClientLike {
+  private readonly executable: string;
+  private profile?: string;
+  private profileResolved = false;
+  private readonly runner: DwsCommandRunner;
+  private readonly eventStarter: DwsEventProcessStarter;
+
+  constructor(
+    options: DwsClientOptions,
+    runner: DwsCommandRunner = runDwsProcess,
+    eventStarter: DwsEventProcessStarter = startDwsEventProcess,
+  ) {
+    this.executable = options.executable;
+    this.profile = options.profile?.trim() || undefined;
+    if (this.profile?.includes(',')) {
+      throw new Error(
+        'DWS channel profile must select exactly one login profile.',
+      );
+    }
+    this.runner = runner;
+    this.eventStarter = eventStarter;
+  }
+
+  async assertCompatible(signal?: AbortSignal): Promise<void> {
+    const response = await this.run(['version'], signal, false);
+    const version = parseVersion(response);
+    if (!version || !versionAtLeast(version, MINIMUM_DWS_VERSION)) {
+      throw new Error(
+        'DWS channel requires dws 1.0.57 or newer on the daemon PATH.',
+      );
+    }
+  }
+
+  async assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity> {
+    if (!this.profileResolved) {
+      const selected = this.profile;
+      const profiles = await this.run(['profile', 'list'], signal, false);
+      const resolved = resolveProfile(profiles, selected);
+      if (!resolved) {
+        throw new Error(
+          selected
+            ? 'DWS profile must exactly match one entry from `dws profile list`.'
+            : 'DWS has no active profile. Run `dws auth login` or configure an exact login profile.',
+        );
+      }
+      this.profile = resolved.profile;
+      this.profileResolved = true;
+    }
+    const response = await this.run(['auth', 'status'], signal);
+    const authenticated = findScalar(response, new Set(['authenticated']));
+    if (authenticated !== true) {
+      throw new Error(
+        'DWS is not authenticated. Run `dws auth login` for the selected profile.',
+      );
+    }
+    return { profile: this.profile };
+  }
+
+  async subscribeToIm(
+    source: DwsImSource,
+    onMessage: (message: DwsImMessage) => void | Promise<void>,
+    onError: (error: Error) => void,
+  ): Promise<DwsEventSubscription> {
+    const args = [
+      ...this.profileArgs(),
+      'event',
+      'consume',
+      eventKey(source),
+      '--format',
+      'compact',
+    ];
+    if (source.kind === 'group') {
+      args.push('--group', source.conversationId);
+    }
+    return this.eventStarter(
+      this.executable,
+      args,
+      async (line) => onMessage(parseDwsImEvent(line)),
+      onError,
+    );
+  }
+
+  async sendImMessage(
+    target: DwsImTarget,
+    content: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    const targetArgs =
+      target.kind === 'group'
+        ? ['--group', target.conversationId]
+        : ['--open-dingtalk-id', target.openDingTalkId];
+    await this.run([
+      'chat',
+      'message',
+      'send',
+      ...targetArgs,
+      '--text',
+      content,
+      '--uuid',
+      idempotencyKey,
+    ]);
+  }
+
+  async replyToImMessage(
+    conversationId: string,
+    messageId: string,
+    senderId: string,
+    content: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.run([
+      'chat',
+      'message',
+      'reply',
+      '--conversation-id',
+      conversationId,
+      '--ref-msg-id',
+      messageId,
+      '--ref-sender',
+      senderId,
+      '--text',
+      content,
+      '--uuid',
+      idempotencyKey,
+    ]);
+  }
+
+  async addImReaction(
+    conversationId: string,
+    messageId: string,
+    reactionName: string,
+  ): Promise<void> {
+    await this.run([
+      'chat',
+      'message',
+      'add-emoji',
+      '--conversation-id',
+      conversationId,
+      '--msg-id',
+      messageId,
+      '--emoji',
+      reactionName,
+    ]);
+  }
+
+  async removeImReaction(
+    conversationId: string,
+    messageId: string,
+    reactionName: string,
+  ): Promise<void> {
+    await this.run([
+      'chat',
+      'message',
+      'remove-emoji',
+      '--conversation-id',
+      conversationId,
+      '--msg-id',
+      messageId,
+      '--emoji',
+      reactionName,
+    ]);
+  }
+
+  async listDirectMessages(
+    startTime: number,
+    endTime: number,
+    signal?: AbortSignal,
+  ): Promise<DwsImMessage[]> {
+    const messages: DwsImMessage[] = [];
+    const seenCursors = new Set<string>();
+    let cursor = '0';
+    for (let page = 0; page < MAX_MESSAGE_PAGES; page++) {
+      signal?.throwIfAborted();
+      const response = await this.run(
+        [
+          'chat',
+          'message',
+          'list-all',
+          '--start',
+          formatDwsDateTime(startTime),
+          '--end',
+          formatDwsDateTime(endTime),
+          '--limit',
+          '50',
+          '--cursor',
+          cursor,
+        ],
+        signal,
+      );
+      const conversations = findConversationList(response);
+      if (!conversations) {
+        throw new Error(
+          'DWS message-history response did not contain a conversation list.',
+        );
+      }
+      for (const conversation of conversations) {
+        if (!isRecord(conversation) || conversation['singleChat'] !== true) {
+          continue;
+        }
+        const entries = conversation['messages'];
+        if (!Array.isArray(entries)) continue;
+        for (const entry of entries) {
+          if (!isRecord(entry)) continue;
+          const messageId = firstString(entry, ['openMessageId', 'messageId']);
+          const conversationId = firstString(entry, [
+            'openConversationId',
+            'conversationId',
+          ]);
+          const senderId = firstString(entry, [
+            'senderOpenDingTalkId',
+            'senderId',
+          ]);
+          if (!messageId || !conversationId || !senderId) continue;
+          messages.push({
+            type: 'user_im_message_receive_o2o_all',
+            eventId: messageId,
+            messageId,
+            conversationId,
+            content: messageContent(entry['content']),
+            senderId,
+            senderName:
+              firstString(entry, ['sender', 'senderName']) ?? senderId,
+            eventTime: eventTime(entry),
+          });
+        }
+      }
+      if (findScalar(response, new Set(['hasMore'])) !== true) {
+        return messages;
+      }
+      const next = findScalar(response, new Set(['nextCursor']));
+      if (typeof next !== 'string' || !next || seenCursors.has(next)) {
+        throw new Error('DWS returned an invalid message pagination cursor.');
+      }
+      seenCursors.add(next);
+      cursor = next;
+    }
+    throw new Error(
+      `DWS message pagination exceeded ${MAX_MESSAGE_PAGES} pages.`,
+    );
+  }
+
+  async readDocument(
+    documentId: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const response = await this.run(
+      ['doc', 'read', '--node', documentId],
+      signal,
+    );
+    const markdown = findMarkdown(response);
+    if (markdown === undefined) {
+      throw new Error(
+        'DWS document response did not contain Markdown content.',
+      );
+    }
+    return markdown;
+  }
+
+  async replyToComment(
+    documentId: string,
+    commentKey: string,
+    content: string,
+  ): Promise<void> {
+    await this.run([
+      'doc',
+      'comment',
+      'reply',
+      '--node',
+      documentId,
+      '--comment-key',
+      commentKey,
+      '--content',
+      content,
+    ]);
+  }
+
+  private profileArgs(): string[] {
+    return this.profile ? ['--profile', this.profile] : [];
+  }
+
+  private async run(
+    command: string[],
+    signal?: AbortSignal,
+    scoped = true,
+  ): Promise<unknown> {
+    const args = [
+      ...(scoped ? this.profileArgs() : []),
+      ...command,
+      '--format',
+      'json',
+    ];
+    const result = signal
+      ? await this.runner(this.executable, args, signal)
+      : await this.runner(this.executable, args);
+    return parseOutput(result.stdout);
+  }
+}
