@@ -4364,6 +4364,7 @@ describe('createAcpSessionBridge', () => {
       attached: true,
       historyHasMore: true,
       lastEventId: loaded.lastEventId,
+      eventEpoch: loaded.eventEpoch,
       compactedReplay: [
         {
           type: 'session_update',
@@ -4796,6 +4797,7 @@ describe('createAcpSessionBridge', () => {
       hasMore: false,
     });
 
+    await expect(refresh).rejects.toBeInstanceOf(SessionNotFoundError);
     await expect(refresh).rejects.toMatchObject({
       code: 'session_closing',
     });
@@ -8980,6 +8982,23 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips channel display metadata from non-channel sessions', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'model text' }],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hidden transcript text' },
+      } as PromptRequest);
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.promptDisplayText'],
+      ).toBeUndefined();
+      await bridge.shutdown();
+    });
+
     it('strips spoofed delivery metadata and injects only trusted context', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -9447,6 +9466,296 @@ describe('createAcpSessionBridge', () => {
 
       abortA.abort();
       abortB.abort();
+      await bridge.shutdown();
+    });
+
+    it('echoes only channel display text while forwarding full model context', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunk = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') return update;
+        }
+        throw new Error('no user_message_chunk observed');
+      })();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            { type: 'text', text: 'internal channel instructions\n\nhello' },
+          ],
+          _meta: { 'qwen.daemon.promptDisplayText': 'forged' },
+        } as PromptRequest,
+        undefined,
+        { promptDisplayText: 'hello' },
+      );
+
+      await expect(userChunk).resolves.toMatchObject({
+        content: { type: 'text', text: 'hello' },
+      });
+      expect(handle.agent.promptCalls[0]).toMatchObject({
+        prompt: [
+          { type: 'text', text: 'internal channel instructions\n\nhello' },
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': 'hello' },
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('reserves an echo slot for channel display text after the block cap', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const textChunk = (async () => {
+        for await (const event of events) {
+          const update = (
+            event.data as {
+              update?: { content?: { type?: string; text?: string } };
+            }
+          ).update;
+          if (update?.content?.type === 'text') return update.content.text;
+        }
+        throw new Error('no text echo observed');
+      })();
+      const resources = Array.from({ length: 256 }, (_, index) => ({
+        type: 'resource_link' as const,
+        uri: `file:///resource-${index}`,
+        name: `resource-${index}`,
+      }));
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [...resources, { type: 'text', text: 'hidden text' }],
+        },
+        undefined,
+        { promptDisplayText: 'visible text' },
+      );
+
+      await expect(textChunk).resolves.toBe('visible text');
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does not sacrifice an echo block for an empty display projection after the cap', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunks: unknown[] = [];
+      const drain = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate !== 'user_message_chunk') continue;
+          userChunks.push(update.content);
+          if (userChunks.length === 256) break;
+        }
+      })();
+      const resources = Array.from({ length: 256 }, (_, index) => ({
+        type: 'resource_link' as const,
+        uri: `file:///resource-${index}`,
+        name: `resource-${index}`,
+      }));
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [...resources, { type: 'text', text: 'hidden text' }],
+        },
+        undefined,
+        { promptDisplayText: '' },
+      );
+
+      // An empty projection publishes no visible slot, so reserving one would
+      // only overwrite a resource block that the echo must keep.
+      await vi.waitFor(() => expect(userChunks).toHaveLength(256));
+      expect(userChunks).toEqual(resources);
+      abort.abort();
+      await drain.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('ignores promptDisplayText for non-channel sessions', async () => {
+      const promptGate = deferred<PromptResponse>();
+      const handle = makeChannel({
+        promptImpl: () => promptGate.promise,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunk = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') return update;
+        }
+        throw new Error('no user_message_chunk observed');
+      })();
+
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'verbatim user text' }],
+        },
+        undefined,
+        { promptDisplayText: 'hidden' },
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+          { text: 'verbatim user text', state: 'running' },
+        ]);
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      await expect(userChunk).resolves.toMatchObject({
+        content: { type: 'text', text: 'verbatim user text' },
+      });
+      expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+        'qwen.daemon.promptDisplayText',
+      );
+
+      promptGate.resolve({ stopReason: 'end_turn' });
+      await promptPromise;
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('hides every text block for an intentionally empty display projection', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunks: unknown[] = [];
+      const drain = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate !== 'user_message_chunk') continue;
+          userChunks.push(update.content);
+          if (
+            typeof update.content === 'object' &&
+            update.content !== null &&
+            (update.content as { type?: unknown }).type === 'resource_link'
+          ) {
+            break;
+          }
+        }
+      })();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [
+            { type: 'text', text: 'hidden first' },
+            { type: 'text', text: 'hidden second' },
+            { type: 'resource_link', uri: 'file:///visible', name: 'visible' },
+          ],
+        },
+        undefined,
+        { promptDisplayText: '' },
+      );
+
+      await drain;
+      expect(userChunks).toEqual([
+        { type: 'resource_link', uri: 'file:///visible', name: 'visible' },
+      ]);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does not leak a prompt slot for a malformed null block', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+
+      const malformedResult = await bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [null] as never,
+          },
+          undefined,
+          { promptDisplayText: '' },
+        )
+        .catch((error: unknown) => error);
+      expect(malformedResult).not.toBeInstanceOf(TypeError);
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'next' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
       await bridge.shutdown();
     });
 
@@ -10473,7 +10782,10 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({
         channelFactory: async () => handle.channel,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
       const sub = (async () => {
         for await (const ev of bridge.subscribeEvents(session.sessionId)) {
           events.push(ev);
@@ -10493,10 +10805,14 @@ describe('createAcpSessionBridge', () => {
         session.sessionId,
         {
           sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'queued behind first' }],
+          prompt: [
+            { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+            { type: 'text', text: 'hidden channel instructions' },
+          ],
+          _meta: { 'qwen.daemon.promptDisplayText': '' },
         },
         undefined,
-        { promptId: 'prompt-second' },
+        { promptId: 'prompt-second', promptDisplayText: '' },
       );
 
       await new Promise((r) => setTimeout(r, 20));
@@ -10507,7 +10823,7 @@ describe('createAcpSessionBridge', () => {
       expect(addedEvents[0]?.promptId).toBe('prompt-second');
       expect(
         (addedEvents[0] as BridgeEvent & { data: { text: string } }).data.text,
-      ).toBe('queued behind first');
+      ).toBe('[image]');
 
       const pending = bridge.getPendingPrompts(session.sessionId);
       expect(pending).toHaveLength(2);
@@ -10538,7 +10854,11 @@ describe('createAcpSessionBridge', () => {
       expect(
         (startedEvents[0] as BridgeEvent & { data: { text: string } }).data
           .text,
-      ).toBe('queued behind first');
+      ).toBe('[image]');
+      expect(handle.agent.promptCalls[1]?.prompt).toEqual([
+        { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' },
+        { type: 'text', text: 'hidden channel instructions' },
+      ]);
       const completedEvents = events.filter(
         (e) => e.type === 'pending_prompt_completed',
       );

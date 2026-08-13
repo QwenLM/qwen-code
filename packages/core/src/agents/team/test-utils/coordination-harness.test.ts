@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
 import type { FakeAgent } from './fake-agent.js';
@@ -84,6 +85,132 @@ describe('TeamCoordinationHarness', () => {
   // ─── 1. Message routing ────────────────────────────────────
 
   describe('message routing', () => {
+    it('notifies the leader when a teammate does not report explicitly', async () => {
+      const h = await createHarness();
+      const worker = await h.spawnTeammate('worker', {
+        onMessage: (_message, agent) => {
+          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+            subagentId: agent.agentId,
+            round: 1,
+            text: 'final finding',
+            thoughtText: '',
+            timestamp: Date.now(),
+          });
+        },
+      });
+
+      await h.teamManager.sendMessage('worker', 'inspect', 'leader');
+      await h.waitForStatus('worker', AgentStatus.IDLE);
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            from: 'worker',
+            text: 'final finding',
+          }),
+        ]);
+      });
+      expect(worker.getReceivedMessages()).toHaveLength(1);
+
+      worker.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+        subagentId: worker.agentId,
+        round: 2,
+        text: 'follow-up finding',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      worker.getEventEmitter().emit(AgentEventType.STATUS_CHANGE, {
+        agentId: worker.agentId,
+        previousStatus: AgentStatus.IDLE,
+        newStatus: AgentStatus.IDLE,
+        timestamp: Date.now(),
+      });
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            from: 'worker',
+            text: 'follow-up finding',
+          }),
+        ]);
+      });
+
+      await h.spawnTeammate('silent-worker');
+      await h.teamManager.sendMessage('silent-worker', 'inspect', 'leader');
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            from: 'silent-worker',
+            text: expect.stringContaining(
+              'completed a turn without a model-visible final answer',
+            ),
+          }),
+        ]);
+      });
+    });
+
+    it('forwards final text after an interim leader message', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('worker', {
+        onMessage: async (_message, agent) => {
+          await h.teamManager.sendMessage(
+            'leader',
+            'interim finding',
+            'worker',
+          );
+          agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+            subagentId: agent.agentId,
+            round: 1,
+            text: 'final finding',
+            thoughtText: '',
+            timestamp: Date.now(),
+          });
+        },
+      });
+
+      await h.teamManager.sendMessage('worker', 'inspect', 'leader');
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({ text: 'interim finding' }),
+          expect.objectContaining({ text: 'final finding' }),
+        ]);
+      });
+    });
+
+    it('does not forward text from an earlier round when the final round is empty', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('worker', {
+        onMessage: (_message, agent) => {
+          for (const [round, text] of [
+            [1, 'interim narration'],
+            [2, ''],
+          ] as const) {
+            agent.getEventEmitter().emit(AgentEventType.ROUND_TEXT, {
+              subagentId: agent.agentId,
+              round,
+              text,
+              thoughtText: '',
+              timestamp: Date.now(),
+            });
+          }
+        },
+      });
+
+      await h.teamManager.sendMessage('worker', 'inspect', 'leader');
+
+      await vi.waitFor(async () => {
+        expect(await h.teamManager.getLeaderMessages()).toEqual([
+          expect.objectContaining({
+            text: expect.stringContaining(
+              'completed a turn without a model-visible final answer',
+            ),
+          }),
+        ]);
+      });
+    });
+
     it('sends message from leader to teammate', async () => {
       const h = await createHarness();
       const worker = await h.spawnTeammate('worker');
@@ -176,6 +303,40 @@ describe('TeamCoordinationHarness', () => {
       expect(workerMsgs).toHaveLength(1);
       expectTeamMessage(workerMsgs[0], 'leader', 'work');
     });
+
+    it('does not auto-claim while shutdown is pending', async () => {
+      const h = await createHarness();
+      const worker = await h.spawnTeammate('worker');
+
+      h.teamManager.markShutdownRequested('worker');
+      await createTask(h.teamName, {
+        subject: 'Do not claim',
+        description: 'Wait for another worker',
+      });
+
+      worker.setStatus(AgentStatus.RUNNING);
+      worker.setStatus(AgentStatus.IDLE);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(worker.getReceivedMessages()).toHaveLength(0);
+    });
+
+    it('does not auto-claim tasks for read-only teammates', async () => {
+      const h = await createHarness();
+      await h.teamManager.spawnTeammate({
+        name: 'reader',
+        cwd: h.tmpDir,
+        readOnly: true,
+      });
+
+      await createTask(h.teamName, {
+        subject: 'Writer task',
+        description: 'Must remain available for the writer',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(h.getAgent('reader').getReceivedMessages()).toHaveLength(0);
+    });
   });
 
   // ─── 3. Message priority ───────────────────────────────────
@@ -262,6 +423,25 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
 
       expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
+    it('does not treat an automatic final report as a shutdown response', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      target.goIdle();
+
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_approved is handled by the coordinator.',
+        'target',
+        undefined,
+        true,
+      );
+
+      expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
     });
 
     it('shutdown_rejected clears the pending flag and disarms the abort', async () => {
@@ -499,6 +679,26 @@ describe('TeamCoordinationHarness', () => {
   // ─── Spawn lifecycle ────────────────────────────────────────
 
   describe('spawn cap', () => {
+    it('gives read-only teammates only inspection and coordination tools', async () => {
+      const h = await createHarness();
+      await h.teamManager.spawnTeammate({
+        name: 'reader',
+        cwd: h.tmpDir,
+        readOnly: true,
+      });
+
+      const member = h.teamManager.getTeamFile().members[0]!;
+      const toolConfig = h.backend.getSpawnConfig(member.agentId)?.inProcess
+        ?.runtimeConfig.toolConfig;
+
+      expect(toolConfig?.tools).toEqual(toolConfig?.executionAllowedTools);
+      expect(toolConfig?.tools).toContain('read_file');
+      expect(toolConfig?.tools).toContain('send_message');
+      expect(toolConfig?.tools).not.toContain('run_shell_command');
+      expect(toolConfig?.tools).not.toContain('save_memory');
+      expect(toolConfig?.tools).not.toContain('create_sub_session');
+    });
+
     it('concurrent spawns cannot exceed MAX_TEAMMATES', async () => {
       // Regression: the cap check was synchronous but the push to
       // `members` happened after `loadSubagent`/`convertToRuntimeConfig`
