@@ -2397,15 +2397,25 @@ describe('coverage is recomputed, never accepted', () => {
   });
 
   it('collapses spaces after removing backticks from agent labels', () => {
-    transcript(
-      'p1',
-      `You are review agent \`security\` — inspect auth\n${DIFF}`,
-    );
+    transcript('p1', `Inspect the \`auth\` and \`session\` paths\n${DIFF}`);
     const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
 
     expect(r.body).toContain(
-      'Not reviewed: `"You are review agent security — inspect auth"`',
+      'Not reviewed: `"Inspect the auth and session paths"`',
     );
+  });
+
+  it('labels an agent by its brief codename wherever it sits in the prompt', () => {
+    // Launchers prepend context lines: twelve live finders shared one
+    // PR-summary first line, so every disclosure rendered the same truncated
+    // PR quote. The codename line wins over first-line prose.
+    transcript(
+      'p1',
+      `PR #9045 modifies getAuthTypeFromEnv().\nYou are review agent \`security\` — inspect auth\n${DIFF}`,
+    );
+    const r = composeReview({ planPath: plan(), env: ENV, modelId: MODEL });
+
+    expect(r.body).toContain('Not reviewed: `"agent security"`');
   });
 
   it('names a blind launch as itself, not as a whiff', () => {
