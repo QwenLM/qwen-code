@@ -71,9 +71,6 @@ const expectedManifest = {
       relatedPaths: [
         'packages/web-shell/client/adapters/**',
         'packages/web-shell/client/completions/**',
-        'packages/web-shell/client/e2e/*',
-        'packages/web-shell/client/e2e/utils/*',
-        'packages/web-shell/client/e2e/visuals/*',
         'packages/web-shell/client/hooks/**',
       ],
     },
@@ -112,12 +109,6 @@ const relatedPathSentinels: Readonly<Record<string, string>> = {
     'packages/web-shell/client/adapters/types.ts',
   'packages/web-shell/client/completions/**':
     'packages/web-shell/client/completions/slashCompletion.ts',
-  'packages/web-shell/client/e2e/*':
-    'packages/web-shell/client/e2e/web-shell.smoke.spec.ts',
-  'packages/web-shell/client/e2e/utils/*':
-    'packages/web-shell/client/e2e/utils/mockDaemon.ts',
-  'packages/web-shell/client/e2e/visuals/*':
-    'packages/web-shell/client/e2e/visuals/constants.ts',
   'packages/web-shell/client/hooks/**':
     'packages/web-shell/client/hooks/useMessages.ts',
 };
