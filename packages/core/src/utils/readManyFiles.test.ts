@@ -705,7 +705,10 @@ describe('readManyFiles', () => {
     it('skips unsupported images when the bridge handoff flag is absent', async () => {
       const relativePath = 'screenshot.png';
       const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(absolutePath, Buffer.from('fake png data'));
+      await fs.writeFile(
+        absolutePath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
       const mockConfig = createMockConfig(tempRootDir);
 
       const result = await readManyFiles(mockConfig, { paths: [relativePath] });
@@ -1133,7 +1136,10 @@ describe('readManyFiles', () => {
     it('does not let a binary image attachment satisfy text-edit enforcement', async () => {
       const relativePath = 'screenshot.png';
       const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(absolutePath, Buffer.from('fake png data'));
+      await fs.writeFile(
+        absolutePath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
       const cache = new FileReadCache();
       const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 

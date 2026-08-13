@@ -36,6 +36,7 @@ import {
 } from './pdf.js';
 import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
+import { looksLikeText, sniffFileKind } from './binary-content.js';
 import { readNotebookWithMetadata } from './notebook.js';
 import {
   readTextRange,
@@ -58,6 +59,13 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+const SNIFFABLE_IMAGE_MIME_TYPES = new Set([
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+const IMAGE_SNIFF_BYTES = 8192;
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
@@ -790,6 +798,37 @@ const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
   ['.m4v', 'video/x-m4v'],
 ]);
 
+async function classifyImageContent(
+  filePath: string,
+  mimeType: string,
+): Promise<FileType> {
+  if (!SNIFFABLE_IMAGE_MIME_TYPES.has(mimeType)) return 'image';
+
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(filePath, 'r');
+    if ((await handle.stat()).size > IMAGE_MAX_SOURCE_BYTES) return 'image';
+    const sample = Buffer.alloc(IMAGE_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
+    const bytes = sample.subarray(0, bytesRead);
+    if (bytes.length === 0) return 'image';
+
+    const sniffed = sniffFileKind(bytes, mimeType, '', `file://${filePath}`);
+    if (sniffed.magicMatched) {
+      return sniffed.mimeType === mimeType ? 'image' : 'binary';
+    }
+    return looksLikeText(bytes) ? 'text' : 'binary';
+  } catch (error) {
+    debugLogger.debug(
+      `Unable to sniff image content for ${filePath}; preserving extension classification`,
+      error instanceof Error ? error.message : String(error),
+    );
+    return 'image';
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 /**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
@@ -824,7 +863,7 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
-      return 'image';
+      return classifyImageContent(filePath, lookedUpMimeType);
     }
     if (lookedUpMimeType.startsWith('audio/')) {
       return 'audio';
