@@ -555,6 +555,7 @@ vi.mock('./utils/systemInfo', () => ({
 
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
+  const { useWebShellCustomization } = await import('./customization');
   return {
     ChatEditor: React.memo(
       React.forwardRef(function ChatEditor(
@@ -579,6 +580,7 @@ vi.mock('./components/ChatEditor', async () => {
         testState.chatEditorRenderCount += 1;
         testState.latestChatEditorProps = props;
         const { onAttachmentsChange } = props;
+        const customization = useWebShellCustomization();
         React.useEffect(() => {
           onAttachmentsChange?.(
             Boolean(
@@ -624,7 +626,13 @@ vi.mock('./components/ChatEditor', async () => {
         }));
         return React.createElement(
           'div',
-          { 'data-web-shell-composer': '' },
+          {
+            'data-web-shell-composer': '',
+            'data-file-upload-enabled':
+              customization.fileUploadEnabled === undefined
+                ? undefined
+                : String(customization.fileUploadEnabled),
+          },
           React.createElement(
             'button',
             {
@@ -19463,5 +19471,19 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     });
     expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1); // attempted
     expect(editorInsertText).not.toHaveBeenCalled(); // but priming skipped
+  });
+});
+
+describe('fileUploadEnabled customization plumbing', () => {
+  it('reaches the composer customization when the host disables upload', () => {
+    const { container } = renderApp({ fileUploadEnabled: false });
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.getAttribute('data-file-upload-enabled')).toBe('false');
+  });
+
+  it('leaves the customization unset when the prop is omitted', () => {
+    const { container } = renderApp({});
+    const composer = container.querySelector('[data-web-shell-composer]');
+    expect(composer?.hasAttribute('data-file-upload-enabled')).toBe(false);
   });
 });

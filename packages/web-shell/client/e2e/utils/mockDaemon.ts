@@ -107,6 +107,7 @@ export interface MockDaemonController {
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
   branchRequests(): DaemonRequestRecord[];
+  configOptionRequests(): DaemonRequestRecord[];
 }
 
 type ScenarioOverrides = Partial<
@@ -444,6 +445,10 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/branch\/?$/.test(request.path),
       ),
+    configOptionRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/config-option$/.test(request.path),
+      ),
   };
 }
 
@@ -628,7 +633,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -772,7 +777,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -1370,6 +1375,24 @@ async function handleDaemonRoute(
       }
       applyScenarioCurrentModel(scenario, modelId);
       await json(route, { sessionId, modelId });
+      return;
+    }
+    if (action === 'config-option') {
+      const configId = readStringField(body, 'configId');
+      const value = readStringField(body, 'value');
+      if (configId !== 'reasoning_effort' || !value) {
+        await badRequest(route, 'Invalid config-option request.');
+        return;
+      }
+      const configOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions.map((option) =>
+            isRecord(option) && option['id'] === configId
+              ? { ...option, currentValue: value }
+              : option,
+          )
+        : [];
+      scenario.state.configOptions = configOptions;
+      await json(route, { configOptions });
       return;
     }
     if (action === 'approval-mode') {

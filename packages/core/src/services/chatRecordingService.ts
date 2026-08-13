@@ -411,6 +411,11 @@ export interface NotificationRecordPayload {
     status: string;
     kind: 'agent' | 'monitor' | 'shell';
     toolUseId?: string;
+    /** Structured fields for i18n rendering (persisted for page refresh). */
+    description?: string;
+    commandLabel?: string;
+    eventCount?: number;
+    droppedLines?: number;
   };
 }
 

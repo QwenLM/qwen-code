@@ -435,10 +435,12 @@ describe('Session', () => {
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundShellRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
@@ -626,10 +628,24 @@ describe('Session', () => {
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
+      get: vi.fn().mockImplementation((monitorId: string) =>
+        (
+          mockMonitorRegistry.getAll() as Array<{
+            id: string;
+          }>
+        ).find((task) => task.id === monitorId),
+      ),
     };
     mockBackgroundShellRegistry = {
       setNotificationCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
+      get: vi.fn().mockImplementation((shellId: string) =>
+        (
+          mockBackgroundShellRegistry.getAll() as Array<{
+            id: string;
+          }>
+        ).find((task) => task.id === shellId),
+      ),
     };
     mockWorkflowRunRegistry = {
       setApprovalRequestCallback: vi.fn(),
@@ -4604,6 +4620,497 @@ describe('Session', () => {
           source: 'background_notification',
         },
       );
+    });
+
+    it('attaches structured agent metadata built from the canonical entry label', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([
+        {
+          id: 'agent-1',
+          description: 'worker task',
+          subagentType: 'Explore',
+          isBackgrounded: true,
+          status: 'completed',
+          notified: false,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Background agent "Explore: worker task" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            _meta: expect.objectContaining({
+              source: 'background_notification',
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                status: 'completed',
+                kind: 'agent',
+                description: 'Explore: worker task',
+              }),
+            }),
+          }),
+        });
+      });
+      expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
+        expect.any(Array),
+        'Background agent "Explore: worker task" completed.',
+        expect.objectContaining({
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          description: 'Explore: worker task',
+        }),
+      );
+    });
+
+    it('attaches structured monitor metadata with event and dropped-line counts', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-1', description: 'logs', droppedLines: 3 },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: {
+          monitorId: string;
+          status: string;
+          eventCount?: number;
+          toolUseId?: string;
+        },
+      ) => void;
+
+      callback(
+        'Monitor "logs" completed. (5 events, 3 lines dropped due to throttling)',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 5 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            _meta: expect.objectContaining({
+              source: 'background_notification',
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                status: 'completed',
+                kind: 'monitor',
+                description: 'logs',
+                eventCount: 5,
+                droppedLines: 3,
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('attaches structured shell metadata from the shell registry entry', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockBackgroundShellRegistry.getAll.mockReturnValue([
+        { id: 'shell-1', description: 'npm test' },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      callback(
+        'Background shell "npm test" completed.',
+        '<task-notification><kind>shell</kind></task-notification>',
+        { shellId: 'shell-1', status: 'completed' },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            _meta: expect.objectContaining({
+              source: 'background_notification',
+              backgroundTask: expect.objectContaining({
+                taskId: 'shell-1',
+                status: 'completed',
+                kind: 'shell',
+                commandLabel: 'npm test',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('sanitizes, collapses, and truncates structured notification labels', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // Bidi override + newline must be stripped, TAB collapsed, and labels
+      // over 80 chars truncated to exactly 80 ending in '...'.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        {
+          id: 'monitor-1',
+          description: `a\u202eb\tc\n${'x'.repeat(90)}`,
+          droppedLines: 0,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "a..." completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: 'ab c' + 'x'.repeat(73) + '...',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('sanitizes and truncates the shell commandLabel branch', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // The shell branch reads the raw registry entry description (the
+      // registry only sanitizes its own displayText), so it must pin the
+      // same bidi/control stripping and 80-code-point cap independently.
+      mockBackgroundShellRegistry.getAll.mockReturnValue([
+        {
+          id: 'shell-1',
+          description: `a\u202eb\tc\n${'x'.repeat(90)}`,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background shell' }],
+      });
+
+      const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+
+      callback(
+        'Background shell "a..." completed.',
+        '<task-notification><kind>shell</kind></task-notification>',
+        { shellId: 'shell-1', status: 'completed' },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'shell-1',
+                kind: 'shell',
+                commandLabel: 'ab c' + 'x'.repeat(73) + '...',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('sanitizes the agent description branch built from the entry label', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // buildBackgroundEntryLabel pre-truncates the description at 40
+      // chars; bidi controls inside that window must still be stripped by
+      // the Session-side sanitization of the composed agent label.
+      mockBackgroundTaskRegistry.getAll.mockReturnValue([
+        {
+          id: 'agent-1',
+          description: `a\u202eb\tc\n${'x'.repeat(90)}`,
+          subagentType: 'Explore',
+          isBackgrounded: true,
+          status: 'completed',
+          notified: false,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      callback(
+        'Background agent "a..." completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'agent-1',
+                kind: 'agent',
+                description: 'Explore: ab c' + 'x'.repeat(33) + '\u2026',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('truncates astral (emoji) labels on a code-point boundary', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // 90 code points / 180 UTF-16 units — the cut must land on a whole
+      // code point (77 emoji + '...'), never splitting a surrogate pair.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        {
+          id: 'monitor-1',
+          description: '\u{1F600}'.repeat(90),
+          droppedLines: 0,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "…" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: '\u{1F600}'.repeat(77) + '...',
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('leaves an exactly-80-char label unchanged', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // Exactly at the cap: the boundary is inclusive, no fake ellipsis.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-1', description: 'x'.repeat(80), droppedLines: 0 },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "…" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: 'x'.repeat(80),
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('leaves an astral label at the 80-code-point cap unchanged', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // 80 code points but 160 UTF-16 units: the cap is measured in code
+      // points, so this must NOT be "truncated" into a longer string.
+      mockMonitorRegistry.getAll.mockReturnValue([
+        {
+          id: 'monitor-1',
+          description: '\u{1F600}'.repeat(80),
+          droppedLines: 0,
+        },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "…" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: '\u{1F600}'.repeat(80),
+              }),
+            }),
+          }),
+        });
+      });
+    });
+
+    it('collapses whitespace in short structured labels', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-1', description: 'logs\t\tserver', droppedLines: 0 },
+      ]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start monitor' }],
+      });
+
+      const callback = mockMonitorRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { monitorId: string; status: string; eventCount?: number },
+      ) => void;
+
+      callback(
+        'Monitor "logs server" completed.',
+        '<task-notification><kind>monitor</kind></task-notification>',
+        { monitorId: 'monitor-1', status: 'completed', eventCount: 1 },
+      );
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                taskId: 'monitor-1',
+                description: 'logs server',
+              }),
+            }),
+          }),
+        });
+      });
     });
 
     it('fires MessageDisplay with cumulative text and a single is_final for a background notification response', async () => {
@@ -25756,6 +26263,7 @@ describe('Session', () => {
           mockBackgroundTaskRegistry.getAll.mockReturnValue([
             {
               id: 'related-after-api-error',
+              description: 'related-after-api-error',
               isBackgrounded: true,
               status: 'completed',
               notified: false,
@@ -26102,6 +26610,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-before-invalidation-error',
+          description: 'old-before-invalidation-error',
           isBackgrounded: true,
           status: 'running',
           notified: false,
@@ -26149,6 +26658,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-before-invalidation-error',
+          description: 'old-before-invalidation-error',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -27955,6 +28465,7 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'plan-boundary-agent',
+            description: 'plan-boundary-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -27986,6 +28497,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'plan-boundary-agent',
+          description: 'plan-boundary-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -28569,6 +29081,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-agent',
+          description: 'old-agent',
           isBackgrounded: true,
           status: 'running',
           notified: false,
@@ -28587,13 +29100,18 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'baseline-agent',
+          description: 'baseline-agent',
           isBackgrounded: true,
           status: 'running',
           notified: false,
         },
       ]);
       mockMonitorRegistry.getAll.mockReturnValue([
-        { id: 'baseline-monitor', status: 'running' },
+        {
+          id: 'baseline-monitor',
+          description: 'baseline-monitor',
+          status: 'running',
+        },
       ]);
       rebuildSessionWithGuard();
       const internals = session as unknown as {
@@ -29025,6 +29543,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'previous-chain-agent',
+          description: 'previous-chain-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29074,6 +29593,7 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'new-agent',
+            description: 'new-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29149,6 +29669,7 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'cwd-agent',
+            description: 'cwd-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29172,6 +29693,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'cwd-agent',
+          description: 'cwd-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29245,6 +29767,7 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'new-agent',
+            description: 'new-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29267,6 +29790,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'new-agent',
+          description: 'new-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29297,6 +29821,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-agent',
+          description: 'old-agent',
           isBackgrounded: true,
           status: 'running',
           notified: false,
@@ -29308,12 +29833,14 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'old-agent',
+            description: 'old-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
           },
           {
             id: 'new-agent',
+            description: 'new-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29351,12 +29878,14 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-agent',
+          description: 'old-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
         },
         {
           id: 'new-agent',
+          description: 'new-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29393,6 +29922,7 @@ describe('Session', () => {
     it('protects a related notification from unrelated queue overflow', async () => {
       const oldAgents = Array.from({ length: 20 }, (_value, index) => ({
         id: `old-agent-${index}`,
+        description: `old-agent-${index}`,
         isBackgrounded: true,
         status: 'running',
         notified: false,
@@ -29405,6 +29935,7 @@ describe('Session', () => {
           ...oldAgents,
           {
             id: 'new-agent',
+            description: 'new-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29457,6 +29988,7 @@ describe('Session', () => {
     it('preserves queued related notifications when the queue is full', async () => {
       const relatedAgents = Array.from({ length: 21 }, (_value, index) => ({
         id: `related-agent-${index}`,
+        description: `related-agent-${index}`,
         isBackgrounded: true,
         status: 'running',
         notified: false,
@@ -29520,6 +30052,7 @@ describe('Session', () => {
     it('protects a related notification while FIFO priority outlives guard trust', () => {
       const oldAgents = Array.from({ length: 20 }, (_value, index) => ({
         id: `fifo-old-agent-${index}`,
+        description: `fifo-old-agent-${index}`,
         isBackgrounded: true,
         status: 'running',
         notified: false,
@@ -29530,6 +30063,7 @@ describe('Session', () => {
         ...oldAgents,
         {
           id: 'fifo-related-agent',
+          description: 'fifo-related-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: false,
@@ -29574,6 +30108,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-agent',
+          description: 'old-agent',
           isBackgrounded: true,
           status: 'running',
           notified: false,
@@ -29585,12 +30120,14 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'old-agent',
+            description: 'old-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
           },
           {
             id: 'new-agent',
+            description: 'new-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29640,6 +30177,7 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'pre-rewind-agent',
+            description: 'pre-rewind-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29668,6 +30206,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'pre-rewind-agent',
+          description: 'pre-rewind-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29726,6 +30265,7 @@ describe('Session', () => {
         mockBackgroundTaskRegistry.getAll.mockReturnValue([
           {
             id: 'hard-stopped-agent',
+            description: 'hard-stopped-agent',
             isBackgrounded: true,
             status: 'running',
             notified: false,
@@ -29749,6 +30289,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'hard-stopped-agent',
+          description: 'hard-stopped-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29804,6 +30345,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'baseline-agent',
+          description: 'baseline-agent',
           isBackgrounded: true,
           status: 'running',
           notified: false,
@@ -29814,6 +30356,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'baseline-agent',
+          description: 'baseline-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29896,6 +30439,7 @@ describe('Session', () => {
           mockBackgroundTaskRegistry.getAll.mockReturnValue([
             {
               id: 'guard-agent',
+              description: 'guard-agent',
               isBackgrounded: true,
               status: 'running',
               notified: false,
@@ -29911,6 +30455,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'guard-agent',
+          description: 'guard-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,
@@ -29948,6 +30493,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-agent',
+          description: 'old-agent',
           isBackgrounded: true,
           status: 'running',
           notified: false,
@@ -29962,6 +30508,7 @@ describe('Session', () => {
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
           id: 'old-agent',
+          description: 'old-agent',
           isBackgrounded: true,
           status: 'completed',
           notified: true,

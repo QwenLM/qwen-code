@@ -16,6 +16,8 @@ import type {
   CancelNotification,
   Client,
   PromptRequest,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
   SessionUpdate,
@@ -986,11 +988,10 @@ interface SessionEntry {
   /** Bounded ids promoted into the normal prompt FIFO. */
   promotedMidTurnMessageIds: string[];
   /**
-   * Per-session model-change FIFO. Prevents two concurrent
-   * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
-   * model requests) from racing into `unstable_setSessionModel` and
-   * leaving the agent in non-deterministic state. Always resolves —
-   * failures swallowed at the tail like `promptQueue`.
+   * Per-session model/configuration FIFO. Prevents model changes and
+   * model-dependent configuration changes from racing into the agent and
+   * leaving it in non-deterministic state. Always resolves — failures are
+   * swallowed at the tail like `promptQueue`.
    */
   modelChangeQueue: Promise<void>;
   /**
@@ -9319,6 +9320,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
       return response;
+    },
+
+    async setSessionConfigOption(sessionId, req) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
+      const transportClosed = getTransportClosedReject(entry);
+      const work = entry.modelChangeQueue.then(() =>
+        Promise.race([
+          withTimeout(
+            entry.connection.setSessionConfigOption(normalized),
+            initTimeoutMs,
+            'setSessionConfigOption',
+          ),
+          transportClosed,
+        ]),
+      );
+      entry.modelChangeQueue = work.then(
+        () => undefined,
+        () => undefined,
+      );
+      return (await work) as SetSessionConfigOptionResponse;
     },
 
     async setSessionLanguage(sessionId, params, context) {

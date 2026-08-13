@@ -905,6 +905,7 @@ import type {
   LoadSessionResponse,
   McpServer,
   ResumeSessionResponse,
+  SetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk';
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import { loadSettings, SettingScope } from '../config/settings.js';
@@ -6595,6 +6596,156 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'Reasoning effort cannot be applied while thinking is disabled',
       );
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(3);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('projects qwen3.8-max reasoning controls through one ACP option', async () => {
+    const sessionId = 'qwen38-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string; budget_tokens?: number };
+    } = { reasoning: { effort: 'high' } };
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+      generation.reasoning = effort ? { effort } : {};
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string }>;
+        }>;
+      };
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(
+        session.configOptions.filter((item) => item.id === 'effort'),
+      ).toEqual([]);
+      expect(option).toMatchObject({
+        currentValue: 'high',
+      });
+      expect(option?.options.map(({ value }) => value)).not.toContain('none');
+
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      })) as SetSessionConfigOptionResponse;
+      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith(undefined);
+      expect(
+        reset.configOptions.find((item) => item.id === 'reasoning_effort'),
+      ).toMatchObject({
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+      });
+
+      const medium = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'medium',
+      })) as SetSessionConfigOptionResponse;
+      expect(generation.reasoning).toEqual({ effort: 'medium' });
+      expect(
+        medium.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('medium');
+
+      const disabled = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'none',
+      })) as SetSessionConfigOptionResponse;
+      expect(generation.reasoning).toBe(false);
+      expect(
+        disabled.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('none');
+
+      const enabled = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'medium',
+      })) as SetSessionConfigOptionResponse;
+      expect(generation.reasoning).toEqual({ effort: 'medium' });
+      expect(
+        enabled.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('medium');
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'high',
+        }),
+      ).rejects.toThrow(
+        'Unknown reasoning effort: high. Choose one of: none, low, medium, xhigh',
+      );
+      expect(generation.reasoning).toEqual({ effort: 'medium' });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('hides qwen3.8-max reasoning controls when thinking is mandatory', async () => {
+    const sessionId = 'qwen38-mandatory-thinking-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = {
+      reasoning: { effort: 'medium' },
+      thinkingMandatory: true,
+    };
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() => generation.reasoning.effort);
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string }>;
+        }>;
+      };
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('medium');
+      expect(option?.options.map(({ value }) => value)).not.toContain('none');
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        }),
+      ).rejects.toThrow(
+        'Unknown reasoning effort: none. Choose one of: default, low, medium, high, xhigh, max',
+      );
+      expect(generation.reasoning).toEqual({ effort: 'medium' });
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
