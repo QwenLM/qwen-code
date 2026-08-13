@@ -68,6 +68,11 @@ async function testBootstrapWorkspaceVisibility() {
     'The bootstrap splash mark must ship with the frontendDist directory.',
   );
   assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
+  assert.match(
+    bootstrapHtml,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*body\[data-state='starting'\] \.shell \{[\s\S]*?display: flex;[\s\S]*?flex-direction: column;[\s\S]*?align-items: center;/,
+    'The reduced-motion startup view must keep the logo and status text on the same horizontal center.',
+  );
   const primary = await createBootstrapHarness();
   const { body, commands, element, listeners, resolveBootstrapState } = primary;
 
