@@ -96,6 +96,9 @@ describe('OmniExtractKeyframesTool', () => {
   });
 
   afterEach(async () => {
+    // Un-freeze Date.now for tests that spied on it — the budget-sharing
+    // test below depends on real elapsed time.
+    vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -129,6 +132,13 @@ describe('OmniExtractKeyframesTool', () => {
 
   describe('bucketed extraction (known duration, maxFrames > 1)', () => {
     it('spreads one frame per equal bucket across the FULL duration', async () => {
+      // The bucket loop's budget guard calls remainingTimeoutMs() before
+      // the ffmpeg call reads it again — on a slow runner a millisecond
+      // elapses in between and the exact-equality assertion below turns
+      // flaky (observed on CI: 599999 ≠ 600000). Freeze Date so the
+      // strong assertion stays deterministic; ffmpeg is mocked and
+      // nothing in this test needs real wall-clock time.
+      vi.spyOn(Date, 'now').mockReturnValue(1_755_000_000_000);
       probe({ durationMs: 80_000, width: 1920, height: 1080 });
       // Every bucket has a scene change 3.5s into its window.
       mocks.runFfmpeg.mockImplementation(framesRun(1, [3.5]));
@@ -314,7 +324,11 @@ describe('OmniExtractKeyframesTool', () => {
       const secondTimeout = (
         mocks.runFfmpeg.mock.calls[1][1] as { timeoutMs: number }
       ).timeoutMs;
-      expect(firstTimeout).toBe(DEFAULT_POLICY_TOOL_TIMEOUT_MS);
+      // The loop's budget guard reads the clock just before the ffmpeg
+      // call does — this test needs REAL time (the 50ms burn below), so
+      // tolerate the guard→use drift instead of freezing Date.
+      expect(firstTimeout).toBeGreaterThan(DEFAULT_POLICY_TOOL_TIMEOUT_MS - 40);
+      expect(firstTimeout).toBeLessThanOrEqual(DEFAULT_POLICY_TOOL_TIMEOUT_MS);
       // The second bucket gets only what the first one left, never a
       // fresh full budget (timers never fire early, so ≥40ms is gone).
       expect(secondTimeout).toBeLessThanOrEqual(
