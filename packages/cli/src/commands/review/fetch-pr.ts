@@ -58,6 +58,7 @@ import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
+import { SHA_RE } from './lib/ledger.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -166,11 +167,15 @@ type FetchPrResult = PlanReport & {
    * `effective: false` carries the reason the anchor was refused — a rebase
    * or force-push (`not-an-ancestor`), a sha this history has never seen
    * (`unknown-commit`), an anchor older than the merge base that would
-   * scope WIDER than the PR's diff (`behind-merge-base`), a delta capture
-   * or partition that failed (`capture-failed`), or an up-to-date anchor
-   * whose full-range capture failed or never ran
-   * (`full-range-unavailable` — the one refusal where NO diff or plan
-   * exists; every other refusal falls back to the full range).
+   * scope WIDER than the PR's diff (`behind-merge-base`), a merge base too
+   * stale to rule that clamp on (`base-untrusted`), or a delta capture or
+   * partition that failed (`capture-failed`) — and in every one of those
+   * the diff and plan are the full range. **`full-range-unavailable` is the
+   * single exception and the single planless reason**: it is stamped over
+   * whatever refused the anchor whenever the run ends with no captured diff
+   * at all, so a reader can key the degraded flow on the reason alone
+   * rather than having to cross-check `diffPath` (the underlying refusal is
+   * named on stderr).
    */
   incremental?: IncrementalDecision;
 };
@@ -183,6 +188,7 @@ export interface IncrementalDecision {
     | 'unknown-commit'
     | 'not-an-ancestor'
     | 'behind-merge-base'
+    | 'base-untrusted'
     | 'capture-failed'
     | 'full-range-unavailable';
   /**
@@ -217,23 +223,29 @@ export interface AnchorProbe {
  * `diffBase` is the full sha to scope the diff from, null when the diff must
  * stay full-range (anchor refused, or already at the head).
  *
- * `mergeBaseSha`, when available, is the clamp: an anchor that is an
- * ancestor of the head but OLDER than the merge base would scope a range
- * strictly WIDER than the PR's own diff (`anchor..head` = the PR plus a
- * slice of base history) — re-reviewing already-landed hunks whose comments
- * fall outside every hunk of GitHub's PR diff, where a single one 422s the
- * whole Create Review call. Reachable non-adversarially: commits from the
- * PR branch landing in the base between rounds move the merge base past the
- * cached anchor. A null merge base skips the clamp, consistent with the
- * capture path's base-free design.
+ * `mergeBase`, when available, is the clamp: an anchor that is an ancestor
+ * of the head but OLDER than the merge base would scope a range strictly
+ * WIDER than the PR's own diff (`anchor..head` = the PR plus a slice of base
+ * history) — re-reviewing already-landed hunks whose comments fall outside
+ * every hunk of GitHub's PR diff, where a single one 422s the whole Create
+ * Review call. Reachable non-adversarially: commits from the PR branch
+ * landing in the base between rounds move the merge base past the cached
+ * anchor. A null `sha` skips the clamp, consistent with the capture path's
+ * base-free design — but a `fetchFailed` base REFUSES the anchor: the clamp
+ * would then be ruling on a base resolved from a possibly stale local ref,
+ * and every sibling guard here (`isEmptyDiff`, `isCollapsedFromUpstream`)
+ * declines to rule in that state rather than ruling on it.
  */
 export function resolveIncrementalAnchor(
   since: string,
   fetchedSha: string,
   probe: AnchorProbe,
-  mergeBaseSha: string | null = null,
+  mergeBase: { sha: string | null; fetchFailed: boolean } | null = null,
 ): { incremental: IncrementalDecision; diffBase: string | null } {
-  if (!/^[0-9a-f]{7,64}$/i.test(since) || !probe.commitExists(since)) {
+  // The SAME shape predicate the ledger marker applies, imported rather than
+  // restated: an anchor the marker will not carry must not be one the fetch
+  // accepts, or the cache path and the marker path drift apart.
+  if (!SHA_RE.test(since) || !probe.commitExists(since)) {
     return {
       incremental: { since, effective: false, reason: 'unknown-commit' },
       diffBase: null,
@@ -260,7 +272,13 @@ export function resolveIncrementalAnchor(
       diffBase: null,
     };
   }
-  if (mergeBaseSha !== null && !probe.isAncestor(mergeBaseSha, resolved)) {
+  if (mergeBase?.fetchFailed) {
+    return {
+      incremental: { since, effective: false, reason: 'base-untrusted' },
+      diffBase: null,
+    };
+  }
+  if (mergeBase?.sha != null && !probe.isAncestor(mergeBase.sha, resolved)) {
     return {
       incremental: { since, effective: false, reason: 'behind-merge-base' },
       diffBase: null,
@@ -281,6 +299,11 @@ function fileLineCount(ref: string, path: string): number {
   } catch {
     return 0; // absent at this ref: created by the PR, or deleted by it
   }
+}
+
+/** A commit's tree object, or null when git cannot name it. */
+function treeOf(sha: string): string | null {
+  return gitOpt('rev-parse', `${sha}^{tree}`);
 }
 
 /** The real git surface `resolveMergeBase` runs against. */
@@ -455,9 +478,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           gitOpt('merge-base', '--is-ancestor', a, b) !== null,
         resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
       },
-      mergeBaseSha,
+      { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
     );
   }
+  /** Refuse the anchor, keeping every demotion one shape. */
+  const demote = (reason: NonNullable<IncrementalDecision['reason']>): void => {
+    if (!anchor) return;
+    anchor.incremental = {
+      since: anchor.incremental.since,
+      effective: false,
+      reason,
+    };
+  };
   /** True when the FINAL captured diff is the incremental delta. */
   let scopedDelta = false;
   if (anchor?.diffBase) {
@@ -465,11 +497,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     if (delta === null) {
       // Infrastructure, not anchor validity — but the report must not claim
       // an incremental scope the capture never produced.
-      anchor.incremental = {
-        since: anchor.incremental.since,
-        effective: false,
-        reason: 'capture-failed',
-      };
+      demote('capture-failed');
     } else if (delta.trim() === '') {
       // Commits since the anchor change no bytes: nothing new to review.
       // Same outcome as anchor-at-head, and the full range is captured below
@@ -503,11 +531,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // and the degraded state here is a different fact (no plan exists at
     // all, not a fallback to a full one).
     if (anchor?.incremental.upToDate && diffPath === null) {
-      anchor.incremental = {
-        since: anchor.incremental.since,
-        effective: false,
-        reason: 'full-range-unavailable',
-      };
+      demote('full-range-unavailable');
     }
   }
   // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
@@ -535,13 +559,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // `scopedDelta` stays true: the text that failed to partition IS the
     // delta, and re-enabling the full-range flags over it would fire the
     // collapse ratio against GitHub's full-PR stat.
-    if (scopedDelta && anchor) {
-      anchor.incremental = {
-        since: anchor.incremental.since,
-        effective: false,
-        reason: 'capture-failed',
-      };
-    }
+    if (scopedDelta) demote('capture-failed');
+  }
+  // Every refusal that ends with NO diff at all reports the planless reason,
+  // whatever refused the anchor first. The contract downstream reads is "one
+  // reason names the degraded flow" — three shapes (a partition failure, a
+  // delta throw with the full-range capture also failing, a delta throw with
+  // no merge base) used to publish `capture-failed` over a zero-chunk plan
+  // while the skill's per-reason bullet said the full range was in hand. The
+  // original refusal is not lost: the status line below names it.
+  const anchorRefusal = anchor?.incremental.reason;
+  if (anchor && !anchor.incremental.effective && diffPath === null) {
+    demote('full-range-unavailable');
   }
   // The incremental status line is emitted AFTER planning, so it describes
   // the state the report actually publishes — a demotion above must not be
@@ -553,7 +582,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         ? `Incremental: anchor ${inc.since.slice(0, 10)} is up to date with the head — nothing new to review.`
         : inc.effective
           ? `Incremental: scoped to ${inc.since.slice(0, 10)}..${fetchedSha.slice(0, 10)}.`
-          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); ${
+          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${anchorRefusal}); ${
               diffPath !== null
                 ? 'reviewing the full diff.'
                 : 'no diff could be captured — coverage will be partial.'
@@ -644,7 +673,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // then "resolved from a possibly stale local ref" (the warning above says
     // so), and a stale base ref that already contains the head commits diffs
     // to empty — the same wrong recommendation, one cause further out.
-    ...(!scopedDelta && isEmptyDiff({ diffPath, baseFetchFailed, diffText })
+    // A delta round judges emptiness by TREE, not by its own diff text: the
+    // PR can collapse to empty between rounds (a revert, or the work landing
+    // in the base another way) while `anchor..head` stays non-empty, and the
+    // full-range text this flag normally reads was never captured. The
+    // ancestry clamp does not catch it — it compares history, not trees. Left
+    // unflagged, the skill never recommends close-as-superseded and the round
+    // reviews hunks GitHub's (empty) PR diff does not contain, where one
+    // anchored comment 422s the whole review. Same fail-closed guard as the
+    // text path: a base resolved from a possibly stale local ref cannot rule.
+    ...((
+      scopedDelta
+        ? !baseFetchFailed &&
+          mergeBaseSha !== null &&
+          treeOf(mergeBaseSha) !== null &&
+          treeOf(mergeBaseSha) === treeOf(fetchedSha)
+        : isEmptyDiff({ diffPath, baseFetchFailed, diffText })
+    )
       ? { emptyDiff: true }
       : {}),
     // Collapse detection compares recomputed reality against GitHub's

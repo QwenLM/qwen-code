@@ -445,15 +445,22 @@ describe('fetch-pr report assembly', () => {
     '',
   ].join('\n');
 
-  /** gitOpt that vouches for ANCHOR as a commit behind the head. */
-  function anchorIsValid() {
-    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      args[0] === 'cat-file' || args[0] === 'merge-base'
-        ? ''
-        : args[0] === 'rev-parse'
-          ? ANCHOR
-          : null,
-    );
+  /**
+   * gitOpt that vouches for ANCHOR as a commit behind the head, with the PR
+   * NOT collapsed (base tree ≠ head tree — the trees are what the delta
+   * round's emptiness ruling reads).
+   */
+  function anchorIsValid(opts: { collapsed?: boolean } = {}) {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
+      if (args[0] !== 'rev-parse') return null;
+      const arg = String(args[1]);
+      if (arg.endsWith('^{tree}')) {
+        if (opts.collapsed) return 'same-tree';
+        return arg.startsWith(BASE) ? 'base-tree' : 'head-tree';
+      }
+      return ANCHOR;
+    });
   }
 
   it('scopes the plan to a valid anchor and suppresses the full-range flags', async () => {
@@ -592,10 +599,12 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).toBeNull();
+    // No plan survived, so the planless reason is what the report publishes
+    // (the partition failure itself is named on stderr).
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'capture-failed',
+      reason: 'full-range-unavailable',
     });
     // The demoted state must not resurrect the full-range flags over the
     // delta text either.
@@ -604,16 +613,50 @@ describe('fetch-pr report assembly', () => {
 
   it('demotes to capture-failed when the delta capture throws', async () => {
     anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
-      if (args.includes('diff')) throw new Error('git timed out');
-      return Buffer.from('');
+      if (args.includes(`${ANCHOR}..f00df00df00d`)) {
+        throw new Error('git timed out');
+      }
+      return Buffer.from(DELTA_DIFF);
     });
     const report = await reportFor({ since: ANCHOR });
+    // The full-range fallback DID produce a plan, so the reason stays the
+    // one that names why the delta was abandoned.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
       reason: 'capture-failed',
     });
+    expect(report.diffPath).not.toBeNull();
+  });
+
+  it('reports the planless reason whatever refused the anchor first', async () => {
+    // Three shapes used to publish `capture-failed` over a zero-chunk plan
+    // while the skill's per-reason bullet promised the full range: here the
+    // delta throws AND there is no merge base to fall back to. One reason
+    // names the degraded flow; the stderr line still names the underlying
+    // refusal.
+    anchorIsValid();
+    producerMocks.gitRaw.mockImplementation((...args: string[]) => {
+      if (args.includes('diff')) throw new Error('git timed out');
+      return Buffer.from('');
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.diffPath).toBeNull();
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'full-range-unavailable',
+    });
+    const refusedLine = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.includes('refused'));
+    expect(refusedLine).toContain('capture-failed');
+    expect(refusedLine).toContain('no diff could be captured');
   });
 
   it('upgrades an empty delta to upToDate and recaptures the FULL range', async () => {
@@ -790,18 +833,48 @@ describe('resolveIncrementalAnchor', () => {
     expect(r.diffBase).toBeNull();
   });
 
+  it('expands an abbreviated anchor to the full sha it scopes from', () => {
+    // The cache and the marker may both hold an abbreviation (git's
+    // auto-abbreviation grows with the repo). `diffBase` is contracted as a
+    // FULL sha — it is welded into Agent 7's `--base` — so the ruling scopes
+    // from what rev-parse resolved, never from the string that came in.
+    const r = resolveIncrementalAnchor(
+      'abc1234',
+      HEAD,
+      probe({ resolveCommit: () => ANCHOR }),
+    );
+    expect(r.diffBase).toBe(ANCHOR);
+    expect(r.incremental).toEqual({ since: 'abc1234', effective: true });
+  });
+
+  it('refuses an anchor when the merge base is too stale to clamp against', () => {
+    // Ruling the clamp on a base resolved from a possibly stale local ref is
+    // the one thing every sibling guard here refuses to do.
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, probe(), {
+      sha: 'c'.repeat(40),
+      fetchFailed: true,
+    });
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
   it('clamps an anchor older than the merge base — wider than the PR is not incremental', () => {
     const MERGE_BASE = 'c'.repeat(40);
     // The anchor is behind the head, but the merge base is NOT behind the
     // anchor: scoping anchor..head would include base history the PR's own
     // diff does not contain.
+    const base = { sha: MERGE_BASE, fetchFailed: false };
     const r = resolveIncrementalAnchor(
       ANCHOR,
       HEAD,
       probe({
         isAncestor: (a) => a !== MERGE_BASE,
       }),
-      MERGE_BASE,
+      base,
     );
     expect(r.incremental).toEqual({
       since: ANCHOR,
@@ -810,9 +883,9 @@ describe('resolveIncrementalAnchor', () => {
     });
     expect(r.diffBase).toBeNull();
     // With the base behind the anchor the clamp passes and the scope stands.
-    expect(
-      resolveIncrementalAnchor(ANCHOR, HEAD, probe(), MERGE_BASE).diffBase,
-    ).toBe(ANCHOR);
+    expect(resolveIncrementalAnchor(ANCHOR, HEAD, probe(), base).diffBase).toBe(
+      ANCHOR,
+    );
   });
 
   it('never hands a flag-shaped or non-hex anchor to git', () => {

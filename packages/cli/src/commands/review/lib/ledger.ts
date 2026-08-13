@@ -76,6 +76,12 @@ export interface Ledger {
  * git against an anchor), so a tampered sha costs a full-range review, never
  * a mis-scoped one.
  *
+ * Exported because `fetch-pr --since` gates on the SAME shape: an anchor the
+ * marker will not carry must not be one the fetch accepts, or a
+ * ledger-blessed anchor and a cache-supplied one would be judged by two
+ * predicates that can drift (a second, case-insensitive copy shipped once).
+ * One answer about the shape, applied at every gate that reads an anchor.
+ *
  * Sibling check, deliberately not shared: `repo-context.ts` validates
  * `plan.mergeBaseSha` as a FULL 40/64-char object id and hard-throws — that
  * field comes from the trusted plan and is then resolved via git. This one
@@ -83,7 +89,7 @@ export interface Ledger {
  * body. Two claims, two strictnesses; one shared helper would invite using
  * the loose one where the strict one is meant.
  */
-const SHA_RE = /^[0-9a-f]{7,64}$/;
+export const SHA_RE = /^[0-9a-f]{7,64}$/;
 
 /**
  * Grammar of a ledger finding id (`R<round>-<n>`). Shared by every site
