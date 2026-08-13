@@ -197,14 +197,15 @@ const LAYER_RECEIPT_LINE_RE =
 
 /**
  * Tests the text immediately AFTER a captured id: an optional run of trailing
- * punctuation/symbols followed by any non-space, non-punctuation code point means
- * the id is STITCHED to more of a visible word GitHub renders as one token (a
- * letter/digit/mark/connector — `toctou_x`, `toctoué` — or a punctuation-then-more
- * run — `toctou.x`, `toctou‐x` — or the dropped-node sentinel — `` toctou`x` ``).
- * A clean receipt has nothing but trailing punctuation before the next space:
- * `toctou`, `toctou.`, `toctou — note` all pass.
+ * punctuation/symbols followed by either a non-space, non-punctuation code point
+ * OR a CONNECTOR (`\p{Pc}`) means the id is STITCHED to more of a visible word
+ * GitHub renders as one token (a letter/digit/mark — `toctou_x`, `toctoué` — a
+ * punctuation-then-more run — `toctou.x`, `toctou‐x` — the dropped-node sentinel
+ * — `` toctou`x` `` — or a lone connector, which UAX#29 joins with no word break:
+ * `toctou_` renders one word). A clean receipt has nothing but non-connector
+ * trailing punctuation before the next space: `toctou`, `toctou.`, `toctou — note`.
  */
-const TRAILING_STITCH = /^[\p{P}\p{S}]*[^\s\p{P}\p{S}]/u;
+const TRAILING_STITCH = /^[\p{P}\p{S}]*(?:[^\s\p{P}\p{S}]|\p{Pc})/u;
 
 /**
  * The one CommonMark tokenizer this module uses. A hand-rolled fence/blockquote
@@ -224,21 +225,31 @@ const MD = new MarkdownIt({ html: true });
 // marker only ever begins a reconstructed line when it truly begins a visible one.
 const DROPPED_INLINE = '\u0000';
 
-// Code points GitHub renders as NOTHING: every format character (`\p{Cf}` —
-// zero-width spaces/joiners, bidi controls AND isolates, BOM, soft hyphen, …)
-// and variation selector, plus VT, the combining grapheme joiner, and the line/
-// paragraph separators (which are not `\p{Cf}`). A Unicode PROPERTY class, not a
-// hand-enumerated one, so it cannot silently MISS a member the way a list does —
-// enumerating them by hand is what left the bidi isolates open. Same family the
-// sanitizer's `PROMPT_UNSAFE_INVISIBLES` (channels/base) guards, the same drift-
-// proof way. markdown-it decodes numeric entities at parse time, so any of these
-// can land in a text child (`&#8203;`, `&#8294;`). Left in the prose view they
-// would glue a marker phrase GitHub shows fused (`layerwalked`) or wedge
-// invisibly between an id and the text after it; deleted from the text view so
-// the reconstruction is what a human sees (a wedge just before a REAL break still
-// leaves a clean line-leading receipt).
+// Directionality controls REORDER visible text rather than hide it, so deleting
+// them would make the reconstruction the LOGICAL text, not what a human sees
+// (`<RLO>Layer walked: toctou` displays reversed — never a readable receipt). Map
+// them to the dropped-node sentinel instead: opaque, so they break a match right
+// where they disrupt the visible reading. `\p{Bidi_Control}` is the whole family
+// (LRM/RLM/ALM, embeddings/overrides U+202A–202E, isolates U+2066–2069),
+// property-defined so it cannot drift.
+const BIDI_CONTROL = /\p{Bidi_Control}/gu;
+
+// Code points GitHub renders as NOTHING (truly invisible, not reordering): every
+// non-bidi format character (`\p{Cf}` — zero-width spaces/joiners, BOM, soft
+// hyphen, …) and variation selector, plus VT, FORM FEED (CSS does not collapse it
+// to a space), the combining grapheme joiner, and the line/paragraph separators
+// (not `\p{Cf}`). A Unicode PROPERTY class, not a hand-enumerated one, so it
+// cannot silently MISS a member the way a list does — enumerating by hand is what
+// left the bidi isolates open. Same family the sanitizer's `PROMPT_UNSAFE_INVISIBLES`
+// (channels/base) guards, the same drift-proof way. markdown-it decodes numeric
+// entities at parse time, so any of these can land in a text child (`&#8203;`,
+// `&#12;`). Left in the prose view they would glue a marker phrase GitHub shows
+// fused (`layerwalked`) or wedge invisibly between an id and following text;
+// deleted so the reconstruction is what a human sees (a wedge just before a REAL
+// break still leaves a clean receipt). Bidi controls are `\p{Cf}` too, but the
+// sentinel map above already replaced them.
 const INVISIBLE_FORMAT =
-  /[\p{Cf}\p{Variation_Selector}\u000B\u034F\u2028\u2029]/gu; // eslint-disable-line no-control-regex, no-misleading-character-class
+  /[\p{Cf}\p{Variation_Selector}\u000B\u034F\u000C\u2028\u2029]/gu; // eslint-disable-line no-control-regex, no-misleading-character-class
 
 /**
  * The lines an auditor is USING, not quoting — the VISIBLE PROSE markdown-it
@@ -293,6 +304,7 @@ function* usedLines(finalText: string): Generator<string> {
         if (c.type === 'text')
           prose += c.content
             .replace(/[\r\n]+/g, ' ')
+            .replace(BIDI_CONTROL, DROPPED_INLINE)
             .replace(INVISIBLE_FORMAT, '');
         else if (c.type === 'softbreak' || c.type === 'hardbreak')
           prose += '\n';
@@ -302,7 +314,7 @@ function* usedLines(finalText: string): Generator<string> {
           // NOT a `<br-…>` custom element (a hyphen keeps the tag name going, and
           // GitHub strips the non-allowlisted tag, leaving no break). After `br`
           // the tag must END, or continue with whitespace/slash then attributes.
-          /^<br(?:[\s/][^>]*)?>$/i.test(c.content)
+          /^<br(?:[ \t\n\f\r/][^>]*)?>$/i.test(c.content)
         )
           prose += '\n';
         else if (
@@ -333,12 +345,14 @@ export function parseLayerReceipts(
   const ids = new Set<string>();
   // Cheap pre-filter. It reads RAW text but the parser reads DECODED, markup-joined
   // prose, so it must not veto a marker whose words are split by inline markup —
-  // even MID-word (`La*yer* walked`, `Layer wal*ked*`) — or entity-encoded
-  // (`Layer&#32;walked`). Skip only when BOTH words are absent AND no entity could
-  // decode into them; a single surviving word (or any entity) runs the full parse.
+  // even MID-word, and even when BOTH words are (`La*yer* wal*ked*`) — or are
+  // entity-encoded (`Layer&#32;walked`). Strip the inline-markup delimiters first,
+  // then skip only when BOTH words are absent from that AND no entity could decode
+  // into them; a single surviving word (or any entity) runs the full parse.
+  const bare = finalText.replace(/[*_~`[\]()]/g, '');
   if (
-    !/layer/i.test(finalText) &&
-    !/walked/i.test(finalText) &&
+    !/layer/i.test(bare) &&
+    !/walked/i.test(bare) &&
     !/&[#a-z]/i.test(finalText)
   )
     return ids;

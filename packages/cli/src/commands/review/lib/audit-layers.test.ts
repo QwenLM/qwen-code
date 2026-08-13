@@ -258,6 +258,18 @@ describe('parseLayerReceipts', () => {
       'Layer walked: lexing.extra', // id then `.` then more of the word
       'Layer walked: toctou.,x', // chained punctuation then word
       'Layer walked: toctou.<b>x</b>', // punctuation then a dropped node
+      // A CONNECTOR (`\p{Pc}`) joins with no word break (UAX#29), so even a lone
+      // trailing one renders one word — not a receipt.
+      'Layer walked: toctou_', // trailing low line
+      'Layer walked: expansion_', // a real layer id, connector-joined
+      'Layer walked: toctou&#8255;', // U+203F undertie
+      // FORM FEED (U+000C) is JS `\s` but CSS does not collapse it to a space, so
+      // GitHub renders it verbatim — a glued phrase or a wedged id, never a receipt.
+      'Layer&#12;walked: toctou', // FF glues the phrase
+      'Layer walked: toctou&#12;x', // FF wedges the id
+      // A bidi control REORDERS the visible text, so the logical marker is not what
+      // a human reads — mapped to the opaque sentinel, which breaks the match.
+      '&#8238;Layer walked: toctou', // U+202E right-to-left override, line-leading
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
     // Trailing PUNCTUATION with nothing stuck after it is a real boundary — the id
@@ -290,8 +302,19 @@ describe('parseLayerReceipts', () => {
     // But NOT a `<br-…>` custom element or `<brfoo>` — GitHub strips the
     // non-allowlisted tag, leaving no break, so the marker stays mid-line. The
     // break test must not fabricate a receipt from these (a dropped `\b` would).
-    for (const notBr of ['<br-foo>', '<brfoo>', '<BR-FOO>', '<br->']) {
-      expect(parseLayerReceipts(`x${notBr}Layer walked: toctou`).size).toBe(0);
+    // A NON-ASCII space after `br` is not tag whitespace in the HTML grammar, so
+    // GitHub does not parse the tag at all — it must not count as a break either.
+    const notBr = [
+      '<br-foo>',
+      '<brfoo>',
+      '<BR-FOO>',
+      '<br->',
+      '<br\u00A0>', // no-break space — not ASCII tag whitespace
+      '<br\u2000>', // en quad
+      '<br\u3000>', // ideographic space
+    ];
+    for (const t of notBr) {
+      expect(parseLayerReceipts(`x${t}Layer walked: toctou`).size).toBe(0);
     }
     // A paragraph-LEADING entity newline collapses to a space GitHub renders at
     // paragraph start, so the marker stays a visible receipt.
@@ -332,18 +355,26 @@ describe('parseLayerReceipts', () => {
     for (const q of [
       'Layer&#32;walked: toctou', // entity space separator
       '&#76;ayer walked: toctou', // entity-encoded leading `L`
+      '&#76;ayer w&#97;lked: toctou', // BOTH words entity-encoded — isolates the entity clause
       'Layer&nbsp;walked: toctou', // named entity → visible nbsp space
       // The two words split by inline markup that the reconstructed prose rejoins:
       // the raw view has no adjacent "layer walked", but the render does — the
-      // split can even fall MID-word, so the prefilter cannot require either whole
-      // word to survive it (only that both are not wholly absent).
+      // split can even fall MID-word in BOTH words at once, so the prefilter must
+      // strip the markup delimiters before testing, not require either word whole.
       'Layer *walked*: toctou', // emphasis boundary between the words
       'Layer [walked: toctou](/u)', // link boundary between the words
       'La*yer* walked: toctou', // emphasis MID-word in "layer"
       'Layer wal*ked*: toctou', // emphasis MID-word in "walked"
+      'La*yer* wal*ked*: toctou', // BOTH words split mid-word
     ]) {
       expect([...parseLayerReceipts(q)]).toEqual(['toctou']);
     }
+    // A variation selector (U+FE0F) is folded only by `\p{Variation_Selector}` —
+    // not `\p{Cf}` — so this fold-dependent carve-out (VS just before a real break)
+    // discriminates that member: dropping it would reject a genuine receipt.
+    expect([
+      ...parseLayerReceipts('Layer walked: toctou&#65039;  \nmore'),
+    ]).toEqual(['toctou']);
     // The combining grapheme joiner (U+034F) — the one enumerated non-`\p{Cf}`
     // member of the fold class — renders as nothing, so a marker wearing it is a
     // real receipt. Pin it: dropping U+034F from the class silently loses this.
