@@ -235,10 +235,13 @@ reconciled; the feature does not promise persistent inode attestation across
 clean restarts. Windows validates canonical path and link/reparse behavior
 exposed by the platform without claiming POSIX owner/mode or ACL guarantees.
 
-The transcript and runtime configuration remain stored under the Conversations
-runtime root. The session's effective tool and shell working directory is its
-private child. Managed relocation updates the effective target directory and
-workspace context without changing transcript ownership.
+Daemon-managed transcripts and sidecars remain in the daemon runtime base's
+per-runtime storage keyed by the canonical Conversations runtime cwd (under the
+default user-global base unless the daemon explicitly selects another runtime
+base). User-authored Conversations-root configuration remains under that root.
+Neither is moved into the session's private child, which is only the effective
+tool and shell working directory. Managed relocation updates the effective
+target directory and workspace context without changing transcript ownership.
 
 User/global settings and user-authored Conversations-root configuration
 continue to apply. A child may inherit ancestor `QWEN.md`/`AGENTS.md` and shared
@@ -342,7 +345,9 @@ response-loss recovery and deep links:
 - Return `200` with an active or archived summary when a compatible transcript
   exists.
 - Return `404 standalone_session_not_found` when the UUID is absent or belongs
-  to another context. Lookup never reveals or guesses another runtime.
+  to another context. A retained deletion journal does not make the deleted
+  session discoverable; cleanup resumes through owner acquisition or an exact
+  delete retry. Lookup never reveals or guesses another runtime.
 - Return structured ownership, root, or compromise errors when lookup cannot be
   performed safely.
 
@@ -423,10 +428,16 @@ logical transaction:
 
 1. Strictly validate the request and required UUID.
 2. Ensure cross-daemon ownership, runtime, and secure root.
-3. Reserve the UUID daemon-wide across every active runtime bridge, every active
-   and archived transcript catalog, the Live owner index, and in-flight
-   creation. Admission is global, but the new session is created only through
-   the validated Conversations runtime. Any existing owner is a conflict.
+3. Under the exclusive lifecycle coordinator, check the deletion-journal
+   namespace for that UUID and run its bounded reconciliation. Continue only
+   after the journal reaches a terminal cleared state. A valid record still
+   pending cleanup returns retryable `409 standalone_session_conflict`; a
+   compromised record returns `409 deletion_recovery_compromised`. Neither case
+   materializes a child. While still holding the coordinator, reserve the UUID
+   daemon-wide across every active runtime bridge, every active and archived
+   transcript catalog, the Live owner index, and in-flight creation. Admission
+   is global, but the new session is created only through the validated
+   Conversations runtime. Any existing owner is a conflict.
 4. Validate and reuse an existing empty child or materialize a new deterministic
    child. A non-empty child without a transcript is a conflict and is never
    adopted or deleted automatically.
@@ -592,6 +603,24 @@ Final removal failure does not resurrect the transcript. Return the session ID
 in `fileCleanupPending` and retain the journal so an exact retry or bounded
 reconciliation can resume cleanup.
 
+Reconciliation has explicit reachable entry points. The first successful
+Conversations ownership acquisition in a daemon lifetime runs a bounded pass
+over deletion-journal records after secure-root validation and before standalone
+route admission; this does not initialize Conversations while Live and
+standalone are unused. Each record is reconciled under its exclusive lifecycle
+coordinator and the transcript writer lease. A delete retry containing that exact
+session ID checks for a matching journal before mapping an absent transcript to
+`notFound`; if no session in another context owns the UUID, a valid record resumes
+the authorized deletion and returns the session ID in `removed` after terminal
+cleanup. Creation checks and reconciles the same UUID before reservation, and
+load, resume, or repair of an existing transcript checks before normal child
+validation or recreation. A startup pass that reaches its fixed safety bound
+leaves remaining records untouched and reachable through a singleton delete
+retry; it never guesses from staged-looking directories. A non-terminal or
+compromised record is isolated to its UUID: the pass records the structured
+error, leaves that record untouched, and continues without blocking unrelated
+standalone sessions.
+
 Recovery considers active and archived transcripts and every Conversations
 source before destructive cleanup:
 
@@ -622,30 +651,34 @@ source before destructive cleanup:
   above: report `deletion_recovery_compromised` and leave every file untouched.
 
 A staged-looking directory without a valid recovery record is never proof that
-deletion was authorized.
+deletion was authorized. Creation cannot establish a new incarnation of a UUID
+while any journal for that UUID remains, so recovery never treats a fresh normal
+child as belonging beside an older staged child.
 
 ### Failure contract
 
-| Condition                                                 | Result                                              |
-| --------------------------------------------------------- | --------------------------------------------------- |
-| Invalid/forbidden field or malformed UUID                 | `400 invalid_request`                               |
-| Session is absent or not standalone                       | `404 standalone_session_not_found`                  |
-| UUID/source/orphan-directory/session-state conflict       | `409 standalone_session_conflict`                   |
-| UUID creation is currently in flight                      | Exact lookup returns `202 state: "creating"`        |
-| Private child disappeared before prompt                   | `409 working_directory_missing`                     |
-| Existing managed path fails validation                    | `409 working_directory_compromised`                 |
-| Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`                 |
-| Create crossed persistence and cleanup completed          | `500 standalone_creation_rolled_back` with UUID     |
-| Create failed before persistence and cleanup completed    | `500 standalone_creation_rolled_back` with UUID     |
-| Transcript deletion failed and directory state recovered  | `500 transcript_deletion_failed`                    |
-| Transcript or sidecar deletion outcome is partial/unknown | `500 transcript_deletion_outcome_unknown`           |
-| Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`             |
-| Create cleanup outcome is unknown                         | `500 standalone_creation_outcome_unknown` with UUID |
-| Conversations root identity or trust fails                | `503 conversation_root_compromised`                 |
-| Runtime owner record is unsafe                            | `503 conversation_runtime_ownership_compromised`    |
-| Another daemon owns the runtime                           | `503 conversation_runtime_in_use`                   |
-| Conversations runtime cannot be initialized               | `503 conversation_runtime_unavailable`              |
-| Transcript was deleted but final file cleanup failed      | `200` with `fileCleanupPending`                     |
+| Condition                                                  | Result                                              |
+| ---------------------------------------------------------- | --------------------------------------------------- |
+| Invalid/forbidden field or malformed UUID                  | `400 invalid_request`                               |
+| Session is absent or belongs to another context            | `404 standalone_session_not_found`                  |
+| DELETE sees absent transcript plus journal, no other owner | Resume exact deletion recovery before `notFound`    |
+| UUID/source/orphan-directory/session-state conflict        | `409 standalone_session_conflict`                   |
+| Creation finds a valid journal still pending cleanup       | `409 standalone_session_conflict`, retryable        |
+| UUID creation is currently in flight                       | Exact lookup returns `202 state: "creating"`        |
+| Private child disappeared before prompt                    | `409 working_directory_missing`                     |
+| Existing managed path fails validation                     | `409 working_directory_compromised`                 |
+| Deletion journal or staged state is inconsistent           | `409 deletion_recovery_compromised`                 |
+| Create crossed persistence and cleanup completed           | `500 standalone_creation_rolled_back` with UUID     |
+| Create failed before persistence and cleanup completed     | `500 standalone_creation_rolled_back` with UUID     |
+| Transcript deletion failed and directory state recovered   | `500 transcript_deletion_failed`                    |
+| Transcript or sidecar deletion outcome is partial/unknown  | `500 transcript_deletion_outcome_unknown`           |
+| Transcript rollback cannot restore staged child            | `500 working_directory_recovery_failed`             |
+| Create cleanup outcome is unknown                          | `500 standalone_creation_outcome_unknown` with UUID |
+| Conversations root identity or trust fails                 | `503 conversation_root_compromised`                 |
+| Runtime owner record is unsafe                             | `503 conversation_runtime_ownership_compromised`    |
+| Another daemon owns the runtime                            | `503 conversation_runtime_in_use`                   |
+| Conversations runtime cannot be initialized                | `503 conversation_runtime_unavailable`              |
+| Transcript was deleted but final file cleanup failed       | `200` with `fileCleanupPending`                     |
 
 Structured errors include the session ID when known, identify retryability, and
 never expose untrusted filesystem paths. Logs and telemetry record route,
@@ -668,8 +701,9 @@ therefore still targets primary unless it explicitly uses the new routes.
 
 There is no transcript migration. New sessions persist explicit standalone
 source metadata; compatible legacy projectless transcripts are normalized when
-read. Removing the feature code leaves existing transcripts and directories in
-the Conversations root and does not affect project sessions, but a pre-feature
+read. Removing the feature code leaves existing transcripts in the configured
+daemon runtime base's per-runtime storage and managed directories under the
+Conversations root, and does not affect project sessions, but a pre-feature
 daemon is not required to expose explicit standalone transcripts as projectless
 sessions.
 
@@ -951,10 +985,15 @@ the daemon contract.
   archived transcript and sidecars, and returns the exact batch fields.
 - Every journal write, rename, transcript delete, rollback, final cleanup, and
   restart recovery boundary is fault-injected.
+- Owner acquisition and a singleton delete retry reconcile a valid journal whose
+  transcript is already absent; bounded startup work leaves excess records for
+  exact retry.
 - Invalid/missing journal, normal-plus-staged conflict, hash mismatch, and unsafe
   staged path remain untouched.
-- Failed final cleanup reports `fileCleanupPending`; retry/restart resumes only
-  the journaled exact path.
+- Failed final cleanup reports `fileCleanupPending`; a singleton delete retry and
+  the owner-acquisition startup pass resume only the journaled exact path.
+- Creation with the same UUID cannot materialize a new child until its pending
+  deletion journal is terminally reconciled and cleared.
 
 ### Isolation and platforms
 
