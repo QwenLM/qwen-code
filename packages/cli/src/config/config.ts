@@ -2256,6 +2256,8 @@ export async function loadCliConfig(
     omniQuarantineRetentionDays:
       settings.omni?.storage?.quarantine?.retentionDays,
     omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
+    omniStorageRetentionDays: settings.omni?.storage?.retentionDays,
+    omniStorageMaxTotalBytes: settings.omni?.storage?.maxTotalBytes,
     omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use

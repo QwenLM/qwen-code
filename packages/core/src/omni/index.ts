@@ -37,6 +37,7 @@ import {
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
 } from './upload-cache.js';
 import { runStartupRecoveryOnce } from './recovery.js';
+import { runOmniGcOnce } from './gc.js';
 import { OmniDegradationCache } from './policy/degradation-cache.js';
 import {
   formatDisclosureText,
@@ -479,6 +480,24 @@ export async function processMediaForOmniDelivery(
         maxInlineTextBytes: memoryConfig.collection.maxInlineTextBytes,
       })
     : undefined;
+  // GC (storage design §6.2), asynchronously after recovery so the first
+  // delivery is never blocked on a sweep. Memory IS the root set, so the
+  // GC only exists where memory does — without it every object would read
+  // as unreferenced and the sweep would empty the store on age alone.
+  if (memoryService) {
+    void runOmniGcOnce({
+      store,
+      memoryService,
+      registry: (
+        config as OmniMediaRegistryView
+      ).getOmniMediaResourceRegistry?.(),
+      uploadCache,
+      degradationCache: new OmniDegradationCache(store.getOmniRootDir()),
+      retentionDays: config.getOmniStorageRetentionDays?.() ?? 14,
+      maxTotalBytes:
+        config.getOmniStorageMaxTotalBytes?.() ?? 20 * 1024 * 1024 * 1024,
+    });
+  }
   // Session resource registry (M §5.2): every memory-known resource this
   // delivery puts in front of the model gets an opaque session handle,
   // making it addressable by recall without ever exposing a path.

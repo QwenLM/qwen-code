@@ -3992,6 +3992,39 @@ const SETTINGS_SCHEMA = {
         description: 'Managed storage settings under .qwen/omni/.',
         showInDialog: false,
         properties: {
+          retentionDays: {
+            type: 'integer',
+            label: 'Object Retention (days)',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 14,
+            description:
+              'Days an object in .qwen/omni/objects/ that no memory ' +
+              'record references survives before garbage collection may ' +
+              'remove it. Referenced objects are never removed. Must be ' +
+              'at least 1; non-positive values fall back to the default.',
+            showInDialog: false,
+            jsonSchemaOverride: { type: 'integer', minimum: 1, default: 14 },
+          },
+          maxTotalBytes: {
+            type: 'integer',
+            label: 'Object Store Max Bytes',
+            category: 'Experimental',
+            requiresRestart: true,
+            default: 21474836480,
+            description:
+              'Soft byte budget for .qwen/omni/objects/. Over budget, ' +
+              'garbage collection removes the oldest unreferenced ' +
+              'objects regardless of age; if only referenced objects ' +
+              'remain it warns and suspends new policy derivations ' +
+              'instead of deleting them. Defaults to 20 GiB.',
+            showInDialog: false,
+            jsonSchemaOverride: {
+              type: 'integer',
+              minimum: 1,
+              default: 21474836480,
+            },
+          },
           quarantine: {
             type: 'object',
             label: 'Omni Quarantine',

@@ -405,6 +405,53 @@ export class MediaMemoryService {
   }
 
   /**
+   * The GC root set (storage design §6.2): every object hash any memory
+   * record still references. Two distinct reference kinds exist and BOTH
+   * count — `entries[].artifactRef.managedId` (policy outputs) and
+   * managed-protocol `versions[].source.locator` (tool/URL media anchor
+   * their file identity in the object store because their local file is
+   * deleted the turn it lands, so the store copy is the only one).
+   *
+   * Returns null when the store exists but cannot be read — the caller
+   * must treat that as "roots unknown" and delete NOTHING (fail-closed:
+   * an unreadable ledger must never read as an empty one). A store that
+   * has never been written returns an empty set: nothing was ever
+   * recorded, so nothing is referenced.
+   */
+  async collectManagedRefs(): Promise<Set<string> | null> {
+    const UNREADABLE = null;
+    try {
+      return await this.store.read<Set<string> | null>(
+        UNREADABLE,
+        (snapshot) => {
+          const refs = new Set<string>();
+          const add = (locator: string | undefined) => {
+            if (locator?.startsWith('sha256/')) {
+              refs.add(locator.slice('sha256/'.length));
+            }
+          };
+          for (const entry of Object.values(snapshot.entries)) {
+            if (entry.artifactRef?.storage === 'managed') {
+              add(entry.artifactRef.managedId);
+            }
+          }
+          for (const version of Object.values(snapshot.versions)) {
+            if (version.source.protocol === 'managed') {
+              add(version.source.locator);
+            }
+          }
+          return refs;
+        },
+      );
+    } catch (err) {
+      debugLogger.debug(
+        `collectManagedRefs failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Read-side lookup for callers that hold bytes but no identity (the
    * reactive degradation ladder re-recognizes a stored object without
    * knowing which memory version it is). Returns the binding of the

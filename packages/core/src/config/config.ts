@@ -1131,6 +1131,12 @@ export interface ConfigParameters {
   omniQuarantineRetentionDays?: number;
   /** `omni.storage.quarantine.maxBytes` (default 5 GiB). */
   omniQuarantineMaxBytes?: number;
+  /** `omni.storage.retentionDays` — days an unreferenced object survives
+   * before GC may sweep it (default 14). */
+  omniStorageRetentionDays?: number;
+  /** `omni.storage.maxTotalBytes` — soft byte budget for the object
+   * store (default 20 GiB). */
+  omniStorageMaxTotalBytes?: number;
   /** Raw `omni.memory` settings (collection/recall). Normalized at
    * startup; invalid configuration aborts startup. */
   omniMemory?: Record<string, unknown>;
@@ -1970,6 +1976,8 @@ export class Config {
   private readonly omniTransportGuardPolicies?: Record<string, unknown>;
   private readonly omniProcessingLimits?: Record<string, unknown>;
   private readonly omniQuarantineRetentionDays?: number;
+  private readonly omniStorageRetentionDays?: number;
+  private readonly omniStorageMaxTotalBytes?: number;
   private readonly omniQuarantineMaxBytes?: number;
   private readonly omniMemory?: Record<string, unknown>;
   /** Normalized `omni.processing` view; set once during initialize()
@@ -2269,6 +2277,8 @@ export class Config {
     this.omniProcessingLimits = params.omniProcessingLimits;
     this.omniQuarantineRetentionDays = params.omniQuarantineRetentionDays;
     this.omniQuarantineMaxBytes = params.omniQuarantineMaxBytes;
+    this.omniStorageRetentionDays = params.omniStorageRetentionDays;
+    this.omniStorageMaxTotalBytes = params.omniStorageMaxTotalBytes;
     this.omniMemory = params.omniMemory;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
@@ -6541,6 +6551,23 @@ export class Config {
     return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0
       ? bytes
       : 5 * 1024 * 1024 * 1024;
+  }
+
+  getOmniStorageRetentionDays(): number {
+    // Zero/negative/NaN would make the GC treat every unreferenced object
+    // as expired — fall back to the default instead (same fail-safe stance
+    // as the quarantine accessors above).
+    const days = this.omniStorageRetentionDays;
+    return typeof days === 'number' && Number.isFinite(days) && days > 0
+      ? days
+      : 14;
+  }
+
+  getOmniStorageMaxTotalBytes(): number {
+    const bytes = this.omniStorageMaxTotalBytes;
+    return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0
+      ? bytes
+      : 20 * 1024 * 1024 * 1024;
   }
 
   resolveImageGenerationModel(
