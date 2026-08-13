@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
@@ -24,6 +25,9 @@ import {
   isTooLargeToHighlight,
 } from './codeHighlighter';
 import { useI18n } from '../../i18n';
+import { extractErrorDetail } from '../../utils/errorDetail';
+import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
+import { requestToast } from '../ToastHost';
 import {
   useWebShellCustomization,
   type MarkdownTableMode,
@@ -708,6 +712,7 @@ function MarkdownLink({
   children?: ReactNode;
 }) {
   const renderMode = useTranscriptRenderMode();
+  const { t } = useI18n();
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode === 'readonly') {
       return <span className={styles.link}>{children}</span>;
@@ -731,12 +736,33 @@ function MarkdownLink({
     );
   }
   const safeHref = isSafeHref(href) ? href : undefined;
+  const isExternalHref = Boolean(
+    safeHref && SAFE_HREF_SCHEMES.test(safeHref.trim()),
+  );
+  // In the packaged desktop shell the webview's implicit `target="_blank"`
+  // handling silently drops the request on failure, so route external clicks
+  // through the shell's explicit opener and surface errors as toasts. Plain
+  // browsers keep the native anchor behavior (cmd/ctrl+click included).
+  const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (!isExternalHref || !safeHref || !isDesktopShell()) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      return;
+    if (event.button !== 0) return;
+    event.preventDefault();
+    openExternalUrl(safeHref).catch((error: unknown) => {
+      requestToast(
+        'error',
+        t('common.openFailed', { message: extractErrorDetail(error) }),
+      );
+    });
+  };
   return (
     <a
       href={safeHref}
       target="_blank"
       rel="noopener noreferrer"
       className={styles.link}
+      onClick={isExternalHref ? handleClick : undefined}
     >
       {children}
     </a>
