@@ -5343,7 +5343,18 @@ export class AcpDispatcher {
       receipt?.discarded();
       return Promise.resolve('closed');
     }
-    return conn.sendConn(success(id, result), receipt);
+    const delivery = conn.sendConn(success(id, result), receipt);
+    void delivery.then(
+      (outcome) => {
+        if (outcome === 'failed' && !conn.destroyed) {
+          void conn.sendConn(
+            error(id, RPC.INTERNAL_ERROR, 'Response delivery failed'),
+          );
+        }
+      },
+      () => undefined,
+    );
+    return delivery;
   }
 
   private replyOwnership(

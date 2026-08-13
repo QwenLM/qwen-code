@@ -3812,6 +3812,58 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['live', 'buffered'] as const)(
+    'session/load returns an internal error when its %s response cannot be serialized',
+    async (mode) => {
+      bridge.loadState = { value: 1n };
+      const connId = await initialize();
+      const connStream = mode === 'live' ? await openStream(connId) : undefined;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'session/load',
+        params: { sessionId: 'loaded-1' },
+      });
+
+      const stream = connStream ?? (await openStream(connId));
+      const reader = frameReader(stream);
+      try {
+        const failure = (await reader.next()) as {
+          id: number;
+          error: { code: number; message: string };
+        };
+        expect(failure).toMatchObject({
+          id: 21,
+          error: {
+            code: -32603,
+            message: 'Response delivery failed',
+          },
+        });
+        expect(acpHandle?.registry.get(connId)?.destroyed).toBe(false);
+        expect(acpHandle?.registry.get(connId)?.ownsSession('loaded-1')).toBe(
+          false,
+        );
+        expect(bridge.detached).toContainEqual({
+          sessionId: 'loaded-1',
+          clientId: 'client-load',
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 22,
+          method: 'authenticate',
+        });
+        await expect(reader.next()).resolves.toMatchObject({
+          id: 22,
+          result: {},
+        });
+      } finally {
+        reader.close();
+      }
+    },
+  );
+
   it('session/load reports partial replay status under qwen _meta', async () => {
     bridge.loadState = {
       replayed: true,
