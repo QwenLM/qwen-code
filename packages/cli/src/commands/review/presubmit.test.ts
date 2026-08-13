@@ -783,12 +783,16 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(false);
     });
 
-    it('does not author-match replies — a hand reply is not a posted finding', async () => {
+    it('does not author-match replies — even a finding-shaped reply is not a posted finding', async () => {
+      // Finding-shaped on purpose: a hand-written body fails the severityOf
+      // shape gate first, so the test would stay green with the reply guard
+      // deleted (mutation-verified) — with this body, only the
+      // !c.in_reply_to_id term keeps the reply out of the dedup set.
       const result = await presubmitWithComments(
         [
           {
             id: 4,
-            body: 'we fixed this, thanks',
+            body: '**[Critical]** confirmed, thanks',
             path: 'a.ts',
             line: 12,
             commit_id: 'abc123',
