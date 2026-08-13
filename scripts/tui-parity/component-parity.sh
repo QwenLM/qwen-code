@@ -8,3 +8,4 @@ if ! command -v bun >/dev/null 2>&1; then
   exit 77
 fi
 bun packages/cli/scripts/opentui-component-parity.tsx
+bun packages/cli/scripts/opentui-stats-parity.tsx
