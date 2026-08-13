@@ -572,7 +572,9 @@ describe('useProviderUpdates', () => {
     mockSettings.merged['modelProviders'] = {
       [AuthType.USE_OPENAI]: chinaTemplate,
     };
-    mockConfig.refreshAuth.mockResolvedValue(undefined);
+    mockConfig.refreshAuth.mockImplementation(async () => {
+      mockConfig.getModel.mockReturnValue('provider-default-model');
+    });
 
     const { result } = renderHook(() =>
       useProviderUpdates(
