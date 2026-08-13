@@ -87,6 +87,8 @@ import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
+  TOAST_REQUEST_EVENT,
+  type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
 } from './components/ToastHost';
@@ -8106,6 +8108,19 @@ export function App({
     window.addEventListener('qwen:open-session', handler);
     return () => window.removeEventListener('qwen:open-session', handler);
   }, [handleOpenSessionFromOverview]);
+
+  // Listen for toast requests from deeply nested components (markdown links
+  // and artifact actions reporting a failed external open, for example).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<ToastRequestDetail>).detail;
+      if (detail && typeof detail.message === 'string' && detail.message) {
+        pushToast(detail.tone, detail.message);
+      }
+    };
+    window.addEventListener(TOAST_REQUEST_EVENT, handler);
+    return () => window.removeEventListener(TOAST_REQUEST_EVENT, handler);
+  }, [pushToast]);
 
   useEffect(() => {
     if (
