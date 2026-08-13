@@ -6017,7 +6017,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('rejects coalescing load requests with different live replay modes', async () => {
+  it('lets a summary load coalesce onto an in-flight full restore', async () => {
     const load = deferred<LoadSessionResponse>();
     const handle = makeChannel({ loadSessionImpl: () => load.promise });
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -6032,12 +6032,48 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.loadSessionCalls).toHaveLength(1);
     });
 
+    // The summary journal is a strict subset of the full journal, so the
+    // summary waiter shares the in-flight full restore and projects the
+    // superset it receives down to its own view.
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-live-replay-mode',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      liveReplayMode: 'summary',
+    });
+
+    load.resolve({});
+    const [r1, r2] = await Promise.all([first, second]);
+    expect(r1.attached).toBe(false);
+    expect(r2.attached).toBe(true);
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    await bridge.shutdown();
+  });
+
+  it('rejects a full load joining an in-flight summary restore', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-live-replay-mode-full-after-summary',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      liveReplayMode: 'summary',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+
+    // A full request cannot share the in-flight summary restore — the
+    // projection lacks the nested detail the full client expects — so it
+    // stays fenced instead of coalescing onto the wrong replay.
     await expect(
       bridge.loadSession({
-        sessionId: 'coalesce-live-replay-mode',
+        sessionId: 'coalesce-live-replay-mode-full-after-summary',
         workspaceCwd: WS_A,
         historyReplay: 'response',
-        liveReplayMode: 'summary',
+        liveReplayMode: 'full',
       }),
     ).rejects.toBeInstanceOf(RestoreInProgressError);
 

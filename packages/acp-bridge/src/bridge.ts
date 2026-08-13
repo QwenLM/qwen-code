@@ -5711,13 +5711,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
-      // caller. Same-shape coalescing is unaffected.
+      // caller. Same-shape coalescing is unaffected. The one directional
+      // exception is liveReplayMode: the summary journal is a strict subset
+      // of the full journal, so a summary request safely shares an in-flight
+      // full restore (its waiter receives a superset and projects it down);
+      // only the reverse — a full request joining a summary restore — would
+      // return a missing-detail projection, so that direction stays fenced.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
         historyPageSize !== inFlight.historyPageSize ||
-        liveReplayMode !== inFlight.liveReplayMode ||
+        (inFlight.liveReplayMode === 'summary' && liveReplayMode === 'full') ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
