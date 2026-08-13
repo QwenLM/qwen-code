@@ -15,6 +15,8 @@ import {
 import {
   convertClaudePluginPackage,
   convertClaudePluginStandalone,
+  loadClaudePluginHooks,
+  type ClaudeMarketplacePluginConfig,
 } from './claude-converter.js';
 import {
   convertQoderPlugin,
@@ -52,7 +54,11 @@ async function removeConvertedDirectory(directory: string): Promise<void> {
 }
 
 type MarketplacePluginSelection =
-  | { location: 'root'; version?: string }
+  | {
+      location: 'root';
+      version?: string;
+      plugin: ClaudeMarketplacePluginConfig;
+    }
   | { location: 'other' | 'missing-marketplace' };
 
 function selectedMarketplacePlugin(
@@ -102,13 +108,21 @@ function selectedMarketplacePlugin(
     // Claude marketplaces allow an entry without `source`; that entry refers
     // to the marketplace root itself.
     if (source === undefined || source === null) {
-      return { location: 'root', version };
+      return {
+        location: 'root',
+        version,
+        plugin: selectedPlugin as unknown as ClaudeMarketplacePluginConfig,
+      };
     }
     if (typeof source !== 'string') return { location: 'other' };
 
     return path.resolve(path.join(extensionDir, source)) ===
       path.resolve(extensionDir)
-      ? { location: 'root', version }
+      ? {
+          location: 'root',
+          version,
+          plugin: selectedPlugin as unknown as ClaudeMarketplacePluginConfig,
+        }
       : { location: 'other' };
   } catch {
     return { location: 'other' };
@@ -254,23 +268,23 @@ export async function convertCompatibleExtension(
   } else if (hasQwenConfig) {
     newExtensionDir = extensionDir;
   } else if (isGeminiExtension && hasClaudePlugin) {
-    const geminiConversion = await convertGeminiExtensionPackage(extensionDir);
-    let claudeConversion:
-      | Awaited<ReturnType<typeof convertClaudePluginStandalone>>
-      | Awaited<ReturnType<typeof convertClaudePluginPackage>>
-      | undefined;
+    const geminiConversion = await convertGeminiExtensionPackage(
+      extensionDir,
+      signal,
+    );
     try {
       signal?.throwIfAborted();
+      let claudeHooks: ExtensionHooks | undefined;
+      let claudeMetadataLoaded = false;
       try {
-        claudeConversion = rootMarketplacePluginName
-          ? await convertClaudePluginPackage(
-              extensionDir,
-              rootMarketplacePluginName,
-              networkPolicy,
-              signal,
-              true,
-            )
-          : await convertClaudePluginStandalone(extensionDir, true);
+        claudeHooks = loadClaudePluginHooks(
+          extensionDir,
+          rootMarketplacePluginName && marketplaceSelection.location === 'root'
+            ? marketplaceSelection.plugin
+            : undefined,
+          signal,
+        );
+        claudeMetadataLoaded = true;
       } catch (error) {
         signal?.throwIfAborted();
         debugLogger.warn(
@@ -280,7 +294,7 @@ export async function convertCompatibleExtension(
         );
       }
 
-      if (!claudeConversion) {
+      if (!claudeMetadataLoaded) {
         newExtensionDir = geminiConversion.convertedDir;
         originSource = 'Gemini';
         return {
@@ -295,7 +309,6 @@ export async function convertCompatibleExtension(
         geminiConversion.convertedDir,
       );
       const geminiHooks = geminiConversion.config.hooks ?? conventionalHooks;
-      const claudeHooks = claudeConversion.config.hooks;
       const mergedConfig = {
         ...geminiConversion.config,
         ...(rootMarketplacePluginName &&
@@ -313,22 +326,15 @@ export async function convertCompatibleExtension(
       );
       newExtensionDir = geminiConversion.convertedDir;
       originSource = 'Gemini';
-      externalContent =
-        'externalContent' in claudeConversion
-          ? claudeConversion.externalContent
-          : false;
       requiresClaudeFileAdaptation = Boolean(conventionalHooks || claudeHooks);
     } catch (error) {
       await removeConvertedDirectory(geminiConversion.convertedDir);
       throw error;
-    } finally {
-      if (claudeConversion) {
-        await removeConvertedDirectory(claudeConversion.convertedDir);
-      }
     }
   } else if (isGeminiExtension) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
+    newExtensionDir = (
+      await convertGeminiExtensionPackage(extensionDir, signal)
+    ).convertedDir;
     originSource = 'Gemini';
   } else if (pluginName && !isExplicitExtensionRoot) {
     const converted = await convertClaudePluginPackage(
@@ -347,11 +353,13 @@ export async function convertCompatibleExtension(
     originSource = 'Claude';
     externalContent = converted.externalContent;
   } else if (fs.existsSync(path.join(extensionDir, QODER_PLUGIN_MANIFEST))) {
-    newExtensionDir = (await convertQoderPlugin(extensionDir)).convertedDir;
+    newExtensionDir = (await convertQoderPlugin(extensionDir, signal))
+      .convertedDir;
     originSource = 'Qoder';
   } else if (hasClaudePlugin) {
-    newExtensionDir = (await convertClaudePluginStandalone(extensionDir, true))
-      .convertedDir;
+    newExtensionDir = (
+      await convertClaudePluginStandalone(extensionDir, true, signal)
+    ).convertedDir;
     originSource = 'Claude';
   }
   signal?.throwIfAborted();

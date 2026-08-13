@@ -322,6 +322,12 @@ export async function checkForExtensionUpdate(
     if (installMetadata.source.startsWith('upload:')) {
       return ExtensionUpdateState.NOT_UPDATABLE;
     }
+    // A local marketplace can select content fetched from a separate remote
+    // repository. The outer local path does not pin or version that nested
+    // content, so an automatic update sweep must not refetch it implicitly.
+    if (installMetadata.externalContent === true) {
+      return ExtensionUpdateState.NOT_UPDATABLE;
+    }
     let latestConfig: ExtensionConfig | undefined;
     let tempDir: string | undefined;
     let convertedDir: string | undefined;

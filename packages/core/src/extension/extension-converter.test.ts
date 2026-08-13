@@ -104,6 +104,16 @@ describe('convertGeminiOrClaudeExtension', () => {
       includeMarketplace: true,
     },
     {
+      installKind: 'matching direct root alias with a subplugin entry',
+      pluginName: 'ponytail-alias',
+      marketplacePluginName: 'ponytail-alias',
+      marketplaceSource: './plugins/ponytail-alias',
+      marketplaceHooks: './hooks/marketplace-hooks.json',
+      expectedHookPath: 'scripts/session-start.sh',
+      pluginSourceKind: 'extension-root' as const,
+      includeMarketplace: true,
+    },
+    {
       installKind: 'legacy direct root alias',
       pluginName: 'ponytail-alias',
       marketplacePluginName: 'different-plugin',
@@ -319,6 +329,9 @@ describe('convertGeminiOrClaudeExtension', () => {
           ? '${CLAUDE_PLUGIN_ROOT}/' + expectedHookPath
           : undefined,
       );
+      expect(config.hooks?.['SessionStart']).toHaveLength(
+        expectedHookPath ? 1 : 0,
+      );
       expect(
         fs.existsSync(
           path.join(converted.extensionDir, 'commands', 'ponytail.md'),
@@ -352,6 +365,9 @@ describe('convertGeminiOrClaudeExtension', () => {
           command?: string;
         }
       )?.command;
+      expect(installedConfig.hooks?.['SessionStart']).toHaveLength(
+        expectedHookPath ? 1 : 0,
+      );
       expect(installedCommand && path.normalize(installedCommand)).toBe(
         expectedHookPath
           ? path.join(installedDir, expectedHookPath)
@@ -668,6 +684,45 @@ describe('convertGeminiOrClaudeExtension', () => {
     );
   });
 
+  it('converts a named subplugin for legacy metadata without a source kind', async () => {
+    const rootClaudeDir = path.join(extensionDir, '.claude-plugin');
+    const pluginDir = path.join(extensionDir, 'plugins', 'legacy-child');
+    fs.mkdirSync(rootClaudeDir, { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(rootClaudeDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'legacy-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [
+          {
+            name: 'legacy-child',
+            source: './plugins/legacy-child',
+          },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'legacy-child', version: '2.0.0' }),
+    );
+
+    const converted = await convertGeminiOrClaudeExtension(
+      extensionDir,
+      'legacy-child',
+    );
+    convertedDir = converted.extensionDir;
+    const config = JSON.parse(
+      fs.readFileSync(
+        path.join(converted.extensionDir, 'qwen-extension.json'),
+        'utf-8',
+      ),
+    ) as ExtensionConfig;
+
+    expect(converted.originSource).toBe('Claude');
+    expect(config).toMatchObject({ name: 'legacy-child', version: '2.0.0' });
+  });
+
   it('merges conventional Gemini hooks with Claude hooks by event', async () => {
     fs.writeFileSync(
       path.join(extensionDir, 'gemini-extension.json'),
@@ -863,7 +918,7 @@ describe('convertGeminiOrClaudeExtension', () => {
     }
   });
 
-  it('removes the temporary Claude conversion after a successful merge', async () => {
+  it('reads Claude hooks without creating a second converted copy', async () => {
     fs.writeFileSync(
       path.join(extensionDir, 'gemini-extension.json'),
       JSON.stringify({ name: 'cleanup-success', version: '1.0.0' }),
@@ -887,16 +942,15 @@ describe('convertGeminiOrClaudeExtension', () => {
     try {
       const converted = await convertGeminiOrClaudeExtension(extensionDir);
       convertedDir = converted.extensionDir;
-      expect(tempDirs).toHaveLength(2);
+      expect(tempDirs).toHaveLength(1);
       expect(converted.extensionDir).toBe(tempDirs[0]);
       expect(fs.existsSync(tempDirs[0])).toBe(true);
-      expect(fs.existsSync(tempDirs[1])).toBe(false);
     } finally {
       createTmpDirSpy.mockRestore();
     }
   });
 
-  it('removes both conversions when a merge is aborted before writing', async () => {
+  it('removes the Gemini conversion when hook loading observes an abort', async () => {
     fs.writeFileSync(
       path.join(extensionDir, 'gemini-extension.json'),
       JSON.stringify({ name: 'cleanup-abort', version: '1.0.0' }),
@@ -916,7 +970,7 @@ describe('convertGeminiOrClaudeExtension', () => {
       .mockImplementation(async () => {
         const tempDir = await createTmpDir();
         tempDirs.push(tempDir);
-        if (tempDirs.length === 2) controller.abort(reason);
+        controller.abort(reason);
         return tempDir;
       });
 
@@ -929,7 +983,7 @@ describe('convertGeminiOrClaudeExtension', () => {
           controller.signal,
         ),
       ).rejects.toBe(reason);
-      expect(tempDirs).toHaveLength(2);
+      expect(tempDirs).toHaveLength(1);
       expect(tempDirs.every((tempDir) => !fs.existsSync(tempDir))).toBe(true);
     } finally {
       createTmpDirSpy.mockRestore();

@@ -77,7 +77,9 @@ export function convertGeminiToQwenConfig(
  */
 export async function convertGeminiExtensionPackage(
   extensionDir: string,
+  signal?: AbortSignal,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  signal?.throwIfAborted();
   const geminiConfig = convertGeminiToQwenConfig(extensionDir);
 
   // Create temporary directory for converted extension
@@ -85,15 +87,16 @@ export async function convertGeminiExtensionPackage(
 
   try {
     // Step 1: Copy all files and directories to temporary directory
-    await copyDirectory(extensionDir, tmpDir);
+    await copyDirectory(extensionDir, tmpDir, undefined, signal);
 
     // Step 2: Convert TOML commands to Markdown in commands folder
     const commandsDir = path.join(tmpDir, 'commands');
     if (fs.existsSync(commandsDir)) {
-      await convertCommandsDirectory(commandsDir);
+      await convertCommandsDirectory(commandsDir, signal);
     }
 
     // Step 3: Create qwen-extension.json with converted config
+    signal?.throwIfAborted();
     const qwenConfigPath = path.join(tmpDir, 'qwen-extension.json');
     fs.writeFileSync(
       qwenConfigPath,
@@ -151,10 +154,12 @@ export async function copyDirectory(
   source: string,
   destination: string,
   confineRoot?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   // Create destination directory if it doesn't exist
   if (!fs.existsSync(destination)) {
-    fs.mkdirSync(destination, { recursive: true });
+    await fs.promises.mkdir(destination, { recursive: true });
   }
 
   // Symlinks in an (untrusted) source are dereferenced and their *target*
@@ -171,14 +176,15 @@ export async function copyDirectory(
     }
   }
 
-  const entries = fs.readdirSync(source, { withFileTypes: true });
+  const entries = await fs.promises.readdir(source, { withFileTypes: true });
 
   for (const entry of entries) {
+    signal?.throwIfAborted();
     const sourcePath = path.join(source, entry.name);
     const destPath = path.join(destination, entry.name);
 
     if (entry.isDirectory()) {
-      await copyDirectory(sourcePath, destPath, root);
+      await copyDirectory(sourcePath, destPath, root, signal);
     } else if (entry.isSymbolicLink()) {
       // Resolve symlink and copy the target content, but only when the target
       // stays inside the package root.
@@ -192,40 +198,47 @@ export async function copyDirectory(
         }
         const targetStat = fs.statSync(realPath);
         if (targetStat.isDirectory()) {
-          await copyDirectory(realPath, destPath, root);
+          await copyDirectory(realPath, destPath, root, signal);
         } else if (targetStat.isFile()) {
-          fs.copyFileSync(realPath, destPath);
+          await fs.promises.copyFile(realPath, destPath);
         }
         // Skip sockets, FIFOs, etc.
       } catch {
+        signal?.throwIfAborted();
         // Skip broken symlinks
       }
     } else if (entry.isFile()) {
-      fs.copyFileSync(sourcePath, destPath);
+      await fs.promises.copyFile(sourcePath, destPath);
     }
     // Skip sockets, FIFOs, block devices, and character devices
   }
+  signal?.throwIfAborted();
 }
 
 /**
  * Converts all TOML command files in a directory to Markdown format.
  * @param commandsDir Path to the commands directory
  */
-async function convertCommandsDirectory(commandsDir: string): Promise<void> {
+async function convertCommandsDirectory(
+  commandsDir: string,
+  signal?: AbortSignal,
+): Promise<void> {
   // Find all .toml files in the commands directory
   const tomlFiles = await glob('**/*.toml', {
     cwd: commandsDir,
     nodir: true,
     dot: false,
+    signal,
   });
 
   // Convert each TOML file to Markdown
   for (const relativeFile of tomlFiles) {
+    signal?.throwIfAborted();
     const tomlPath = path.join(commandsDir, relativeFile);
 
     try {
       // Read TOML file
-      const tomlContent = fs.readFileSync(tomlPath, 'utf-8');
+      const tomlContent = await fs.promises.readFile(tomlPath, 'utf-8');
 
       // Convert to Markdown
       const markdownContent = convertTomlToMarkdown(tomlContent);
@@ -234,11 +247,12 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
       const markdownPath = tomlPath.replace(/\.toml$/, '.md');
 
       // Write Markdown file
-      fs.writeFileSync(markdownPath, markdownContent, 'utf-8');
+      await fs.promises.writeFile(markdownPath, markdownContent, 'utf-8');
 
       // Delete original TOML file
-      fs.unlinkSync(tomlPath);
+      await fs.promises.unlink(tomlPath);
     } catch (error) {
+      signal?.throwIfAborted();
       debugLogger.warn(
         `Warning: Failed to convert command file ${relativeFile}: ${error instanceof Error ? error.message : String(error)}`,
       );

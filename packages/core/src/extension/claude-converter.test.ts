@@ -986,7 +986,8 @@ describe('convertClaudePluginPackage', () => {
     expect(
       (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
         .command,
-    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
+    ).toBe(`${result.convertedDir}/scripts/post-install.sh`);
+    expect(fs.existsSync(result.convertedDir)).toBe(true);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -1178,6 +1179,51 @@ describe('convertClaudePluginStandalone', () => {
     expect(fs.existsSync(path.join(result.convertedDir, '.git'))).toBe(false);
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('stops a standalone conversion when its recursive copy is aborted', async () => {
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'abort-copy', version: '1.0.0' }),
+      'utf-8',
+    );
+    const sourceDir = path.join(testDir, 'assets');
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'one.txt'), 'one', 'utf-8');
+    fs.writeFileSync(path.join(sourceDir, 'two.txt'), 'two', 'utf-8');
+
+    const controller = new AbortController();
+    const reason = new Error('conversion cancelled');
+    const copyFile = fs.promises.copyFile.bind(fs.promises);
+    const copySpy = vi
+      .spyOn(fs.promises, 'copyFile')
+      .mockImplementation(async (...args) => {
+        await copyFile(...args);
+        controller.abort(reason);
+      });
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
+
+    try {
+      await expect(
+        convertClaudePluginStandalone(testDir, false, controller.signal),
+      ).rejects.toBe(reason);
+      expect(copySpy).toHaveBeenCalledOnce();
+      expect(tempDirs).toHaveLength(1);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+    } finally {
+      copySpy.mockRestore();
+      createTmpDirSpy.mockRestore();
+    }
   });
 
   it('throws when there is no .claude-plugin/plugin.json', async () => {

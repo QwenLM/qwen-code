@@ -32,6 +32,7 @@ import * as archiver from 'archiver';
 import {
   ExtensionUpdateState,
   type Extension,
+  type ExtensionConfig,
   type ExtensionManager,
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -990,6 +991,26 @@ describe('git extension helpers', () => {
       expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
     });
 
+    it('does not refetch external content selected by a local marketplace', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'local',
+          source: '/local/marketplace',
+          pluginName: 'remote-child',
+          pluginSourceKind: 'marketplace-entry',
+          externalContent: true,
+        },
+      });
+      const mockManager = {
+        loadExtensionConfig: vi.fn(),
+      } as unknown as ExtensionManager;
+
+      await expect(
+        checkForExtensionUpdate(extension, mockManager),
+      ).resolves.toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+    });
+
     it('checks a selected marketplace entry when its local source is a directory', async () => {
       const sourceDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'local-marketplace-update-test-'),
@@ -1022,15 +1043,19 @@ describe('git extension helpers', () => {
           path.join(pluginDir, '.claude-plugin', 'plugin.json'),
           JSON.stringify({ name: 'selected', version: '2.0.0' }),
         );
+        const loadedNames: string[] = [];
         const mockManager = {
           loadExtensionConfig: vi.fn(
-            ({ extensionDir }: { extensionDir: string }) =>
-              JSON.parse(
+            ({ extensionDir }: { extensionDir: string }) => {
+              const config = JSON.parse(
                 fsSync.readFileSync(
                   path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
                   'utf-8',
                 ),
-              ),
+              ) as ExtensionConfig;
+              loadedNames.push(config.name);
+              return config;
+            },
           ),
         } as unknown as ExtensionManager;
         const installMetadata = {
@@ -1051,6 +1076,7 @@ describe('git extension helpers', () => {
 
         expect(unchanged).toBe(ExtensionUpdateState.UP_TO_DATE);
         expect(outdated).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(loadedNames).toEqual(['selected', 'selected']);
       } finally {
         await fs.rm(sourceDir, { recursive: true, force: true });
       }
