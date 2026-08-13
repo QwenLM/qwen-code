@@ -248,22 +248,28 @@ function* usedLines(finalText: string): Generator<string> {
     else if (t.type === 'blockquote_close') blockquoteDepth--;
     else if (t.type === 'inline' && blockquoteDepth === 0) {
       // The visible prose of this inline, reconstructed the way GitHub lays it
-      // out. `text` is prose. A soft/hard break is a real visible line break, so
-      // it splits the line. Every OTHER inline node — a code span, inline HTML (a
-      // raw tag, a comment, or a raw-text element like `<script>`/`<title>` whose
-      // inner text markdown-it exposes as a child but GitHub shows only inline or
-      // escaped), or an image — does NOT start a new visible line on GitHub, so it
-      // must not start one here: it is replaced by `DROPPED_INLINE`, a
-      // non-whitespace sentinel that neither forges a line start (`x <script>Layer
-      // walked: id` stays one line, marker mid-line → rejected, as GitHub renders
-      // it) nor lets fragments stitch (`Layer walked: <x>id` → the id capture
-      // stops at the sentinel). Emphasis and link open/close nodes are NEITHER:
-      // their visible text children flow through as prose (a link's visible text
+      // out. A visible line break — a soft/hard break, or a `<br>` tag, which
+      // GitHub renders as one — splits the line. Every OTHER inline node — a code
+      // span, other inline HTML (a raw tag, a comment, or a raw-text element like
+      // `<script>`/`<title>` whose inner text markdown-it exposes as a child but
+      // GitHub shows only inline or escaped), or an image — does NOT start a new
+      // visible line on GitHub, so it must not start one here: it is replaced by
+      // `DROPPED_INLINE`, a non-whitespace sentinel that neither forges a line
+      // start (`x <script>Layer walked: id` stays one line, marker mid-line →
+      // rejected, as GitHub renders it) nor lets fragments stitch (`Layer walked:
+      // <x>id` → the id capture stops at the sentinel). `text` is prose, except a
+      // raw newline in it can only come from a decoded numeric entity (`&#10;`) —
+      // a real source break is a `softbreak`/`hardbreak` TOKEN, never text — and
+      // GitHub collapses that entity LF to whitespace, so it must not split a line
+      // either. Emphasis and link open/close nodes are NEITHER a break nor a
+      // sentinel: their visible text children flow through (a link's visible text
       // is a real receipt).
       let prose = '';
       for (const c of t.children ?? []) {
-        if (c.type === 'text') prose += c.content;
+        if (c.type === 'text') prose += c.content.replace(/[\r\n]+/g, ' ');
         else if (c.type === 'softbreak' || c.type === 'hardbreak')
+          prose += '\n';
+        else if (c.type === 'html_inline' && /^<br\s*\/?>$/i.test(c.content))
           prose += '\n';
         else if (
           c.type === 'code_inline' ||
@@ -296,6 +302,12 @@ export function parseLayerReceipts(
   for (const line of usedLines(finalText)) {
     const m = LAYER_RECEIPT_LINE_RE.exec(line);
     if (!m) continue;
+    // Trailing stitch: the id capture is un-anchored at its end, so a dropped
+    // inline node touching the id (`Layer walked: toctou` + `` `x` ``) truncates
+    // the visible token `toctoux` back to the known prefix `toctou`. GitHub
+    // renders one stitched word, not a receipt, so a sentinel immediately after
+    // the id disqualifies it — the mirror of the leading-stitch guard.
+    if (line.charCodeAt(m[0].length) === 0) continue;
     const id = m[1].toLowerCase();
     if (known.has(id)) ids.add(id);
   }

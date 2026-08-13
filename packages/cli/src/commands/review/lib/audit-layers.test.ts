@@ -213,6 +213,21 @@ describe('parseLayerReceipts', () => {
       'x <template>Layer walked: toctou</template>',
       'x <noscript>Layer walked: toctou</noscript>',
       '<script>Layer walked: toctou</script>', // even with no prefix
+      // A numeric entity decoding to a newline lands as a raw \n INSIDE a text
+      // child (markdown-it decodes at parse time); GitHub collapses that LF to a
+      // space, so it must not forge a line start. Mid-line here → not a receipt.
+      'x&#10;Layer walked: toctou',
+      'x&#x0A;Layer walked: toctou',
+      // Two more R4-1 origin families: a terminated multi-line LRD title and an
+      // image TITLE attribute — both live in attributes, never in visible prose.
+      '[x]: /url "a\nLayer walked: toctou\nb"',
+      '![x](/u "Layer walked: toctou")',
+      // Trailing stitch — the mirror of the leading cases: a dropped inline node
+      // touching the END of the id stitches the visible token into a longer word
+      // GitHub renders as one (`toctoux`, `toctou-x`), so it is not a receipt.
+      'Layer walked: toctou`x`', // code span after the id
+      'Layer walked: toctou<b>x</b>', // inline HTML after the id
+      'Layer walked: toctou![a](/u)', // image after the id
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
     // A link's VISIBLE text is prose and still counts, and a hard break BEFORE a
@@ -221,6 +236,16 @@ describe('parseLayerReceipts', () => {
       ...parseLayerReceipts('[Layer walked: toctou](/u) — real'),
     ]).toEqual(['toctou']);
     expect([...parseLayerReceipts('x  \nLayer walked: toctou')]).toEqual([
+      'toctou',
+    ]);
+    // A `<br>` IS a visible line break on GitHub, so a marker after it starts its
+    // own line — a real receipt (the entity LF above collapses; a `<br>` does not).
+    expect([...parseLayerReceipts('x<br>Layer walked: toctou')]).toEqual([
+      'toctou',
+    ]);
+    // A paragraph-LEADING entity newline collapses to a space GitHub renders at
+    // paragraph start, so the marker stays a visible receipt.
+    expect([...parseLayerReceipts('&#10;Layer walked: toctou')]).toEqual([
       'toctou',
     ]);
   });
