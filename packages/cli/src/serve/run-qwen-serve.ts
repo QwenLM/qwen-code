@@ -31,9 +31,11 @@ import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
+  type JournalGrowthSessionLimit,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -53,6 +55,7 @@ import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
+  serveJournalGrowthPoolMb,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   createChildHeapPolicy,
@@ -1570,6 +1573,17 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    // Same gate the runtime applies (see runQwenServeImpl): pinned journal
+    // flags or a budget with no usable pool disable growth, so the
+    // bootstrap response matches what the runtime will wire.
+    const bootstrapJournalGrowthPoolMb =
+      opts.daemonMemoryBudget !== undefined
+        ? serveJournalGrowthPoolMb({
+            budget: opts.daemonMemoryBudget,
+            maxJournalEvents: opts.maxJournalEvents,
+            maxJournalBytes: opts.maxJournalBytes,
+          })
+        : 0;
     const channelWorker = getChannelWorkerSnapshot();
     const channelWorkers = getChannelWorkerSnapshots();
     const runtimeFailed = runtimeError !== undefined;
@@ -1656,7 +1670,20 @@ function createBootstrapServeApp(input: {
         // No child-heap policy during bootstrap: it is built with the
         // runtime, so `enforced` is correctly false and `childHeap` null in
         // this window even when the flag says `enforce`.
-        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
+        memory: toDaemonStatusMemoryLimits(
+          opts.daemonMemoryBudget,
+          undefined,
+          bootstrapJournalGrowthPoolMb > 0
+            ? {
+                poolBytes: bootstrapJournalGrowthPoolMb * 1024 * 1024,
+                hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                baselineMaxEvents:
+                  opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
+                baselineMaxBytes:
+                  opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
+              }
+            : null,
+        ),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -2537,11 +2564,11 @@ async function runQwenServeImpl(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once, for reporting only. Nothing
-  // downstream consumes them to size a child: dividing a pool by a workspace
-  // count is unsound while registration does not spawn a child, and bounding
-  // the aggregate needs admission at spawn time keyed on live children. This
-  // establishes the denominator that work will be designed against.
+  // Resolve the daemon's memory figures once. Nothing downstream consumes
+  // them to size a child: dividing a pool by a workspace count is unsound
+  // while registration does not spawn a child, and bounding the aggregate
+  // needs admission at spawn time keyed on live children. The one consumer
+  // today is the adaptive live-journal growth pool below.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
@@ -2551,6 +2578,48 @@ async function runQwenServeImpl(
   ) {
     writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
+  // Adaptive live-journal growth: sessions whose in-flight turn outgrows
+  // the journal caps can grow into a daemon-wide pool (derived once from
+  // the memory budget and shared by every bridge), instead of silently
+  // truncating the live replay window (the canonical case: one turn fanning
+  // out many concurrent subagents). An operator-pinned journal flag
+  // disables growth — explicit config wins — as does a budget with no
+  // usable pool (insufficient host, no headroom after the root reserve).
+  const journalGrowthPoolMbValue =
+    opts.daemonMemoryBudget !== undefined
+      ? serveJournalGrowthPoolMb({
+          budget: opts.daemonMemoryBudget,
+          maxJournalEvents: opts.maxJournalEvents,
+          maxJournalBytes: opts.maxJournalBytes,
+        })
+      : 0;
+  const journalGrowthPoolBytes =
+    journalGrowthPoolMbValue > 0
+      ? journalGrowthPoolMbValue * 1024 * 1024
+      : undefined;
+  // ONE aggregate pool for the whole daemon: every bridge registers its
+  // live-session cap enumerator here and receives the aggregator, so each
+  // bridge's growth advisor accounts every sharing session — across all
+  // workspaces — against the same pool instead of holding its own copy.
+  const journalGrowthSessionLimitProviders = new Set<
+    () => readonly JournalGrowthSessionLimit[]
+  >();
+  const journalGrowthSessionLimits =
+    (): readonly JournalGrowthSessionLimit[] => {
+      const limits: JournalGrowthSessionLimit[] = [];
+      for (const provider of journalGrowthSessionLimitProviders) {
+        limits.push(...provider());
+      }
+      return limits;
+    };
+  const registerJournalGrowthSessionLimits = (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ): (() => void) => {
+    journalGrowthSessionLimitProviders.add(provider);
+    return () => {
+      journalGrowthSessionLimitProviders.delete(provider);
+    };
+  };
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
     workspaceRegistrationStore === undefined &&
@@ -4116,6 +4185,13 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -4519,6 +4595,13 @@ async function runQwenServeImpl(
           : {}),
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
+          : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
@@ -5073,6 +5156,13 @@ async function runQwenServeImpl(
             : {}),
           ...(opts.maxJournalBytes !== undefined
             ? { maxJournalBytes: opts.maxJournalBytes }
+            : {}),
+          ...(journalGrowthPoolBytes !== undefined
+            ? {
+                journalGrowthPoolBytes,
+                journalGrowthSessionLimits,
+                registerJournalGrowthSessionLimits,
+              }
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }

@@ -769,6 +769,7 @@ describe('Session', () => {
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
+      getGoalRuntimePrepared: vi.fn().mockResolvedValue(mockGoalRuntime),
       bindGoalTurnHost: vi.fn().mockImplementation((host) => {
         boundGoalHost = host;
         return () => {
@@ -14581,6 +14582,64 @@ describe('Session', () => {
 
           await session.publishRecoveredGoalState([]);
           expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+        });
+
+        it('suppresses a hidden recovered Goal until a different Goal replaces it', async () => {
+          const listener = mockGoalRuntime.subscribe.mock.calls[0]?.[0] as (
+            snapshot: core.GoalSnapshotV2,
+            cause?: core.GoalStateCause,
+          ) => void;
+          session.primeRecoveredGoalPublication(undefined, 'goal-hidden');
+          const hidden: core.GoalSnapshotV2 = {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              ...migratedSnapshot.goal!,
+              goalId: 'goal-hidden',
+              revision: 1,
+              objective: 'hidden inherited goal',
+              status: 'active',
+            },
+          };
+
+          listener(hidden, 'create');
+          listener({ ...hidden, activity: 'running' });
+          await new Promise((resolve) => setTimeout(resolve, 0));
+
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+          const progressed = {
+            ...hidden,
+            activity: 'idle' as const,
+            goal: {
+              ...hidden.goal!,
+              revision: 2,
+              objective: 'still hidden',
+            },
+          };
+          listener(progressed, 'edit');
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+          const replacement = {
+            ...progressed,
+            goal: {
+              ...progressed.goal!,
+              goalId: 'goal-visible',
+              revision: 1,
+              objective: 'visible replacement',
+            },
+          };
+          listener(replacement, 'replace');
+          await vi.waitFor(() =>
+            expect(mockClient.sessionUpdate).toHaveBeenCalledOnce(),
+          );
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              _meta: expect.objectContaining({ goalState: replacement }),
+            }),
+          });
         });
 
         it('returns nothing when no Goal was recovered', async () => {
