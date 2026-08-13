@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -99,7 +100,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
     mkdirSync(channelsDir, { recursive: true });
   });
 
-  it('seeds the workspace file from the legacy global file and removes it', () => {
+  it('seeds the workspace file from the legacy global file and keeps it for later workspaces', () => {
     const legacyBody = JSON.stringify({
       version: 1,
       channels: { telegram: 'stopped' },
@@ -112,7 +113,34 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
     });
-    expect(existsSync(legacyPath)).toBe(false);
+    // The legacy file carries no workspace attribution: deleting it after
+    // the first adoption would silently lose the recorded stops of every
+    // later-starting workspace and resurrect the channels they explicitly
+    // stopped (#8975).
+    expect(existsSync(legacyPath)).toBe(true);
+  });
+
+  it('lets every later-starting workspace adopt the same legacy stops (#8975)', () => {
+    // Multi-workspace upgrade: stops from every workspace landed in the
+    // single global file under older releases. The first workspace to
+    // start must not consume the shared record — a workspace adopting it
+    // later still has to see its stops, or its explicitly stopped
+    // channels resurrect on the next `--channel all` (#8975).
+    const legacyBody = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped', feishu: 'stopped' },
+    });
+    writeFileSync(legacyPath, legacyBody, 'utf-8');
+
+    adoptLegacyChannelState(workspace);
+    adoptLegacyChannelState('/workspace/other');
+
+    expect(
+      new ChannelStateStore(
+        channelRuntimeStatePath('/workspace/other'),
+      ).readAll(),
+    ).toEqual({ telegram: 'stopped', feishu: 'stopped' });
+    expect(existsSync(legacyPath)).toBe(true);
   });
 
   // POSIX permission bits never surface on Windows (statSync().mode does
@@ -218,7 +246,8 @@ describe('adoptLegacyChannelState (#8975)', () => {
     writeFileSync(legacyPath, legacyBody, 'utf-8');
     adoptLegacyChannelState(workspace);
     expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
-    expect(existsSync(legacyPath)).toBe(false);
+    // Kept for later-starting workspaces (#8975).
+    expect(existsSync(legacyPath)).toBe(true);
   });
 
   it('leaves no target behind when the atomic write fails mid-copy (#8975)', () => {
@@ -247,7 +276,8 @@ describe('adoptLegacyChannelState (#8975)', () => {
     // Once the disk recovers, the retry adopts the legacy stops.
     adoptLegacyChannelState(workspace);
     expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
-    expect(existsSync(legacyPath)).toBe(false);
+    // Kept for later-starting workspaces (#8975).
+    expect(existsSync(legacyPath)).toBe(true);
   });
 });
 
@@ -617,9 +647,15 @@ describe('ChannelStateStore', () => {
     () => {
       // Pre-create the target dir LOOSER than 0o700: mkdirSync's mode only
       // applies to newly created dirs, so here only the explicit chmod in
-      // applyChange keeps the dir restrictive.
+      // applyChange keeps the dir restrictive. chmodSync ignores the
+      // process umask (mkdirSync's mode is masked by it), so it pins the
+      // loose precondition even under a restrictive umask — asserted below
+      // so a masking environment fails loudly instead of passing the 0o700
+      // check vacuously (#8975).
       const looseDir = join(dirname(filePath), 'loose');
       mkdirSync(looseDir, { mode: 0o755 });
+      chmodSync(looseDir, 0o755);
+      expect(statSync(looseDir).mode & 0o777).toBe(0o755);
       const target = join(looseDir, 'channel-state.json');
       const store = new ChannelStateStore(target);
 

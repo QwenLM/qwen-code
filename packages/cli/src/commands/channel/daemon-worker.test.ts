@@ -56,22 +56,28 @@ const mockChannelStateStore = vi.hoisted(() =>
     prune: mockChannelStateStorePrune,
     // Mirror the real best-effort wrappers so throwing `set`/`setMany`
     // mocks still exercise "persistence failure never blocks a connect".
+    // Return the persistence boolean like the real store: callers surface a
+    // failed write (#8975).
     trySet: (name: string, state: 'active' | 'stopped') => {
       try {
         mockChannelStateStoreSet(name, state);
+        return true;
       } catch {
         // best-effort
+        return false;
       }
     },
     trySetMany: (names: string[], state: 'active' | 'stopped') => {
       // Mirror the real setMany: an empty name list is a no-op and must
       // not be recorded, or tests diverge from production in both
       // directions (the all-channels-fail path reaches trySetMany([])).
-      if (names.length === 0) return;
+      if (names.length === 0) return true;
       try {
         mockChannelStateStoreSetMany(names, state);
+        return true;
       } catch {
         // best-effort
+        return false;
       }
     },
   })),
@@ -1386,10 +1392,17 @@ describe('runChannelDaemonWorker', () => {
     // 'stopped': a state WRITE added here (e.g. persisting the configured
     // set as 'active') would flip the recorded stops and resurrect every
     // explicitly stopped channel on the next `--channel all` — the #8975
-    // regression class. (prune IS called: pruning stale entries against
-    // the configured set is a read-side cleanup, not a state flip.)
+    // regression class.
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    // prune IS called — and pin it: pruning stale entries against the
+    // configured set is a read-side cleanup, not a state flip, and a
+    // refactor skipping prune exactly in this branch would strand stale
+    // `stopped` entries for channels removed from settings (#8975).
+    expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+      'telegram',
+      'feishu',
+    ]);
   });
 
   it('skips stopped channels when restoring --channel all (#8975)', async () => {
@@ -1524,11 +1537,13 @@ describe('runChannelDaemonWorker', () => {
 
   it('force-starts explicitly selected channels even when stopped (#8975)', async () => {
     const sdk = createSdk();
-    // No state-setup mock here on purpose: an explicit names selection
-    // force-starts without consulting the restore filter, and an
-    // unconsumed mockReturnValueOnce leaks into the NEXT test because
+    // Seed a recorded stop with a PERSISTENT mock (beforeEach resets it):
+    // a mockReturnValueOnce leaks into the NEXT test because
     // vi.clearAllMocks() does not clear Vitest's once-implementation
-    // queue (#8975).
+    // queue. The seeded stop distinguishes force-start from a restore
+    // filter mistakenly applied to names mode — with the filter applied,
+    // the explicitly requested channel would be skipped (#8975).
+    mockChannelStateStoreReadAll.mockReturnValue({ telegram: 'stopped' });
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -1550,6 +1565,11 @@ describe('runChannelDaemonWorker', () => {
       ['telegram'],
       'active',
     );
+    // Names mode never consults the restore filter: neither the prune nor
+    // the read that drives it may run, or a recorded stop could filter an
+    // explicitly requested channel out of a names selection (#8975).
+    expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreReadAll).not.toHaveBeenCalled();
     await handle.close();
   });
 
@@ -1580,6 +1600,12 @@ describe('runChannelDaemonWorker', () => {
       requestedChannels: ['telegram'],
       pid: process.pid,
     });
+    // The loss must still be surfaced like the stop direction does: a
+    // stale `stopped` record would re-skip the explicitly restarted
+    // channel on the next `--channel all` restore (#8975).
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
     await handle.close();
   });
 

@@ -706,7 +706,15 @@ export async function runChannelDaemonWorker(
 
     // One batched best-effort write after the connect loop instead of a
     // fsync'd read-modify-write per channel on the startup critical path.
-    stateStore.trySetMany(connected, 'active');
+    // A failed write leaves stale `stopped` records: the channels ARE
+    // running, so warn instead of failing the start — but surface the loss
+    // like the stop direction does, or the next `--channel all` restore
+    // skips channels the user explicitly asked for (#8975).
+    if (!stateStore.trySetMany(connected, 'active')) {
+      writeStdoutLine(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
+    }
 
     if (connected.length === 0) {
       throw new Error('No channels connected.');

@@ -514,6 +514,37 @@ describe('workspace Channel management routes', () => {
     expect(response.body).not.toHaveProperty('statePersisted');
   });
 
+  it('carries statePersisted on the successful stop body when the record was lost (#8975)', async () => {
+    const { app, primaryService } = mount();
+    // Happy-path twin of the 500 pin: the route handler is the generic
+    // `res.status(200).json(await service.stop(name))` passthrough and
+    // the default route mock resolves without the field, so a reshape
+    // that destructures statePersisted out of the success payload would
+    // drop it with every other test green. The SDK's
+    // DaemonChannelStopInstanceResult.statePersisted would then read
+    // undefined, the client would report the stop as durable, and the
+    // stopped channel would silently resurrect on `--channel all`
+    // (#8975).
+    vi.mocked(primaryService.stop).mockResolvedValueOnce({
+      snapshot: { revision: 'r2', instances: {} },
+      instance: {
+        name: 'bot',
+        config: {},
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      },
+      statePersisted: false,
+    });
+
+    const response = await auth(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.statePersisted).toBe(false);
+  });
+
   it('rejects requests with an invalid client ID', async () => {
     const { app, primaryService } = mount();
     const invalidClient = (test: request.Test) =>

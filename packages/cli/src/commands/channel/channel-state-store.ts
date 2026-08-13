@@ -1,10 +1,4 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  unlinkSync,
-} from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
   atomicWriteFileSync,
@@ -54,13 +48,19 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
 }
 
 /**
- * One-time migration for stops recorded by an older release, which wrote the
- * legacy global file when the pidfile carried no workspace. The standalone
- * read path is always workspace-scoped, so without this seed the recorded
- * stops would be silently lost on upgrade and the channels resurrected by
- * the next `--channel all` start (#8975). Runs only when the workspace file
- * does not exist yet; best-effort — any failure just drops the one-time
- * legacy record.
+ * Migration for stops recorded by an older release, which wrote the legacy
+ * global file when the pidfile carried no workspace. The standalone read
+ * path is always workspace-scoped, so without this seed the recorded stops
+ * would be silently lost on upgrade and the channels resurrected by the
+ * next `--channel all` start (#8975). Runs only when the workspace file
+ * does not exist yet; best-effort — any failure just drops the legacy
+ * record for this workspace. The legacy file carries no workspace
+ * attribution, so it is deliberately KEPT after an adoption: deleting it
+ * after the first workspace adopts it would silently lose the recorded
+ * stops of every later-starting workspace and resurrect the channels they
+ * explicitly stopped. Each adopting workspace copies the whole file;
+ * entries for channels it does not configure are dropped by `prune` on
+ * start anyway (#8975).
  */
 export function adoptLegacyChannelState(workspaceCwd: string): void {
   const targetPath = channelRuntimeStatePath(workspaceCwd);
@@ -87,13 +87,9 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
     writeStoreWarning(
       `[Channel] Warning: could not adopt legacy channel state from ${legacyPath}; recorded stops may not be honored.`,
     );
-    return;
   }
-  try {
-    unlinkSync(legacyPath);
-  } catch {
-    // The completed target is used from now on; the legacy file is inert.
-  }
+  // The legacy file is intentionally kept: later-starting workspaces must
+  // be able to adopt the same recorded stops (see the function doc).
 }
 
 function isChannelRuntimeState(value: unknown): value is ChannelRuntimeState {

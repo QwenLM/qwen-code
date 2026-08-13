@@ -280,8 +280,10 @@ function errorMessage(error: unknown): string {
  * stopped. The supervisor keeps `lastConnectedChannels` on that terminal
  * snapshot exactly for this capture, and when `requestedChannels` is gone
  * the carried connected set also supplies the candidate names (#8975).
- * Runs inside the manager lane, so an in-flight start has already committed
- * and reported ready by the time a queued stop executes.
+ * Manager-driven starts serialize in the lane, but supervisor-internal
+ * crash-restarts bypass it: the caller unions the pre-stop snapshots with
+ * the group's post-stop snapshots so a ready report that commits during
+ * the tear-down window is still recorded as explicitly stopped (#8975).
  */
 function stoppedChannelsByWorkspace(
   workers: readonly ChannelWorkerGroupSnapshot[],
@@ -322,6 +324,22 @@ function stoppedChannelsByWorkspace(
     workspaceCwd,
     names: [...names],
   }));
+}
+
+/**
+ * The control state rides HTTP responses verbatim (GET/PUT/DELETE
+ * /workspace/channel): strip `lastConnectedChannels`, an internal input of
+ * the stop capture that the SDK's `DaemonChannelWorkerSnapshot` does not
+ * declare. The capture reads the group snapshots directly, so stripping in
+ * the public aggregation does not narrow what a stop records (#8975).
+ */
+function publicWorkerSnapshot(
+  worker: ChannelWorkerGroupSnapshot,
+): ChannelWorkerGroupSnapshot {
+  if (!worker.lastConnectedChannels) return worker;
+  const publicSnapshot = { ...worker };
+  delete publicSnapshot.lastConnectedChannels;
+  return publicSnapshot;
 }
 
 function startupFailureDetails(error: unknown): {
@@ -367,7 +385,7 @@ export function createChannelWorkerManager(
       ? { pendingSelection: cloneSelection(pendingSelection) }
       : {}),
     transition,
-    workers: group?.snapshots() ?? [],
+    workers: (group?.snapshots() ?? []).map(publicWorkerSnapshot),
   });
 
   const notify = () => {
@@ -619,21 +637,37 @@ export function createChannelWorkerManager(
     if (!hadState) {
       return { changed: false, state: snapshot() };
     }
-    // Capture what this stop tears down before the workers go away, inside
-    // the lane (any in-flight start has already committed), so callers can
-    // persist `stopped` from the result instead of a racy pre-stop snapshot.
-    const stoppedChannels = stoppedChannelsByWorkspace(
-      group?.snapshots() ?? [],
-    );
+    // Capture what this stop tears down before the workers go away, so
+    // callers can persist `stopped` from the result instead of a racy
+    // pre-stop snapshot. The pre-stop capture alone is not sufficient:
+    // supervisor-internal crash-restarts bypass the manager lane, so a
+    // relaunch whose ready report commits during the tear-down window
+    // connects channels the pre-stop capture never recorded (the worker
+    // already wrote them `active`). Re-read the snapshots once
+    // `group.stop()` settles and union both captures so those channels are
+    // persisted `stopped` too (#8975).
+    const stoppingGroup = group;
+    const capturedSnapshots: ChannelWorkerGroupSnapshot[] = [
+      ...(stoppingGroup?.snapshots() ?? []),
+    ];
     setTransition('stopping');
     try {
-      if (group) {
-        await group.stop();
+      if (stoppingGroup) {
+        try {
+          await stoppingGroup.stop();
+        } finally {
+          // The supervisors' final snapshots reflect any ready that
+          // committed during the tear-down; union them with the pre-stop
+          // capture. After a rejected stop() they additionally cover the
+          // partial tear-down a retry would otherwise re-capture.
+          capturedSnapshots.push(...stoppingGroup.snapshots());
+        }
         group = undefined;
       }
       release();
     } catch (error) {
       setTransition('idle');
+      const stoppedChannels = stoppedChannelsByWorkspace(capturedSnapshots);
       // Carry the captured tear-down set on the error: a partial multi-
       // workspace stop already killed some workers, and a release() failure
       // clears the group before any retry could re-capture the names. The
@@ -643,6 +677,7 @@ export function createChannelWorkerManager(
         ...(stoppedChannels.length > 0 ? { stoppedChannels } : {}),
       });
     }
+    const stoppedChannels = stoppedChannelsByWorkspace(capturedSnapshots);
     commit(undefined, []);
     return {
       changed: hadState,

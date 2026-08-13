@@ -41,33 +41,82 @@ let child: ChildProcess | undefined;
 let testRoot: string | undefined;
 let mockServer: MockServerHandle | undefined;
 
+// One shared transcript per spawned child, with the `data` listeners
+// attached at first observation: consecutive waiters must see output
+// delivered before they attach. A fresh per-call listener starts from an
+// empty buffer, so a single pipe chunk carrying two awaited lines is
+// consumed by the first waiter and lost to the second — a spurious
+// timeout on a correctly behaving service under CPU saturation (#8975).
+interface ChildTranscript {
+  output: string;
+  exited: boolean;
+  exitCode: number | null;
+  waiters: Set<() => void>;
+}
+
+const childTranscripts = new WeakMap<ChildProcess, ChildTranscript>();
+
+function observeChild(proc: ChildProcess): ChildTranscript {
+  const existing = childTranscripts.get(proc);
+  if (existing) return existing;
+  const transcript: ChildTranscript = {
+    output: '',
+    exited: false,
+    exitCode: null,
+    waiters: new Set(),
+  };
+  childTranscripts.set(proc, transcript);
+  const onData = (chunk: Buffer) => {
+    transcript.output += chunk.toString('utf-8');
+    for (const notify of transcript.waiters) notify();
+  };
+  proc.stdout?.on('data', onData);
+  proc.stderr?.on('data', onData);
+  proc.once('exit', (code) => {
+    transcript.exited = true;
+    transcript.exitCode = code;
+    for (const notify of transcript.waiters) notify();
+  });
+  return transcript;
+}
+
 function waitForLine(
   proc: ChildProcess,
   needle: string,
   timeoutMs = 30000,
 ): Promise<void> {
+  const transcript = observeChild(proc);
   return new Promise((resolve, reject) => {
-    let buffer = '';
     const timer = setTimeout(() => {
-      reject(new Error(`Timed out waiting for "${needle}". Output: ${buffer}`));
-    }, timeoutMs);
-    const onData = (chunk: Buffer) => {
-      buffer += chunk.toString('utf-8');
-      if (buffer.includes(needle)) {
-        clearTimeout(timer);
-        resolve();
-      }
-    };
-    proc.stdout?.on('data', onData);
-    proc.stderr?.on('data', onData);
-    proc.once('exit', (code) => {
-      clearTimeout(timer);
+      finish();
       reject(
         new Error(
-          `Process exited (${String(code)}) before "${needle}". Output: ${buffer}`,
+          `Timed out waiting for "${needle}". Output: ${transcript.output}`,
         ),
       );
-    });
+    }, timeoutMs);
+    const finish = () => {
+      clearTimeout(timer);
+      transcript.waiters.delete(check);
+    };
+    const check = () => {
+      if (transcript.output.includes(needle)) {
+        finish();
+        resolve();
+        return true;
+      }
+      if (transcript.exited) {
+        finish();
+        reject(
+          new Error(
+            `Process exited (${String(transcript.exitCode)}) before "${needle}". Output: ${transcript.output}`,
+          ),
+        );
+        return true;
+      }
+      return false;
+    };
+    if (!check()) transcript.waiters.add(check);
   });
 }
 
@@ -77,31 +126,41 @@ function waitForListeningUrl(
   proc: ChildProcess,
   timeoutMs = 60000,
 ): Promise<string> {
+  const transcript = observeChild(proc);
   return new Promise((resolve, reject) => {
-    let buffer = '';
     const timer = setTimeout(() => {
-      reject(
-        new Error(`Timed out waiting for the listening URL. Output: ${buffer}`),
-      );
-    }, timeoutMs);
-    const onData = (chunk: Buffer) => {
-      buffer += chunk.toString('utf-8');
-      const match = buffer.match(/listening on (https?:\/\/[^\s)]+)/);
-      if (match) {
-        clearTimeout(timer);
-        resolve(match[1]!);
-      }
-    };
-    proc.stdout?.on('data', onData);
-    proc.stderr?.on('data', onData);
-    proc.once('exit', (code) => {
-      clearTimeout(timer);
+      finish();
       reject(
         new Error(
-          `Process exited (${String(code)}) before the listening URL. Output: ${buffer}`,
+          `Timed out waiting for the listening URL. Output: ${transcript.output}`,
         ),
       );
-    });
+    }, timeoutMs);
+    const finish = () => {
+      clearTimeout(timer);
+      transcript.waiters.delete(check);
+    };
+    const check = () => {
+      const match = transcript.output.match(
+        /listening on (https?:\/\/[^\s)]+)/,
+      );
+      if (match) {
+        finish();
+        resolve(match[1]!);
+        return true;
+      }
+      if (transcript.exited) {
+        finish();
+        reject(
+          new Error(
+            `Process exited (${String(transcript.exitCode)}) before the listening URL. Output: ${transcript.output}`,
+          ),
+        );
+        return true;
+      }
+      return false;
+    };
+    if (!check()) transcript.waiters.add(check);
   });
 }
 

@@ -354,10 +354,18 @@ async function serveWithoutChannels(
 
 /** Best-effort: record a successfully connected channel as active. */
 function recordChannelActive(name: string, workspaceCwd: string): void {
-  new ChannelStateStore(channelRuntimeStatePath(workspaceCwd)).trySet(
-    name,
-    'active',
-  );
+  const persisted = new ChannelStateStore(
+    channelRuntimeStatePath(workspaceCwd),
+  ).trySet(name, 'active');
+  // The channel IS running, so a failed write is a warning, not an exit —
+  // but the stale `stopped` record survives and the next `--channel all`
+  // would skip the channel the user explicitly restarted. Surface the loss
+  // like the stop direction does (#8975).
+  if (!persisted) {
+    writeStdoutLine(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+  }
 }
 
 /** Start a single channel with its own bridge + crash recovery. */
@@ -618,8 +626,16 @@ async function startAll(
     }
   }
   // One batched best-effort write after the loop instead of a fsync'd
-  // read-modify-write per channel on the startup critical path.
-  stateStore.trySetMany([...connectedChannels.keys()], 'active');
+  // read-modify-write per channel on the startup critical path. A failed
+  // write leaves stale `stopped` records: the channels ARE running, so
+  // warn instead of failing the start — but surface the loss like the stop
+  // direction does, or the next `--channel all` restore skips explicitly
+  // restarted channels (#8975).
+  if (!stateStore.trySetMany([...connectedChannels.keys()], 'active')) {
+    writeStdoutLine(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+  }
   const connectedCount = connectedChannels.size;
 
   if (connectedCount === 0) {

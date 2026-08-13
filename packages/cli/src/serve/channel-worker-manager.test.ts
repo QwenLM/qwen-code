@@ -1194,6 +1194,77 @@ describe('createChannelWorkerManager', () => {
     ]);
   });
 
+  it('unions the post-stop capture when a crash-restart ready commits during tear-down (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // Supervisor-internal crash-restarts bypass the manager lane: a
+    // relaunch whose ready report commits during the stop's tear-down
+    // window connects channels the pre-stop capture never recorded (and
+    // the worker already wrote them `active`). The pre-stop snapshot alone
+    // would tear them down without a `stopped` record, resurrecting them
+    // on the next `--channel all` — the exact regression this PR fixes.
+    // The group must be re-read once stop() settles and both captures
+    // unioned.
+    const preStop = workerSnapshot({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: ['telegram', 'feishu'],
+      lastConnectedChannels: ['telegram'],
+    });
+    const postStop = workerSnapshot({
+      state: 'running',
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+      lastConnectedChannels: ['telegram', 'feishu'],
+    });
+    let stopped = false;
+    vi.mocked(group.stop).mockImplementation(async () => {
+      stopped = true;
+    });
+    vi.mocked(group.snapshots).mockImplementation(() =>
+      stopped ? [postStop] : [preStop],
+    );
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+    ]);
+  });
+
+  it('strips lastConnectedChannels from the public control state but not the stop capture (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // `lastConnectedChannels` is an internal input of the stop capture,
+    // undeclared in the SDK's DaemonChannelWorkerSnapshot: the control
+    // state rides HTTP responses verbatim, so it must not leak there —
+    // while the capture (which reads the group snapshots directly) must
+    // keep seeing it (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'starting',
+        channels: ['all'],
+        requestedChannels: ['telegram'],
+        lastConnectedChannels: ['telegram'],
+      }),
+    ]);
+
+    const state = test.manager.state();
+
+    expect(state.workers[0]).not.toHaveProperty('lastConnectedChannels');
+    expect(state.workers[0]).toMatchObject({
+      requestedChannels: ['telegram'],
+    });
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram'] },
+    ]);
+  });
+
   it('records only the connected channels from a budget-exhausted mode-names worker (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);

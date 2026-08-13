@@ -49,18 +49,24 @@ const mockChannelStateStore = vi.hoisted(() =>
     prune: mockChannelStateStorePrune,
     // Mirror the real best-effort wrappers so throwing `set`/`setMany`
     // mocks still exercise "persistence failure never blocks startup".
+    // Return the persistence boolean like the real store: callers surface a
+    // failed write (#8975).
     trySet: (name: string, state: 'active' | 'stopped') => {
       try {
         mockChannelStateStoreSet(name, state);
+        return true;
       } catch {
         // best-effort
+        return false;
       }
     },
     trySetMany: (names: string[], state: 'active' | 'stopped') => {
       try {
         mockChannelStateStoreSetMany(names, state);
+        return true;
       } catch {
         // best-effort
+        return false;
       }
     },
   })),
@@ -1538,6 +1544,14 @@ describe('startCommand.handler', () => {
         // the user explicitly stopped — the #8975 regression class.
         expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
         expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+        // prune IS called — and pin it: pruning stale entries against the
+        // configured set is a read-side cleanup, not a state flip, and a
+        // refactor skipping prune exactly in this branch would strand stale
+        // `stopped` entries for channels removed from settings (#8975).
+        expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
+          'telegram',
+          'feishu',
+        ]);
         // Startup no longer exits when every channel is stopped.
         expect(exitSpy).not.toHaveBeenCalled();
 
@@ -1824,6 +1838,12 @@ describe('startCommand.handler', () => {
         ['telegram'],
         process.cwd(),
       );
+      // The loss must still be surfaced like the stop direction does: a
+      // stale `stopped` record would re-skip the explicitly restarted
+      // channel on the next `--channel all` restore (#8975).
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
     });
   });
 
@@ -1928,6 +1948,12 @@ describe('startCommand.handler', () => {
     expect(mockWriteServiceInfo).toHaveBeenCalledWith(
       ['telegram'],
       process.cwd(),
+    );
+    // The loss must still be surfaced like the stop direction does: a
+    // stale `stopped` record would re-skip the explicitly restarted
+    // channel on the next `--channel all` restore (#8975).
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
     );
   });
 });

@@ -169,6 +169,18 @@ describe('stopCommand', () => {
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // The no-op exit mock lets execution continue past process.exit, so it
+    // cannot pin the ordering the production control flow depends on: the
+    // warning must be surfaced BEFORE the exit — relocating it below
+    // process.exit(...) would keep this test green while killing the
+    // warning in production (#8975).
+    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('could not persist the stopped record'),
+    );
+    expect(warningCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('warns when a failed daemon stop also lost the stopped record (#8975)', async () => {
@@ -194,6 +206,17 @@ describe('stopCommand', () => {
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(1);
+    // Order pin as in the success branch: the warning must precede the
+    // exit. A throwing exit mock is not usable here (the surrounding
+    // daemon catch would re-exit 1), so assert invocationCallOrder with
+    // the no-op mock instead (#8975).
+    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('could not persist the stopped record'),
+    );
+    expect(warningCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('keeps a plain failed daemon stop quiet about persistence (#8975)', async () => {
