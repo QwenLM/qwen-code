@@ -348,9 +348,12 @@ export type {
 export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
+  stripDisplayControlChars,
+  truncateNotificationLabel,
   TERMINAL_OSC_REGEX,
   TERMINAL_CSI_REGEX,
   TERMINAL_SHIFT_DCS_REGEX,
+  NOTIFICATION_LABEL_MAX_LENGTH,
 } from './utils/terminalSafe.js';
 export { escapeXml } from './utils/xml.js';
 export * from './services/shellExecutionService.js';
