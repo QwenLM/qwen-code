@@ -5807,13 +5807,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
       // caller. Same-shape coalescing is unaffected. The one directional
-      // exception is liveReplayMode: the summary journal is a strict subset
-      // of the full journal, so a summary request safely shares an in-flight
-      // full restore (the waiter recomputes its own mode's replay fields
-      // from the registered entry once the restore settles); only the
-      // reverse — a full request joining a summary restore — would lack the
-      // nested detail the full client expects, so that direction stays
-      // fenced.
+      // exception is liveReplayMode: a summary request safely shares an
+      // in-flight full restore because once the restore settles the daemon
+      // recomputes the waiter's replay fields for its own mode from the
+      // registered entry — the two journals can diverge under cap pressure
+      // (each evicts independently against the shared caps), so the owner's
+      // projected fields can never be reused or filtered down for a waiter
+      // of a different mode. Only the reverse — a full request joining a
+      // summary restore — stays fenced: that projection lacks the nested
+      // detail the full client expects.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
@@ -5871,6 +5873,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.attachCount = Math.max(0, entry.attachCount - 1);
         throw error;
       }
+      // The owner's result carries replay fields selected for the OWNER'S
+      // live replay mode. A waiter whose mode differs (a summary load that
+      // joined a full restore — the only asymmetric direction the fence
+      // admits) recomputes its own fields from the registered entry, exactly
+      // as the existing-entry attach path above does — before registering —
+      // instead of inheriting the owner's unprojected full journal — which
+      // would include nested frames the summary client discards and the full
+      // journal's `history_truncated` marker even when the summary journal
+      // never truncated.
+      const waiterReplayFields =
+        liveReplayMode !== inFlight.liveReplayMode
+          ? historyPageSize !== undefined
+            ? await refreshedReplayFieldsFor(
+                entry,
+                historyPageSize,
+                liveReplayMode,
+              )
+            : replayFieldsFor(entry, action, liveReplayMode)
+          : undefined;
+      // `refreshedReplayFieldsFor` swallows fetch failures into the
+      // in-memory fallback, so re-assert after the await above: a channel
+      // death mid-fetch would otherwise attach the waiter to a session the
+      // daemon already tore down.
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        inFlight.coalesceState.count--;
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw error;
+      }
       // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
       // already initialized it from coalesceState.count synchronously
       // when the IIFE registered the entry. Spread `restored` so the
@@ -5898,25 +5930,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw error;
         }
       }
-      // The owner's result carries replay fields selected for the OWNER'S
-      // live replay mode. A waiter whose mode differs (a summary load that
-      // joined a full restore — the only asymmetric direction the fence
-      // admits) recomputes its own fields from the registered entry, exactly
-      // as the existing-entry attach path above does, instead of inheriting
-      // the owner's unprojected full journal — which would include nested
-      // frames the summary client discards and the full journal's
-      // `history_truncated` marker even when the summary journal never
-      // truncated.
-      const waiterReplayFields =
-        liveReplayMode !== inFlight.liveReplayMode
-          ? historyPageSize !== undefined
-            ? await refreshedReplayFieldsFor(
-                entry,
-                historyPageSize,
-                liveReplayMode,
-              )
-            : replayFieldsFor(entry, action, liveReplayMode)
-          : undefined;
       return {
         ...restored,
         attached: true,

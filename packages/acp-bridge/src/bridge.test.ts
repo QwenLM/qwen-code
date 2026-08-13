@@ -6983,10 +6983,12 @@ describe('createAcpSessionBridge', () => {
       },
     });
 
-    // The summary journal is a strict subset of the full journal, so the
-    // summary waiter shares the in-flight full restore; once the restore
-    // settles, the bridge recomputes the waiter's own-mode replay fields
-    // from the registered entry.
+    // The two journals can diverge under cap pressure (each evicts
+    // independently against the shared caps), so the summary waiter shares
+    // the in-flight full restore only because once the restore settles the
+    // bridge recomputes the waiter's own-mode replay fields from the
+    // registered entry — the owner's projected fields are never reused or
+    // filtered down for a waiter of a different mode.
     const second = bridge.loadSession({
       sessionId: 'coalesce-live-replay-mode',
       workspaceCwd: WS_A,
@@ -7278,6 +7280,68 @@ describe('createAcpSessionBridge', () => {
     expect(waiterJournal).toContain('root-before');
     expect(waiterJournal).toContain('root-after');
     expect(waiterJournal).not.toContain('nested-');
+    await bridge.shutdown();
+  });
+
+  it('rejects a coalesced summary waiter when the channel dies during its replay recompute', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const transcript = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      loadSessionImpl: () => load.promise,
+      // Park the waiter's transcript-page fetch on a deferred so the
+      // channel can die deterministically mid-await.
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return transcript.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-waiter-channel-death',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'full',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+
+    // A summary load with a history page coalesces onto the in-flight full
+    // restore; its recompute takes the `refreshedReplayFieldsFor` arm.
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-waiter-channel-death',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'summary',
+    });
+
+    load.resolve({});
+    const owner = await first;
+    expect(owner.attached).toBe(false);
+
+    // Once the waiter is parked on the transcript fetch, kill the channel
+    // out from under it. `refreshedReplayFieldsFor` swallows the fetch
+    // failure into the in-memory fallback, so only the post-recompute
+    // re-assert can stop the waiter attaching to the torn-down session.
+    await vi.waitFor(() => {
+      expect(
+        handle.agent.extMethodCalls.some(
+          (call) => call.method === SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        ),
+      ).toBe(true);
+    });
+    handle.crash({ exitCode: null, signalCode: 'SIGKILL' });
+    transcript.reject(new Error('channel gone'));
+
+    await expect(second).rejects.toBeInstanceOf(SessionNotFoundError);
+    expect(bridge.sessionCount).toBe(0);
     await bridge.shutdown();
   });
 
