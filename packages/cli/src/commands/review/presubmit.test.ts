@@ -812,7 +812,10 @@ describe('presubmitCommand', () => {
         [
           {
             id: 4,
-            body: 'we fixed this, thanks',
+            // Finding-shaped on purpose: the severityOf gate alone would
+            // exclude an unmarked reply even with the reply guard deleted,
+            // so this fixture pins the `!in_reply_to_id` guard itself.
+            body: '**[Critical]** we fixed this, thanks',
             path: 'a.ts',
             line: 12,
             commit_id: 'abc123',
