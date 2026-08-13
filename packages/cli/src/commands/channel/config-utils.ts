@@ -4,6 +4,10 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import {
+  isValidRotationBound,
+  isValidTurnCount,
+} from '@qwen-code/channel-base';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -175,6 +179,43 @@ function optionalBooleanField(
     );
   }
   return value;
+}
+
+function parseSessionRotationConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['sessionRotation'] {
+  const raw = rawConfig['sessionRotation'];
+  if (raw === undefined || raw === null) return undefined;
+  const parsed = requireObjectField(channelName, 'sessionRotation', raw);
+
+  // Reject unknown keys loudly: a typo'd bound (say "maxTurn") must not
+  // silently disable rotation — the exact failure mode rotation prevents.
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'maxTurns' && key !== 'maxAgeHours') {
+      throw new Error(
+        `Channel "${channelName}" field "sessionRotation.${key}" is not a valid sessionRotation key.`,
+      );
+    }
+  }
+
+  const maxTurns = parsed['maxTurns'];
+  if (maxTurns !== undefined && !isValidTurnCount(maxTurns)) {
+    throw new Error(
+      `Channel "${channelName}" field "sessionRotation.maxTurns" must be a positive integer.`,
+    );
+  }
+  const maxAgeHours = parsed['maxAgeHours'];
+  if (maxAgeHours !== undefined && !isValidRotationBound(maxAgeHours)) {
+    throw new Error(
+      `Channel "${channelName}" field "sessionRotation.maxAgeHours" must be a positive number.`,
+    );
+  }
+  if (maxTurns === undefined && maxAgeHours === undefined) return undefined;
+  return {
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(maxAgeHours !== undefined ? { maxAgeHours } : {}),
+  };
 }
 
 function requireObjectField(
@@ -466,6 +507,7 @@ export async function parseChannelConfig(
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
       plugin?.defaultSessionScope ||
       'user',
+    sessionRotation: parseSessionRotationConfig(name, rawConfig),
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

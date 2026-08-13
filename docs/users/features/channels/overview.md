@@ -62,6 +62,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                    |
 | `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                    |
 | `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                                                                        |
+| `sessionRotation`        | No               | Bounds after which a route starts a fresh session: `{ "maxTurns": N, "maxAgeHours": N }`. Unset means a session is reused forever. See [Session rotation](#session-rotation)                                            |
 | `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                                                                      |
 | `approvalMode`           | No               | Tool approval mode for channel sessions. Unattended webhook tasks require `yolo`; the setting applies to every session on the channel                                                                                   |
 | `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                                                                      |
@@ -90,6 +91,32 @@ Controls how conversation sessions are managed:
 - **`user`** (default) — One session per user. All messages from the same user share a conversation.
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
+
+### Session Rotation
+
+By default a route keeps the same session forever, so a long-lived route — a busy group thread, a `single`-scope channel — accumulates context without bound. Once it grows past the model's context window every later message on that route fails, while the rest of the channel keeps working. `sessionRotation` puts a ceiling on that: when the current session is past its bound, the next message starts a fresh one instead.
+
+```json
+{
+  "channels": {
+    "my-bot": {
+      "type": "dingtalk",
+      "sessionScope": "thread",
+      "sessionRotation": {
+        "maxTurns": 200,
+        "maxAgeHours": 24
+      }
+    }
+  }
+}
+```
+
+- **`maxTurns`** — Rotate once this many messages have started a turn on the current session. Messages that settle without one (a `!` shell command, a dropped loop firing) do not count.
+- **`maxAgeHours`** — Rotate once the current session is older than this.
+
+Set either, both, or neither; whichever bound is hit first rotates. `maxTurns` must be a positive integer and `maxAgeHours` a positive number. Omitting `sessionRotation` keeps the previous behavior of never rotating. In `collect` dispatch mode, messages buffered while a turn runs are coalesced into one turn and count once against `maxTurns`.
+
+Rotation is a context reset, not a cleanup: the new session starts empty, so the bot no longer remembers the earlier conversation on that route. The channel posts a short notice in the chat or thread whose message triggered the rotation, and the daemon logs the rotated route. With `sessionScope: single`, only the chat whose message triggered the rotation is notified; other chats sharing the session see the reset without a notice. Counters are stored alongside the routes and survive a daemon restart. Sessions that were already routed before you enabled rotation start their clock at the first message after the upgrade. A route that still has a turn running or queued rotates on the next message after it settles instead of mid-turn; under sustained traffic, where every message arrives while a turn is still running or queued, the bound waits for the first pause in traffic. Each message routed during that window extends it, so a continuously saturated route — a webhook receiving events faster than turns complete, or an overrunning loop — rotates only once traffic stops.
 
 ### Channel Memory
 
