@@ -177,7 +177,45 @@ export function OpenTuiStatsDialog(props: {
       <box height={1} />
 
       {tab !== 'session' ? (
-        <text fg={C.dim}>{'Loading stats...'}</text>
+        <box flexDirection="column">
+          <SectionTitle>
+            {tab === 'activity'
+              ? 'Activity (this session)'
+              : 'Efficiency (this session)'}
+          </SectionTitle>
+          <Row label="Requests:">
+            <text fg={C.text}>
+              {Object.values(metrics.models)
+                .reduce((s, m) => s + m.api.totalRequests, 0)
+                .toLocaleString()}
+            </text>
+          </Row>
+          <Row label="Input:">
+            <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
+          </Row>
+          <Row label="Output:">
+            <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
+          </Row>
+          {totalCached > 0 && (
+            <Row label="Cached:">
+              <text fg={C.green}>
+                {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
+              </text>
+            </Row>
+          )}
+          <SectionTitle>Models</SectionTitle>
+          {Object.entries(metrics.models).map(([name, m], i) => (
+            <box key={name} flexDirection="row">
+              <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
+                {`${ICON.CIRCLE_FILLED} `}
+              </text>
+              <text fg={C.text}>{`${name} `}</text>
+              <text fg={C.dim}>
+                {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
+              </text>
+            </box>
+          ))}
+        </box>
       ) : (
         <box flexDirection="column">
           <Row label="Session ID:">

@@ -203,13 +203,24 @@ function ToolCard(props: {
         </box>
       )}
       {(expanded || item.title === 'write_file') && item.output.length > 0 && (
-        <box paddingLeft={3} marginTop={0}>
-          <code
-            content={item.output}
-            filetype={filetypeFromArgs(item.title, item.args)}
-            syntaxStyle={SYNTAX}
-            fg={C.text}
-          />
+        <box paddingLeft={3} marginTop={0} flexDirection="row">
+          {item.title === 'write_file' && (
+            <box flexDirection="column" paddingRight={1}>
+              {item.output.split('\n').map((_, i) => (
+                <text key={i} fg={C.dim}>
+                  {String(i + 1)}
+                </text>
+              ))}
+            </box>
+          )}
+          <box flexGrow={1}>
+            <code
+              content={item.output}
+              filetype={filetypeFromArgs(item.title, item.args)}
+              syntaxStyle={SYNTAX}
+              fg={C.text}
+            />
+          </box>
         </box>
       )}
     </box>
@@ -782,6 +793,18 @@ function App({
           it.kind === 'tool' ||
           it.kind === 'task'
         ) {
+          toggle(it.id);
+          break;
+        }
+      }
+      return;
+    }
+    if (key.name === 't' && (key.ctrl || key.meta)) {
+      // Ctrl+T tool descriptions / Alt+T thinking: toggle last tool or thinking
+      const wantTool = key.ctrl;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (wantTool ? it.kind === 'tool' : it.kind === 'thinking') {
           toggle(it.id);
           break;
         }
