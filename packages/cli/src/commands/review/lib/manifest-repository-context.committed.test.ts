@@ -6,11 +6,12 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { manifestRepositoryContextProvider } from './manifest-repository-context.js';
 import { MAX_ARRAY_ITEMS } from './repository-context.js';
+import { allFiles } from './test-utils.js';
 
 const repoRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -160,21 +161,6 @@ function probeFor(pattern: string): string {
     .join('/');
 }
 
-function listFilesRecursively(relativeDirectory: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(join(repoRoot, relativeDirectory), {
-    withFileTypes: true,
-  })) {
-    const relativePath = `${relativeDirectory}/${entry.name}`;
-    if (entry.isDirectory()) {
-      files.push(...listFilesRecursively(relativePath));
-    } else if (entry.isFile()) {
-      files.push(relativePath);
-    }
-  }
-  return files.sort();
-}
-
 function inGitWorktree(): boolean {
   try {
     execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
@@ -206,6 +192,8 @@ describe('committed review context manifest', () => {
   it('matches every paths pattern through the real provider', () => {
     const patterns = [
       ...expectedManifest.rules.flatMap((rule) => rule.paths),
+      // No committed paths pattern uses a single-star segment; keep one
+      // synthetic probe so that branch of probeFor and the matcher stay covered.
       'packages/core/src/synthetic/*.json',
     ];
     for (const pattern of patterns) {
@@ -262,7 +250,9 @@ describe('committed review context manifest', () => {
       .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
       .map((entry) => `${SKILLS_ROOT}/${entry.name}`)
       .sort();
-    const bundledFiles = listFilesRecursively(BUNDLED_SKILLS_ROOT);
+    const bundledFiles = [...allFiles(join(repoRoot, BUNDLED_SKILLS_ROOT))]
+      .map((path) => relative(repoRoot, path))
+      .sort();
     const entrypoints = bundledFiles.filter((path) =>
       /^packages\/core\/src\/skills\/bundled\/[^/]+\/SKILL\.md$/.test(path),
     );

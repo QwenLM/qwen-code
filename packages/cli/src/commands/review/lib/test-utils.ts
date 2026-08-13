@@ -4,11 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PARSE_ARGS_REPORT } from './paths.js';
 import { DIGEST_FILE } from './stale-bundle.js';
+
+/** Every regular directory entry under `dir`; symlinks are not followed. */
+export function* allFiles(dir: string): Generator<string> {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) yield* allFiles(full);
+    else if (entry.isFile()) yield full;
+  }
+}
 
 /** Seed the report `parse-args` tees, so the effort fallback has something to read. */
 export function seedParseArgs(dir: string, effort: unknown): void {

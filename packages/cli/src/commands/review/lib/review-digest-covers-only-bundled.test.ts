@@ -21,13 +21,7 @@
 // sparse or partial clone fails this test without anything being wrong.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
   basename,
@@ -44,6 +38,7 @@ import {
   NOT_BUNDLED_FILE,
   NOT_BUNDLED_RE,
 } from './stale-bundle.js';
+import { allFiles } from './test-utils.js';
 
 const repoRoot = resolve(
   import.meta.dirname,
@@ -62,15 +57,6 @@ const reviewDir = join(
   'commands',
   'review',
 );
-
-/** Every file under `dir`, tests and fixtures included. */
-function* allFiles(dir: string): Generator<string> {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, e.name);
-    if (e.isDirectory()) yield* allFiles(full);
-    else if (e.isFile()) yield full;
-  }
-}
 
 /**
  * Whether a static `import`/`export … from` clause is a statement-level
