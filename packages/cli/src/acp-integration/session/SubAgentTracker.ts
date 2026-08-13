@@ -242,7 +242,7 @@ export class SubAgentTracker {
           .emitProgressUpdate(
             this.subagentMeta.parentToolCallId,
             this.subagentMeta.subagentType,
-            `Waiting for permission: ${event.name}`,
+            `Waiting for permission: ${state?.tool?.displayName ?? event.name}`,
             event.name,
           )
           .catch((error) => {

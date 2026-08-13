@@ -22047,6 +22047,17 @@ describe('Session', () => {
         );
       // Filter out the new subagentProgress frames, as they are intentionally
       // emitted before the cancellation check to keep the parent card live.
+      // The new contract allows the pre cancellation approval progress update.
+
+      const ProgressUpdates = subagentUpdates.filter(
+        (update: { _meta?: { subagentProgress?: boolean } }) =>
+          update?._meta?.subagentProgress,
+      );
+      expect(ProgressUpdates).toHaveLength(1);
+      expect(ProgressUpdates[0].content?.[0]?.content?.text).toContain(
+        'Waiting for permission',
+      );
+
       const nonProgressUpdates = subagentUpdates.filter(
         (update: { _meta?: { subagentProgress?: boolean } }) =>
           !update?._meta?.subagentProgress,
