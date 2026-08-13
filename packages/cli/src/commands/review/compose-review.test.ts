@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync,
   readFileSync,
+  renameSync,
   writeFileSync,
   mkdirSync,
   rmSync,
@@ -5789,5 +5790,34 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(performance.now() - t0).toBeLessThan(2000);
     // The multi-line entry still collapses to one list item.
     expect(r.body).toContain('comment 102 (b.ts) — body truncated');
+  });
+});
+
+describe('composeReview — a resumed run is continuity, not a coverage gap', () => {
+  it('stays APPROVE and renders the non-capping continuity note', () => {
+    // The interrupted attempt's chunk-1 agent, re-homed into session S0 and
+    // named by the run ledger; the current session covers the rest. The
+    // recovered work COUNTS as reviewed: no cap, no "Not reviewed:" entry —
+    // a capping entry here downgraded every clean resumed run to COMMENT,
+    // permanently, since the prior records never leave the ledger.
+    const p = coveredPlan();
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    renameSync(
+      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
+      join(dir, 'subagents', 'S0', 'agent-a1.jsonl'),
+    );
+    writeFileSync(
+      join(promptRecordDir(p), 'run-sessions.json'),
+      JSON.stringify([
+        { sessionId: 'S0', atMs: Date.now() },
+        { sessionId: 'S1', atMs: Date.now() },
+      ]),
+    );
+
+    const r = composeReview(base({ planPath: p }));
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+    expect(r.body).not.toContain('Not reviewed: review continuity');
+    expect(r.body).not.toContain('Partially reviewed');
   });
 });

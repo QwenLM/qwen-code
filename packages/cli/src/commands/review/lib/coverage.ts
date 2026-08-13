@@ -1000,19 +1000,17 @@ export function coverageFromTranscripts(
     }
     return false;
   };
+  // NOT pushed through `disclose()`: that channel caps (compose-review folds
+  // every disclosure into the unreviewed-dimension cap and the "Not
+  // reviewed:" rendering), and recovered work is the OPPOSITE of a gap — a
+  // capping entry here would downgrade every clean resumed run to COMMENT,
+  // permanently, since the prior records never leave the ledger.
+  // compose-review reads the count off this report and renders its own
+  // non-capping continuity note, beside the other disclosed-but-not-capping
+  // blocks (deferred lint, test-plan notes).
   const recoveredAgents = records.filter(
     (r) => r.fromPriorSession && certifies(r),
   ).length;
-  if (recoveredAgents > 0) {
-    disclose(
-      'review continuity',
-      `resumed — ${recoveredAgents} agent result(s) recovered from an interrupted earlier attempt`,
-      {
-        subjectZh: '评审续跑',
-        reasonZh: `本次为续跑 — 复用了上一次中断运行的 ${recoveredAgents} 个 agent 结果`,
-      },
-    );
-  }
 
   return {
     ok:

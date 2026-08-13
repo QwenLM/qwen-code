@@ -2193,11 +2193,12 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
     expect(r.ok).toBe(true);
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.recoveredAgents).toBeGreaterThanOrEqual(1);
-    expect(
-      r.disclosures.some(
-        (d) => d.subject === 'review continuity' && /resumed/.test(d.reason),
-      ),
-    ).toBe(true);
+    // Continuity is NOT a disclosure: that channel caps the verdict and
+    // renders under "Not reviewed:" — recovered work is the opposite of a
+    // gap. compose-review renders its own non-capping note from the count.
+    expect(r.disclosures.some((d) => d.subject === 'review continuity')).toBe(
+      false,
+    );
   });
 
   it('sees nothing from a prior session the ledger never recorded', () => {
@@ -2231,14 +2232,11 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
     expect(r.recoveredAgents).toBe(0);
   });
 
-  it('emits no continuity disclosure on a run that never resumed', () => {
+  it('reports zero recovered agents on a run that never resumed', () => {
     transcript('a1', good(1), { calls: 3 });
     transcript('a2', good(2), { calls: 2 });
 
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.recoveredAgents).toBe(0);
-    expect(r.disclosures.some((d) => d.subject === 'review continuity')).toBe(
-      false,
-    );
   });
 });
