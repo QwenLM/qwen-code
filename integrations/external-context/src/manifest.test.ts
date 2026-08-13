@@ -22,6 +22,59 @@ describe('extension manifest', () => {
     expect(manifest.hooks).toBeUndefined();
   });
 
+  it('keeps the remote provider Extension OAuth-only and retrieval-only', async () => {
+    const manifest = await readJson(
+      '../examples/provider-extension-remote/qwen-extension.json',
+    );
+    const server = manifest.mcpServers?.['provider-context-remote-example'];
+
+    expect(Object.keys(manifest.mcpServers ?? {})).toEqual([
+      'provider-context-remote-example',
+    ]);
+    expect(server).toEqual({
+      httpUrl: 'https://context.example.com/mcp',
+      timeout: 8000,
+      includeTools: ['context_search'],
+      oauth: {
+        enabled: true,
+        scopes: ['context.read'],
+        audiences: ['https://context.example.com/mcp'],
+      },
+    });
+    expect(JSON.stringify(manifest)).not.toMatch(
+      /authorization|token|secret|api.?key|trust/i,
+    );
+  });
+
+  it('keeps the local provider Extension self-contained and retrieval-only', async () => {
+    const manifest = await readJson(
+      '../examples/provider-extension-local/qwen-extension.json',
+    );
+    const server = manifest.mcpServers?.['provider-context-local-example'];
+    const packageJson = await readJson(
+      '../examples/provider-extension-local/package.json',
+    );
+
+    expect(Object.keys(manifest.mcpServers ?? {})).toEqual([
+      'provider-context-local-example',
+    ]);
+    expect(server).toEqual({
+      command: 'node',
+      args: ['${extensionPath}${/}dist${/}main.js'],
+      cwd: '${extensionPath}',
+      env: {
+        PROVIDER_CONTEXT_BASE_URL: '${PROVIDER_CONTEXT_BASE_URL}',
+        PROVIDER_CONTEXT_TOKEN: '${PROVIDER_CONTEXT_TOKEN}',
+      },
+      timeout: 8000,
+      includeTools: ['context_search'],
+    });
+    expect(manifest.settings).toBeUndefined();
+    expect(server?.trust).toBeUndefined();
+    expect(packageJson.scripts?.build).toContain('--bundle');
+    expect(packageJson.dependencies).toBeUndefined();
+  });
+
   it.each([
     {
       platform: 'posix',
