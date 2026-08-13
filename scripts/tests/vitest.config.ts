@@ -30,11 +30,6 @@ export default defineConfig({
     // vitest's 5s default and flakes. Bump the suite timeout so a single
     // slow subprocess startup doesn't fail an otherwise-healthy test run.
     testTimeout: 30_000,
-    // Several suites spawn real subprocesses with real sleeps (the autofix
-    // watchdog tests, install-script). On the shared self-hosted runner pool
-    // a load spike slows or fails a spawn at random; a retry rides it out,
-    // while a real deterministic regression fails every attempt.
-    retry: 2,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
