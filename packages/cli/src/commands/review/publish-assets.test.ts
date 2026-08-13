@@ -230,6 +230,30 @@ describe('publish-assets', () => {
     expect(ghWithInputMock).toHaveBeenCalled();
   });
 
+  it('the handler refuses when neither flag nor setting authorises — the polluted view must not decide', async () => {
+    // The refusal counterpart of the wiring leg above: setting off, no
+    // `--comment` in the recorded arguments. If the handler's loadSettings
+    // call drops `skipWorkspaceSettings`, the workspace-polluted mock view
+    // answers comment:true and this refusal becomes a publish — the exact
+    // regression review-settings.ts documents (a repository-controlled
+    // .qwen/settings.json deciding to publish for every reviewer).
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({}); // setting off
+    happyGh();
+    await publishAssetsCommand.handler?.({
+      _: [],
+      $0: 'qwen',
+      pr: 8346,
+      files: [pngFile('refused.png')],
+      out: join(dir, 'manifest.json'),
+      'user-authorized': false,
+      'skill-args': argsFile,
+    } as never);
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('publishes, writes a manifest with commit-pinned URLs', () => {
     happyGh();
     const f = pngFile('evidence.png');

@@ -236,6 +236,34 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       '`--comment` was not in the review arguments',
     );
   });
+
+  it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
+    // With `review.comment` on, telling the operator to re-run with
+    // `--comment` misdirects: the blocker is that no recorded invocation
+    // names a PR, and a plain re-run fixes it. Flag-driven operators keep
+    // the flag wording — for them the flag IS the missing piece.
+    const missing = join(dir, 'no-such-args.txt');
+    const base = {
+      userAuthorized: false,
+      skillArgs: missing,
+      pr: 123,
+      repo: 'o/r',
+    } as never;
+
+    const bySetting = reviewWriteAuthorization({
+      ...base,
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain(
+      'no recorded invocation names a pull request',
+    );
+    expect(bySetting.why).not.toContain('`--comment`');
+
+    const byFlag = reviewWriteAuthorization(base);
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('cannot show that `--comment` was requested');
+  });
 });
 
 describe('the posting gate', () => {
