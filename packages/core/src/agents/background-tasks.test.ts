@@ -2141,35 +2141,63 @@ describe('BackgroundTaskRegistry', () => {
   });
 
   describe('notification XML', () => {
-    it('reports owner-scoped remaining background agents until all are terminal', () => {
+    it.each([
+      ['top-a', 'top-b'],
+      ['top-b', 'top-a'],
+    ])(
+      'reports owner-scoped remaining agents when %s finishes before %s',
+      (firstAgentId, secondAgentId) => {
+        const callback = vi.fn();
+        registry.setNotificationCallback(callback);
+
+        registry.register(makeRegistration('top-a'));
+        registry.register(makeRegistration('top-b'));
+        registry.register(
+          makeRegistration('nested', { parentAgentId: 'parent-agent' }),
+        );
+        registry.register(
+          makeRegistration('foreground', { isBackgrounded: false }),
+        );
+
+        registry.complete(firstAgentId, 'done');
+        registry.fail('nested', 'boom');
+        registry.fail(secondAgentId, 'boom');
+
+        expect(callback).toHaveBeenCalledTimes(3);
+        expect(callback.mock.calls[0]![1]).toContain(
+          '<remaining>1</remaining>',
+        );
+        expect(callback.mock.calls[0]![1]).toContain(
+          '<all-terminal>false</all-terminal>',
+        );
+        expect(callback.mock.calls[1]![1]).toContain(
+          '<remaining>0</remaining>',
+        );
+        expect(callback.mock.calls[1]![1]).toContain(
+          '<all-terminal>true</all-terminal>',
+        );
+        expect(callback.mock.calls[2]![1]).toContain(
+          '<remaining>0</remaining>',
+        );
+        expect(callback.mock.calls[2]![1]).toContain(
+          '<all-terminal>true</all-terminal>',
+        );
+      },
+    );
+
+    it('counts a paused same-owner background agent as remaining', () => {
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
 
-      registry.register(makeRegistration('top-a'));
-      registry.register(makeRegistration('top-b'));
-      registry.register(
-        makeRegistration('nested', { parentAgentId: 'parent-agent' }),
-      );
-      registry.register(
-        makeRegistration('foreground', { isBackgrounded: false }),
-      );
+      registry.register(makeRegistration('completed'));
+      registry.register(makeRegistration('paused', { status: 'paused' }));
 
-      registry.complete('top-a', 'done');
-      registry.fail('nested', 'boom');
-      registry.fail('top-b', 'boom');
+      registry.complete('completed', 'done');
 
-      expect(callback).toHaveBeenCalledTimes(3);
+      expect(callback).toHaveBeenCalledOnce();
       expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
       expect(callback.mock.calls[0]![1]).toContain(
         '<all-terminal>false</all-terminal>',
-      );
-      expect(callback.mock.calls[1]![1]).toContain('<remaining>0</remaining>');
-      expect(callback.mock.calls[1]![1]).toContain(
-        '<all-terminal>true</all-terminal>',
-      );
-      expect(callback.mock.calls[2]![1]).toContain('<remaining>0</remaining>');
-      expect(callback.mock.calls[2]![1]).toContain(
-        '<all-terminal>true</all-terminal>',
       );
     });
 
