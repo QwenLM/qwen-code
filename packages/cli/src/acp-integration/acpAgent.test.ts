@@ -6505,8 +6505,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).toEqual([]);
       expect(option).toMatchObject({
         currentValue: 'high',
-        options: expect.not.arrayContaining([{ value: 'none' }]),
       });
+      expect(option?.options.map(({ value }) => value)).not.toContain('none');
 
       const reset = (await agent.setSessionConfigOption({
         sessionId,
