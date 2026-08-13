@@ -12,7 +12,9 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1017,4 +1019,32 @@ describe('repo-context providers and trust boundary', () => {
       expect(readJson(local.outPath)).toBeNull();
     },
   );
+});
+
+describe('the plan mtime is the run epoch — enrichment must not advance it', () => {
+  // The run-session ledger, deadline stamps, prompt records and transcripts
+  // are all fenced on the plan's mtime, and fetch-pr's session entry lands an
+  // orchestrator turn BEFORE this command runs. A rewrite that advanced the
+  // mtime re-keyed the epoch mid-run and orphaned everything recorded before
+  // it — a resumed run then saw no prior evidence at all.
+  it('preserves the plan mtime across the enrichment rewrite', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-epoch-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      const before = new Date(Date.now() - 3600_000);
+      utimesSync(planPath, before, before);
+      const mtimeBefore = statSync(planPath).mtimeMs;
+
+      runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
+
+      expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+      // The rewrite itself still happened: the plan carries no context here,
+      // but the write path ran (content is re-serialized).
+      expect(() => JSON.parse(readFileSync(planPath, 'utf8'))).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

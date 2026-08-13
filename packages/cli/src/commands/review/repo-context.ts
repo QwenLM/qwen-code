@@ -12,6 +12,7 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  utimesSync,
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -400,7 +401,16 @@ export function runRepoContext(
 
   mkdirSync(dirname(outPath), { recursive: true });
   atomicWriteFileSync(outPath, `${JSON.stringify(context, null, 2)}\n`);
+  // The plan's mtime is the RUN EPOCH: deadline stamps, prompt records,
+  // transcripts and the run-session ledger are all fenced on it, and entries
+  // written before this enrichment (fetch-pr's session entry, ~an
+  // orchestrator turn earlier) must stay inside the fence. This write
+  // enriches the same run's plan — it is not a re-capture — so the mtime is
+  // restored after it; letting it advance re-keyed the epoch mid-run and
+  // silently orphaned everything recorded before this command ran.
+  const planStat = statSync(planPath);
   atomicWriteFileSync(planPath, stringifyPlanReport(plan));
+  utimesSync(planPath, planStat.atime, planStat.mtime);
   writeStdoutLine(
     context === null
       ? `Wrote null repository context to ${outPath}`
