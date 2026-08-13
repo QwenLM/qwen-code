@@ -6,6 +6,7 @@ import {
   type DaemonAuthProviderDescriptor,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import styles from './AuthMessage.module.css';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
@@ -108,6 +109,7 @@ function normalizeModelIds(value: string): string[] {
 
 export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
@@ -601,6 +603,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={provider.documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}
             </a>
@@ -617,6 +622,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={provider.documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}: {provider.documentationUrl}
             </a>
@@ -830,6 +838,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(
+                  event,
+                  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
+                )
+              }
             >
               https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
             </a>
