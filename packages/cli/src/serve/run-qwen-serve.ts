@@ -801,6 +801,15 @@ export interface RunHandle {
   resolvedToken?: string;
   /** Resolves when the full REST/Web/ACP runtime has been mounted. */
   runtimeReady: Promise<void>;
+  /**
+   * The Local Control service, once the runtime app exists.
+   *
+   * A getter rather than a field because the runtime app is mounted after the
+   * listener is up: at the moment this handle is constructed there is nothing
+   * to hand back. Callers await `runtimeReady` first — before that it is
+   * undefined, which is also what an API-only daemon returns forever.
+   */
+  getLocalControl(): LocalControlService | undefined;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
@@ -7110,6 +7119,10 @@ async function runQwenServeImpl(
         webShellMounted,
         resolvedToken: token,
         runtimeReady,
+        getLocalControl: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'localControlService'
+          ] as LocalControlService | undefined,
         close: () => {
           // Idempotent: cache the in-flight (or settled) close promise so
           // overlapping calls (e.g. test harness + signal handler firing

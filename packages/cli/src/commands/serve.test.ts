@@ -10,11 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import {
-  localControlUrls,
-  maybeOpenWebShellBrowser,
-  serveCommand,
-} from './serve.js';
+import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
@@ -267,64 +263,6 @@ describe('serve command args', () => {
       .parseSync('serve --workspace /tmp/primary --workspace /tmp/secondary');
 
     expect(captured).toEqual(['/tmp/primary', '/tmp/secondary']);
-  });
-});
-
-describe('localControlUrls', () => {
-  it('builds fragment-authenticated URLs for each non-loopback IPv4 address', () => {
-    const urls = localControlUrls('http://0.0.0.0:4170/', 'a/b token', {
-      en1: [
-        {
-          address: '10.0.0.20',
-          netmask: '255.255.255.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:01',
-          internal: false,
-          cidr: '10.0.0.20/24',
-        },
-      ],
-      en0: [
-        {
-          address: '192.168.1.20',
-          netmask: '255.255.255.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:00',
-          internal: false,
-          cidr: '192.168.1.20/24',
-        },
-        {
-          address: 'fe80::1',
-          netmask: 'ffff:ffff:ffff:ffff::',
-          family: 'IPv6',
-          mac: '00:00:00:00:00:00',
-          internal: false,
-          cidr: 'fe80::1/64',
-          scopeid: 1,
-        },
-      ],
-      lo0: [
-        {
-          address: '127.0.0.1',
-          netmask: '255.0.0.0',
-          family: 'IPv4',
-          mac: '00:00:00:00:00:00',
-          internal: true,
-          cidr: '127.0.0.1/8',
-        },
-      ],
-      unavailable: undefined,
-    });
-
-    expect(urls).toEqual([
-      {
-        interfaceName: 'en0',
-        url: 'http://192.168.1.20:4170/#token=a%2Fb%20token',
-      },
-      {
-        interfaceName: 'en1',
-        url: 'http://10.0.0.20:4170/#token=a%2Fb%20token',
-      },
-    ]);
   });
 });
 
