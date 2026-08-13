@@ -598,6 +598,8 @@ export type {
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
   DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileUploadRequest,
+  DaemonWorkspaceFileUploadResult,
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,

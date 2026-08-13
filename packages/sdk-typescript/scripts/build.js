@@ -81,9 +81,13 @@ const rootDir = join(__dirname, '..');
 // Bumped from 184KB to 185KB for the Live Voice lifecycle helpers on both
 // daemon client classes.
 // Bumped from 185KB to 186KB for daemon-owned mid-turn message APIs.
-// Bumped from 186KB to 187KB for skill-toggle mutation metadata on
+// Bumped from 186KB to 188KB for the workspace file-upload surface
+// (`uploadWorkspaceFile` + XHR progress) on both daemon client classes.
+// Bumped from 188KB to 189KB for the session reasoning-effort config option
+// APIs merged in from main.
+// Bumped from 189KB to 190KB for skill-toggle mutation metadata on
 // settings_changed in the UI normalizer.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 187 * 1024;
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 190 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
