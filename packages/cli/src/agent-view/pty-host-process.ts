@@ -616,6 +616,28 @@ export function createAgentViewPtyHostServer(
             });
           });
         });
+        if (!isWindowsPipePath(socketPath)) {
+          // The reclaim path is racy: two processes can both delete a stale
+          // lock and proceed, and a rival can reclaim this process's
+          // lockfile between its O_EXCL create and the pid write. Re-verify
+          // lock ownership now and fail closed when displaced, so at most one
+          // host serves the socket.
+          const lockContent = await fs
+            .readFile(`${socketPath}.lock`, 'utf8')
+            .catch(() => '');
+          if (lockContent !== String(process.pid)) {
+            releaseLock = undefined; // the lock no longer belongs to us
+            for (const socket of openSockets) {
+              socket.destroy();
+            }
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            const displaced = new Error(
+              `Agent View PTY host socket is already in use: ${socketPath}`,
+            ) as NodeJS.ErrnoException;
+            displaced.code = 'EADDRINUSE';
+            throw displaced;
+          }
+        }
       } catch (error) {
         await releaseLock?.();
         releaseLock = undefined;
@@ -758,7 +780,11 @@ async function handleHostRequest(
       });
       return { resized: true };
     case 'kill':
-      host.kill(signalParam(request.params));
+      // Default to SIGTERM, not node-pty's POSIX fallback SIGHUP: SIGHUP is
+      // outside ALLOWED_KILL_SIGNALS and is commonly ignored (nohup-style
+      // workers), so kill and shutdown would disagree on whether the worker
+      // dies.
+      host.kill(signalParam(request.params) ?? 'SIGTERM');
       return { killed: true };
     case 'shutdown':
       await shutdownHost(host, shutdownGraceMs);
@@ -1018,7 +1044,13 @@ async function acquireSocketPathLock(
     try {
       await fs.writeFile(lockPath, String(process.pid), { flag: 'wx' });
       return async () => {
-        await fs.rm(lockPath, { force: true });
+        // Only remove a lock that still belongs to this process: a rival
+        // reclaim may have replaced it, and removing the replacement would
+        // strip the new owner's lock.
+        const current = await fs.readFile(lockPath, 'utf8').catch(() => '');
+        if (current === String(process.pid)) {
+          await fs.rm(lockPath, { force: true });
+        }
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
@@ -1027,7 +1059,13 @@ async function acquireSocketPathLock(
       // An empty/non-numeric lock means the writer died before recording its
       // pid; reclaim it the same as a confirmed-dead holder.
       if (!Number.isInteger(holderPid) || !isProcessAlive(holderPid)) {
-        await fs.rm(lockPath, { force: true });
+        // Re-read right before removing: a concurrent reclaim may have
+        // already replaced the stale lock, and removing the replacement
+        // would delete the new owner's lock.
+        const current = await fs.readFile(lockPath, 'utf8').catch(() => '');
+        if (current === raw) {
+          await fs.rm(lockPath, { force: true });
+        }
         continue;
       }
       break;
