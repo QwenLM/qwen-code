@@ -150,6 +150,14 @@ function stopAttachKeepalive(): void {
   }
 }
 
+function ensureAttachObservers(): void {
+  chrome.debugger.onEvent.removeListener(onDebuggerEvent);
+  chrome.debugger.onDetach.removeListener(onDebuggerDetach);
+  chrome.debugger.onEvent.addListener(onDebuggerEvent);
+  chrome.debugger.onDetach.addListener(onDebuggerDetach);
+  startAttachKeepalive();
+}
+
 /** Whether a frame `type` is one this bridge owns (daemon → extension). */
 export function isCdpBridgeFrame(type: unknown): boolean {
   return (
@@ -301,6 +309,7 @@ async function runAttachFlow(
     // Already attached to exactly this tab: just refcount, no debugger churn.
     if (attachedTabId === tabId) {
       attachedLinks.add(linkId);
+      ensureAttachObservers();
       return await tabInfoOf(tabId);
     }
 
@@ -335,11 +344,8 @@ async function runAttachFlow(
           resolve();
         });
       });
-    } else {
-      chrome.debugger.onEvent.addListener(onDebuggerEvent);
-      chrome.debugger.onDetach.addListener(onDebuggerDetach);
-      startAttachKeepalive();
     }
+    ensureAttachObservers();
 
     return await tabInfoOf(tabId);
   } finally {

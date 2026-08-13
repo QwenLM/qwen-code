@@ -405,6 +405,31 @@ describe('maybeRouteChromeDevToolsViaDaemonBridge', () => {
     expect(log).toHaveBeenCalledTimes(1);
     expect(log.mock.calls[0]?.[0]).toContain('no usable shared Chrome bridge');
     expect(log.mock.calls[0]?.[0]).toContain('qwen serve');
+    expect(log.mock.calls[0]?.[0]).toContain(SHARED_CHROME_BRIDGE_OPT_OUT_ENV);
+  });
+
+  it('fails open when reroute setup throws', async () => {
+    const log = vi.fn();
+    const config = {
+      getSettingsMcpServers: () => {
+        throw new Error('settings unavailable');
+      },
+      isSafeMode: () => false,
+      getBareMode: () => false,
+      setMcpServers: vi.fn(),
+    } as unknown as Config;
+
+    await maybeRouteChromeDevToolsViaDaemonBridge(
+      config,
+      {},
+      log,
+      vi.fn() as unknown as typeof fetch,
+    );
+
+    expect(config.setMcpServers).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      'qwen: shared Chrome bridge reroute skipped: settings unavailable',
+    );
   });
 
   it('stays silent when the probe fails without any candidate', async () => {

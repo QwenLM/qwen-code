@@ -34,6 +34,10 @@ function installChromeHarness(options?: {
   const tabQueryResolvers: Array<(tabs: Array<{ id: number }>) => void> = [];
   const debuggerEventListeners: ChromeHarness['debuggerEventListeners'] = [];
   const debuggerDetachListeners: ChromeHarness['debuggerDetachListeners'] = [];
+  const remove = <T>(listeners: T[], listener: T) => {
+    const index = listeners.indexOf(listener);
+    if (index >= 0) listeners.splice(index, 1);
+  };
   const attach = vi.fn(
     (
       _target: chrome.debugger.Debuggee,
@@ -63,13 +67,17 @@ function installChromeHarness(options?: {
       sendCommand,
       onEvent: {
         addListener: vi.fn((listener) => debuggerEventListeners.push(listener)),
-        removeListener: vi.fn(),
+        removeListener: vi.fn((listener) =>
+          remove(debuggerEventListeners, listener),
+        ),
       },
       onDetach: {
         addListener: vi.fn((listener) =>
           debuggerDetachListeners.push(listener),
         ),
-        removeListener: vi.fn(),
+        removeListener: vi.fn((listener) =>
+          remove(debuggerDetachListeners, listener),
+        ),
       },
     },
     tabs: {
@@ -214,6 +222,39 @@ describe('CDP bridge', () => {
     expect(send).toHaveBeenCalledWith({
       type: 'cdp_detach',
       reason: 'canceled_by_user',
+    });
+  });
+
+  it('notifies every attached link when Chrome detaches the debugger', async () => {
+    const chromeHarness = installChromeHarness();
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+
+    chromeHarness.debuggerDetachListeners[0]?.(
+      { tabId: 7 },
+      'canceled_by_user',
+    );
+
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_detach',
+      reason: 'canceled_by_user',
+      linkId: 'cdp-link-1',
+    });
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_detach',
+      reason: 'canceled_by_user',
+      linkId: 'cdp-link-2',
     });
   });
 
@@ -668,6 +709,65 @@ describe('CDP bridge', () => {
     await vi.waitFor(() =>
       expect(chromeHarness.detach).toHaveBeenCalledWith({ tabId: 7 }),
     );
+  });
+
+  it('re-registers debugger observers after an old-tab detach races a tab switch', async () => {
+    const chromeHarness = installChromeHarness({ deferAttach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    vi.mocked(chrome.tabs.query)
+      .mockResolvedValueOnce([{ id: 7 }])
+      .mockResolvedValueOnce([{ id: 8 }]);
+    vi.mocked(chrome.tabs.get).mockResolvedValue({
+      id: 8,
+      url: 'https://next.example.test',
+      title: 'Next',
+    });
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 1, linkId: 'cdp-link-1' }),
+      send,
+    );
+    await vi.waitFor(() => expect(chromeHarness.attach).toHaveBeenCalledOnce());
+    chromeHarness.finishAttach();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+    bridge.handleCdpFrame(
+      frame({ type: 'cdp_attach', id: 2, linkId: 'cdp-link-2' }),
+      send,
+    );
+    await vi.waitFor(() =>
+      expect(chromeHarness.attach).toHaveBeenCalledTimes(2),
+    );
+    chromeHarness.debuggerDetachListeners[0]?.(
+      { tabId: 7 },
+      'canceled_by_user',
+    );
+    chromeHarness.finishAttach();
+
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'cdp_attached',
+          id: 2,
+          linkId: 'cdp-link-2',
+        }),
+      ),
+    );
+    expect(chromeHarness.debuggerEventListeners).toHaveLength(1);
+    expect(chromeHarness.debuggerDetachListeners).toHaveLength(1);
+
+    chromeHarness.debuggerEventListeners[0]?.(
+      { tabId: 8 },
+      'Runtime.consoleAPICalled',
+      { type: 'log' },
+    );
+    expect(send).toHaveBeenCalledWith({
+      type: 'cdp_event',
+      method: 'Runtime.consoleAPICalled',
+      params: { type: 'log' },
+    });
   });
 
   it('detaches when a failed attach outlives the final landed link', async () => {
