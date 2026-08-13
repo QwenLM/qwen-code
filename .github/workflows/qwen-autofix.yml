@@ -2645,13 +2645,16 @@ jobs:
               # Delay-window fallback: a review run parked BEFORE its job
               # starts (the 10-minute environment wait) has no review-pr
               # check-run yet, but a push now would still cancel it via
-              # synchronize. The runs API catches both pull_request_target and
-              # explicit-trigger review runs by PR/head identity. One paginated
+              # synchronize. Only pull_request_target runs are cancelable —
+              # comment/review-triggered runs use per-run concurrency groups
+              # that a synchronize never cancels, so holding the round for
+              # one would defer autofix for nothing (R2-1). One paginated
               # read per candidate, and only when the rollup showed nothing live.
               REVIEW_RUNS_JSON="$(gh api --paginate "repos/${REPO}/actions/workflows/${REVIEW_WF_ID}/runs?per_page=100" 2> /dev/null || printf '{"workflow_runs":[]}')"
               REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" --arg branch "${BRANCH}" '
                 [ .workflow_runs[]?
                   | select((.workflow_id | tostring) == $wf)
+                  | select((.event // "") == "pull_request_target")
                   | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
                   | select(((.head_sha // "") == $head) or ((.head_branch // "") == $branch) or any(.pull_requests[]?; (.number | tostring) == $pr))
                   | (.run_started_at // .created_at // "") ]
