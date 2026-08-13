@@ -38,7 +38,12 @@ import {
   type AuditPublisher,
   createAuditPublisher,
 } from './audit.js';
-import { FsError, wrapAsFsError, type FsErrorKind } from './errors.js';
+import {
+  FsError,
+  isFsError,
+  wrapAsFsError,
+  type FsErrorKind,
+} from './errors.js';
 import {
   assertCursorMatchesFile,
   decodeTextCursor,
@@ -293,8 +298,9 @@ export interface WorkspaceFileSystem {
    * content. An existing target (including a final-component symlink)
    * throws `file_already_exists` (`symlink_escape` for a symlink). The
    * caller is responsible for choosing a free name; the upload route owns
-   * the numbered-candidate policy. `data` is size-checked against
-   * `MAX_UPLOAD_BYTES` here — the binary-ingress policy, NOT the
+   * the numbered-candidate policy; the collision is expected control flow
+   * there and emits no `fs.denied` audit event. `data` is size-checked
+   * against `MAX_UPLOAD_BYTES` here — the binary-ingress policy, NOT the
    * `MAX_WRITE_BYTES` text default. Trust and generation guards are enforced
    * at entry, inside the path lock, and at the final publish checkpoint.
    * New files are created at `0o600`.
@@ -1526,7 +1532,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       );
       return out;
     } catch (err) {
-      throw this.recordAndWrap(err, 'write', p as string);
+      // A no-clobber collision is the upload route's expected candidate-loop
+      // outcome (it numbers on), not a boundary policy denial; auditing it
+      // would emit one `fs.denied` per skipped occupied name.
+      throw this.recordAndWrap(err, 'write', p as string, {
+        audit: !(isFsError(err) && err.kind === 'file_already_exists'),
+      });
     }
   }
 
@@ -1543,7 +1554,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
    *   - routes can still rely on `instanceof FsError`
    *     for their `sendFsError` serializer.
    */
-  private recordAndWrap(err: unknown, intent: Intent, input: string): Error {
+  private recordAndWrap(
+    err: unknown,
+    intent: Intent,
+    input: string,
+    opts?: { audit?: boolean },
+  ): Error {
     if (
       err instanceof Error &&
       'code' in err &&
@@ -1552,6 +1568,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       return err;
     }
     const fs = wrapAsFsError(err);
+    if (opts?.audit === false) {
+      return fs;
+    }
     this.deps.audit.recordDenied(this.deps.ctx, {
       intent,
       input,

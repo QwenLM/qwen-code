@@ -39,7 +39,7 @@ The method is a single-purpose no-clobber create primitive; it cannot modify or 
 - An existing target throws `FsError('file_already_exists')` (409), including an external writer racing the final no-clobber publication.
 - Symlinks at the target are rejected (`symlink_escape`), consistent with the text writes; boundary resolution goes through the existing `resolve(path, 'write')`.
 - A new file is created at `0o600` (not umask default).
-- The implementation reuses the existing path lock, temp-file reservation, no-clobber create publication, generation guard, audit, and cleanup machinery. Generalize the current atomic publisher to accept an already validated `Buffer`; do not copy a second binary-specific atomic-write implementation. The byte path must not pass through `writeEncodedTextTemp`, whose internal `enforceWriteSize(buf.length)` intentionally applies the 5 MiB text default. Each public write path validates its final byte buffer with its own policy before calling the shared publisher.
+- The implementation reuses the existing path lock, temp-file reservation, no-clobber create publication, generation guard, audit, and cleanup machinery. Generalize the current atomic publisher to accept an already validated `Buffer`; do not copy a second binary-specific atomic-write implementation. The byte path must not pass through `atomicWriteTextResolvedFile`, whose internal `enforceWriteSize(buf.length)` intentionally applies the 5 MiB text default. Each public write path validates its final byte buffer with its own policy before calling the shared publisher.
 
 ### Daemon: new `POST /file/upload` endpoint
 
@@ -202,7 +202,8 @@ New hook at `packages/web-shell/client/hooks/useFileUpload.ts`:
 
 ```typescript
 interface UseFileUploadOptions {
-  client: DaemonClient | WorkspaceDaemonClient;
+  /** Structural client; both daemon client classes satisfy it. */
+  client: FileUploadClient | undefined;
   maxBytes: number;
   targetKey: string;
 }
@@ -213,22 +214,28 @@ interface FileUploadItem {
   targetPath: string; // requested relative path in the target workspace
   status: 'pending' | 'uploading' | 'done' | 'error';
   progress: number; // 0–1
-  error?: string;
+  /** Locally classified failures; the render site localizes them. */
+  errorCode?: 'tooLarge' | 'noDaemon' | 'tooManyFiles';
+  error?: string; // raw failure message (server-side errors)
   resultPath?: string; // server-confirmed final path
+  /** Set on a `tooManyFiles` notice row: how many files were not queued. */
+  skippedCount?: number;
 }
 
 interface UseFileUploadReturn {
   uploads: FileUploadItem[];
+  /** True while any item is pending or in flight; gates composer submit. */
+  isBusy: boolean;
   uploadFiles: (
     files: File[],
     targetDir: string,
-    onUploaded: (path: string) => void,
-  ) => void;
+    onUploaded?: (path: string) => void,
+  ) => number; // returns how many files were actually queued
   removeUpload: (id: string) => void; // aborts the in-flight request too
 }
 ```
 
-Occupied names are always auto-numbered; safety-boundary failures, candidate exhaustion, and I/O failures still produce an error row. `uploadFiles` stores `onUploaded` with each queued item and invokes it exactly once per successful upload with the server-confirmed final path.
+Occupied names are always auto-numbered; safety-boundary failures, candidate exhaustion, and I/O failures still produce an error row. `uploadFiles` stores `onUploaded` with each queued item and invokes it exactly once per successful upload with the server-confirmed final path. A batch accepts at most `MAX_FILES_PER_BATCH = 100` files; the overflow is not queued and surfaces as a single `tooManyFiles` notice row carrying the skipped count, so unbounded drops cannot keep the strictly-sequential queue busy for hours.
 
 - Done rows display the final file name. If `resultPath !== targetPath`, they additionally show a short auto-numbering hint so the user sees why the name differs from what they dropped.
 - Callers pre-flight the target-specific capability set via the same `workspace.capabilities?.features` snapshot `VoiceButton` uses and hide the entry points when unsupported.
@@ -299,5 +306,5 @@ addTags([{ kind: 'file', serialized: '@<finalPath>' }], { placement: 'inline' })
 - **fs layer**: byte-identical round-trip of binary fixtures, including an empty buffer; a payload greater than 5 MiB and at most `MAX_UPLOAD_BYTES` succeeds, proving the text-write default is not applied to the byte path; a direct `writeBytesAtomic` call above `MAX_UPLOAD_BYTES` fails with `file_too_large`; existing text writes above `MAX_WRITE_BYTES` remain rejected. Trust/generation: a direct untrusted call fails with `untrusted_workspace`; a generation closed after method entry but before publication leaves no target. Atomicity: interrupted write leaves no partial target; an external create racing the no-clobber publish still yields `file_already_exists`; symlink target rejected; new file created at `0o600`.
 - **Daemon route**: correct bytes written with correct hash and size; zero-byte octet-stream → 201 with the empty-buffer hash; wrong or missing Content-Type → the exact 415 `unsupported_media_type` envelope before buffering; an upload greater than 5 MiB and at most `MAX_UPLOAD_BYTES` succeeds; an oversized declared `Content-Length` is rejected immediately, while a chunked or understated body above `MAX_UPLOAD_BYTES` is rejected by the raw parser before the handler/fs write; both use the exact upload-specific 413 envelope (`errorKind`, `status`, and `maxBytes` included, with no "10 MB" message). Missing/invalid `path`, a requested basename over 255 UTF-8 bytes, invalid client id, missing/non-directory parents, and boundary escapes are rejected before buffering. Paths containing spaces, non-ASCII, `%`, and `#` decode exactly once; a name occupied by a file, directory, or in-workspace final-component symlink → 201 with a numbered `path`, with no write through the existing entry; an escaping symlink remains a boundary error. Numbering preserves the final extension, handles no-extension and dotfile names, skips taken candidates, trims a long Unicode stem to the 255-byte policy cap, and fails at the 1000-candidate cap; auto-numbering never modifies the requested target; concurrent same-name uploads land on distinct candidates. Four admitted uploads may buffer concurrently across both route forms; a fifth receives the exact 429 `upload_busy` response and `Retry-After`, and disconnect/parser-error paths release their slot. The response has no derived `renamed` flag. Capability tag and `limits.maxWorkspaceFileUploadBytes` are advertised. Qualified route: untrusted, unknown (including already removed), and draining workspaces are rejected before buffering and never fall back to the primary runtime.
 - **SDK**: progress callbacks fire in a browser; requesting progress without `XMLHttpRequest` fails before sending; omitted timeout inherits the client default, `timeoutMs: 0` disables it, and an explicit timeout or abort signal cancels the request; filesystem errors expose `errorKind` while other daemon errors preserve their existing parsed bodies; both legacy-primary and workspace-qualified clients.
-- **Web Shell hook/UI**: a file above the advertised limit is rejected without an HTTP request; a batch runs one request at a time in selection order; failure/cancel does not block the next item; removing a pending item prevents it from starting; a late response after abort does not invoke `onUploaded`; changing the target workspace aborts and clears the old queue and ignores late completions; each successful final path creates exactly one inline file tag; removing the last tag restores the placeholder; completed rows disappear after three seconds. Pure supported-image drops stay on the image-attachment path, while ordinary files and mixed batches upload without leaving drag-active styling behind.
+- **Web Shell hook/UI**: a file above the advertised limit is rejected without an HTTP request; a batch above 100 files queues the first 100 and renders one `tooManyFiles` notice row with the skipped count; a batch runs one request at a time in selection order; failure/cancel does not block the next item; removing a pending item prevents it from starting; a late response after abort does not invoke `onUploaded`; changing the target workspace aborts and clears the old queue and ignores late completions; each successful final path creates exactly one inline file tag; removing the last tag restores the placeholder; completed rows disappear after three seconds. Pure supported-image drops stay on the image-attachment path, while ordinary files and mixed batches upload without leaving drag-active styling behind.
 - **Web Shell E2E**: drag a file onto the composer → progress strip appears above the input surface → file exists in the workspace → an inline file tag appears (include filenames with spaces/non-ASCII and a literal `%` to cover escaping); drop a file whose requested name is occupied, including by an in-workspace symlink → upload succeeds as `name (1).ext` with an auto-numbering hint derived from the differing paths, the existing entry untouched, and the tag uses the final name; batch drop preserves upload/tag order. @ panel: browse into a nested directory, select upload, choose a file → the trigger `@` is removed, the captured directory receives the file, and an inline file tag appears; reopening the menu fetches a fresh listing without a public cache API; selecting the same local file twice still fires two uploads. Entry points are hidden when either the upload capability or the required qualified-route capability is absent. Submit prompts that reference one uploaded text file and one uploaded image and verify the existing resolver supplies their content; an unsupported/oversized binary surfaces the resolver's existing readable error rather than being described as universally consumable.

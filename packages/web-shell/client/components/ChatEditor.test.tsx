@@ -2139,6 +2139,11 @@ describe('ChatEditor file upload gating', () => {
     });
 
     rerenderChatEditor(container, { sessionId: 'session-b' });
+    // The target switch flushed the pending restore synchronously, handing
+    // the typed query back to session A's draft BEFORE the swap persists it;
+    // the later picker event must find nothing left to restore.
+    expect(restore).toHaveBeenCalledOnce();
+
     Object.defineProperty(input, 'files', {
       value: [new File(['abc'], 'notes.txt')],
       configurable: true,
@@ -2150,6 +2155,37 @@ describe('ChatEditor file upload gating', () => {
 
     expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
     expect(restore).toHaveBeenCalledOnce();
+  });
+
+  it('restores the mention when every picker selection is locally rejected', async () => {
+    const workspace = makeWorkspace(['workspace_file_upload']);
+    uploadWorkspaceState.current = workspace;
+    const container = renderChatEditor({});
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+
+    const restore = vi.fn();
+    act(() => {
+      composerCoreState.onFileUploadRequest?.('docs', restore);
+    });
+    const oversized = new File(['x'], 'big.bin');
+    Object.defineProperty(oversized, 'size', {
+      value: 50 * 1024 * 1024 + 1,
+    });
+    Object.defineProperty(input, 'files', {
+      value: [oversized],
+      configurable: true,
+    });
+    act(() => {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {});
+
+    // Nothing was queued, so the picker closed without any upload and the
+    // consumed restore must give the typed query back.
+    expect(workspace.client.uploadWorkspaceFile).not.toHaveBeenCalled();
+    expect(restore).toHaveBeenCalledTimes(1);
   });
 
   describe('qualified upload targeting', () => {

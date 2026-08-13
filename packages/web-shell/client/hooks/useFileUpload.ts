@@ -66,12 +66,14 @@ export interface UseFileUploadReturn {
    * Queue `files` for sequential upload into `targetDir` (relative to the
    * target workspace root; `'.'` for the root). `onUploaded` fires exactly
    * once per successful upload with the server-confirmed final path.
+   * Returns how many files were actually queued (locally rejected files,
+   * e.g. oversized ones, become error rows without queueing).
    */
   uploadFiles: (
     files: File[],
     targetDir: string,
     onUploaded?: (path: string) => void,
-  ) => void;
+  ) => number;
   /** Remove a row and abort it if it is pending or in flight. */
   removeUpload: (id: string) => void;
 }
@@ -109,6 +111,17 @@ export function useFileUpload(
   const activeUploadRef = useRef<QueuedUpload | undefined>(undefined);
   const processingRef = useRef(false);
   const generationRef = useRef(0);
+  const prevTargetKeyRef = useRef(targetKey);
+  // Invalidate the generation synchronously when the target changes:
+  // `clientRef` is reassigned during render, so an in-flight completion
+  // landing between commit and the reset effect below would otherwise pass
+  // the old-generation guard while already holding the NEW target's client.
+  if (prevTargetKeyRef.current !== targetKey) {
+    prevTargetKeyRef.current = targetKey;
+    generationRef.current += 1;
+    activeUploadRef.current?.controller.abort();
+    for (const queued of queueRef.current) queued.controller.abort();
+  }
   const clientRef = useRef<FileUploadClient | undefined>(client);
   clientRef.current = client;
   const maxBytesRef = useRef(maxBytes);
@@ -219,10 +232,11 @@ export function useFileUpload(
 
   const uploadFiles = useCallback(
     (files: File[], targetDir: string, onUploaded?: (path: string) => void) => {
-      if (files.length === 0) return;
+      if (files.length === 0) return 0;
       const limit = maxBytesRef.current;
       const accepted = files.slice(0, MAX_FILES_PER_BATCH);
       const skipped = files.length - accepted.length;
+      let queuedCount = 0;
       for (const file of accepted) {
         uploadIdCounter += 1;
         const id = `upload-${uploadIdCounter}`;
@@ -252,6 +266,7 @@ export function useFileUpload(
           controller: new AbortController(),
           onUploaded,
         });
+        queuedCount += 1;
       }
       if (skipped > 0) {
         uploadIdCounter += 1;
@@ -270,6 +285,7 @@ export function useFileUpload(
       }
       commit();
       void processQueue();
+      return queuedCount;
     },
     [commit, processQueue],
   );

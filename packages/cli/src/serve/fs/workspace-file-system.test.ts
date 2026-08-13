@@ -2342,6 +2342,22 @@ describe('WorkspaceFileSystem - writeBytesAtomic', () => {
     ).toBe('x');
   });
 
+  it('does not audit a no-clobber collision as fs.denied', async () => {
+    // Collisions are the upload route's expected candidate-loop control
+    // flow; monitoring keyed on fs.denied volume must not see them.
+    await fsp.writeFile(path.join(h.workspace, 'taken.bin'), 'x');
+    const r = await h.fs.resolve('taken.bin', 'write');
+    const deniedBefore = h.events.filter(
+      (e) => e.type === FS_DENIED_EVENT_TYPE,
+    ).length;
+    await expect(
+      h.fs.writeBytesAtomic(r, Buffer.from('y')),
+    ).rejects.toMatchObject({ kind: 'file_already_exists' });
+    expect(
+      h.events.filter((e) => e.type === FS_DENIED_EVENT_TYPE),
+    ).toHaveLength(deniedBefore);
+  });
+
   it('rejects an escaping symlink at the boundary', async () => {
     const outside = path.join(h.scratch, 'outside.txt');
     await fsp.writeFile(outside, 'external');

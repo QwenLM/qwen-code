@@ -10,6 +10,7 @@ import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express from 'express';
 import request from 'supertest';
@@ -805,6 +806,114 @@ describe('POST /file/upload', () => {
     expect(dotdot.body.errorKind).toBe('parse_error');
   });
 
+  it.each(['assets/', 'sub/dir/'])(
+    'rejects the directory-shaped trailing-slash path %s before buffering',
+    async (pathParam) => {
+      const res = await upload(pathParam).send(Buffer.from('x'));
+      expect(res.status).toBe(400);
+      expect(res.body.errorKind).toBe('parse_error');
+    },
+  );
+
+  it('rejects a trailing-slash path even when a same-named directory exists', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'assets'));
+    const res = await upload('assets/').send(Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+    // No auto-numbered FILE may appear beside the directory.
+    await expect(
+      fsp.stat(path.join(h.workspace, 'assets (1)')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['notes\u0000.txt', 'foo\u0000/x.txt'])(
+    'rejects the NUL-bearing path with parse_error and no denied event',
+    async (pathParam) => {
+      const deniedBefore = h.events.filter(
+        (e) => e.type === 'fs.denied',
+      ).length;
+      const res = await upload(pathParam).send(Buffer.from('x'));
+      expect(res.status).toBe(400);
+      expect(res.body.errorKind).toBe('parse_error');
+      expect(h.events.filter((e) => e.type === 'fs.denied')).toHaveLength(
+        deniedBefore,
+      );
+    },
+  );
+
+  it('rejects an encoded request body instead of silently decoding it', async () => {
+    const res = await request(h.app)
+      .post('/file/upload')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'application/octet-stream')
+      .set('Content-Encoding', 'gzip')
+      .query({ path: 'gz.bin' })
+      .send(gzipSync(Buffer.from('decoded payload')));
+    expect(res.status).toBe(415);
+    expect(res.body.errorKind).toBe('unsupported_media_type');
+    await expect(
+      fsp.stat(path.join(h.workspace, 'gz.bin')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('numbers past a symlink cycle occupying the requested name', async () => {
+    await fsp.symlink(
+      path.join(h.workspace, 'loop.txt'),
+      path.join(h.workspace, 'loop.txt'),
+    );
+    const res = await upload('loop.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('loop (1).txt');
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'loop (1).txt'), 'utf-8'),
+    ).toBe('x');
+  });
+
+  it('numbers past a two-hop symlink cycle occupying the requested name', async () => {
+    await fsp.symlink(
+      path.join(h.workspace, 'b.txt'),
+      path.join(h.workspace, 'a.txt'),
+    );
+    await fsp.symlink(
+      path.join(h.workspace, 'a.txt'),
+      path.join(h.workspace, 'b.txt'),
+    );
+    const res = await upload('a.txt').send(Buffer.from('x'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('a (1).txt');
+  });
+
+  it('uploads through a symlinked directory whose target trips the pattern check', async () => {
+    // `aux` matches the DOS-device pattern; `docs -> aux` is a legal POSIX
+    // pair. Candidates re-resolve from the literal request dir, so the
+    // canonical `aux` segment never enters the pattern check.
+    await fsp.mkdir(path.join(h.workspace, 'aux'));
+    await fsp.symlink(
+      path.join(h.workspace, 'aux'),
+      path.join(h.workspace, 'docs'),
+      'dir',
+    );
+    const res = await upload('docs/report.txt').send(Buffer.from('hi'));
+    expect(res.status).toBe(201);
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'aux', 'report.txt'), 'utf-8'),
+    ).toBe('hi');
+  });
+
+  it('emits no fs.denied events for a successful auto-numbered upload', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'shot.png'), '0');
+    await fsp.writeFile(path.join(h.workspace, 'shot (1).png'), '1');
+    await fsp.writeFile(path.join(h.workspace, 'shot (2).png'), '2');
+    const deniedBefore = h.events.filter((e) => e.type === 'fs.denied').length;
+    const res = await upload('shot.png').send(Buffer.from('3'));
+    expect(res.status).toBe(201);
+    expect(res.body.path).toBe('shot (3).png');
+    expect(h.events.filter((e) => e.type === 'fs.denied')).toHaveLength(
+      deniedBefore,
+    );
+  });
+
   it('accepts an upload above the 5 MiB text cap (binary policy at HTTP)', async () => {
     // 6 MiB > MAX_WRITE_BYTES (5 MiB) but <= MAX_UPLOAD_BYTES: proves the
     // route applies the binary-ingress cap, not the text-write default.
@@ -946,43 +1055,48 @@ describe('POST /file/upload', () => {
     await new Promise<void>((resolve) => server.once('listening', resolve));
     const port = (server.address() as AddressInfo).port;
     try {
-      await new Promise<void>((resolve) => {
-        const req = http.request(
-          {
-            host: '127.0.0.1',
-            port,
-            method: 'POST',
-            path: '/file/upload?path=photo.jpg',
-            headers: {
-              Host: loopbackHost(),
-              Authorization: 'Bearer secret',
-              'Content-Type': 'application/octet-stream',
-              'Content-Length': '5',
-            },
-          },
-          (res) => {
-            res.resume();
-            res.on('end', resolve);
-            res.on('close', resolve);
-          },
-        );
-        req.on('error', () => {});
-        req.on('close', resolve);
-        req.write('hello');
-        req.end();
-        // Cut the connection while admission is suspended on the held stat.
-        void vi
-          .waitFor(() => {
-            expect(statCalls).toBe(1);
-          })
-          .then(async () => {
-            req.destroy();
-            // Give the server time to process the disconnect (req becomes
-            // aborted / res closed) before admission resumes.
-            await new Promise((r) => setTimeout(r, 100));
-            releaseStat();
-          });
+      let resolveDisconnect!: () => void;
+      const disconnected = new Promise<void>((resolve) => {
+        resolveDisconnect = resolve;
       });
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/file/upload?path=photo.jpg',
+          headers: {
+            Host: loopbackHost(),
+            Authorization: 'Bearer secret',
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': '5',
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('end', resolveDisconnect);
+          res.on('close', resolveDisconnect);
+        },
+      );
+      req.on('error', () => {});
+      req.on('close', resolveDisconnect);
+      req.write('hello');
+      req.end();
+      // Cut the connection while admission is suspended on the held stat.
+      // Awaited so a timeout fails THIS test instead of escaping as an
+      // unhandled rejection attributed to whatever test runs next.
+      await vi.waitFor(
+        () => {
+          expect(statCalls).toBe(1);
+        },
+        { timeout: 5000 },
+      );
+      req.destroy();
+      // Give the server time to process the disconnect (req becomes
+      // aborted / res closed) before admission resumes.
+      await new Promise((r) => setTimeout(r, 100));
+      releaseStat();
+      await disconnected;
       // Let the resumed pipeline reach the aborted-request guard and release
       // its gate slot before the follow-ups probe the gate.
       await new Promise((r) => setTimeout(r, 150));

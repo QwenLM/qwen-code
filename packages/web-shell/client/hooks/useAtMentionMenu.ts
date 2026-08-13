@@ -1878,11 +1878,19 @@ export function useAtMentionMenu({
           fileDirectoryRef.current,
         );
         onUploadRequest(dirPath, () => {
+          const doc = view.state.doc;
+          // Tolerate a pure end-append — the upload flow's own completed
+          // `@file` tags land there while the picker is open and never move
+          // the insertion point. Whole-doc session swaps flush this callback
+          // before the swap, so a foreign doc never reaches here.
           if (
-            view.state.doc !== docAfterRemoval ||
-            current.from > view.state.doc.length
-          )
+            current.from > doc.length ||
+            doc.length < docAfterRemoval.length ||
+            doc.sliceString(0, docAfterRemoval.length) !==
+              docAfterRemoval.toString()
+          ) {
             return;
+          }
           view.dispatch({
             changes: { from: current.from, insert: removedText },
             selection: { anchor: current.from + removedText.length },

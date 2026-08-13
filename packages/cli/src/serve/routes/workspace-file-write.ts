@@ -412,14 +412,15 @@ interface UploadAdmission {
   basename: string;
   resolvedDir: ResolvedPath;
   /**
-   * Workspace-relative form of `resolvedDir` (POSIX separators). Candidates
-   * are re-resolved from THIS string, not from the absolute `resolvedDir`:
-   * `resolveWithinWorkspace` runs `hasSuspiciousPathPattern` on the whole
-   * input, and a workspace root whose own path trips the pattern check
-   * (trailing-dot/space segment, DOS device name) would otherwise fail every
-   * upload even though admission resolved the same root successfully.
+   * The literal request directory admission validated with
+   * `fs.resolve(dir, 'write')`. Candidates are re-resolved from THIS string,
+   * never from the canonicalized `resolvedDir`: resolution re-runs
+   * `hasSuspiciousPathPattern` on its whole input, so canonical segments the
+   * client never wrote — the workspace root's own path when it trips the
+   * pattern check, or a symlinked parent whose TARGET name does
+   * (`docs -> aux`) — would otherwise fail every upload into the directory.
    */
-  admissionDir: string;
+  queryDir: string;
 }
 
 const uploadAdmissions = new WeakMap<Request, UploadAdmission>();
@@ -504,12 +505,31 @@ export function fileUploadBodyParser(): RequestHandler {
   const raw = express.raw({
     type: 'application/octet-stream',
     limit: MAX_UPLOAD_BYTES,
+    // The endpoint contract is raw octets: decoding a Content-Encoding would
+    // publish bytes the client never sent (and hash/size of the decoded form).
+    inflate: false,
   });
   return (req, res, next) => {
     raw(req, res, (err?: unknown) => {
       if (err) {
-        if ((err as { status?: number }).status === 413) {
+        const status = (err as { status?: number }).status;
+        if (status === 413) {
           sendUploadTooLarge(res);
+          return;
+        }
+        if (status === 415) {
+          applyReadHeaders(res);
+          res.status(415).json({
+            errorKind: 'unsupported_media_type',
+            error: 'File uploads do not support encoded request bodies',
+            status: 415,
+          });
+          return;
+        }
+        // A client aborting mid-body is routine for large uploads; the gate
+        // slot is already released by the pre-handler response-close
+        // listener, so the abort must not surface as an unhandled error.
+        if ((err as { code?: string }).code === 'ECONNABORTED' || req.aborted) {
           return;
         }
         next(err);
@@ -576,12 +596,23 @@ function fileUploadAdmission(
         }
         const dir = path.dirname(queryPath);
         const basename = path.basename(queryPath);
-        if (basename.length === 0 || basename === '.' || basename === '..') {
+        // `path.dirname`/`path.basename` silently normalize a trailing slash,
+        // so a directory-shaped path must be rejected before they run.
+        if (
+          queryPath.endsWith('/') ||
+          basename.length === 0 ||
+          basename === '.' ||
+          basename === '..'
+        ) {
           sendParseError(res, ROUTE, '`path` must name a file');
           return;
         }
         // Reject statically detectable bad names before taking a gate slot
         // and buffering the body; fs.resolve would throw on them anyway.
+        if (queryPath.includes('\0')) {
+          sendParseError(res, ROUTE, 'path must not contain null bytes');
+          return;
+        }
         if (hasSuspiciousPathPattern(basename)) {
           sendParseError(res, ROUTE, 'filename contains a suspicious pattern');
           return;
@@ -642,7 +673,7 @@ function fileUploadAdmission(
           fs,
           basename,
           resolvedDir,
-          admissionDir: workspaceRelative(req, resolvedDir),
+          queryDir: dir,
         });
         next();
       } catch (err) {
@@ -672,7 +703,7 @@ async function handlePostFileUpload(
     });
     return;
   }
-  const { route, fs, basename, resolvedDir, admissionDir } = admission;
+  const { route, fs, basename, resolvedDir, queryDir } = admission;
   const { stem, ext } = splitStemExtension(basename);
   const lease = uploadGateLeases.get(req);
   if (lease) lease.handlerStarted = true;
@@ -706,11 +737,20 @@ async function handlePostFileUpload(
       let resolved: ResolvedPath;
       try {
         resolved = await fs.resolve(
-          path.join(admissionDir, candidateBasename),
+          path.join(queryDir, candidateBasename),
           'write',
         );
       } catch (err) {
-        // Boundary escapes and other resolution failures stop the loop.
+        // A symlink CYCLE occupying the candidate (ELOOP) is merely an
+        // occupied name — number on like the other occupied cases. Boundary
+        // escapes and other resolution failures stop the loop.
+        if (
+          isFsError(err) &&
+          err.kind === 'symlink_escape' &&
+          (err.cause as NodeJS.ErrnoException | undefined)?.code === 'ELOOP'
+        ) {
+          continue;
+        }
         sendFsError(res, err, route);
         return;
       }

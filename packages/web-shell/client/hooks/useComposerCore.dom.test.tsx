@@ -287,6 +287,29 @@ describe('useComposerCore history and drafts', () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it('blocks history retry and search-match submit while an upload is busy', async () => {
+    const workspaceCwd = '/workspace/upload-busy';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['previous prompt']),
+    );
+    const onSubmit = vi.fn();
+    await mount({
+      onSubmit,
+      sessionId: 'session-upload-busy',
+      atWorkspaceCwd: workspaceCwd,
+      workspaceUploadBusy: true,
+    });
+
+    act(() => latest!.retryLast());
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toEqual(['previous prompt']);
+    act(() => latest!.searchState.submitSearchMatch('previous prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it('falls back to legacy prompt history until the workspace has its own history', async () => {
     localStorage.setItem(
       getPromptHistoryStorageKey(),

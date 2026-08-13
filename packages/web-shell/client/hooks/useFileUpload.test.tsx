@@ -18,9 +18,11 @@ interface ProbeProps {
 }
 
 let latest: UseFileUploadReturn | undefined;
+let probeRenderCount = 0;
 
 function Probe({ client, maxBytes, targetKey }: ProbeProps) {
   latest = useFileUpload({ client, maxBytes, targetKey });
+  probeRenderCount += 1;
   return null;
 }
 
@@ -57,6 +59,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   latest = undefined;
+  probeRenderCount = 0;
 });
 
 afterEach(() => {
@@ -717,6 +720,85 @@ describe('useFileUpload', () => {
     });
     expect(latest!.uploads).toHaveLength(0);
     expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it('invalidates the generation before the new client can serve the old queue', async () => {
+    // `clientRef` is reassigned during render, so the generation bump must
+    // land during render too: an in-flight completion settling between
+    // commit and the passive reset effect would otherwise pass the OLD
+    // generation while `clientRef` already points at the new target. The
+    // switch renders WITHOUT act so that window stays open — act flushes
+    // passive effects synchronously and would hide the race.
+    const gates: Array<
+      Deferred<Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>>
+    > = [];
+    const makeClient = (): FileUploadClient => ({
+      uploadWorkspaceFile: vi.fn(() => {
+        const gate =
+          deferred<
+            Awaited<ReturnType<FileUploadClient['uploadWorkspaceFile']>>
+          >();
+        gates.push(gate);
+        return gate.promise;
+      }),
+    });
+    const clientA = makeClient();
+    const clientB = makeClient();
+    const onUploaded = vi.fn();
+
+    render({ client: clientA, maxBytes: MAX, targetKey: 'ws:/a' });
+    act(() => {
+      latest!.uploadFiles(
+        [makeFile('one.txt'), makeFile('two.txt')],
+        '.',
+        onUploaded,
+      );
+    });
+    expect(clientA.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const rendersBefore = probeRenderCount;
+      root!.render(<Probe client={clientB} maxBytes={MAX} targetKey="ws:/b" />);
+      // Poll on chained macrotasks until the switch render commits (the
+      // fixed hook bumps the generation during that render). Each poll
+      // message posts after the previous task, so the chain lands between
+      // the commit and the passive reset effect's flush task.
+      const nextMacrotask = () =>
+        new Promise<void>((resolve) => {
+          const channel = new MessageChannel();
+          channel.port1.onmessage = () => resolve();
+          channel.port2.postMessage(undefined);
+        });
+      for (
+        let tasks = 0;
+        probeRenderCount <= rendersBefore && tasks < 1000;
+        tasks += 1
+      ) {
+        await nextMacrotask();
+      }
+      // The reset effect commits one more render when it flushes. If it
+      // already ran, the window is closed and this test would pass
+      // vacuously — fail loudly instead.
+      expect(probeRenderCount).toBe(rendersBefore + 1);
+      // Land the in-flight completion inside the commit/effect window.
+      gates[0].resolve({
+        kind: 'file_upload',
+        path: 'one.txt',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}`,
+      });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    } finally {
+      consoleError.mockRestore();
+    }
+    await act(async () => {});
+
+    expect(onUploaded).not.toHaveBeenCalled();
+    // The still-queued second file must not upload through B's client.
+    expect(clientB.uploadWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it('never uploads a queued item after unmount', async () => {

@@ -50,7 +50,7 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
-import { useFileUpload } from '../hooks/useFileUpload';
+import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
 import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import {
@@ -1374,6 +1374,18 @@ export const ChatEditor = memo(
       [uploadTargetKey],
     );
 
+    // A pending picker restore belongs to the CURRENT target's draft. Flush
+    // it before a target change (session switch, capability flip) persists or
+    // replaces the doc: afterwards the editor holds another draft, and the
+    // layout effect runs before the composer's passive session-swap effect
+    // saves the outgoing draft. Also covers the picker being torn down while
+    // the OS dialog is open — no cancel/change event will ever arrive.
+    useLayoutEffect(() => {
+      const restore = uploadPickerRestoreRef.current;
+      uploadPickerRestoreRef.current = undefined;
+      restore?.();
+    }, [uploadTargetKey]);
+
     const core = useComposerCore({
       onSubmit,
       onInputTextChange,
@@ -1433,6 +1445,36 @@ export const ChatEditor = memo(
       },
       [addComposerTags],
     );
+    const uploadStatusText = (upload: FileUploadItem): string => {
+      switch (upload.status) {
+        case 'pending':
+          return t('composer.upload.pending');
+        case 'uploading':
+          return `${t('composer.upload.uploading')} ${Math.round(
+            upload.progress * 100,
+          )}%`;
+        case 'done':
+          return upload.resultPath !== undefined &&
+            upload.resultPath !== upload.targetPath
+            ? `${t('composer.upload.renamed')} ${upload.resultPath}`
+            : t('composer.upload.done');
+        case 'error':
+          return (
+            upload.error ??
+            (upload.errorCode === 'tooLarge'
+              ? t('composer.upload.error.tooLarge', {
+                  limit: `${Math.round(maxUploadBytes / (1024 * 1024))} MiB`,
+                })
+              : upload.errorCode === 'noDaemon'
+                ? t('composer.upload.error.noDaemon')
+                : upload.errorCode === 'tooManyFiles'
+                  ? t('composer.upload.error.tooManyFiles', {
+                      count: upload.skippedCount ?? 0,
+                    })
+                  : t('composer.upload.error'))
+          );
+      }
+    };
     const [uploadDragActive, setUploadDragActive] = useState(false);
     const uploadDragDepthRef = useRef(0);
     const handleUploadDragEnter = useCallback(
@@ -1537,7 +1579,12 @@ export const ChatEditor = memo(
           capturedKey !== '' &&
           capturedKey === uploadTargetKey
         ) {
-          uploadFiles(files, targetDir, insertUploadReference);
+          const queued = uploadFiles(files, targetDir, insertUploadReference);
+          if (queued === 0) {
+            // Every chosen file was rejected locally (e.g. all oversized):
+            // the picker closed without any upload, so give the query back.
+            restore?.();
+          }
         } else {
           // The @ panel deleted the mention query before opening the picker.
           // A blocked or empty selection must give it back, like the native
@@ -2203,13 +2250,23 @@ export const ChatEditor = memo(
       >
         {fileUpload.uploads.length > 0 && (
           <div className={styles.uploadStrip} data-web-shell-upload-strip>
+            {/* One live region per strip, fed only by terminal transitions:
+                per-row regions would announce every >=2% progress tick. */}
+            <div className={styles.srOnly} role="status" aria-live="polite">
+              {fileUpload.uploads
+                .filter(
+                  (upload) =>
+                    upload.status === 'done' || upload.status === 'error',
+                )
+                .map(
+                  (upload) =>
+                    `${upload.file.name}: ${uploadStatusText(upload)}`,
+                )
+                .join(' \u2014 ')}
+            </div>
             {fileUpload.uploads.map((upload) => {
               const busy =
                 upload.status === 'pending' || upload.status === 'uploading';
-              const renamed =
-                upload.status === 'done' &&
-                upload.resultPath !== undefined &&
-                upload.resultPath !== upload.targetPath;
               return (
                 <div
                   key={upload.id}
@@ -2227,36 +2284,8 @@ export const ChatEditor = memo(
                   <span className={styles.uploadRowName}>
                     {upload.file.name}
                   </span>
-                  <span
-                    className={styles.uploadRowStatus}
-                    role="status"
-                    aria-live="polite"
-                  >
-                    {upload.status === 'pending' &&
-                      t('composer.upload.pending')}
-                    {upload.status === 'uploading' &&
-                      `${t('composer.upload.uploading')} ${Math.round(
-                        upload.progress * 100,
-                      )}%`}
-                    {upload.status === 'done' &&
-                      (renamed
-                        ? `${t('composer.upload.renamed')} ${upload.resultPath}`
-                        : t('composer.upload.done'))}
-                    {upload.status === 'error' &&
-                      (upload.error ??
-                        (upload.errorCode === 'tooLarge'
-                          ? t('composer.upload.error.tooLarge', {
-                              limit: `${Math.round(
-                                maxUploadBytes / (1024 * 1024),
-                              )} MiB`,
-                            })
-                          : upload.errorCode === 'noDaemon'
-                            ? t('composer.upload.error.noDaemon')
-                            : upload.errorCode === 'tooManyFiles'
-                              ? t('composer.upload.error.tooManyFiles', {
-                                  count: upload.skippedCount ?? 0,
-                                })
-                              : t('composer.upload.error')))}
+                  <span className={styles.uploadRowStatus}>
+                    {uploadStatusText(upload)}
                   </span>
                   <button
                     type="button"

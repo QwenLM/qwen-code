@@ -299,6 +299,50 @@ describe('useAtMentionMenu', () => {
     expect(view.dispatch).toHaveBeenCalledOnce();
   });
 
+  it('restores the mention when an end-placed upload tag landed mid-picker', async () => {
+    vi.useFakeTimers();
+    const view = makeView('hello @src/');
+    const dispatched: unknown[] = [];
+    view.dispatch = vi.fn((tr: unknown) => {
+      dispatched.push(tr);
+    });
+    let restoreQuery: (() => void) | undefined;
+    const onUploadRequest = vi.fn(
+      (_targetDir: string, restore?: () => void) => {
+        restoreQuery = restore;
+      },
+    );
+    mount({
+      view,
+      builtinProviders: ['files'],
+      onUploadRequest,
+      actions: {
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: 'src',
+          entries: [],
+          truncated: false,
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+
+    // While the OS picker is open, an earlier upload completes and appends
+    // its @file tag at the doc end. Canceling must still give the typed
+    // query back: the append does not move the insertion point.
+    setViewState(view, 'hello @src/@report.pdf ');
+
+    act(() => restoreQuery!());
+    expect(dispatched).toHaveLength(2);
+    expect(dispatched[1]).toEqual({
+      changes: { from: 6, insert: '@src/' },
+      selection: { anchor: 11 },
+    });
+  });
+
   it('uploads into the directory shown by a typed path query', async () => {
     vi.useFakeTimers();
     const view = makeView('@src/');
