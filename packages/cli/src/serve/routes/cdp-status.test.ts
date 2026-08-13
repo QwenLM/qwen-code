@@ -7,8 +7,17 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import type { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
+import type {
+  CdpBridgeEndpoint,
+  CdpTunnelRegistry,
+} from '../cdp-tunnel/cdp-tunnel-registry.js';
 import { registerCdpStatusRoute } from './cdp-status.js';
+
+const bridge = (multiClient: boolean): CdpBridgeEndpoint => ({
+  connectionId: 'bridge-1',
+  multiClient,
+  send: () => {},
+});
 
 function appFor(
   registry: Pick<CdpTunnelRegistry, 'getActive' | 'linkCount'> | undefined,
@@ -56,7 +65,7 @@ describe('registerCdpStatusRoute', () => {
 
   it('requires a multi-client bridge without bearer auth', async () => {
     const registry = {
-      getActive: () => ({ multiClient: true }),
+      getActive: () => bridge(true),
       linkCount: () => 2,
     };
 
@@ -80,7 +89,7 @@ describe('registerCdpStatusRoute', () => {
     await expect(
       request(
         appFor({
-          getActive: () => ({ multiClient: false }),
+          getActive: () => bridge(false),
           linkCount: () => 1,
         }),
       ).get('/cdp/status'),
