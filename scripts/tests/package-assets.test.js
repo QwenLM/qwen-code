@@ -41,6 +41,34 @@ describe('package asset scripts', () => {
     }
   });
 
+  it('emits an executable dist/cli.js — shebang plus the exec bit, once', () => {
+    // shellContextEnv blanks a QWEN_CODE_CLI a POSIX shell cannot exec (no
+    // shebang, or no exec bit), and `"${QWEN_CODE_CLI:-qwen}"` then silently
+    // runs whatever `qwen` the PATH resolves — a different install for every
+    // review subcommand of a session launched off the bundle (measured on
+    // three live runs). Deleting the block, dropping the chmod, or dropping
+    // the already-has-a-shebang guard must not stay green.
+    const rootDir = createFixtureRoot();
+    writeFile(rootDir, 'dist/cli.js', 'console.log("bundle");\n');
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    const cliEntry = path.join(rootDir, 'dist', 'cli.js');
+    const once = readFileSync(cliEntry, 'utf8');
+    expect(once.startsWith('#!/usr/bin/env node\n')).toBe(true);
+    expect(once).toContain('console.log("bundle");');
+    if (process.platform !== 'win32') {
+      // Windows has no POSIX exec bit for chmod to set; the shebang half
+      // still holds there.
+      expect(fs.statSync(cliEntry).mode & 0o777).toBe(0o755);
+    }
+
+    // Re-running the bundle step must not stack a second shebang.
+    copyBundleAssets({ root: rootDir });
+    expect(readFileSync(cliEntry, 'utf8')).toBe(once);
+  });
+
   it('stamps the review source digest into dist', () => {
     // Nothing gated this call site: removing it left the whole scripts suite
     // green while `npm run bundle` silently stopped writing the stamp — and a

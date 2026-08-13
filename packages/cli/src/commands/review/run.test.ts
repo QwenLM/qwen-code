@@ -156,6 +156,23 @@ describe('target-pinned artifact patterns', () => {
     expect(prNumberFromTarget(undefined)).toBeNull();
   });
 
+  it('classifies exactly as the child parser does — no second classifier', () => {
+    // The child names its artifacts after parse-args' verdict; a narrower
+    // local regex pinned patterns the child never writes and reported a
+    // completed (and posted) review as "no verdict was produced".
+    // GitHub's Files-changed tab hands out /pull/<n>/files URLs:
+    expect(prNumberFromTarget('https://github.com/o/r/pull/9014/files')).toBe(
+      '9014',
+    );
+    // The parser normalizes pure integers via Number(), and the child writes
+    // `pr-42-…`, so the pin must be '42', never '0042':
+    expect(prNumberFromTarget('0042')).toBe('42');
+    // A path that merely contains /pull/<n> is a FILE target to the parser:
+    expect(prNumberFromTarget('docs/pull/42')).toBeNull();
+    // The scheme and path are case-insensitive to the parser:
+    expect(prNumberFromTarget('HTTPS://github.com/o/r/PULL/9014')).toBe('9014');
+  });
+
   it('pins a PR run to its own composed artifact', () => {
     // Two concurrent `review run`s share `.qwen/tmp`; the generic
     // newest-composed scan republished the OTHER run's verdict on two of

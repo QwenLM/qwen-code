@@ -34,7 +34,7 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR } from './lib/paths.js';
-import { EFFORT_LEVELS } from './parse-args.js';
+import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
 export interface RunReviewArgs {
   target?: string;
@@ -86,12 +86,21 @@ export interface RunReviewResult {
  * `review run`s in one repo share `.qwen/tmp`, and a generic newest-composed
  * scan has captured the OTHER run's verdict the moment it appeared (measured:
  * two of three parallel PR reviews republished a neighbour's `composedPath`).
+ *
+ * Classified by the child's own parser, not a local regex: the child names
+ * its artifacts after what `parse-args` decided, so any second classifier
+ * here diverges exactly where the shapes get interesting — `/pull/9014/files`
+ * (a PR to the parser, unmatched by a $-anchored regex), `0042` (the parser
+ * writes `pr-42-`, a verbatim pin looks for `pr-0042-`), `docs/pull/42` (a
+ * file path to the parser). A run whose pin disagrees with the child reports
+ * a completed review as "no verdict was produced".
  */
 export function prNumberFromTarget(target?: string): string | null {
   if (!target) return null;
-  if (/^\d+$/.test(target)) return target;
-  const m = /\/pull\/(\d+)\/?(?:[?#]|$)/.exec(target);
-  return m ? m[1] : null;
+  const { target: t } = parseReviewArgs(target);
+  return t.type === 'pr-number' || t.type === 'pr-url'
+    ? String(t.number)
+    : null;
 }
 
 /**
@@ -100,6 +109,14 @@ export function prNumberFromTarget(target?: string): string | null {
  * composed artifact EXCEPT a PR-scoped one, so a concurrent PR review cannot
  * be mistaken for the local run (the reverse direction is already covered by
  * the PR pin).
+ *
+ * Known residual race, accepted: the pin separates target CLASSES, not runs.
+ * Two concurrent no-target runs both write the one fixed filename
+ * `qwen-review-local-composed.json`, and whichever child composes last wins
+ * on disk for both parents — target identity cannot key that apart without
+ * threading a per-run nonce into the child's artifact names, which the
+ * bundled skill, not this command, would have to mint. Same-target
+ * collisions predate the pin; do not diagnose them as a pin failure.
  */
 export function composedPatternFor(prNumber: string | null): RegExp {
   return prNumber
