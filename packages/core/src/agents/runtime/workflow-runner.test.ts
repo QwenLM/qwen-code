@@ -113,6 +113,7 @@ describe('WorkflowRunner', () => {
     expect(productionBridge).toHaveBeenCalledWith(
       productionHandle.runId,
       emitter,
+      undefined,
     );
 
     const injected = configWithRegistry();
@@ -129,6 +130,67 @@ describe('WorkflowRunner', () => {
     });
     expect(createProductionDispatchMock).toHaveBeenCalledOnce();
     expect(injectedBridge).not.toHaveBeenCalled();
+  });
+
+  it('retains the original args needed to retry a failed run from its journal', async () => {
+    const { config, registry } = configWithRegistry();
+    const args = { target: 'web-shell', checks: ['correctness'] };
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return args.target',
+      args,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.args).toEqual(args);
+  });
+
+  it('records sandbox logs in the replay event ledger', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'log("repository loaded"); return "done";',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await handle.completion;
+
+    expect(registry.get(handle.runId)?.events).toEqual([
+      expect.objectContaining({
+        type: 'log',
+        message: 'repository loaded',
+      }),
+      expect.objectContaining({ type: 'workflow-completed' }),
+    ]);
+  });
+
+  it('records a journal retry as sourced from the same run', async () => {
+    const { config, registry } = configWithRegistry();
+    const runId = 'wf_1234abcd';
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "retried"',
+      args: undefined,
+      resumeFromRunId: runId,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+
+    await handle.completion;
+
+    expect(registry.get(runId)).toMatchObject({
+      runId,
+      sourceRunId: runId,
+      startMode: 'retry',
+    });
   });
 
   it('keeps one registry-owned handle through exactly-once completion', async () => {
@@ -245,6 +307,27 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.status).toBe('completed');
     expect(observed.terminalStatuses).toEqual(['completed']);
     expect(observed.abortCount()).toBe(1);
+  });
+
+  it('persists terminal runs without live fire-and-forget dispatches', async () => {
+    const { config, registry } = configWithRegistry();
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'agent("fire and forget"); return "done"',
+      args: undefined,
+      runInBackground: true,
+      dispatch: () => new Promise<string>(() => undefined),
+    });
+
+    await expect(handle.completion).resolves.toMatchObject({ ok: true });
+
+    const entry = registry.get(handle.runId);
+    expect(entry).toMatchObject({ status: 'completed' });
+    expect(entry?.dispatches).toEqual([
+      expect.objectContaining({ status: 'cancelled' }),
+    ]);
+    expect(writeWorkflowSnapshotMock).toHaveBeenCalledWith(config, entry);
   });
 
   it('holds an in-flight agent result until a paused run resumes', async () => {
