@@ -8535,10 +8535,20 @@ exit 1
   // Shared fixture for the content-based validity checks: a repo whose
   // origin/main..origin/feat span is the PR's own diff and whose
   // origin/feat..feat commit is the round under verification.
+  // Ambient global/system git config (fsmonitor, hooks) must not reach the
+  // fixtures — under load it is a spawn-level flake source (R5-1).
+  const isolatedGitEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  };
   const validityFixture = (build) => {
     const dir = mkdtempSync(join(tmpdir(), 'autofix-validity-'));
     const git = (...args) =>
-      execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      execFileSync('git', ['-C', dir, ...args], {
+        encoding: 'utf8',
+        env: isolatedGitEnv,
+      });
     const write = (rel, content) => {
       mkdirSync(join(dir, dirname(rel)), { recursive: true });
       writeFileSync(join(dir, rel), content);
@@ -8933,8 +8943,9 @@ exit 1
           dir,
           tools,
         ],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: isolatedGitEnv },
       );
+      expect(res.error).toBeUndefined();
       const status = git('status', '--porcelain');
       const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
       const advisoryPath = join(tools, 'gate-advisories.md');
@@ -8943,7 +8954,12 @@ exit 1
         : '';
       rmSync(dir, { recursive: true, force: true });
       rmSync(tools, { recursive: true, force: true });
-      return { out: `${res.stdout}\n${res.stderr}`, status, head, advisory };
+      return {
+        out: `${res.stdout}\n${res.stderr}\n[spawn status=${res.status}]`,
+        status,
+        head,
+        advisory,
+      };
     };
     const srcAndTest = {
       base: ({ write }) => {

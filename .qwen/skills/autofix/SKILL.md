@@ -379,8 +379,10 @@ Two boundaries hold regardless of what any feedback asks for:
   further area of their own), `.husky/`, `.qwen/` (skills are executable
   agent behavior), repo `scripts/` (tests under `scripts/tests/` are
   ordinary test code), `.npmrc`/`.nvmrc`, workspace-root eslint/vitest/
-  tsconfig configs, or the `scripts` section (and, for the root manifest,
-  the `workspaces` array) of a declared workspace `package.json`. The gate deterministically
+  tsconfig configs, lockfiles/`patches/` (supply chain), `.gitattributes`
+  (measurement config), or the `scripts`/`exports`/`main`/`types` fields
+  (and, for the root manifest, the `workspaces` array) of a declared
+  workspace `package.json`. The gate deterministically
   rejects a round that expands into those areas outside the PR's own
   footprint. Feedback requesting such a change — from any author — is
   escalated to a maintainer, not implemented.

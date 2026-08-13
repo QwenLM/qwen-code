@@ -643,8 +643,8 @@ mapfile -d '' -t BITE_SNAPS < <(git diff --name-only -z --no-renames --diff-filt
 # consequence gating above keeps doc-only rounds from ever being rejected.
 BITE_SRC="$(git diff --name-only "${ROUND_RANGE}" \
   -- ':(exclude,glob)**/*.test.*' ':(exclude,glob)**/*.spec.*' \
-  ':(exclude,glob)**/__snapshots__/**' ':(exclude,glob)**/test-utils/**' \
-  ':(exclude,glob)integration-tests/**')"
+  ':(exclude,glob)**/__snapshots__/**' ':(exclude,glob)**/__tests__/**' \
+  ':(exclude,glob)**/test-utils/**' ':(exclude,glob)integration-tests/**')"
 # Does this round RESOLVE a Critical-tagged or CHANGES_REQUESTED finding in
 # code? resolved-comments.txt is the agent's own machine-readable claim of
 # what it fixed; rc.json/rv.json carry the thread bodies and review states
