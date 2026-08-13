@@ -2090,6 +2090,12 @@ it -C ${outsideRepo} reset --hard`,
     // A removal inside a `( … )` subshell does not reach the parent shell.
     () =>
       `git() { command git -C ${plainOutsidePath} reset --hard "$@"; }; ( unset -f git ); git`,
+    // A function shadowing `unset` runs its relocating body even when the
+    // argument names only untracked state — the builtin never runs.
+    () => `unset() { git -C ${plainOutsidePath} reset --hard; }; unset other`,
+    // `unset A` drops the tracked variable, so `cd $A` is a bare `cd` to $HOME
+    // in bash; the guard must not keep expanding the stale in-bounds value.
+    () => `A=nested; unset A; cd $A; git reset --hard`,
   ])(
     'does not let a mis-modelled removal drop a live relocating shadow %#',
     async (build) => {

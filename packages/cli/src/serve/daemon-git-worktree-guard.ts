@@ -2248,11 +2248,13 @@ async function evaluateCommandWithCwd(
         }
       };
       skipRedirectOperands();
+      let hasCommandPrefix = false;
       while (
         removalStart < run.length &&
         (run[removalStart]!.text === 'command' ||
           run[removalStart]!.text === 'builtin')
       ) {
+        hasCommandPrefix = true;
         removalStart++;
         while (
           removalStart < run.length &&
@@ -2265,11 +2267,20 @@ async function evaluateCommandWithCwd(
       }
       const removalTokens = run.slice(removalStart);
       const removalProgram = readProgramWord(removalTokens);
+      // A function shadowing `unset`/`unalias`/`export` runs its body instead
+      // of the builtin (unless `command`/`builtin` bypassed the lookup), so
+      // let the normal shadow dispatch replay it rather than treating the run
+      // as a builtin removal that changes nothing.
+      const shadowedBuiltin =
+        !hasCommandPrefix &&
+        removalProgram !== undefined &&
+        definedBodies.has(removalProgram);
       const isRemoval =
-        removalProgram === 'unset' ||
-        removalProgram === 'unalias' ||
-        (removalProgram === 'export' &&
-          removalTokens.some((token) => /^-[A-Za-z]*n/.test(token.text)));
+        !shadowedBuiltin &&
+        (removalProgram === 'unset' ||
+          removalProgram === 'unalias' ||
+          (removalProgram === 'export' &&
+            removalTokens.some((token) => /^-[A-Za-z]*n/.test(token.text))));
       if (isRemoval) {
         const clearsAll = removalTokens.some((token) =>
           /^-[A-Za-z]*a/.test(token.text),
@@ -2297,8 +2308,19 @@ async function evaluateCommandWithCwd(
             cwdAfter: trackedCwd,
           };
         }
-        // A removal that names only untracked variables is a genuine no-op for
-        // the shadow model.
+        // `unset NAME` / `unset -v NAME` drops a tracked variable, so a later
+        // `$NAME` must stop expanding to its stale value — bash leaves it empty
+        // (an unresolved reference the guard then fails closed on). `unset -f`
+        // is functions-only and leaves variables intact.
+        if (
+          removalProgram === 'unset' &&
+          !removalTokens.some((token) => token.text === '-f')
+        ) {
+          for (const token of removalTokens.slice(1)) {
+            if (!token.text.startsWith('-')) shellLocals.delete(token.text);
+          }
+        }
+        // Any other removal that names only untracked state is a genuine no-op.
         continue;
       }
       // A recorded function shadows a builtin or the git program, and bash
