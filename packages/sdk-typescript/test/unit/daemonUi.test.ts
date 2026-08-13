@@ -2815,8 +2815,13 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       { ...validMutation, kind: 'other' },
       { ...validMutation, activation: 'soon' },
       { ...validMutation, skills: [] },
+      { ...validMutation, skills: 'not-an-array' },
       { ...validMutation, sessionsFailed: Number.POSITIVE_INFINITY },
       { ...validMutation, skills: [{ name: '', enabled: true }] },
+      {
+        ...validMutation,
+        skills: [{ name: 'web-search', enabled: 'yes' }],
+      },
     ];
     for (const mutation of malformed) {
       const events = normalizeDaemonEvent(

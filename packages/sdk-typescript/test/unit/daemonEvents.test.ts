@@ -482,6 +482,25 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
   });
 
+  it('accepts settings_changed with a non-empty key and rejects missing key', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: { key: 'skills.disabled' },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'settings_changed',
+        data: {},
+      }),
+    ).toBeUndefined();
+  });
+
   it('reduces permission, model, and terminal events into a session view', () => {
     const state = reduceDaemonSessionEvents([
       {

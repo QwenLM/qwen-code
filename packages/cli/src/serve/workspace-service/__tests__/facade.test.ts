@@ -2797,6 +2797,7 @@ describe('createDaemonWorkspaceService', () => {
         ],
       });
       expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+      expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
       expect(publishWorkspaceEvent).toHaveBeenCalledWith(
         skillToggleSettingsChanged({
           key: 'skills.disabled',
