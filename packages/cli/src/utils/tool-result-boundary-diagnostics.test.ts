@@ -99,6 +99,16 @@ describe('CLI tool-result boundary diagnostics', () => {
         values: expect.any(Function),
       }),
     );
+    expect(mockObserveBoundary).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        stage: 'acp_projection_output',
+        mutated: true,
+        sessionId: 'session-secret',
+        toolCallId: 'call-secret',
+        artifacts: [{ state: 'reusable', kinds: ['file', 'image'] }],
+      }),
+    );
     const projectionValues = mockObserveBoundary.mock.calls[0]?.[0].values;
     expect(
       typeof projectionValues === 'function'
@@ -161,6 +171,36 @@ describe('CLI tool-result boundary diagnostics', () => {
         stage: 'acp_wire',
         wireUtf8Bytes: 2_001,
         artifacts: [{ state: 'none', kinds: ['link'] }],
+      }),
+    );
+  });
+
+  it('correlates paged replay events with the ACP writer frame', () => {
+    const input = acpUpdate('original');
+    const projected = acpUpdate('projected');
+    const delivered = { ...projected, timestamp: 123 };
+    observeAcpToolResultProjection(
+      input,
+      projected,
+      'session-secret',
+      delivered,
+    );
+
+    observeAcpToolResultWire(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {
+          events: [{ v: 1, type: 'session_update', data: delivered }],
+        },
+      },
+      2_500,
+    );
+
+    expect(mockObserveBoundary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stage: 'acp_wire',
+        wireUtf8Bytes: 2_501,
       }),
     );
   });
@@ -242,6 +282,15 @@ describe('CLI tool-result boundary diagnostics', () => {
         mutated: true,
         artifacts: [{ state: 'reusable', kinds: ['file'] }],
         values: [{ representation: 'headless_content', value: 'original' }],
+      }),
+    );
+    expect(mockObserveBoundary).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        stage: 'headless_projection_output',
+        mutated: true,
+        artifacts: [{ state: 'reusable', kinds: ['file'] }],
+        values: [{ representation: 'headless_content', value: 'projected' }],
       }),
     );
     expect(mockObserveBoundary).toHaveBeenLastCalledWith(

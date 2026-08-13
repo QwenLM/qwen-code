@@ -8,6 +8,7 @@ import { type Config } from '../config/config.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
   Content,
@@ -1737,10 +1738,24 @@ export class ChatRecordingService {
         recordingToolCallResult = sanitizeToolCallResultForRecording(
           recordableToolCallResult,
         );
+        if (
+          typeof recordingToolCallResult.resultDisplay === 'object' &&
+          recordingToolCallResult.resultDisplay !== null &&
+          'type' in recordingToolCallResult.resultDisplay &&
+          recordingToolCallResult.resultDisplay.type === 'task_execution'
+        ) {
+          const taskResult =
+            recordingToolCallResult.resultDisplay as AgentResultDisplay;
+          recordingToolCallResult = {
+            ...recordingToolCallResult,
+            resultDisplay: { ...taskResult, toolCalls: [] },
+          };
+        }
       }
       const outputDisplay = recordingToolCallResult?.resultDisplay;
-      const mutated =
-        typeof inputDisplay === 'string' && inputDisplay !== outputDisplay;
+      let displayMutated: boolean | undefined;
+      const mutated = () =>
+        (displayMutated ??= !isDeepStrictEqual(inputDisplay, outputDisplay));
       observeToolResultBoundary({
         stage: 'recorder_input',
         sessionId: this.getSessionId(),
@@ -1778,25 +1793,7 @@ export class ChatRecordingService {
       };
 
       if (recordingToolCallResult) {
-        // special case for task executions - we don't want to record the tool calls
-        if (
-          typeof recordingToolCallResult.resultDisplay === 'object' &&
-          recordingToolCallResult.resultDisplay !== null &&
-          'type' in recordingToolCallResult.resultDisplay &&
-          recordingToolCallResult.resultDisplay.type === 'task_execution'
-        ) {
-          const taskResult =
-            recordingToolCallResult.resultDisplay as AgentResultDisplay;
-          record.toolCallResult = {
-            ...recordingToolCallResult,
-            resultDisplay: {
-              ...taskResult,
-              toolCalls: [],
-            },
-          };
-        } else {
-          record.toolCallResult = recordingToolCallResult;
-        }
+        record.toolCallResult = recordingToolCallResult;
       }
 
       this.appendRecord(record);

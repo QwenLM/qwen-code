@@ -19,6 +19,7 @@ import type {
   ToolResultArtifactState,
   ToolResultBoundaryArtifact,
 } from '../tools/tools.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 
 export const TOOL_RESULT_BOUNDARY_EVENT_NAME = 'qwen-code.tool_result.boundary';
 export const TOOL_RESULT_BOUNDARY_JSON_BYTE_THRESHOLD = 65_536;
@@ -109,17 +110,20 @@ export interface ToolResultBoundaryObserverOptions {
 }
 
 const boundaryLogger = createDebugLogger('TOOL_RESULT_BOUNDARY');
-const artifactKinds = new Set<ToolArtifactKind>([
-  'file',
-  'link',
-  'html',
-  'image',
-  'video',
-  'audio',
-  'pdf',
-  'notebook',
-  'other',
-]);
+const artifactKindRecord = {
+  file: true,
+  link: true,
+  html: true,
+  image: true,
+  video: true,
+  audio: true,
+  pdf: true,
+  notebook: true,
+  other: true,
+} satisfies Record<ToolArtifactKind, true>;
+const artifactKinds = new Set<ToolArtifactKind>(
+  Object.keys(artifactKindRecord) as ToolArtifactKind[],
+);
 
 export function isToolResultBoundaryDiagnosticsEnabled(): boolean {
   try {
@@ -227,7 +231,10 @@ export function createToolResultBoundaryObserver(
       if (!mutated && !oversized) return false;
 
       const currentTime = now();
-      if (currentTime - windowStartedAt >= windowMs) {
+      if (
+        currentTime < windowStartedAt ||
+        currentTime - windowStartedAt >= windowMs
+      ) {
         windowStartedAt = currentTime;
         emittedInWindow = 0;
       }
@@ -291,7 +298,9 @@ export function createToolResultBoundaryObserver(
           : {}),
         ...hmacIdentifier(
           'toolNameHmacSha256',
-          observation.toolName,
+          observation.toolName === undefined
+            ? undefined
+            : canonicalToolName(observation.toolName),
           activeHmacKey,
         ),
         ...(observation.wireUtf8Bytes !== undefined

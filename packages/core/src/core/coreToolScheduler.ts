@@ -1320,17 +1320,19 @@ function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
   return partitionByConcurrencySafety(calls, isConcurrencySafe);
 }
 
-function toolResultBoundaryValuesEqual(
-  left: readonly ToolResultBoundaryValue[],
-  right: readonly ToolResultBoundaryValue[],
+function producerTextEqual(
+  input: PartListUnion,
+  output: PartListUnion,
 ): boolean {
+  const diagnosticText = (value: PartListUnion) =>
+    toolResultPartDiagnosticValues(value)
+      .map((slot) => slot.value)
+      .join('\n');
+  const inputText = diagnosticText(input);
+  const outputText = diagnosticText(output);
   return (
-    left.length === right.length &&
-    left.every(
-      (value, index) =>
-        value.representation === right[index].representation &&
-        value.value === right[index].value,
-    )
+    inputText === outputText ||
+    (inputText === '' && outputText === TOOL_SUCCEEDED_OUTPUT)
   );
 }
 
@@ -4804,10 +4806,16 @@ export class CoreToolScheduler {
             ]);
           let mutated: boolean | undefined;
           const isMutated = () =>
-            (mutated ??= !toolResultBoundaryValuesEqual(
-              getProducerInputValues(),
-              getProducerOutputValues(),
-            ));
+            (mutated ??=
+              !producerTextEqual(
+                toolResult.llmContent,
+                response.responseParts,
+              ) ||
+              (typeof toolResult.returnDisplay === 'string' ||
+              typeof response.resultDisplay === 'string'
+                ? toolResult.returnDisplay !== response.resultDisplay
+                : false) ||
+              typeof response.visionBridgeNotice === 'string');
           const observation = {
             sessionId: this.config.getSessionId(),
             promptId: scheduledCall.request.prompt_id,
@@ -6046,6 +6054,7 @@ export class CoreToolScheduler {
           call.request.prompt_id,
         ]),
       ),
+      false,
     );
 
     return completedCalls.map((call, index) => ({

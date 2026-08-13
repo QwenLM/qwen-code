@@ -298,25 +298,28 @@ export async function finalizeToolResponses(
   config: Config,
   entries: ToolResponseBudgetEntry[],
   promptIds?: ReadonlyMap<string, string>,
+  observeBoundary = true,
 ): Promise<ToolResponseBudgetEntry[]> {
   const budget =
     config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
   if (!Number.isFinite(budget) || budget <= 0) {
     const unchanged = new Set<number>();
-    observeFinalizerEntries(
-      config,
-      'finalizer_input',
-      entries,
-      unchanged,
-      promptIds,
-    );
-    observeFinalizerEntries(
-      config,
-      'finalizer_output',
-      entries,
-      unchanged,
-      promptIds,
-    );
+    if (observeBoundary)
+      observeFinalizerEntries(
+        config,
+        'finalizer_input',
+        entries,
+        unchanged,
+        promptIds,
+      );
+    if (observeBoundary)
+      observeFinalizerEntries(
+        config,
+        'finalizer_output',
+        entries,
+        unchanged,
+        promptIds,
+      );
     return entries;
   }
 
@@ -324,20 +327,22 @@ export async function finalizeToolResponses(
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     const unchanged = new Set<number>();
-    observeFinalizerEntries(
-      config,
-      'finalizer_input',
-      entries,
-      unchanged,
-      promptIds,
-    );
-    observeFinalizerEntries(
-      config,
-      'finalizer_output',
-      entries,
-      unchanged,
-      promptIds,
-    );
+    if (observeBoundary)
+      observeFinalizerEntries(
+        config,
+        'finalizer_input',
+        entries,
+        unchanged,
+        promptIds,
+      );
+    if (observeBoundary)
+      observeFinalizerEntries(
+        config,
+        'finalizer_output',
+        entries,
+        unchanged,
+        promptIds,
+      );
     return entries;
   }
 
@@ -352,13 +357,14 @@ export async function finalizeToolResponses(
     }
   }
 
-  observeFinalizerEntries(
-    config,
-    'finalizer_input',
-    entries,
-    entriesToPersist,
-    promptIds,
-  );
+  if (observeBoundary)
+    observeFinalizerEntries(
+      config,
+      'finalizer_input',
+      entries,
+      entriesToPersist,
+      promptIds,
+    );
 
   const withPersistence = [...entries];
   const normalizedCallIds = entries.map((entry) =>
@@ -424,13 +430,14 @@ export async function finalizeToolResponses(
   }
 
   const finalized = replaceTextSlots(withPersistence, slots, allocations);
-  observeFinalizerEntries(
-    config,
-    'finalizer_output',
-    finalized,
-    entriesToPersist,
-    promptIds,
-  );
+  if (observeBoundary)
+    observeFinalizerEntries(
+      config,
+      'finalizer_output',
+      finalized,
+      entriesToPersist,
+      promptIds,
+    );
   const finalizedTotal = collectTextSlots(finalized).reduce(
     (sum, slot) => sum + slot.text.length,
     0,

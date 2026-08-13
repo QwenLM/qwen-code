@@ -141,6 +141,29 @@ describe('tool-result boundary diagnostics', () => {
     expect(hashes[2]).not.toBe(hashes[1]);
   });
 
+  it('hashes legacy and canonical tool names identically', () => {
+    const debug = vi.fn();
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      hmacKey: Buffer.alloc(32, 4),
+      logger: { debug, isEnabled: () => true },
+      thresholdBytes: 0,
+    });
+
+    for (const toolName of ['task', 'agent']) {
+      observe({
+        stage: 'producer',
+        toolName,
+        values: [{ representation: 'display', value: 'eligible' }],
+      });
+    }
+
+    const hashes = debug.mock.calls.map(
+      ([line]) => parseEvent(line as string)['toolNameHmacSha256'],
+    );
+    expect(hashes[0]).toBe(hashes[1]);
+  });
+
   it('hashes distinct lone-surrogate code units differently', () => {
     const debug = vi.fn();
     const observe = createToolResultBoundaryObserver({
@@ -171,7 +194,25 @@ describe('tool-result boundary diagnostics', () => {
       logger: { debug, isEnabled: () => true },
       thresholdBytes: 0,
     });
-    const atoms = ['a', '"', '\\', '\n', '\0', '汉', '😀', '\ud800', '\udc00'];
+    const atoms = [
+      'a',
+      '"',
+      '\\',
+      '\b',
+      '\t',
+      '\n',
+      '\f',
+      '\r',
+      '\0',
+      '\x1f',
+      '\x7f',
+      'é',
+      '\u07ff',
+      '汉',
+      '😀',
+      '\ud800',
+      '\udc00',
+    ];
     let state = 0x5eed1234;
     const random = () => {
       state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
@@ -289,6 +330,33 @@ describe('tool-result boundary diagnostics', () => {
     });
   });
 
+  it('starts a new rate-limit window when the clock moves backward', () => {
+    let currentTime = 100;
+    const debug = vi.fn();
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      hmacKey: Buffer.alloc(32, 5),
+      logLimit: 1,
+      logger: { debug, isEnabled: () => true },
+      now: () => currentTime,
+      thresholdBytes: 0,
+      windowMs: 100,
+    });
+    const observation = {
+      stage: 'producer' as const,
+      values: [{ representation: 'display' as const, value: 'large' }],
+    };
+
+    expect(observe(observation)).toBe(true);
+    expect(observe(observation)).toBe(true);
+    currentTime = 50;
+    expect(observe(observation)).toBe(true);
+    expect(debug).toHaveBeenCalledTimes(2);
+    expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
+      suppressedCount: 1,
+    });
+  });
+
   it('swallows diagnostic failures', () => {
     const throwingLogger = {
       debug: () => {
@@ -362,6 +430,14 @@ describe('tool-result boundary diagnostics', () => {
         }),
       ),
     ).toEqual({ state: 'undecided', kinds: [] });
+    expect(toolResultBoundaryArtifact(undefined, [{ kind: 'image' }])).toEqual({
+      state: 'undecided',
+      kinds: ['image'],
+    });
+    expect(toolResultBoundaryArtifact([], [{ kind: 'image' }])).toEqual({
+      state: 'none',
+      kinds: ['image'],
+    });
   });
 
   it('extracts model text slots', () => {
@@ -379,6 +455,13 @@ describe('tool-result boundary diagnostics', () => {
       { representation: 'model_text', value: 'top' },
       { representation: 'model_text', value: 'output' },
       { representation: 'model_text', value: 'error' },
+    ]);
+    expect(toolResultPartDiagnosticValues('plain')).toEqual([
+      { representation: 'model_text', value: 'plain' },
+    ]);
+    expect(toolResultPartDiagnosticValues(['plain', { text: 'top' }])).toEqual([
+      { representation: 'model_text', value: 'plain' },
+      { representation: 'model_text', value: 'top' },
     ]);
   });
 });

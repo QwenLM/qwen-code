@@ -251,7 +251,14 @@ function acpWireUpdates(message: Record<string, unknown>): object[] {
   const result = asRecord(message['result']);
   const replay = asRecord(asRecord(result?.['_meta'])?.[LOAD_REPLAY_META_KEY]);
   const candidates = replay?.['updates'] ?? result?.['updates'];
-  return Array.isArray(candidates) ? candidates.filter(isObject) : [];
+  if (Array.isArray(candidates)) return candidates.filter(isObject);
+  const events = result?.['events'];
+  return Array.isArray(events)
+    ? events.flatMap((event) => {
+        const update = asRecord(event)?.['data'];
+        return isObject(update) ? [update] : [];
+      })
+    : [];
 }
 
 function headlessToolResults(message: CLIMessage): ToolResultBlock[] {

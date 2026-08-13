@@ -23,9 +23,17 @@ const debugLogger = vi.hoisted(() => ({
   warn: vi.fn(),
   error: vi.fn(),
 }));
+const boundaryObserveMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./debugLogger.js', () => ({
   createDebugLogger: () => debugLogger,
+}));
+
+vi.mock('./tool-result-boundary-diagnostics.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('./tool-result-boundary-diagnostics.js')
+  >()),
+  observeToolResultBoundary: boundaryObserveMock,
 }));
 
 vi.mock('./truncation.js', async (importOriginal) => {
@@ -85,6 +93,24 @@ describe('tool response finalization', () => {
     );
     expect(persist).not.toHaveBeenCalled();
     expect(debugLogger.info).not.toHaveBeenCalled();
+  });
+
+  it('can suppress intermediate boundary observations', async () => {
+    const entries = [
+      entry('small', [
+        {
+          functionResponse: {
+            id: 'small',
+            name: 'shell',
+            response: { output: 'small output' },
+          },
+        },
+      ]),
+    ];
+
+    await finalizeToolResponses(config(100), entries, undefined, false);
+
+    expect(boundaryObserveMock).not.toHaveBeenCalled();
   });
 
   it.each([false, true])(

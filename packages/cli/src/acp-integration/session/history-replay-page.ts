@@ -202,11 +202,12 @@ function replayContext(
           _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
         } as unknown as SessionUpdate;
       })();
+      const deliveredUpdate = liftSessionUpdateTimestamp(updateWithRecordId);
       observeAcpToolResultProjection(
         update,
         projectedUpdate,
         sessionId,
-        updateWithRecordId,
+        deliveredUpdate,
       );
       if (limits) {
         const updateCount = updates.length + 1;
@@ -220,7 +221,7 @@ function replayContext(
         }
         serializedUpdateBytes +=
           (updates.length === 0 ? 0 : 1) +
-          Buffer.byteLength(JSON.stringify(updateWithRecordId), 'utf8');
+          Buffer.byteLength(JSON.stringify(deliveredUpdate), 'utf8');
         if (serializedUpdateBytes > limits.maxBytes) {
           throw new HistoryReplayLimitError(
             sessionId,
@@ -230,7 +231,7 @@ function replayContext(
           );
         }
       }
-      updates.push(updateWithRecordId);
+      updates.push(deliveredUpdate);
     },
     setActiveRecordId: (recordId: string | null) => {
       activeRecordId = recordId;
@@ -280,22 +281,24 @@ export async function collectHistoryReplayUpdates({
       updates.length,
       error,
     );
-    return { updates: liftSessionUpdateTimestamps(updates), replayError };
+    return { updates, replayError };
   }
-  return { updates: liftSessionUpdateTimestamps(updates) };
+  return { updates };
+}
+
+function liftSessionUpdateTimestamp(update: SessionUpdate): SessionUpdate {
+  const record = update as Record<string, unknown>;
+  const meta = record['_meta'];
+  const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
+  return typeof timestamp === 'number' || typeof timestamp === 'string'
+    ? ({ ...record, timestamp } as unknown as SessionUpdate)
+    : update;
 }
 
 export function liftSessionUpdateTimestamps(
   updates: SessionUpdate[],
 ): SessionUpdate[] {
-  return updates.map((update) => {
-    const record = update as Record<string, unknown>;
-    const meta = record['_meta'];
-    const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
-    return typeof timestamp === 'number' || typeof timestamp === 'string'
-      ? ({ ...record, timestamp } as unknown as SessionUpdate)
-      : update;
-  });
+  return updates.map(liftSessionUpdateTimestamp);
 }
 
 export interface ReplayedTranscriptPage {
@@ -361,7 +364,7 @@ export async function replayTranscriptRecordPage({
       : undefined;
 
   return {
-    updates: liftSessionUpdateTimestamps(updates),
+    updates,
     ...(nextCursor ? { nextCursor } : {}),
     hasMore: replayError === undefined && page.hasMore,
     startTime: page.startTime,

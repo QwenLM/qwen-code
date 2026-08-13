@@ -4547,6 +4547,17 @@ describe('CoreToolScheduler', () => {
       String(functionResponse?.response?.['output']).length,
     );
     expect(completed.response.visionBridgeNotice).toContain('qwen3-vl-plus');
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
     expect(functionResponse).not.toHaveProperty('parts');
     expect(runSideQueryMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -11457,6 +11468,50 @@ describe('CoreToolScheduler telemetry spans', () => {
         .map(([observation]) => observation.stage)
         .filter((stage) => stage.startsWith('producer_')),
     ).toEqual(['producer_input', 'producer_output']);
+  });
+
+  it('does not treat routine multi-part response wrapping as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [{ text: 'alpha' }, { text: 'beta' }],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('does not treat routine media response wrapping as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
   });
 
   it('preserves original tool exceptions when the failure hook rejects', async () => {
