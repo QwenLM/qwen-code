@@ -379,6 +379,12 @@ describe('bundled review skill', () => {
     expect(body).toContain('`{"resumed": false, "resumeRefused": "<reason>"}`');
     expect(body).toContain('resumes at round `k+1`');
     expect(body).toContain('re-enters at `latestReverseAuditRound + 1`');
+    // The restart bound survives a resume only through this reader; the
+    // effort pin and the lightweight inertness disclosure are the two
+    // silent-surprise fixes.
+    expect(body).toContain('`restartsSpent`');
+    expect(body).toContain('`effort-mismatch`');
+    expect(body).toContain('no effect in lightweight mode');
   });
 
   it('routes both remote-resolution paths through match-remote', () => {

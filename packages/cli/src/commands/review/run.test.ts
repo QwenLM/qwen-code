@@ -655,6 +655,28 @@ describe('review run (handler)', () => {
     expect(argvUsed[i + 1]).toBe('default');
   });
 
+  it('passes --resume through to the child prompt', async () => {
+    // The argv→runReview mapping, at the handler level: buildReviewPrompt's
+    // own unit tests cannot see a dropped `resume: Boolean(argv['resume'])`
+    // line, and a run invoked with --resume that spawns a plain /review
+    // silently starts the review from scratch.
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ target: '7724', resume: true });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    const prompt = argvUsed[argvUsed.indexOf('--prompt') + 1];
+    expect(prompt).toBe('/review 7724 --resume');
+  });
+
+  it('omits --resume from the child prompt when not asked', async () => {
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ target: '7724', resume: false });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    const prompt = argvUsed[argvUsed.indexOf('--prompt') + 1];
+    expect(prompt).toBe('/review 7724');
+  });
+
   describe('child env: QWEN_CODE_CLI version skew', () => {
     let saved: string | undefined;
 

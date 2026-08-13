@@ -105,7 +105,11 @@ export interface ParsedReviewArgs {
    * the on-disk state itself and silently falls back to a fresh run when the
    * state no longer matches. Gated on PR targets: only `fetch-pr` has a
    * resume path (a local review's diff is captured from a live working tree
-   * that has no stable interrupted state to continue).
+   * that has no stable interrupted state to continue). `effective` is a
+   * TARGET-SHAPE gate, not a promise: a cross-repo `pr-url` with no matching
+   * remote routes to lightweight mode, which never calls `fetch-pr` — the
+   * parser cannot see remotes, so Step 1's lightweight branch owns telling
+   * the user the flag is inert there.
    */
   resume: {
     /** `--resume` appeared in the arguments. */
