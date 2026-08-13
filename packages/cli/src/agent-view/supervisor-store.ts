@@ -224,6 +224,36 @@ export async function patchAgentViewSessionState(
   });
 }
 
+export async function patchAgentViewSessionStateIf(
+  sessionId: string,
+  decidePatch: (
+    existing: AgentViewSessionStateFile,
+  ) => Partial<AgentViewSessionStateFile> | undefined,
+  options: StoreOptions = {},
+): Promise<void> {
+  return mutateAgentViewState(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.statePath);
+    if (existing === undefined) {
+      return;
+    }
+    const normalized = normalizeSessionState(existing, sessionId);
+    if (normalized === undefined) {
+      return;
+    }
+    const patch = decidePatch(normalized);
+    if (patch === undefined) {
+      return;
+    }
+    await writeJsonFile(paths.statePath, {
+      ...existing,
+      ...patch,
+      schemaVersion: 1,
+    });
+    await fs.mkdir(paths.tmpDir, { recursive: true });
+  });
+}
+
 export async function listAgentViewSessionStates(
   options: StoreOptions = {},
 ): Promise<AgentViewSessionStateFile[]> {

@@ -39,6 +39,7 @@ import {
   listAgentViewSessionSnapshots,
   listAgentViewSessionStates,
   patchAgentViewSessionState,
+  patchAgentViewSessionStateIf,
   readAgentViewLaunch,
   readAgentViewActivity,
   readAgentViewSessionState,
@@ -53,7 +54,10 @@ import {
   writeAgentViewWorker,
 } from './supervisor-store.js';
 import type { AgentViewSupervisorHandler } from './supervisor-server.js';
-import { createAgentViewWorkerSidebandEnv } from './worker-sideband.js';
+import {
+  createAgentViewWorkerSidebandEnv,
+  QWEN_AGENT_VIEW_TOKEN,
+} from './worker-sideband.js';
 import {
   buildCurrentQwenCliArgv,
   getCurrentQwenCliEntrypoint,
@@ -642,7 +646,11 @@ class AgentViewSupervisorProcessHandler
     }
     let applied = true;
     try {
-      applied = await applyWorkerEvent(event, this.store);
+      applied = await applyWorkerEvent(
+        event,
+        this.store,
+        this.hasPendingWorkerInputControl(event.sessionId),
+      );
     } catch (error) {
       if (event.type === 'ready') {
         this.workers.rejectPendingWorkerReady(event.sessionId, error);
@@ -1621,6 +1629,7 @@ class WorkerRegistry {
       this.onHostReleased(sessionId);
     } else if (!host) {
       await this.killStoredWorkerPids(sessionId, signal);
+      this.onHostReleased(sessionId);
     }
     await markStoppedSession(sessionId, this.store, 'exited');
   }
@@ -1858,7 +1867,14 @@ class WorkerRegistry {
     if (!launch) {
       throw new Error(`No Agent View launch record found for ${sessionId}.`);
     }
-    const resumeLaunch = await writeResumeWorkerLaunch(launch, this.store);
+    // Rotate the worker sideband token on respawn so the replaced worker's
+    // predecessor token can no longer authenticate worker-side calls.
+    const token = randomUUID();
+    const resumeLaunch = await writeResumeWorkerLaunch(
+      launch,
+      token,
+      this.store,
+    );
     // The replacement worker must not inherit stop/redraw controls queued
     // for its predecessor; prompt/answer controls are preserved.
     this.preserveQueuedInputControls(sessionId);
@@ -1909,6 +1925,7 @@ class WorkerRegistry {
           ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
           protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
           platform: process.platform,
+          tokenDigest: digestAgentViewWorkerToken(token),
           recentOutputBytes: 0,
         },
         this.store,
@@ -2239,30 +2256,39 @@ class WorkerRegistry {
       return state;
     }
 
-    const nextSessionState =
-      state.sessionState === 'starting' ||
-      state.sessionState === 'working' ||
-      state.sessionState === 'needs_input'
-        ? 'failed'
-        : state.sessionState;
     const now = new Date().toISOString();
-    const patch = {
-      sessionState: nextSessionState,
-      processState: 'exited' as const,
-      attachState: 'detached' as const,
-      updatedAt: now,
-      ...(nextSessionState === 'failed'
-        ? {
-            lastError: {
-              code: 'stale_worker',
-              message: 'Agent View worker process is no longer running.',
-              at: now,
-            },
-          }
-        : {}),
-    };
-    await patchAgentViewSessionState(state.sessionId, patch, this.store);
-    return { ...state, ...patch };
+    // Decide the heal inside the queued mutation so a concurrent terminal
+    // verdict (stop/complete) that lands mid-heal is not overwritten.
+    let appliedPatch: Partial<AgentViewSessionStateFile> | undefined;
+    await patchAgentViewSessionStateIf(
+      state.sessionId,
+      (existing) => {
+        const nextSessionState =
+          existing.sessionState === 'starting' ||
+          existing.sessionState === 'working' ||
+          existing.sessionState === 'needs_input'
+            ? 'failed'
+            : existing.sessionState;
+        appliedPatch = {
+          sessionState: nextSessionState,
+          processState: 'exited' as const,
+          attachState: 'detached' as const,
+          updatedAt: now,
+          ...(nextSessionState === 'failed'
+            ? {
+                lastError: {
+                  code: 'stale_worker',
+                  message: 'Agent View worker process is no longer running.',
+                  at: now,
+                },
+              }
+            : {}),
+        };
+        return appliedPatch;
+      },
+      this.store,
+    );
+    return appliedPatch ? { ...state, ...appliedPatch } : state;
   }
 }
 
@@ -2701,6 +2727,7 @@ async function markFailedSession(
 async function applyWorkerEvent(
   event: AgentViewWorkerEvent,
   options: { globalDir?: string },
+  hasPendingInputControl = false,
 ): Promise<boolean> {
   const state = await readAgentViewSessionState(event.sessionId, options);
   if (!state) {
@@ -2766,7 +2793,12 @@ async function applyWorkerEvent(
           ...(event.type === 'state' && event.lastResult
             ? { lastResult: event.lastResult }
             : { lastResult: undefined }),
-          ...(shouldClearPendingPrompt(event, state, existingActivity)
+          ...(shouldClearPendingPrompt(
+            event,
+            state,
+            existingActivity,
+            hasPendingInputControl,
+          )
             ? getDequeuedPromptActivityPatch()
             : {}),
           capabilities:
@@ -2836,8 +2868,15 @@ function shouldClearPendingPrompt(
   event: AgentViewWorkerEvent,
   previousState: AgentViewSessionStateFile,
   activity: AgentViewActivityFile | undefined,
+  hasPendingInputControl = false,
 ): boolean {
   if (!hasPendingPrompt(activity)) {
+    return false;
+  }
+  // A prompt/answer control still queued for the worker means the persisted
+  // marker is the only durable record of an accepted prompt; a replacement
+  // worker's ready must not erase it until the control is consumed.
+  if (hasPendingInputControl) {
     return false;
   }
   // A queued-prompt marker newer than this event belongs to a prompt the
@@ -3178,19 +3217,24 @@ function buildResumeWorkerArgv(sessionId: string): string[] {
 
 function refreshResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
+  token?: string,
 ): AgentViewLaunchFile {
   return {
     ...launch,
     entrypoint: getCurrentQwenCliEntrypoint(),
     argv: buildResumeWorkerArgv(launch.sessionId),
+    ...(token === undefined
+      ? {}
+      : { env: { ...launch.env, [QWEN_AGENT_VIEW_TOKEN]: token } }),
   };
 }
 
 async function writeResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
+  token: string,
   store: { globalDir?: string },
 ): Promise<AgentViewLaunchFile> {
-  const resumeLaunch = refreshResumeWorkerLaunch(launch);
+  const resumeLaunch = refreshResumeWorkerLaunch(launch, token);
   await writeAgentViewLaunch(resumeLaunch, store);
   return resumeLaunch;
 }
