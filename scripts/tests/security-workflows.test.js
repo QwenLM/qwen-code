@@ -58,7 +58,7 @@ describe('security workflows', () => {
     expect(workflow).toContain('pull_request:');
     expect(workflow).toContain('push:');
     expect(workflow).toContain(
-      "group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'",
+      "group: '${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'",
     );
     expect(workflow).toContain(
       'cancel-in-progress: "${{ github.event_name == \'pull_request\' }}"',
@@ -84,6 +84,9 @@ describe('security workflows', () => {
     expect(auditStep).toContain(') || status=$?');
     expect(auditStep).toContain('for lockfile in packages/*/package-lock.json');
     expect(auditStep).toContain('[ -f "$lockfile" ] || continue');
+    expect(auditStep).toContain(
+      '[ "$lockfile" != "packages/mobile-mcp/package-lock.json" ] || continue',
+    );
     expect(auditStep).toContain('cd "$package_dir"');
     expect(auditStep).toContain(
       'npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&',
