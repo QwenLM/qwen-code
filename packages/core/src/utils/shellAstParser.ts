@@ -20,7 +20,6 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLocalGitConfigRisk } from './git-config-safety.js';
-import { hasShellSubstitution } from './shell-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -674,7 +673,6 @@ type SyntaxNode = Parser.SyntaxNode;
 const SHELL_EXPANSION_TYPES = new Set(
   'simple_expansion expansion arithmetic_expansion'.split(' '),
 );
-const COMMENT_TYPES = new Set(['comment']);
 const CHILD_STATEMENT =
   /^(?:pipeline|list|subshell|compound_statement|negated_command)$/;
 /** Collect all descendant nodes of given types. */
@@ -745,26 +743,6 @@ function hasShellExpansion(node: SyntaxNode): boolean {
     (['word', 'concatenation'].includes(node.type) &&
       hasShellPatternExpansion(node.text))
   );
-}
-
-function hasUnsafeParsedSyntax(root: SyntaxNode, command: string): boolean {
-  if (
-    collectDescendants(root, SHELL_EXPANSION_TYPES).some((node) =>
-      node.text.replaceAll('\\\n', '').endsWith('@P}'),
-    )
-  ) {
-    return true;
-  }
-
-  return collectDescendants(root, COMMENT_TYPES).some(
-    (node) =>
-      node.parent?.type !== 'program' || command[node.startIndex - 1] === '\r',
-  );
-}
-
-function hasPromptExpansionText(command: string): boolean {
-  const normalized = command.replaceAll('\\\n', '');
-  return normalized.includes('${') && normalized.includes('@P}');
 }
 
 function mergeSafety(...results: ShellCommandSafety[]): ShellCommandSafety {
@@ -987,7 +965,19 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
     new Set(['command_substitution', 'process_substitution']),
     true,
   );
-  if (substitutions.length === 0) return 'read-only';
+  if (substitutions.length === 0) {
+    for (const expansion of collectDescendants(node, new Set(['expansion']))) {
+      for (let i = 0; i < expansion.childCount - 1; i++) {
+        if (
+          expansion.child(i)?.type === '@' &&
+          expansion.child(i + 1)?.type === 'P'
+        ) {
+          return 'unknown';
+        }
+      }
+    }
+    return 'read-only';
+  }
   return mergeSafety(
     'unknown',
     ...substitutions
@@ -1160,7 +1150,10 @@ function fallbackGitConfigMakesCommandUnsafe(
   return risk.diffExternal || risk.fsmonitor;
 }
 
-async function classifyParsed(command: string, cwd?: string): Promise<Safety> {
+async function classifyInternal(
+  command: string,
+  cwd?: string,
+): Promise<Safety> {
   const tree = await parseShellCommand(command);
   try {
     const root = tree.rootNode;
@@ -1168,8 +1161,12 @@ async function classifyParsed(command: string, cwd?: string): Promise<Safety> {
     const safety = mergeSafety(
       ...root.namedChildren.map(evaluateStatementSafety),
     );
-    if (hasUnsafeParsedSyntax(root, command)) {
-      return mergeSafety(safety, 'unknown');
+    if (safety === 'read-only' && command.includes('\\\n')) {
+      const normalizedSafety = await classifyInternal(
+        command.replaceAll('\\\n', ''),
+        cwd,
+      );
+      if (normalizedSafety !== 'read-only') return 'unknown';
     }
     if (safety !== 'read-only' || !cwd) return safety;
     return localGitConfigMakesCommandUnsafe(root, cwd)
@@ -1179,45 +1176,19 @@ async function classifyParsed(command: string, cwd?: string): Promise<Safety> {
     tree.delete();
   }
 }
-
-async function classifyInternal(
-  command: string,
-  cwd?: string,
-): Promise<Safety> {
-  const safety = await classifyParsed(command, cwd);
-  if (!command.includes('\\\n')) return safety;
-  const normalizedSafety = await classifyParsed(
-    command.replaceAll('\\\n', ''),
-    cwd,
-  );
-  return safety === 'read-only' && normalizedSafety !== 'read-only'
-    ? 'unknown'
-    : safety;
-}
 export async function classifyShellCommandSafety(
   command: string,
 ): Promise<ShellCommandSafety> {
-  return classifyShellCommandSafetyInternal(command);
+  if (typeof command !== 'string' || !command.trim()) return 'unknown';
+  return classifyInternal(command).catch(() => 'unknown');
 }
 
 export async function classifyShellCommandSafetyInDirectory(
   command: string,
   cwd: string,
 ): Promise<ShellCommandSafety> {
-  return classifyShellCommandSafetyInternal(command, cwd);
-}
-
-async function classifyShellCommandSafetyInternal(
-  command: string,
-  cwd?: string,
-): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  const safety = await classifyInternal(command, cwd).catch(
-    (): ShellCommandSafety => 'unknown',
-  );
-  return safety === 'read-only' && hasShellSubstitution(command)
-    ? 'unknown'
-    : safety;
+  return classifyInternal(command, cwd).catch(() => 'unknown');
 }
 
 /**
@@ -1251,14 +1222,12 @@ async function isShellCommandReadOnlyInternal(
   cwd?: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
-  if (hasShellSubstitution(command)) return false;
 
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
   // after a symlinked install), fall back to the regex-based checker so the
   // agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
     return (
-      !hasPromptExpansionText(command) &&
       isShellCommandReadOnly(command) &&
       !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
     );
@@ -1270,7 +1239,6 @@ async function isShellCommandReadOnlyInternal(
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.
     return (
-      !hasPromptExpansionText(command) &&
       isShellCommandReadOnly(command) &&
       !(cwd && fallbackGitConfigMakesCommandUnsafe(command, cwd))
     );

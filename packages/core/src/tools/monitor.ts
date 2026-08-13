@@ -38,7 +38,6 @@ import {
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
-  hasShellSubstitution,
   hasUnsafeMonitorBackgroundOperator,
   normalizeMonitorCommand as normalizeMonitorShellCommand,
   splitCommands,
@@ -172,15 +171,13 @@ class MonitorToolInvocation extends BaseToolInvocation<
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    if (hasShellSubstitution(this.params.command)) return 'ask';
-
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.safetyCommand;
     const cwd =
       this.params.directory || this.config.getTargetDir?.() || process.cwd();
 
-    // Command substitution ($(), ``, <(), >(), ${parameter@P}) is NOT a hard
-    // deny here — it falls through to 'ask' with every other non-read-only
+    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
+    // it falls through to 'ask' along with every other non-read-only
     // command, so the user (or YOLO mode) can decide. The user-facing
     // warning is surfaced by getConfirmationDetails below so the
     // confirmation prompt still flags the substitution clearly. This
@@ -267,8 +264,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       permissionRules = [`Monitor(${normalized.safetyCommand})`];
     }
 
-    // Flag command substitution ($(), backticks, <(), >(), ${parameter@P})
-    // so the user sees a visible warning in the confirmation dialog. Mirrors the
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. Mirrors the
     // pattern in ShellToolInvocation.getConfirmationDetails — see #4093
     // for why we surface this as a warning rather than denying outright.
     // Checked against both the normalized safety command and the

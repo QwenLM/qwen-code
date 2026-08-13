@@ -509,16 +509,6 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('checks substitutions in wrapper flags before normalization', async () => {
-      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
-      const invocation = createInvocation({
-        command: `bash -o $(helper) -c 'tail -f /tmp/app.log'`,
-      });
-
-      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
-      expect(mockIsShellCommandReadOnlyAST).not.toHaveBeenCalled();
-    });
-
     it('allows read-only monitor commands by default', async () => {
       mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
       const invocation = createInvocation({

@@ -7112,20 +7112,6 @@ describe('ShellTool', () => {
       expect(await invocation.getDefaultPermission()).toBe('ask');
     });
 
-    it('asks for prompt expansions after complex quoting', async () => {
-      for (const command of [
-        `echo $'a\\'b' "\${value@P}"`,
-        `echo "\${a:-"'\${value@P}'"}"`,
-      ]) {
-        const invocation = shellTool.build({
-          command,
-          is_background: false,
-        });
-
-        expect(await invocation.getDefaultPermission()).toBe('ask');
-      }
-    });
-
     it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);

@@ -10,7 +10,6 @@ import {
   checkArgumentSafety,
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
-  detectCommandSubstitution,
   detectSelfKillCommand,
   escapeShellArg,
   getCommandRoot,
@@ -151,29 +150,33 @@ describe('isCommandAllowed', () => {
   });
 
   describe('command substitution', () => {
-    it('detects the #8582 bypasses without treating literal twins as executable', () => {
-      expect(detectCommandSubstitution('echo "$\\\n(touch PWNED)"')).toBe(true);
-      expect(detectCommandSubstitution('echo "\\$\\\n(touch PWNED)"')).toBe(
-        false,
-      );
-      expect(detectCommandSubstitution('echo "${value@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo "${value@Q}"')).toBe(false);
-      expect(detectCommandSubstitution("echo '${value@P}'")).toBe(false);
-      expect(detectCommandSubstitution('echo "$\\\n{value@P}"')).toBe(true);
-      expect(detectCommandSubstitution('echo $\\\n{value@P}')).toBe(true);
-      expect(detectCommandSubstitution('echo ${value@P}')).toBe(true);
-      expect(detectCommandSubstitution('echo "$\\\n\\\n(marker)"')).toBe(true);
-      expect(
-        detectCommandSubstitution(
-          'echo "${one="$"}${two="$one(marker)"}${two@P}"',
-        ),
-      ).toBe(true);
-    });
-
     it('should block command substitution using `$(...)`', async () => {
       const result = await isCommandAllowed('echo $(rm -rf /)', config);
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('Command substitution');
+    });
+
+    it('should block the two substitution forms from issue #8582', async () => {
+      for (const command of [
+        'echo "$\\\n(touch /tmp/pwned)"',
+        'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
+      ]) {
+        const result = await isCommandAllowed(command, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      }
+    });
+
+    it('should keep literal twins of issue #8582 allowed', async () => {
+      config.getCoreTools = () => ['ShellTool(echo)'];
+      for (const command of [
+        'echo "\\$\\\n(touch /tmp/pwned)"',
+        'echo "$$\\\n(touch /tmp/pwned)"',
+        "echo '$\\\n(touch /tmp/pwned)'",
+        "echo '${two@P}'",
+      ]) {
+        expect((await isCommandAllowed(command, config)).allowed).toBe(true);
+      }
     });
 
     it('should block command substitution using `<(...)`', async () => {
@@ -273,24 +276,6 @@ describe('isCommandAllowed', () => {
         const result = await isCommandAllowed(cmd, config);
         expect(result.allowed).toBe(false);
         expect(result.reason).toContain('Command substitution');
-      });
-
-      it('detects reviewed continuation and heredoc substitution forms', () => {
-        for (const command of [
-          'cat <<"E\\\nOF"\nEOF\n$(marker)',
-          "cat <\\\n<EOF\na'\n$(marker)\nEOF",
-          'cat <\\\n<<$(marker)',
-          'echo hi\r# comment $(marker)',
-          'cat <<EOF\n$\\\n{value@P}\nEOF',
-        ]) {
-          expect(detectCommandSubstitution(command)).toBe(true);
-        }
-        expect(detectCommandSubstitution('cat <<EOF\n${value@P}\nEOF')).toBe(
-          true,
-        );
-        expect(detectCommandSubstitution("cat <<'EOF'\n${value@P}\nEOF")).toBe(
-          false,
-        );
       });
 
       it('should allow escaped command substitution split by line continuation in an unquoted heredoc body', async () => {

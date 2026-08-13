@@ -20,10 +20,7 @@ import {
   isShellCommandReadOnlyAST,
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
-import {
-  hasShellSubstitution,
-  normalizeMonitorCommand,
-} from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -192,12 +189,6 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
-    const rawMonitorDecision: PermissionDecision =
-      ctx.toolName === 'monitor' &&
-      ctx.command !== undefined &&
-      hasShellSubstitution(ctx.command)
-        ? 'ask'
-        : 'default';
     ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 
@@ -260,20 +251,13 @@ export class PermissionManager {
     // opinion" and must never override an explicit allow from a Bash
     // rule. (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the
     // guard is load-bearing.)
-    let finalDecision = bashDecision;
     if (
       virtualDecision !== 'default' &&
-      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[finalDecision]
+      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[bashDecision]
     ) {
-      finalDecision = virtualDecision;
+      return virtualDecision;
     }
-    if (
-      rawMonitorDecision !== 'default' &&
-      DECISION_PRIORITY[rawMonitorDecision] > DECISION_PRIORITY[finalDecision]
-    ) {
-      finalDecision = rawMonitorDecision;
-    }
-    return finalDecision;
+    return bashDecision;
   }
 
   /**
@@ -509,8 +493,8 @@ export class PermissionManager {
    * Resolve 'default' permission to actual permission using AST analysis.
    * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
    *
-   * Command substitution ($(), ``, <(), >(), ${parameter@P}) is NOT a hard
-   * deny here — it falls through to 'ask' with every other non-read-only command, so
+   * Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
+   * falls through to 'ask' along with every other non-read-only command, so
    * the user (or YOLO mode) can decide. The user-facing warning is surfaced
    * by ShellToolInvocation.getConfirmationDetails so the confirmation prompt
    * still flags the substitution clearly. See issue #4093 for why a hard

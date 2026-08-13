@@ -1532,20 +1532,6 @@ export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
-  const skipLineContinuations = (index: number): number => {
-    while (command[index] === '\\' && command[index + 1] === '\n') index += 2;
-    return index;
-  };
-
-  const isPromptExpansion = (text: string, openIndex: number): boolean => {
-    const close = text.indexOf('}', openIndex + 1);
-    if (close < 0) return false;
-    const body = text.slice(openIndex + 1, close).replaceAll('\\\n', '');
-    return /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[-?@$*])(?:\[[^\]\n]*\])?@P$/.test(
-      body,
-    );
-  };
-
   type PendingHeredoc = {
     delimiter: string;
     isQuotedDelimiter: boolean;
@@ -1557,7 +1543,7 @@ export function detectCommandSubstitution(command: string): boolean {
     if (index === 0) return true;
 
     const prev = command[index - 1]!;
-    if (prev === ' ' || prev === '\t' || prev === '\n') {
+    if (prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r') {
       return true;
     }
 
@@ -1578,27 +1564,12 @@ export function detectCommandSubstitution(command: string): boolean {
   const parseHeredocOperator = (
     startIndex: number,
   ): { nextIndex: number; heredoc: PendingHeredoc } | null => {
-    // Bash removes line continuations before recognizing redirections.
-    const secondIndex = skipLineContinuations(startIndex + 1);
-    const afterSecondIndex = skipLineContinuations(secondIndex + 1);
-    let previousIndex = startIndex - 1;
-    while (
-      previousIndex >= 1 &&
-      command[previousIndex] === '\n' &&
-      command[previousIndex - 1] === '\\'
-    ) {
-      previousIndex -= 2;
-    }
-    if (
-      command[startIndex] !== '<' ||
-      command[secondIndex] !== '<' ||
-      command[previousIndex] === '<' ||
-      command[afterSecondIndex] === '<'
-    ) {
+    // startIndex points at the first '<' of the `<<` operator.
+    if (command[startIndex] !== '<' || command[startIndex + 1] !== '<') {
       return null;
     }
 
-    let i = afterSecondIndex;
+    let i = startIndex + 2;
     const stripLeadingTabs = command[i] === '-';
     if (stripLeadingTabs) i++;
 
@@ -1634,10 +1605,6 @@ export function detectCommandSubstitution(command: string): boolean {
           continue;
         }
         if (char === '\\') {
-          if (command[i + 1] === '\n') {
-            i += 2;
-            continue;
-          }
           isQuotedDelimiter = true;
           i++;
           if (i >= command.length) break;
@@ -1668,10 +1635,6 @@ export function detectCommandSubstitution(command: string): boolean {
         continue;
       }
       if (char === '\\') {
-        if (command[i + 1] === '\n') {
-          i += 2;
-          continue;
-        }
         // Backslash quoting is supported in double-quoted words. For our
         // purposes, treat it as quoting and include the escaped char as-is.
         isQuotedDelimiter = true;
@@ -1713,10 +1676,6 @@ export function detectCommandSubstitution(command: string): boolean {
       }
 
       if (char === '$' && nextChar === '(') {
-        return true;
-      }
-
-      if (char === '$' && nextChar === '{' && isPromptExpansion(line, i + 1)) {
         return true;
       }
 
@@ -1775,12 +1734,7 @@ export function detectCommandSubstitution(command: string): boolean {
         }
 
         if (!heredoc.isQuotedDelimiter) {
-          if (
-            pendingDollarLineContinuation &&
-            (effectiveLine.startsWith('(') ||
-              (effectiveLine.startsWith('{') &&
-                isPromptExpansion(`$${effectiveLine}`, 1)))
-          ) {
+          if (pendingDollarLineContinuation && effectiveLine.startsWith('(')) {
             return { nextIndex: i, hasSubstitution: true };
           }
 
@@ -1871,19 +1825,18 @@ export function detectCommandSubstitution(command: string): boolean {
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
       if (nextChar === '\n' && command[i - 1] === '$') {
-        let precedingBackslashes = 0;
-        for (let j = i - 2; j >= 0 && command[j] === '\\'; j--) {
-          precedingBackslashes++;
+        let dollarStart = i - 1;
+        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+          dollarStart--;
         }
-        let nextIndex = i + 2;
-        while (command[nextIndex] === '\\' && command[nextIndex + 1] === '\n') {
-          nextIndex += 2;
+        let escapeStart = dollarStart;
+        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+          escapeStart--;
         }
         if (
-          precedingBackslashes % 2 === 0 &&
-          (command[nextIndex] === '(' ||
-            (command[nextIndex] === '{' &&
-              isPromptExpansion(command, nextIndex)))
+          (i - dollarStart) % 2 === 1 &&
+          (dollarStart - escapeStart) % 2 === 0 &&
+          command[i + 2] === '('
         ) {
           return true;
         }
@@ -1903,13 +1856,12 @@ export function detectCommandSubstitution(command: string): boolean {
     }
 
     // Detect heredoc operators (`<<` / `<<-`) only in command-line context.
-    const nextOperatorIndex = skipLineContinuations(i + 1);
     if (
       !inSingleQuotes &&
       !inDoubleQuotes &&
       !inBackticks &&
       char === '<' &&
-      command[nextOperatorIndex] === '<'
+      nextChar === '<'
     ) {
       const parsed = parseHeredocOperator(i);
       if (parsed) {
@@ -1930,7 +1882,7 @@ export function detectCommandSubstitution(command: string): boolean {
       if (
         char === '$' &&
         nextChar === '{' &&
-        isPromptExpansion(command, i + 1)
+        /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(i))
       ) {
         return true;
       }
