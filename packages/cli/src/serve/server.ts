@@ -37,7 +37,11 @@ import {
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
-import { CredentialStore, LocalControlService } from './local-control/index.js';
+import {
+  CredentialStore,
+  listenerIdentityOf,
+  LocalControlService,
+} from './local-control/index.js';
 import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
 import type {
   DeviceFlowProvider,
@@ -1610,6 +1614,8 @@ export function createServeApp(
   const originAllowlist = new MutableOriginAllowlist(parsedAllowOrigins);
   app.use(allowOriginCors(originAllowlist));
   app.use(hostAllowlist(opts.hostname, getPort));
+  const credentials = new CredentialStore(opts.token);
+  const authenticate = bearerAuth(credentials);
   const rateLimiter = installRateLimiter(app, opts, daemonLog, {
     mount: false,
     workspaceQualifiedAcpEnabled,
@@ -1622,6 +1628,13 @@ export function createServeApp(
     getRateLimiter: () => rateLimiter,
   });
   if (healthRoutes.exposeHealthPreAuth) {
+    app.use('/health', (req, res, next) => {
+      if (listenerIdentityOf(req).kind === 'local-control') {
+        authenticate(req, res, next);
+        return;
+      }
+      next();
+    });
     healthRoutes.register(app);
   }
 
@@ -1707,8 +1720,7 @@ export function createServeApp(
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
   // Control session this behaves exactly as `bearerAuth(opts.token)` did.
-  const credentials = new CredentialStore(opts.token);
-  app.use(bearerAuth(credentials));
+  app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
   // webhook routes which use their own shared-secret auth before bearerAuth.

@@ -46,25 +46,12 @@ export class CredentialStore implements ListenerScopedCredentials {
     this.#runtime = hashToken(runtimeToken);
   }
 
-  /** True when the daemon booted without a token (loopback developer default). */
-  get runtimeTokenConfigured(): boolean {
-    return this.#runtime !== undefined;
-  }
-
-  setRuntimeToken(token: string | undefined): void {
-    this.#runtime = hashToken(token);
-  }
-
   addPairingToken(id: string, token: string): void {
     this.#pairing.set(id, createHash('sha256').update(token, 'utf8').digest());
   }
 
   revokePairingToken(id: string): boolean {
     return this.#pairing.delete(id);
-  }
-
-  revokeAllPairingTokens(): void {
-    this.#pairing.clear();
   }
 
   /**

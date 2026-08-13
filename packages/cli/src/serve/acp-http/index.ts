@@ -1580,14 +1580,30 @@ export function mountAcpHttp(
       }
 
       const fromLoopback = isLoopbackSocket(socket);
+      const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
+      const host = (req.headers['host'] ?? '').toLowerCase();
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
       // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
       // domain resolves to 127.0.0.1 and the browser sends the
       // attacker's Host header. Match the full host:port string like
       // the REST middleware does; extract port from the socket.
-      if (fromLoopback) {
-        const host = (req.headers['host'] ?? '').toLowerCase();
+      if (upgradeListenerIdentity.kind === 'local-control') {
+        const authority = upgradeListenerIdentity.authority;
+        const browserHost =
+          upgradeListenerIdentity.origin === undefined
+            ? undefined
+            : new URL(upgradeListenerIdentity.origin).host.toLowerCase();
+        if (
+          authority === undefined ||
+          (host !== authority && host !== browserHost)
+        ) {
+          logReject(`host-not-allowed ${host || '(missing)'}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      } else if (fromLoopback) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -1627,7 +1643,10 @@ export function mountAcpHttp(
           const isAllowlistedOrigin =
             opts.allowedOrigins !== undefined &&
             opts.allowedOrigins.origins.has(origin.toLowerCase());
-          if (!isLoopbackOrigin && !isAllowlistedOrigin) {
+          const isListenerOrigin =
+            upgradeListenerIdentity.kind === 'local-control' &&
+            upgradeListenerIdentity.origin === origin.toLowerCase();
+          if (!isLoopbackOrigin && !isAllowlistedOrigin && !isListenerOrigin) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
@@ -1649,7 +1668,6 @@ export function mountAcpHttp(
       // credential, and the runtime token does not satisfy it. Without this
       // the subprotocol path would be a way around the scoping that
       // `bearerAuth` enforces for plain HTTP.
-      const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
       if (!upgradeCredentials.isOpen(upgradeListenerIdentity)) {
         // Accept the token from `Authorization` (non-browser clients) or the
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
@@ -2540,7 +2558,7 @@ export function mountAcpHttp(
           client as unknown as { _socket?: { server?: unknown } }
         )._socket;
         if (clientSocket?.server === server) {
-          client.close(1001, 'Local Control disabled');
+          client.terminate();
         }
       }
     },

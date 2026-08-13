@@ -60,10 +60,8 @@ const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
  *
  * The flag no longer implements Local Control — it calls the same service the
  * Web Shell and the desktop menu item drive. It is a caller now, not a second
- * implementation, which is why `--local-control` composes with `--token`,
- * `--hostname`, and `--allow-origin` instead of conflicting with all three:
- * the daemon keeps its own bind and credential, and the LAN listener gets its
- * own alongside them.
+ * implementation, which is why `--local-control` composes with `--token` and
+ * `--allow-origin`: the LAN listener gets its own credential and origin.
  */
 async function startLocalControl(
   handle: RunHandle,
@@ -368,15 +366,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
       })
       .check((argv) => {
-        // The only remaining conflict. `--token`, `--hostname`,
-        // `--allow-origin`, and an ephemeral port used to be incompatible with
-        // Local Control because the flag commandeered the daemon's bind,
-        // credential, and origin list to build the LAN surface. The daemon now
-        // owns a separate LAN listener with a separate credential, so none of
-        // those are in tension: a daemon can serve authenticated loopback and
-        // run a Local Control session at the same time.
+        // A wildcard or LAN primary bind already owns the port Local Control
+        // needs on its selected address. Token, Origin, and ephemeral-port
+        // settings remain independent because the second listener owns those.
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
+        }
+        if (
+          argv['local-control'] === true &&
+          argv.hostname !== DEFAULT_SERVE_HOSTNAME
+        ) {
+          throw new Error(
+            `Local Control requires --hostname ${DEFAULT_SERVE_HOSTNAME}.`,
+          );
         }
         if (
           argv['local-control'] !== true &&

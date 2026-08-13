@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
@@ -14,10 +15,17 @@ import type { MutableOriginAllowlist } from '../auth.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
 import { selectLanAddress, type LanCandidate } from './lan-interfaces.js';
-import { mintPairingToken, type PairingToken } from './pairing-token.js';
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
 const CORS_KEY = 'local-control';
+const MAX_CONNECTIONS = 64;
+const HEADERS_TIMEOUT_MS = 10_000;
+
+interface PairingToken {
+  readonly id: string;
+  readonly secret: string;
+  readonly issuedAt: number;
+}
 
 export interface LocalControlStatus {
   active: boolean;
@@ -101,6 +109,7 @@ export class LocalControlService {
   #selected: LanCandidate | undefined;
   #sleep: SleepInhibitorHandle | undefined;
   #url: string | undefined;
+  #transition: Promise<void> = Promise.resolve();
 
   constructor(deps: LocalControlServiceDeps) {
     this.#deps = deps;
@@ -135,6 +144,12 @@ export class LocalControlService {
   async enable(
     options: LocalControlEnableOptions = {},
   ): Promise<LocalControlStatus> {
+    return this.#serialize(() => this.#enable(options));
+  }
+
+  async #enable(
+    options: LocalControlEnableOptions,
+  ): Promise<LocalControlStatus> {
     if (this.active) return this.status();
 
     const selected = selectLanAddress(options.address);
@@ -143,34 +158,38 @@ export class LocalControlService {
     const token = mintPairingToken();
 
     const tls = this.#deps.tlsPaths;
+    const scheme = tls ? 'https' : 'http';
+    const origin = new URL(`${scheme}://${authority}`).origin;
     const server = tls
       ? createSecureServer(
           { cert: readFileSync(tls.cert), key: readFileSync(tls.key) },
           this.#deps.app,
         )
       : createServer(this.#deps.app);
+    server.maxConnections = MAX_CONNECTIONS;
+    server.headersTimeout = HEADERS_TIMEOUT_MS;
     // Tag before listening. Identity must be resolvable by the first request,
     // and a request can arrive between `listen()` resolving and the next line
     // of this function running.
-    tagListener(server, { kind: 'local-control', authority });
+    tagListener(server, { kind: 'local-control', authority, origin });
 
     // Register the credential and the origin BEFORE the socket accepts
     // anything. Reversed, there is a window where the LAN listener is up but
     // the pairing token is not yet valid — the phone's first request 401s and
     // the user re-scans a QR that was never broken.
-    const scheme = tls ? 'https' : 'http';
     this.#deps.credentials.addPairingToken(token.id, token.secret);
-    this.#deps.originAllowlist.add(CORS_KEY, `${scheme}://${authority}`);
+    this.#deps.originAllowlist.add(CORS_KEY, origin);
 
     try {
+      this.#deps.attachWebSocket(server);
       await listen(server, port, selected.address);
     } catch (error) {
+      this.#deps.detachWebSocket(server);
       this.#deps.credentials.revokePairingToken(token.id);
       this.#deps.originAllowlist.remove(CORS_KEY);
       throw error;
     }
 
-    this.#deps.attachWebSocket(server);
     this.#server = server;
     this.#token = token;
     this.#selected = selected;
@@ -192,6 +211,10 @@ export class LocalControlService {
    * listener with a valid token if teardown failed partway.
    */
   async disable(): Promise<LocalControlStatus> {
+    return this.#serialize(() => this.#disable());
+  }
+
+  async #disable(): Promise<LocalControlStatus> {
     const server = this.#server;
     const token = this.#token;
     this.#server = undefined;
@@ -219,6 +242,25 @@ export class LocalControlService {
   async dispose(): Promise<void> {
     await this.disable();
   }
+
+  async #serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#transition;
+    let release!: () => void;
+    this.#transition = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+}
+
+function mintPairingToken(): PairingToken {
+  const secret = randomBytes(32).toString('base64url');
+  return { id: randomUUID(), secret, issuedAt: Date.now() };
 }
 
 function buildPairedUrl(

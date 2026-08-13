@@ -24,7 +24,6 @@ export {
   UnknownLanInterfaceError,
   type LanCandidate,
 } from './lan-interfaces.js';
-export { mintPairingToken, type PairingToken } from './pairing-token.js';
 export {
   LocalControlService,
   type LocalControlEnableOptions,

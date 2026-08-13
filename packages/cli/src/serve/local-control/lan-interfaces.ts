@@ -35,12 +35,19 @@ function isLanIpv4(address: string): boolean {
   return false;
 }
 
+function isSoftwareNetwork(interfaceName: string): boolean {
+  return /(^|[\s_-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|hamachi|nordlynx|proton|vpn|docker|veth|vmnet|vboxnet|bridge)(\d|[\s_-]|$)/i.test(
+    interfaceName,
+  );
+}
+
 /** Every private/link-local IPv4 the host currently has, sorted for stable output. */
 export function listLanCandidates(
   interfaces = networkInterfaces(),
 ): LanCandidate[] {
   const candidates: LanCandidate[] = [];
   for (const [interfaceName, addresses] of Object.entries(interfaces).sort()) {
+    if (isSoftwareNetwork(interfaceName)) continue;
     for (const address of addresses ?? []) {
       if (address.family !== 'IPv4' || address.internal) continue;
       if (!isLanIpv4(address.address)) continue;

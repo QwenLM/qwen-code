@@ -290,11 +290,17 @@ export function hostAllowlist(
     // below and left the LAN with no Host check at all, while the Rust proxy
     // enforced one per request (`local_control.rs:347-350`).
     //
-    // Exactly one value is accepted — the authority the QR advertises. There
-    // is no default-port shorthand to honor because the daemon's port is
-    // always explicit in the paired URL.
+    // Accept the exact bind authority plus the canonical authority browsers
+    // send when the scheme uses its default port.
     const host = (req.headers.host || '').toLowerCase();
-    if (listener.authority === undefined || host !== listener.authority) {
+    const browserHost =
+      listener.origin === undefined
+        ? undefined
+        : new URL(listener.origin).host.toLowerCase();
+    if (
+      listener.authority === undefined ||
+      (host !== listener.authority && host !== browserHost)
+    ) {
       res.status(403).json({ error: 'Invalid Host header' });
       return;
     }
@@ -432,8 +438,21 @@ export function bearerAuth(
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
+    (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
+      AUTHENTICATED_REQUEST
+    ] = true;
     next();
   };
+}
+
+const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
+
+function requestWasAuthenticated(req: Request): boolean {
+  return (
+    (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
+      AUTHENTICATED_REQUEST
+    ] === true
+  );
 }
 
 /**
@@ -451,7 +470,8 @@ export function bearerAuth(
  * | requireAuth=true           | any               | passthrough (1) |
  * | token configured           | any               | passthrough (2) |
  * | no token (loopback dev)    | strict=false      | passthrough     |
- * | no token (loopback dev)    | strict=true       | 401 + code      |
+ * | no token, authenticated LAN| strict=true       | passthrough     |
+ * | no token, open loopback    | strict=true       | 401 + code      |
  *
  * (1) `--require-auth` boots only with a token, so the global
  *     `bearerAuth` middleware already 401'd unauthenticated requests
@@ -471,8 +491,9 @@ export function bearerAuth(
  */
 export interface MutationGateOptions {
   /**
-   * When true, this route refuses to serve unauthenticated callers
-   * even on loopback no-token defaults. Used by mutation routes
+   * When true, this route refuses to serve unauthenticated callers even on
+   * loopback no-token defaults, while allowing requests that passed a
+   * listener-scoped pairing credential. Used by mutation routes
    * (memory, file edit, tool enable, MCP restart, device-flow auth)
    * that should never be reachable without explicit operator opt-in.
    * Defaults to false so existing routes can adopt the helper without
@@ -542,7 +563,15 @@ export function createMutationGate(
   // routes doesn't allocate N identical closures. The auth.test.ts
   // identity assertion anchors this — a future change that loses the
   // cache is visible.
-  const strictDenier: RequestHandler = (_req: Request, res: Response) => {
+  const strictDenier: RequestHandler = (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    if (requestWasAuthenticated(req)) {
+      next();
+      return;
+    }
     // Only list remediations that work standalone. `--require-auth` is
     // paired-required-with-a-token at boot (`run-qwen-serve.ts` refuses
     // to start with the flag set but no token), so naming it as a

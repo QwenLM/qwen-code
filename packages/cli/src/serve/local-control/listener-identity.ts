@@ -32,6 +32,8 @@ export interface ListenerIdentity {
    * allowlist from the bind + port instead.
    */
   readonly authority?: string;
+  /** Exact browser Origin accepted by the Local Control WebSocket gate. */
+  readonly origin?: string;
 }
 
 /**
