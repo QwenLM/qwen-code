@@ -24,6 +24,7 @@ describe('security workflows', () => {
 
     expect(workflow).toContain("- cron: '0 2 1 * *'");
     expect(workflow).toContain('workflow_dispatch: {}');
+    expect(workflow).not.toContain('pull_request');
     expect(workflow).toContain('publish_results: false');
     expect(workflow).toContain('retention-days: 90');
     expect(workflow).toContain(
@@ -68,6 +69,8 @@ describe('security workflows', () => {
     );
     expect(auditStep).toContain(') || status=$?');
     expect(auditStep).toContain('for lockfile in packages/*/package-lock.json');
+    expect(auditStep).toContain('[ -f "$lockfile" ] || continue');
+    expect(auditStep).toContain('cd "$package_dir"');
     expect(auditStep).toContain(
       'npm ci --ignore-scripts --no-audit --progress=false &&',
     );
