@@ -741,10 +741,14 @@ export function createChannelWorkerSupervisor(
       // adapters. Keeping them would report every channel as `starting`
       // forever, and an explicit per-channel start would see the channel as
       // enabled and do nothing on the dead worker — silently swallowing the
-      // natural recovery command (#8975).
+      // natural recovery command (#8975). Keep `lastConnectedChannels`:
+      // its only production reader is the manager's stop capture, which
+      // needs the last committed connected set on this terminal snapshot —
+      // dropping it degrades a budget-exhausted stop to the launch
+      // placeholder/attempted set, recording never-connected channels
+      // (mode-names) or nothing at all (mode-all) as stopped (#8975).
       delete snapshot.requestedChannels;
       delete snapshot.adapters;
-      delete snapshot.lastConnectedChannels;
       return false;
     }
     clearRestartTimer();

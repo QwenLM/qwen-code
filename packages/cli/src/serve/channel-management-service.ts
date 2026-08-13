@@ -73,6 +73,16 @@ export interface ChannelMutationResult {
   instance: ChannelInstanceSnapshot;
 }
 
+export interface ChannelStopResult extends ChannelMutationResult {
+  /**
+   * Present (and `false`) only when the stop succeeded but its `stopped`
+   * record failed to persist: a later `--channel all` restart may bring
+   * the channel back, so callers claiming a durable stop must surface the
+   * failure. Absent on the happy path (#8975).
+   */
+  statePersisted?: boolean;
+}
+
 export interface ChannelPairingRequestsSnapshot {
   requests: PairingRequest[];
 }
@@ -112,7 +122,7 @@ export interface ChannelManagementService {
     request: ChannelStartupRequest,
   ): Promise<ChannelMutationResult>;
   start(name: string): Promise<ChannelMutationResult>;
-  stop(name: string): Promise<ChannelMutationResult>;
+  stop(name: string): Promise<ChannelStopResult>;
   restart(name: string): Promise<ChannelMutationResult>;
   pairingRequests(name: string): Promise<ChannelPairingRequestsSnapshot>;
   approvePairing(
@@ -578,6 +588,24 @@ export function createChannelManagementService(
               daemonChannelRuntimeStatePath(group.workspaceCwd),
             ).trySetMany(group.names, 'stopped');
           }
+        } else if (
+          error instanceof ChannelWorkerControlError &&
+          error.code === 'channel_worker_start_failed' &&
+          error.rolledBack === false
+        ) {
+          // Per-channel disable via applySelection: the reconcile stopped
+          // this channel's worker entry, the replacement selection failed
+          // to start, and the rollback restart also failed — the channel
+          // is confirmed dead, but this error shape carries no
+          // stoppedChannels set. Record the stop anyway, or the channel
+          // resurrects on the next `--channel all` start (#8975). Key on
+          // code + rolledBack together, not rolledBack alone: the
+          // stop-phase failure shape (code channel_worker_stop_failed)
+          // can leave an old worker alive, where recording `stopped`
+          // would be wrong.
+          new ChannelStateStore(
+            daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
+          ).trySet(name, 'stopped');
         }
         throw error;
       }
@@ -596,11 +624,18 @@ export function createChannelManagementService(
       // does not bring this channel back (#8975). The stop already succeeded
       // at this point, so a degraded workspace path must not escape as a raw
       // fs error and skip the persistence — use the throw-safe form.
-      new ChannelStateStore(
+      const statePersisted = new ChannelStateStore(
         daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
       ).trySet(name, 'stopped');
       diagnostics.delete(name);
-      return resultFor(name, persisted);
+      return {
+        ...(await resultFor(name, persisted)),
+        // Only on failure: the happy-path response shape stays unchanged,
+        // but the route's client must be able to tell that the stop record
+        // did not persist and the stop is not durable — a persistence
+        // failure must never fail an already-succeeded stop (#8975).
+        ...(statePersisted ? {} : { statePersisted: false }),
+      };
     },
     async restart(name) {
       assertManageableInstanceName(name);

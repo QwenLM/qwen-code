@@ -198,6 +198,7 @@ function sendChannelControlError(
   res: Response,
   error: unknown,
   getState: () => ChannelWorkerControlState,
+  extraBody?: Record<string, unknown>,
 ): boolean {
   const code =
     error && typeof error === 'object' && 'code' in error
@@ -276,6 +277,9 @@ function sendChannelControlError(
       ? startupFailureResponseFields(error)
       : {}),
     state: getState(),
+    // Route-supplied persistence signals (e.g. a lost stop record) ride on
+    // the structured error body, mirroring the success path (#8975).
+    ...extraBody,
   });
   return true;
 }
@@ -378,14 +382,22 @@ export function registerWorkspaceChannelControlRoutes(
           // successful tear-down). The manager carries the captured set on
           // the error; persist it here too, or those channels resurrect on
           // the next `--channel all` start (#8975).
+          let statePersisted = true;
           if (
             error instanceof ChannelWorkerControlError &&
             error.stoppedChannels
           ) {
-            recordChannelsStopped(error.stoppedChannels);
+            statePersisted = recordChannelsStopped(error.stoppedChannels);
           }
           if (
-            sendChannelControlError(res, error, deps.getChannelWorkerControl)
+            sendChannelControlError(res, error, deps.getChannelWorkerControl, {
+              // A failed stop whose torn-down record ALSO failed to persist
+              // gives the client no retry handle (a release() failure
+              // clears the group before any retry could re-capture the
+              // names), so the error body must carry the loss — mirroring
+              // the success path's statePersisted field (#8975).
+              ...(statePersisted ? {} : { statePersisted: false }),
+            })
           ) {
             return;
           }

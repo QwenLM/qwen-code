@@ -77,6 +77,7 @@ export {
   type DaemonChannelUpsertRequest,
   type DaemonChannelStartupRequest,
   type DaemonChannelMutationResult,
+  type DaemonChannelStopInstanceResult,
   type DaemonChannelPairingRequest,
   type DaemonChannelPairingSubject,
   type DaemonChannelPairingRequestsSnapshot,

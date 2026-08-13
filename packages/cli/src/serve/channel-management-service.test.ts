@@ -722,6 +722,69 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
+  it('persists the stop when a failed disable leaves the channel confirmed dead (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Per-channel disable routes through applySelection: the reconcile
+    // stops the old worker entries, the replacement selection fails to
+    // start, and the rollback restart also fails (rolledBack: false). The
+    // channel is confirmed dead, but this error shape carries no
+    // stoppedChannels set — without a record here the next `--channel all`
+    // start resurrects it (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(WORKSPACE),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
+  it('does not persist the stop when the failed disable rolled back (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // rolledBack: true means the old worker was restored — the channel is
+    // not dead, so recording `stopped` would skip a live channel on the
+    // next `--channel all` start (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: true,
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
+  it('does not persist from a stop-phase failure without a torn-down set (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // The stop-phase failure shape (code channel_worker_stop_failed,
+    // rolledBack: false) can leave an old worker alive; keying on
+    // rolledBack alone would record a running channel as stopped (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_stop_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+    });
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
   it('keeps stopping when state persistence fails (#8975)', async () => {
     const { service } = setup({ committedNames: ['bot'] });
     mockChannelStateStoreSet.mockImplementationOnce(() => {
@@ -731,6 +794,22 @@ describe('createChannelManagementService', () => {
     const result = await service.stop('bot');
 
     expect(result.instance.name).toBe('bot');
+    // The stop itself succeeded, so the result stays a 200-shape — but it
+    // must carry the persistence failure, or the route's client claims a
+    // durable stop and the channel silently resurrects on `--channel all`
+    // (#8975).
+    expect(result.statePersisted).toBe(false);
+  });
+
+  it('omits statePersisted when the stop record persisted (#8975)', async () => {
+    const { service } = setup({ committedNames: ['bot'] });
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    // Happy-path response shape stays unchanged: the flag only appears on
+    // failure, matching the whole-selection DELETE route (#8975).
+    expect(result).not.toHaveProperty('statePersisted');
   });
 
   it('still records the stop when canonicalization fails on the persistence path (#8975)', async () => {

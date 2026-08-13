@@ -1296,14 +1296,18 @@ describe('createChannelWorkerSupervisor', () => {
       ),
     });
     // A permanently failed worker will never commit a new ready report,
-    // so the carried names, starting-state adapters and connected set must
-    // be dropped: keeping them would report every channel as `starting`
-    // forever and let an explicit per-channel start return success without
-    // touching the dead worker (#8975).
+    // so the carried names and starting-state adapters must be dropped:
+    // keeping them would report every channel as `starting` forever and
+    // let an explicit per-channel start return success without touching
+    // the dead worker (#8975). The carried CONNECTED set stays: its only
+    // production reader is the manager's stop capture, which needs it to
+    // record exactly the channels that ran on this terminal snapshot —
+    // dropping it would degrade a budget-exhausted stop to the attempted
+    // set (recording never-connected channels) or nothing (#8975).
     const terminal = supervisor.snapshot();
     expect(terminal.requestedChannels).toBeUndefined();
     expect(terminal.adapters).toBeUndefined();
-    expect(terminal.lastConnectedChannels).toBeUndefined();
+    expect(terminal.lastConnectedChannels).toEqual(['telegram']);
   });
 
   it('resets restart budget after an intentional stop and start', async () => {

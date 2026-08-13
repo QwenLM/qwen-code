@@ -1148,6 +1148,86 @@ describe('createChannelWorkerManager', () => {
     ]);
   });
 
+  it('records only the connected channels from a budget-exhausted mode-names worker (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    // Budget-exhausted TERMINAL snapshot: the supervisor drops
+    // requestedChannels/adapters (an explicit start must not see the dead
+    // worker as enabled) but keeps lastConnectedChannels for this capture;
+    // `channels` is the last launch's attempted set. Intersecting with the
+    // attempted set would record a never-connected channel as explicitly
+    // stopped, skipping it on every later `--channel all` start (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['telegram', 'feishu'],
+        requestedChannels: undefined,
+        lastConnectedChannels: ['telegram'],
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram'] },
+    ]);
+  });
+
+  it('records the carried connected set from a budget-exhausted mode-all worker (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // Mode-all twin: `channels` is still the `['all']` launch placeholder
+    // and requestedChannels is gone — without the carried connected set
+    // the capture would record NOTHING and lose the explicit
+    // whole-selection stop entirely (every channel resurrects) (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['all'],
+        requestedChannels: undefined,
+        lastConnectedChannels: ['telegram', 'feishu'],
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+    ]);
+  });
+
+  it('records nothing from a budget-exhausted worker that never connected (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    // Budget exhausted before any ready report ever committed: nothing
+    // actually connected, so there is no carried set and nothing to
+    // record — the attempted set must not be pinned as stopped (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['telegram', 'feishu'],
+        requestedChannels: undefined,
+        lastConnectedChannels: undefined,
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toBeUndefined();
+  });
+
   it('keeps the stop capture alive when workspace canonicalization fails (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);

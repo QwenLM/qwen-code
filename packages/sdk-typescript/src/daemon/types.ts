@@ -3201,6 +3201,12 @@ export interface DaemonChannelSetResult {
 export interface DaemonChannelStopResult {
   changed: boolean;
   state: DaemonChannelControlState;
+  /**
+   * Present (and `false`) only when the stop succeeded but its `stopped`
+   * record failed to persist: a later `--channel all` restart may bring
+   * the channels back. Absent on the happy path (#8975).
+   */
+  statePersisted?: boolean;
 }
 
 export interface DaemonChannelWorkerStartErrorResponse {
@@ -3365,6 +3371,16 @@ export interface DaemonChannelStartupRequest extends DaemonRevisionRequest {
 export interface DaemonChannelMutationResult {
   snapshot: DaemonChannelsSnapshot;
   instance: DaemonChannelInstanceSnapshot;
+}
+
+export interface DaemonChannelStopInstanceResult
+  extends DaemonChannelMutationResult {
+  /**
+   * Present (and `false`) only when the per-channel stop succeeded but its
+   * `stopped` record failed to persist: a later `--channel all` restart
+   * may bring the channel back. Absent on the happy path (#8975).
+   */
+  statePersisted?: boolean;
 }
 
 export interface DaemonChannelPairingRequest {

@@ -39,6 +39,7 @@ import type {
   DaemonChannelStartupAttemptFailure,
   DaemonChannelStartupFailure,
   DaemonChannelStopResult,
+  DaemonChannelStopInstanceResult,
   DaemonChannelWorkerStartErrorResponse,
   DaemonControlEvent,
   DaemonEvent,
@@ -244,6 +245,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelStopInstanceResult>().not.toBeNever();
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();

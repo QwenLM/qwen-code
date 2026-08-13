@@ -140,6 +140,28 @@ describe('stopCommand', () => {
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
   });
 
+  it('warns when the daemon stop record failed to persist (#8975)', async () => {
+    // The route reports a successful stop whose `stopped` record did not
+    // persist (ENOSPC/EACCES on the daemon channels dir). The CLI must
+    // surface the loss like the standalone path does — printing an
+    // unqualified success here resurrects the channels on the next
+    // `--channel all` (#8975).
+    mockStopChannelWorker.mockResolvedValueOnce({
+      changed: true,
+      statePersisted: false,
+    });
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop({ 'daemon-url': 'http://daemon:9' });
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Daemon-managed channels stopped.',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+  });
+
   it('reports remote stop failures without falling through to standalone mode', async () => {
     mockStopChannelWorker.mockRejectedValueOnce(new Error('stop failed'));
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
@@ -353,5 +375,62 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+  });
+
+  it('surfaces a lost stop record when the service died before the signal (#8975)', async () => {
+    // The realistic shape when stopping a hung or dying service: the state
+    // write fails (disk full) AND the service dies between the liveness
+    // check and SIGTERM delivery. This branch exits 0 before the final
+    // recorded-conditional message, so the warning must be emitted inside
+    // it, or the lost record is never surfaced (#8975).
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockChannelStateStoreSetMany.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    mockSignalService.mockReturnValue(false);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to send signal'),
+    );
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
+    // The branch must exit before any wait/kill fall-through.
+    expect(mockWaitForExit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the signal-failure branch quiet when the record persisted (#8975)', async () => {
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockSignalService.mockReturnValue(false);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 0');
+
+    // The record persisted, so only the signal failure is reported — the
+    // persistence warning would be a false alarm here.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
   });
 });

@@ -263,7 +263,14 @@ function errorMessage(error: unknown): string {
  * recorded as stopped though it never ran). Intersect with the connected
  * set carried from the last ready report instead (#8975). Before the first
  * ready report there is no carried set: a stop in the initial mode-`all`
- * window records nothing, as before.
+ * window records nothing, as before. The carried set is authoritative in
+ * EVERY state, not just `starting`: a budget-exhausted terminal snapshot
+ * drops `requestedChannels`, and its `channels` is the last launch's
+ * attempted set (or the mode-`all` placeholder), so intersecting with it
+ * would record never-connected channels — or nothing — as explicitly
+ * stopped. The supervisor keeps `lastConnectedChannels` on that terminal
+ * snapshot exactly for this capture, and when `requestedChannels` is gone
+ * the carried connected set also supplies the candidate names (#8975).
  * Runs inside the manager lane, so an in-flight start has already committed
  * and reported ready by the time a queued stop executes.
  */
@@ -272,14 +279,18 @@ function stoppedChannelsByWorkspace(
 ): Array<{ workspaceCwd: string; names: string[] }> {
   const byWorkspace = new Map<string, Set<string>>();
   for (const worker of workers) {
-    const connectedSource =
-      worker.state === 'starting' && worker.lastConnectedChannels
-        ? worker.lastConnectedChannels
-        : worker.channels;
-    const connected = new Set(connectedSource);
-    const names = (worker.requestedChannels ?? worker.channels).filter(
-      (name) => !isAllChannelSelectionName(name) && connected.has(name),
-    );
+    // Neither a requested set nor a carried connected set: nothing was
+    // ever confirmed connected (the initial mode-`all` window, or a
+    // budget-exhausted worker that never reported ready) — recording the
+    // launch placeholder/attempted set would pin never-run channels as
+    // explicitly stopped (#8975).
+    if (!worker.requestedChannels && !worker.lastConnectedChannels) continue;
+    const connected = new Set(worker.lastConnectedChannels ?? worker.channels);
+    const names = (
+      worker.requestedChannels ??
+      worker.lastConnectedChannels ??
+      worker.channels
+    ).filter((name) => !isAllChannelSelectionName(name) && connected.has(name));
     if (names.length === 0) continue;
     // Throw-safe canonical form: canonicalizeWorkspace rethrows non-ENOENT
     // fs errors by design, but a degraded worker path must degrade to the

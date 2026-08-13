@@ -271,4 +271,76 @@ describe('DELETE /workspace/channel', () => {
     expect(response.body.changed).toBe(true);
     expect(response.body.statePersisted).toBe(false);
   });
+
+  it('surfaces a lost stop record on the failure path too (#8975)', async () => {
+    const { app } = setup({
+      stop: vi.fn(async () => {
+        // A partial multi-workspace failure: some workers were already
+        // torn down (carried on the error), and the state write for them
+        // ALSO fails (disk full). The 500 body is the client's only
+        // signal that the stop record was lost — a stop retry cannot
+        // re-capture the names, so without it the torn-down channels
+        // resurrect on the next `--channel all` (#8975).
+        throw new ChannelWorkerControlError(
+          'channel_worker_stop_failed',
+          'workspace /workspace/a failed to stop',
+          {
+            stoppedChannels: [
+              { workspaceCwd: '/workspace/a', names: ['telegram'] },
+            ],
+          },
+        );
+      }),
+    });
+    mockChannelStateStore.mockImplementationOnce((path: string) => {
+      const instance: MockStateStoreInstance = {
+        path,
+        setMany: vi.fn(() => {
+          throw new Error('disk full');
+        }),
+        trySetMany: (names: string[], state: 'active' | 'stopped') => {
+          try {
+            instance.setMany(names, state);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+      mockChannelStateStoreInstances.push(instance);
+      return instance;
+    });
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('channel_worker_stop_failed');
+    expect(response.body.statePersisted).toBe(false);
+  });
+
+  it('omits statePersisted from a failed stop whose record persisted (#8975)', async () => {
+    const { app } = setup({
+      stop: vi.fn(async () => {
+        throw new ChannelWorkerControlError(
+          'channel_worker_stop_failed',
+          'workspace /workspace/a failed to stop',
+          {
+            stoppedChannels: [
+              { workspaceCwd: '/workspace/a', names: ['telegram'] },
+            ],
+          },
+        );
+      }),
+    });
+
+    const response = await request(app).delete('/workspace/channel');
+
+    expect(response.status).toBe(500);
+    // The torn-down record persisted, so the error body keeps its shape.
+    expect(response.body).not.toHaveProperty('statePersisted');
+    expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'stopped',
+    );
+  });
 });

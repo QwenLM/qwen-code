@@ -146,6 +146,7 @@ import type {
   DaemonChannelControlState,
   DaemonChannelSelection,
   DaemonChannelSetResult,
+  DaemonChannelStopInstanceResult,
   DaemonChannelStopResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
@@ -3953,7 +3954,7 @@ export class DaemonClient {
   stopWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,
-  ): Promise<DaemonChannelMutationResult> {
+  ): Promise<DaemonChannelStopInstanceResult> {
     return this.workspaceChannelAction(name, 'stop', opts);
   }
 
@@ -5082,7 +5083,7 @@ export class WorkspaceDaemonClient {
   stopWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,
-  ): Promise<DaemonChannelMutationResult> {
+  ): Promise<DaemonChannelStopInstanceResult> {
     return this.channelAction(name, 'stop', opts);
   }
 

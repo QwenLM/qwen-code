@@ -47,7 +47,7 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           DaemonClient: new (opts: { baseUrl: string; token?: string }) => {
             stopChannelWorker(opts?: {
               timeoutMs?: number;
-            }): Promise<{ changed: boolean }>;
+            }): Promise<{ changed: boolean; statePersisted?: boolean }>;
           };
         };
         const client = new sdk.DaemonClient({
@@ -62,6 +62,14 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
             ? 'Daemon-managed channels stopped.'
             : 'Daemon-managed channels are already stopped.',
         );
+        // The route reports a successful stop whose `stopped` record did
+        // not persist; surface it like the standalone path does, or the
+        // stopped channels resurrect on the next `--channel all` (#8975).
+        if (result.statePersisted === false) {
+          writeStdoutLine(
+            'Warning: could not persist the stopped record; --channel all may restart these channels.',
+          );
+        }
         process.exit(0);
       } catch (error) {
         writeStderrLine(
@@ -119,6 +127,15 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     ).trySetMany(info.channels, 'stopped');
 
     if (!signalService(info.pid, 'SIGTERM')) {
+      // This branch exits before the recorded-conditional message below,
+      // so a failed stop-record persistence must be surfaced here too —
+      // the realistic shape is a service dying between the liveness check
+      // and signal delivery while the state write also fails (#8975).
+      if (!recorded) {
+        writeStdoutLine(
+          'Warning: could not persist the stopped record; --channel all may restart these channels.',
+        );
+      }
       writeStderrLine(
         'Failed to send signal — process may have already exited.',
       );
