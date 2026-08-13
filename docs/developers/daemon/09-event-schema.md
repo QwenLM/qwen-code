@@ -77,13 +77,13 @@ Grouped by domain.
 | `agent_changed`          | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                                                                |
 | `approval_mode_changed`  | S->C      | `sessionId, previous, next, persisted: boolean`                                                                                                |
 | `tool_toggled`           | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.                                            |
-| `settings_changed`       | S->C      | Workspace settings write completed. Payload includes `key`, `value`, `scope`, and optional Skill-toggle `mutation`.                            |
+| `settings_changed`       | S->C      | Workspace settings write completed. Payload includes `key` and `value`; `scope` and Skill-toggle `mutation` are optional.                      |
 | `settings_reloaded`      | S->C      | Daemon workspace service reread settings. Payload is open.                                                                                     |
 | `trust_change_requested` | S->C      | `workspaceCwd, desiredState: 'trusted' \| 'untrusted', reason?`                                                                                |
 | `workspace_initialized`  | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                                                                        |
 | `github_setup_completed` | S->C      | `releaseTag, readmeUrl, secretsUrl?, workflows: [{path, status, sizeBytes?, error?}], gitignore: {path, status, added?, error?}`               |
 
-Skill toggle APIs attach optional `mutation: { id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. Every `skills.disabled` / `skills.enabled` event from the same request shares one mutation id. Other settings writes omit `mutation`.
+Skill toggle APIs attach optional `mutation: { id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. Every `skills.disabled` / `skills.enabled` event from the same request shares one mutation id. Other settings writes omit `mutation`. Workspace-service writes include `scope`; some other emitters (for example session model switches) omit it. The SDK normalizer defaults missing `scope` to `'workspace'`.
 
 `memory_changed` also covers sessionless managed-memory tasks. For those
 payloads, `scope` is `"managed"`, `source` is one of

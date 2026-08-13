@@ -2802,22 +2802,40 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
   });
 
   it('keeps settings_changed when skill-toggle mutation metadata is malformed', () => {
-    const events = normalizeDaemonEvent(
-      envelopeOf('settings_changed', {
-        key: 'skills.disabled',
-        value: ['skill-a'],
-        scope: 'workspace',
-        mutation: { kind: 'skill_toggle' },
-      }),
-    );
-    expect(events).toEqual([
-      expect.objectContaining({
-        type: 'workspace.settings.changed',
-        key: 'skills.disabled',
-        value: ['skill-a'],
-      }),
-    ]);
-    expect(events[0]).not.toHaveProperty('mutation');
+    const validMutation = {
+      id: 'mutation-1',
+      kind: 'skill_toggle',
+      skills: [{ name: 'web-search', enabled: true }],
+      activation: 'applied',
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const malformed = [
+      { kind: 'skill_toggle' },
+      { ...validMutation, kind: 'other' },
+      { ...validMutation, activation: 'soon' },
+      { ...validMutation, skills: [] },
+      { ...validMutation, sessionsFailed: Number.POSITIVE_INFINITY },
+      { ...validMutation, skills: [{ name: '', enabled: true }] },
+    ];
+    for (const mutation of malformed) {
+      const events = normalizeDaemonEvent(
+        envelopeOf('settings_changed', {
+          key: 'skills.disabled',
+          value: ['skill-a'],
+          scope: 'workspace',
+          mutation,
+        }),
+      );
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'workspace.settings.changed',
+          key: 'skills.disabled',
+          value: ['skill-a'],
+        }),
+      ]);
+      expect(events[0]).not.toHaveProperty('mutation');
+    }
   });
 
   it('normalizes settings_reloaded as a settings refresh signal', () => {

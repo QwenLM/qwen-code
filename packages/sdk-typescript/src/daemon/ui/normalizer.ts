@@ -1490,11 +1490,11 @@ function parseSkillToggleMutation(
   value: unknown,
 ): DaemonSkillToggleMutation | undefined {
   if (!isRecord(value) || value['kind'] !== 'skill_toggle') return undefined;
-  const id = typeof value['id'] === 'string' ? value['id'] : undefined;
+  const id = stringField(value, 'id');
   const activation = value['activation'];
   const skills = value['skills'];
-  const sessionsRefreshed = value['sessionsRefreshed'];
-  const sessionsFailed = value['sessionsFailed'];
+  const sessionsRefreshed = numberField(value, 'sessionsRefreshed');
+  const sessionsFailed = numberField(value, 'sessionsFailed');
   if (
     !id ||
     (activation !== 'applied' &&
@@ -1502,21 +1502,19 @@ function parseSkillToggleMutation(
       activation !== 'partial') ||
     !Array.isArray(skills) ||
     skills.length === 0 ||
-    typeof sessionsRefreshed !== 'number' ||
-    !Number.isFinite(sessionsRefreshed) ||
-    typeof sessionsFailed !== 'number' ||
-    !Number.isFinite(sessionsFailed)
+    sessionsRefreshed === undefined ||
+    sessionsFailed === undefined
   ) {
     return undefined;
   }
   const parsedSkills: Array<{ name: string; enabled: boolean }> = [];
   for (const skill of skills) {
-    if (!isRecord(skill)) return undefined;
-    const name = skill['name'];
-    const enabled = skill['enabled'];
-    if (typeof name !== 'string' || name.length === 0) return undefined;
-    if (typeof enabled !== 'boolean') return undefined;
-    parsedSkills.push({ name, enabled });
+    if (!isRecord(skill) || typeof skill['enabled'] !== 'boolean') {
+      return undefined;
+    }
+    const name = stringField(skill, 'name');
+    if (!name) return undefined;
+    parsedSkills.push({ name, enabled: skill['enabled'] });
   }
   return {
     id,

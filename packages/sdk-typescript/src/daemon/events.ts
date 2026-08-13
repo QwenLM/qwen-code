@@ -1746,7 +1746,7 @@ export function asKnownDaemonEvent(
         ? (event as DaemonToolToggledEvent)
         : undefined;
     case 'settings_changed':
-      return event.data != null && typeof event.data === 'object'
+      return isSettingsChangedData(event.data)
         ? (event as DaemonSettingsChangedEvent)
         : undefined;
     case 'trust_change_requested':
@@ -3000,6 +3000,12 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
     isNonEmptyString(value['toolName']) &&
     typeof value['enabled'] === 'boolean'
   );
+}
+
+function isSettingsChangedData(
+  value: unknown,
+): value is DaemonSettingsChangedData {
+  return isRecord(value) && isNonEmptyString(value['key']);
 }
 
 function isTrustChangeRequestedData(

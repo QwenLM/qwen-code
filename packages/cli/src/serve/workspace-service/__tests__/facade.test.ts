@@ -119,6 +119,7 @@ import type {
   InvokeWorkspaceCommandFn,
   QueryWorkspaceStatusFn,
   WorkspaceRequestContext,
+  WorkspaceSkillToggleActivation,
 } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ function skillToggleSettingsChanged(args: {
   key: 'skills.disabled' | 'skills.enabled';
   value: unknown;
   skills: Array<{ name: string; enabled: boolean }>;
-  activation: 'applied' | 'deferred' | 'partial';
+  activation: WorkspaceSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
   originatorClientId?: string;
@@ -1792,6 +1793,7 @@ describe('createDaemonWorkspaceService', () => {
     });
 
     it('reports partial activation when a session refresh fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus: statusQuery(),
@@ -1803,6 +1805,7 @@ describe('createDaemonWorkspaceService', () => {
             sessionsRefreshed: 1,
             sessionsFailed: 1,
           }),
+          publishWorkspaceEvent,
           isChannelLive: () => true,
         }),
       );
@@ -1814,6 +1817,16 @@ describe('createDaemonWorkspaceService', () => {
         sessionsRefreshed: 1,
         sessionsFailed: 1,
       });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['review'],
+          skills: [{ name: 'review', enabled: false }],
+          activation: 'partial',
+          sessionsRefreshed: 1,
+          sessionsFailed: 1,
+        }),
+      );
     });
 
     it('defers refresh when no child exists or the child closes mid-refresh', async () => {
@@ -2565,6 +2578,7 @@ describe('createDaemonWorkspaceService', () => {
     });
 
     it('reports partial activation when the shared batch refresh fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
       const failedSessions = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus: vi.fn().mockResolvedValue({
@@ -2581,6 +2595,7 @@ describe('createDaemonWorkspaceService', () => {
             sessionsRefreshed: 1,
             sessionsFailed: 1,
           }),
+          publishWorkspaceEvent,
           isChannelLive: () => true,
         }),
       );
@@ -2591,6 +2606,16 @@ describe('createDaemonWorkspaceService', () => {
         sessionsRefreshed: 1,
         sessionsFailed: 1,
       });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['review'],
+          skills: [{ name: 'review', enabled: false }],
+          activation: 'partial',
+          sessionsRefreshed: 1,
+          sessionsFailed: 1,
+        }),
+      );
 
       const unexpectedError = createDaemonWorkspaceService(
         makeDeps({
@@ -2772,7 +2797,16 @@ describe('createDaemonWorkspaceService', () => {
         ],
       });
       expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
-      expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['deploy'],
+          skills: [{ name: 'deploy', enabled: false }],
+          activation: 'applied',
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+        }),
+      );
     });
 
     it('drops the cached skill snapshot after a changed batch like the single-toggle path', async () => {
