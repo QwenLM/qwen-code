@@ -1299,7 +1299,10 @@ export class SessionService {
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
   ): Promise<SessionLiveRestoreProjection | undefined> {
-    return this.transcriptReader.readLiveRestoreProjection(sessionId, options);
+    return this.transcriptReader.readLiveRestoreProjection(sessionId, options, {
+      validateFirstRecord: (record) =>
+        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    });
   }
 
   /**

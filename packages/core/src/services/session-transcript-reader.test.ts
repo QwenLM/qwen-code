@@ -9,11 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockDebugLogger } = vi.hoisted(() => ({
+const { mockDebugLogger, mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockDebugLogger: {
     debug: vi.fn(),
     warn: vi.fn(),
   },
+  mockAddDaemonRequestAttribute: vi.fn(),
 }));
 
 const { statFault } = vi.hoisted(() => ({
@@ -22,6 +23,10 @@ const { statFault } = vi.hoisted(() => ({
 
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
+}));
+
+vi.mock('../telemetry/daemon-tracing.js', () => ({
+  addDaemonRequestAttribute: mockAddDaemonRequestAttribute,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -910,6 +915,44 @@ describe('SessionTranscriptReader', () => {
     expect(recoverGoalFromRecords(projection!.runtime.goalRecords)).toEqual(
       recoverGoalFromRecords(loaded!.conversation.messages),
     );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.transcript_index_ms',
+      expect.any(Number),
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.resume_state_select_ms',
+      expect.any(Number),
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.selected_record_read_ms',
+      expect.any(Number),
+    );
+    for (const attribute of [
+      'transcript_bytes',
+      'records_indexed',
+      'active_records',
+      'selected_records',
+      'selected_bytes',
+      'replay_records',
+      'replay_bytes',
+    ]) {
+      expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+        `qwen-code.daemon.session_restore.${attribute}`,
+        expect.any(Number),
+      );
+    }
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'fresh',
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.replay_mode',
+      'none',
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.compression_selected',
+      expect.any(Boolean),
+    );
   });
 
   it('uses the bounded persisted-title picker instead of the full active chain', async () => {
@@ -1213,10 +1256,29 @@ describe('SessionTranscriptReader', () => {
       ...record('a1', 'u1', 'inherited answer'),
       forkedFrom: { sessionId: 'parent', messageUuid: 'a1' },
     };
+    const inheritedGoal: ChatRecord = {
+      ...record('goal', 'a1', ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      forkedFrom: { sessionId: 'parent', messageUuid: 'goal' },
+      systemPayload: {
+        rawCommand: '/goal inherited goal',
+        phase: 'result',
+        outputHistoryItems: [
+          {
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'inherited goal',
+          },
+        ],
+      },
+    };
     await writeRecords([
       inheritedUser,
       inheritedAssistant,
-      record('u2', 'a1', 'branch prompt'),
+      inheritedGoal,
+      record('u2', 'goal', 'branch prompt'),
       record('a2', 'u2', 'branch answer'),
     ]);
     const reader = new SessionTranscriptReader(workspaceDir);
@@ -1231,6 +1293,7 @@ describe('SessionTranscriptReader', () => {
     expect(visible?.replay?.records.map((item) => item.uuid)).toEqual([
       'u1',
       'a1',
+      'goal',
       'u2',
       'a2',
     ]);
@@ -1239,6 +1302,87 @@ describe('SessionTranscriptReader', () => {
       'a2',
     ]);
     expect(hidden?.runtime.apiHistory).toEqual(visible?.runtime.apiHistory);
+    expect(visible?.runtime.goalRecoverySourceUuid).toBe('goal');
+    expect(hidden?.runtime.goalRecoverySourceUuid).toBe('goal');
+    expect(hidden?.replay?.goalRecoverySourceUuid).toBeUndefined();
+    expect(hidden?.runtime.goalRecords).toEqual([
+      expect.objectContaining({ uuid: 'goal' }),
+    ]);
+
+    const hiddenLive = await reader.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'all', hideInheritedHistory: true },
+    });
+    expect(hiddenLive?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(hiddenLive?.goalRecoverySourceUuid).toBeUndefined();
+    expect(hiddenLive?.goalRecords).toBeUndefined();
+  });
+
+  it('selects Goal bootstrap precedence from filtered visible history', async () => {
+    const visibleGoal: ChatRecord = {
+      ...record('visible-goal', null, ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      systemPayload: {
+        rawCommand: '/goal visible goal',
+        phase: 'result',
+        outputHistoryItems: [
+          { type: 'goal_status', kind: 'set', condition: 'visible goal' },
+        ],
+      },
+    };
+    const hiddenGoal: ChatRecord = {
+      ...record('hidden-goal', 'visible-goal', ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      forkedFrom: { sessionId: 'parent', messageUuid: 'hidden-goal' },
+      systemPayload: {
+        rawCommand: '/goal hidden goal',
+        phase: 'result',
+        outputHistoryItems: [
+          { type: 'goal_status', kind: 'set', condition: 'hidden goal' },
+        ],
+      },
+    };
+    await writeRecords([
+      record('u0', null, 'older prompt'),
+      record('a0', 'u0', 'older answer'),
+      { ...visibleGoal, parentUuid: 'a0' },
+      hiddenGoal,
+      record('u1', 'hidden-goal', 'branch prompt'),
+      record('a1', 'u1', 'branch answer'),
+      record('u2', 'a1', 'latest prompt'),
+      record('a2', 'u2', 'latest answer'),
+    ]);
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const options = {
+      replay: {
+        kind: 'recent' as const,
+        limit: 2,
+        hideInheritedHistory: true,
+      },
+    };
+
+    const cold = await reader.readRestoreProjection(sessionId, options);
+    const live = await reader.readLiveRestoreProjection(sessionId, options);
+
+    expect(cold?.replay?.records.map((record) => record.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(cold?.runtime.goalRecoverySourceUuid).toBe('hidden-goal');
+    expect(cold?.replay?.goalRecoverySourceUuid).toBe('visible-goal');
+    expect(cold?.replay?.goalBootstrapRecords).toEqual([
+      expect.objectContaining({ uuid: 'visible-goal' }),
+    ]);
+    expect(live?.goalRecoverySourceUuid).toBe('visible-goal');
+    expect(live?.goalRecords?.map((record) => record.uuid)).toEqual([
+      'visible-goal',
+    ]);
   });
 
   it('uses the aggregated final usage metadata when selecting resume tokens', async () => {
@@ -1410,6 +1554,23 @@ describe('SessionTranscriptReader', () => {
         sessionId,
         { replay: { kind: 'none' } },
         { validateFirstRecord: () => false },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+
+    await expect(
+      reader.readLiveRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
+        { validateFirstRecord: () => false },
+      ),
+    ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+  });
+
+  it('fails closed when a cold restore transcript is missing', async () => {
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readRestoreProjection(
+        sessionId,
+        { replay: { kind: 'none' } },
       ),
     ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
   });
@@ -1643,6 +1804,61 @@ describe('SessionTranscriptReader', () => {
     expect(liveResume?.replay).toBeUndefined();
     expect(liveResume?.artifactSnapshot).toEqual(liveLoad?.artifactSnapshot);
     expect(liveResume).not.toHaveProperty('runtime');
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'miss',
+    );
+    expect(mockAddDaemonRequestAttribute).toHaveBeenCalledWith(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'hit',
+    );
+  });
+
+  it('retains the determining legacy Goal candidate for a recent live page', async () => {
+    const legacyGoal: ChatRecord = {
+      ...record('goal', null, ''),
+      type: 'system',
+      subtype: 'slash_command',
+      message: undefined,
+      systemPayload: {
+        rawCommand: '/goal keep the live goal visible',
+        phase: 'result',
+        outputHistoryItems: [
+          {
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'keep the live goal visible',
+            iterations: 0,
+          },
+        ],
+      },
+    };
+    await writeRecords([
+      legacyGoal,
+      record('u1', 'goal', 'one'),
+      record('a1', 'u1', 'one answer'),
+      record('u2', 'a1', 'two'),
+      record('a2', 'u2', 'two answer'),
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readLiveRestoreProjection(sessionId, {
+      replay: {
+        kind: 'recent',
+        limit: 2,
+        hideInheritedHistory: false,
+      },
+    });
+
+    expect(projection?.replay?.records.map((item) => item.uuid)).toEqual([
+      'u2',
+      'a2',
+    ]);
+    expect(projection?.goalRecoverySourceUuid).toBe('goal');
+    expect(projection?.goalRecords).toEqual([
+      expect.objectContaining({ uuid: 'goal', subtype: 'slash_command' }),
+    ]);
   });
 
   it('projects a pending Goal checkpoint window without a full-loader fallback', async () => {

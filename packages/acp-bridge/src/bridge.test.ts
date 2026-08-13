@@ -4234,6 +4234,7 @@ describe('createAcpSessionBridge', () => {
               keep: 'state',
               'qwen.session.loadReplay': {
                 v: 1,
+                anchorRecordId: 'record-anchor',
                 hasMore: true,
                 partial: true,
                 replayError: 'replay boom',
@@ -4278,6 +4279,7 @@ describe('createAcpSessionBridge', () => {
     expect(loaded.partial).toBe(true);
     expect(loaded.replayError).toBe('replay boom');
     expect(loaded.historyHasMore).toBe(true);
+    expect(loaded.historyAnchorRecordId).toBe('record-anchor');
     expect(loaded.lastEventId).toBe(2);
     expect(loaded.compactedReplay).toHaveLength(2);
     expect(loaded.liveJournal).toEqual([]);

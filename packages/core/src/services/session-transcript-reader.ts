@@ -13,6 +13,7 @@ import type { Content } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
 import { readSessionTitleInfoFromFileSync } from '../utils/sessionStorageUtils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
@@ -44,6 +45,7 @@ import {
   normalizeGoalRecoveryRecord,
   selectGoalRecoveryFromRecords,
   type GoalRecoveryRecord,
+  type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
 import {
   GoalEvidenceCheckpointAccumulator,
@@ -182,6 +184,8 @@ export interface SessionRestoreReplayPage {
   hasMore: boolean;
   anchorRecordId?: string;
   replay?: unknown;
+  goalRecoverySourceUuid?: string;
+  goalBootstrapRecords?: GoalRecoveryRecord[];
 }
 
 export interface SessionRuntimeResumeState {
@@ -223,6 +227,8 @@ export interface SessionLiveRestoreProjection {
   lastUpdated: string;
   replay?: SessionRestoreReplayPage;
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  goalRecords?: GoalRecoveryRecord[];
+  goalRecoverySourceUuid?: string;
 }
 
 interface RestoreProjectionReadOptions {
@@ -319,6 +325,72 @@ const CURSOR_HMAC_KEY_FILENAME = 'session-transcript-cursor-key';
 const SESSION_TRANSCRIPT_SESSION_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
 
 const debugLogger = createDebugLogger('SESSION_TRANSCRIPT');
+
+function recordRestoreStage(stage: string, startedAt: number): void {
+  const durationMs = Math.round((performance.now() - startedAt) * 100) / 100;
+  if (Number.isFinite(durationMs) && durationMs >= 0) {
+    addDaemonRequestAttribute(
+      `qwen-code.daemon.session_restore.${stage}_ms`,
+      durationMs,
+    );
+  }
+}
+
+function recordRestoreIndexAttributes(index: TranscriptIndex): void {
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.transcript_bytes',
+    index.snapshotSize,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.records_indexed',
+    index.byUuid.size,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.active_records',
+    index.runtimeUuids.length,
+  );
+}
+
+function selectedRecordBytes(
+  index: TranscriptIndex,
+  uuids: Iterable<string>,
+): number {
+  const offsets = new Set<number>();
+  let bytes = 0;
+  for (const uuid of uuids) {
+    const entry = index.byUuid.get(uuid);
+    if (!entry) continue;
+    for (const segment of entry.segments) {
+      if (offsets.has(segment.offset)) continue;
+      offsets.add(segment.offset);
+      bytes += segment.length;
+    }
+  }
+  return bytes;
+}
+
+function recordRestoreSelectionAttributes(
+  index: TranscriptIndex,
+  selectedUuids: ReadonlySet<string>,
+  replayUuids: ReadonlySet<string>,
+): void {
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.selected_records',
+    selectedUuids.size,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.selected_bytes',
+    selectedRecordBytes(index, selectedUuids),
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.replay_records',
+    replayUuids.size,
+  );
+  addDaemonRequestAttribute(
+    'qwen-code.daemon.session_restore.replay_bytes',
+    selectedRecordBytes(index, replayUuids),
+  );
+}
 
 const indexCache = new Map<string, CacheEntry>();
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
@@ -1605,6 +1677,7 @@ async function getCachedIndex(params: {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   lastUpdated: string;
+  onCacheState?: (state: 'hit' | 'pending' | 'miss') => void;
 }): Promise<TranscriptIndex> {
   const now = Date.now();
   pruneCache(now);
@@ -1619,14 +1692,17 @@ async function getCachedIndex(params: {
     indexCache.delete(key);
     indexCache.set(key, cached);
     debugLogger.debug(`index cache hit ${key}`);
+    params.onCacheState?.('hit');
     return cached.value;
   }
   if (cached?.pending && cached.expiresAt > now) {
     debugLogger.debug(`index cache pending hit ${key}`);
+    params.onCacheState?.('pending');
     return cached.pending;
   }
 
   debugLogger.debug(`index cache miss ${key}`);
+  params.onCacheState?.('miss');
   const pending = buildIndex(params);
   indexCache.set(key, {
     pending,
@@ -1855,16 +1931,27 @@ export class SessionTranscriptReader {
   ): Promise<SessionRestoreProjection | undefined> {
     const filePath = this.getSessionFilePath(sessionId);
     validateRestoreReplaySelection(options.replay);
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.replay_mode',
+      options.replay.kind,
+    );
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.index_cache_state',
+      'fresh',
+    );
     let stats: fs.Stats;
     try {
       stats = await fsp.stat(filePath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (isFileMissingError(error)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
       throw error;
     }
     const fileIdentity = fileIdentityFromStats(stats);
     const lastUpdated = new Date(stats.mtimeMs).toISOString();
     let index: TranscriptIndex;
+    const indexStartedAt = performance.now();
     try {
       index = await buildIndex({
         filePath,
@@ -1886,12 +1973,21 @@ export class SessionTranscriptReader {
         }
       }
       throw error;
+    } finally {
+      recordRestoreStage('transcript_index', indexStartedAt);
     }
-    const replaySelection = selectRestoreReplayUuids(
-      index,
-      sessionId,
-      options.replay,
-    );
+    recordRestoreIndexAttributes(index);
+    const selectionStartedAt = performance.now();
+    let replaySelection: ReturnType<typeof selectRestoreReplayUuids>;
+    try {
+      replaySelection = selectRestoreReplayUuids(
+        index,
+        sessionId,
+        options.replay,
+      );
+    } finally {
+      recordRestoreStage('resume_state_select', selectionStartedAt);
+    }
     const replaySet = new Set(replaySelection?.uuids ?? []);
     const modelSet = new Set<string>();
     let compressionPosition = -1;
@@ -1912,6 +2008,14 @@ export class SessionTranscriptReader {
         modelSet.add(uuid);
       }
     }
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.compression_selected',
+      compressionPosition >= 0,
+    );
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.legacy_full_model_history',
+      compressionPosition < 0,
+    );
 
     const tokenUuid = lastUuidMatching(
       index,
@@ -1947,6 +2051,13 @@ export class SessionTranscriptReader {
       index.runtimeUuids.filter(
         (uuid) => index.byUuid.get(uuid)?.goalRecoveryCandidate === true,
       ),
+    );
+    const replayGoalSet = new Set(
+      replaySelection
+        ? replaySelection.index.replayUuids.filter(
+            (uuid) => index.byUuid.get(uuid)?.goalRecoveryCandidate === true,
+          )
+        : [],
     );
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
@@ -2033,114 +2144,129 @@ export class SessionTranscriptReader {
         ...index.runtimeUuids.filter((uuid) => goalSet.has(uuid)),
       ]),
     );
-
-    const goalRecovery = await withAggregatedRecordReadContext(
-      index,
-      async (readContext) => {
-        await forEachAggregatedRecord(
-          index,
-          preReadUuids,
-          async (record) => {
-            if (record.uuid === index.firstRecordUuid) {
-              if (
-                readOptions.validateFirstRecord &&
-                !(await readOptions.validateFirstRecord(record))
-              ) {
-                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-              }
-              firstRecordSeen = true;
-              if (!goalSet.has(record.uuid)) firstRecord = record;
-            }
-            if (goalSet.has(record.uuid)) {
-              const normalized = normalizeGoalRecoveryRecord(record);
-              if (normalized) {
-                goalRecords.push(normalized);
-                if (record.subtype === 'goal_state') {
-                  goalStatePayloads.set(
-                    record.uuid,
-                    parseGoalStateRecordPayloadV2(normalized.systemPayload),
+    const selectedReadsStartedAt = performance.now();
+    const selectedReadSet = new Set(preReadUuids);
+    let goalRecovery: {
+      selectedGoalRecovery: GoalRecoverySelection;
+      goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
+    };
+    try {
+      goalRecovery = await withAggregatedRecordReadContext(
+        index,
+        async (readContext) => {
+          await forEachAggregatedRecord(
+            index,
+            preReadUuids,
+            async (record) => {
+              if (record.uuid === index.firstRecordUuid) {
+                if (
+                  readOptions.validateFirstRecord &&
+                  !(await readOptions.validateFirstRecord(record))
+                ) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
                   );
                 }
+                firstRecordSeen = true;
+                if (!goalSet.has(record.uuid)) firstRecord = record;
               }
-            }
-            if (replaySet.has(record.uuid)) {
-              replayRecordsByUuid.set(record.uuid, record);
-            }
-            const needsDeferredDispatch =
-              modelSet.has(record.uuid) ||
-              record.uuid === tokenUuid ||
-              record.uuid === attributionUuid ||
-              metadataSet.has(record.uuid) ||
-              uiTelemetrySet.has(record.uuid) ||
-              fileHistorySet.has(record.uuid) ||
-              artifactSet.has(record.uuid);
-            if (needsDeferredDispatch) {
-              if (
-                record.uuid === index.firstRecordUuid &&
-                artifactSet.has(record.uuid)
-              ) {
-                artifacts.add(record);
-              } else {
-                deferredPreReadRecords.set(record.uuid, record);
+              if (goalSet.has(record.uuid)) {
+                const normalized = normalizeGoalRecoveryRecord(record);
+                if (normalized) {
+                  goalRecords.push(normalized);
+                  if (record.subtype === 'goal_state') {
+                    goalStatePayloads.set(
+                      record.uuid,
+                      parseGoalStateRecordPayloadV2(normalized.systemPayload),
+                    );
+                  }
+                }
               }
-            }
-          },
-          readContext,
-        );
-        if (!firstRecordSeen) {
-          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-        }
-
-        const selectedGoalRecovery = selectGoalRecoveryFromRecords(goalRecords);
-        const pendingGoal =
-          selectedGoalRecovery.recovery.kind === 'v2'
-            ? selectedGoalRecovery.recovery.payload
-            : undefined;
-        const pendingCheckpoint = pendingGoal?.checkpointPending;
-        if (pendingCheckpoint && pendingGoal.snapshot.goal) {
-          goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
-            index.runtimeUuids.map(
-              (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
-            ),
-            pendingGoal.snapshot.goal,
-            pendingCheckpoint.permit,
+              if (replaySet.has(record.uuid)) {
+                replayRecordsByUuid.set(record.uuid, record);
+              }
+              const needsDeferredDispatch =
+                modelSet.has(record.uuid) ||
+                record.uuid === tokenUuid ||
+                record.uuid === attributionUuid ||
+                metadataSet.has(record.uuid) ||
+                uiTelemetrySet.has(record.uuid) ||
+                fileHistorySet.has(record.uuid) ||
+                artifactSet.has(record.uuid);
+              if (needsDeferredDispatch) {
+                if (
+                  record.uuid === index.firstRecordUuid &&
+                  artifactSet.has(record.uuid)
+                ) {
+                  artifacts.add(record);
+                } else {
+                  deferredPreReadRecords.set(record.uuid, record);
+                }
+              }
+            },
+            readContext,
           );
-        }
-        goalEvidenceSet = new Set(
-          goalCheckpointAccumulator?.getCandidateUuids() ?? [],
-        );
-        if (firstRecord && goalEvidenceSet.has(firstRecord.uuid)) {
-          goalCheckpointAccumulator?.capture(firstRecord);
-        }
-        firstRecord = undefined;
-        const selectedRuntimeUuids = index.runtimeUuids.filter(
-          (uuid) =>
-            modelSet.has(uuid) ||
-            uuid === tokenUuid ||
-            uuid === attributionUuid ||
-            metadataSet.has(uuid) ||
-            uiTelemetrySet.has(uuid) ||
-            fileHistorySet.has(uuid) ||
-            replaySet.has(uuid) ||
-            goalEvidenceSet.has(uuid),
-        );
-        const preReadSet = new Set(preReadUuids);
-        readContext.preloadedRecords = deferredPreReadRecords;
-        await forEachAggregatedRecord(
-          index,
-          Array.from(
+          if (!firstRecordSeen) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+
+          const selectedGoalRecovery =
+            selectGoalRecoveryFromRecords(goalRecords);
+          const pendingGoal =
+            selectedGoalRecovery.recovery.kind === 'v2'
+              ? selectedGoalRecovery.recovery.payload
+              : undefined;
+          const pendingCheckpoint = pendingGoal?.checkpointPending;
+          if (pendingCheckpoint && pendingGoal.snapshot.goal) {
+            goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
+              index.runtimeUuids.map(
+                (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
+              ),
+              pendingGoal.snapshot.goal,
+              pendingCheckpoint.permit,
+            );
+          }
+          goalEvidenceSet = new Set(
+            goalCheckpointAccumulator?.getCandidateUuids() ?? [],
+          );
+          if (firstRecord && goalEvidenceSet.has(firstRecord.uuid)) {
+            goalCheckpointAccumulator?.capture(firstRecord);
+          }
+          firstRecord = undefined;
+          const selectedRuntimeUuids = index.runtimeUuids.filter(
+            (uuid) =>
+              modelSet.has(uuid) ||
+              uuid === tokenUuid ||
+              uuid === attributionUuid ||
+              metadataSet.has(uuid) ||
+              uiTelemetrySet.has(uuid) ||
+              fileHistorySet.has(uuid) ||
+              replaySet.has(uuid) ||
+              goalEvidenceSet.has(uuid),
+          );
+          const preReadSet = new Set(preReadUuids);
+          readContext.preloadedRecords = deferredPreReadRecords;
+          const remainingUuids = Array.from(
             new Set([...selectedRuntimeUuids, ...artifactUuids]),
           ).filter(
             (uuid) => !preReadSet.has(uuid) || deferredPreReadRecords.has(uuid),
-          ),
-          dispatchRecord,
-          readContext,
-        );
+          );
+          for (const uuid of remainingUuids) selectedReadSet.add(uuid);
+          await forEachAggregatedRecord(
+            index,
+            remainingUuids,
+            dispatchRecord,
+            readContext,
+          );
 
-        const goalCheckpointWindow = goalCheckpointAccumulator?.finish();
-        return { selectedGoalRecovery, goalCheckpointWindow };
-      },
-    );
+          const goalCheckpointWindow = goalCheckpointAccumulator?.finish();
+          return { selectedGoalRecovery, goalCheckpointWindow };
+        },
+      );
+    } finally {
+      recordRestoreStage('selected_record_read', selectedReadsStartedAt);
+    }
+    recordRestoreSelectionAttributes(index, selectedReadSet, replaySet);
 
     let persistedTitle: ReturnType<typeof readSessionTitleInfoFromFileSync>;
     try {
@@ -2160,6 +2286,12 @@ export class SessionTranscriptReader {
           .map((uuid) => replayRecordsByUuid.get(uuid))
           .filter((record): record is ChatRecord => record !== undefined)
       : [];
+    const replayGoalRecords = replaySelection
+      ? goalRecords.filter((record) => replayGoalSet.has(record.uuid))
+      : [];
+    const replayGoalRecoverySourceUuid = replaySelection
+      ? selectGoalRecoveryFromRecords(replayGoalRecords).sourceUuid
+      : goalRecovery.selectedGoalRecovery.sourceUuid;
     let replay: SessionRestoreReplayPage | undefined;
     if (replaySelection) {
       const goalStatePosition =
@@ -2179,6 +2311,13 @@ export class SessionTranscriptReader {
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayGoalRecoverySourceUuid &&
+        !replaySet.has(replayGoalRecoverySourceUuid)
+          ? { goalBootstrapRecords: replayGoalRecords }
+          : {}),
+        ...(replayGoalRecoverySourceUuid
+          ? { goalRecoverySourceUuid: replayGoalRecoverySourceUuid }
           : {}),
         ...(goalState
           ? {
@@ -2245,9 +2384,14 @@ export class SessionTranscriptReader {
   async readLiveRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
+    readOptions: RestoreProjectionReadOptions = {},
   ): Promise<SessionLiveRestoreProjection | undefined> {
     const filePath = this.getSessionFilePath(sessionId);
     validateRestoreReplaySelection(options.replay);
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.replay_mode',
+      options.replay.kind,
+    );
     let stats: fs.Stats;
     try {
       stats = await fsp.stat(filePath);
@@ -2258,12 +2402,18 @@ export class SessionTranscriptReader {
     let index: TranscriptIndex;
     const fileIdentity = fileIdentityFromStats(stats);
     const lastUpdated = new Date(stats.mtimeMs).toISOString();
+    const indexStartedAt = performance.now();
     try {
       index = await getCachedIndex({
         filePath,
         fileIdentity,
         snapshotSize: stats.size,
         lastUpdated,
+        onCacheState: (state) =>
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.index_cache_state',
+            state,
+          ),
       });
     } catch (error) {
       if (error instanceof EmptySessionTranscriptError) {
@@ -2279,13 +2429,24 @@ export class SessionTranscriptReader {
         }
       }
       throw error;
+    } finally {
+      recordRestoreStage('transcript_index', indexStartedAt);
     }
+    recordRestoreIndexAttributes(index);
+    const selectionStartedAt = performance.now();
     const replaySelection = selectRestoreReplayUuids(
       index,
       sessionId,
       options.replay,
     );
     const replaySet = new Set(replaySelection?.uuids ?? []);
+    const goalSet = new Set(
+      replaySelection
+        ? replaySelection.index.replayUuids.filter(
+            (uuid) => index.byUuid.get(uuid)?.goalRecoveryCandidate === true,
+          )
+        : [],
+    );
     const goalStatePosition = replaySelection
       ? replaySelection.index.goalStatePositions.findLast(
           (position) => position < replaySelection.nextPosition,
@@ -2299,29 +2460,56 @@ export class SessionTranscriptReader {
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const selectedRuntimeUuids = index.runtimeUuids.filter(
-      (uuid) => replaySet.has(uuid) || goalStateSet.has(uuid),
+      (uuid) =>
+        replaySet.has(uuid) || goalStateSet.has(uuid) || goalSet.has(uuid),
     );
+    if (!selectedRuntimeUuids.includes(index.firstRecordUuid)) {
+      selectedRuntimeUuids.unshift(index.firstRecordUuid);
+    }
     const replayRecords: ChatRecord[] = [];
+    const goalRecords: GoalRecoveryRecord[] = [];
     const goalStatePayloads = new Map<
       string,
       GoalStateRecordPayloadV2 | undefined
     >();
     const artifacts = new SessionArtifactSnapshotAccumulator(sessionId);
 
-    await forEachAggregatedRecord(
-      index,
-      Array.from(new Set([...selectedRuntimeUuids, ...artifactUuids])),
-      (record) => {
-        if (replaySet.has(record.uuid)) replayRecords.push(record);
-        if (goalStateSet.has(record.uuid)) {
-          goalStatePayloads.set(
-            record.uuid,
-            parseGoalStateRecordPayloadV2(record.systemPayload),
-          );
-        }
-        if (artifactSet.has(record.uuid)) artifacts.add(record);
-      },
-    );
+    recordRestoreStage('resume_state_select', selectionStartedAt);
+    const selectedReadSet = new Set([
+      ...selectedRuntimeUuids,
+      ...artifactUuids,
+    ]);
+    const selectedReadsStartedAt = performance.now();
+    try {
+      await forEachAggregatedRecord(
+        index,
+        [...selectedReadSet],
+        async (record) => {
+          if (
+            record.uuid === index.firstRecordUuid &&
+            readOptions.validateFirstRecord &&
+            !(await readOptions.validateFirstRecord(record))
+          ) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          if (replaySet.has(record.uuid)) replayRecords.push(record);
+          if (goalStateSet.has(record.uuid)) {
+            goalStatePayloads.set(
+              record.uuid,
+              parseGoalStateRecordPayloadV2(record.systemPayload),
+            );
+          }
+          if (goalSet.has(record.uuid)) {
+            const normalized = normalizeGoalRecoveryRecord(record);
+            if (normalized) goalRecords.push(normalized);
+          }
+          if (artifactSet.has(record.uuid)) artifacts.add(record);
+        },
+      );
+    } finally {
+      recordRestoreStage('selected_record_read', selectedReadsStartedAt);
+    }
+    recordRestoreSelectionAttributes(index, selectedReadSet, replaySet);
 
     let replay: SessionRestoreReplayPage | undefined;
     if (replaySelection) {
@@ -2346,6 +2534,12 @@ export class SessionTranscriptReader {
       };
     }
     const artifactSnapshot = artifacts.finish();
+    const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
+    const replayGoalRecoverySourceUuid =
+      goalRecovery.sourceUuid &&
+      replaySelection?.index.replayUuids.includes(goalRecovery.sourceUuid)
+        ? goalRecovery.sourceUuid
+        : undefined;
     await assertIndexSnapshotUnchanged(index, sessionId);
     return {
       sessionId,
@@ -2353,6 +2547,10 @@ export class SessionTranscriptReader {
       lastUpdated: index.lastUpdated,
       ...(replay ? { replay } : {}),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      ...(goalRecords.length > 0 ? { goalRecords } : {}),
+      ...(replayGoalRecoverySourceUuid
+        ? { goalRecoverySourceUuid: replayGoalRecoverySourceUuid }
+        : {}),
     };
   }
 
