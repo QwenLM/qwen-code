@@ -577,6 +577,19 @@ export const removeInlineTagEffect = StateEffect.define<{
 }>();
 export const clearInlineTagsEffect = StateEffect.define<void>();
 
+function normalizeInlineTagRemovalChanges(
+  view: EditorView,
+  changes: Array<{ from: number; to: number; insert: string }>,
+) {
+  let remaining = view.state.doc.toString();
+  for (const change of changes.slice().reverse()) {
+    remaining = remaining.slice(0, change.from) + remaining.slice(change.to);
+  }
+  return remaining.trim().length === 0
+    ? [{ from: 0, to: view.state.doc.length, insert: '' }]
+    : changes;
+}
+
 let nextComposerTagTooltipId = 0;
 
 class ComposerTagWidget extends WidgetType {
@@ -798,7 +811,7 @@ class ComposerTagWidget extends WidgetType {
         });
       if (changes.length === 0) return;
       view.dispatch({
-        changes,
+        changes: normalizeInlineTagRemovalChanges(view, changes),
         effects: removeInlineTagEffect.of({
           predicate: (tag) => tag.id === this.tag.id,
         }),
@@ -1101,6 +1114,20 @@ export interface UseComposerCoreOptions {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /**
+   * Invoked when the user selects the @ panel's "Upload file" item, with the
+   * directory currently being browsed and a callback that re-inserts the
+   * removed mention query when the picker closes without an upload. The
+   * composer opens a file picker and uploads into that directory. When
+   * absent, the upload item is hidden.
+   */
+  onFileUploadRequest?: (targetDir: string, restoreQuery?: () => void) => void;
+  /**
+   * True while a workspace file upload is pending or in flight. Gates
+   * submit exactly like the image lane's pending batches, so a prompt cannot
+   * go out before the upload's `@file` reference has been inserted.
+   */
+  workspaceUploadBusy?: boolean;
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -1299,6 +1326,7 @@ export interface UseComposerCoreReturn {
   canSubmit: boolean;
   pendingImageBatchCount: number;
   imageDragActive: boolean;
+  clearImageDragState: () => void;
   imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1377,6 +1405,8 @@ export function useComposerCore(
     renderComposerTagTooltip,
     onComposerTagClick,
     onImageIngestionNotice,
+    onFileUploadRequest,
+    workspaceUploadBusy = false,
     editorTheme,
   } = options;
 
@@ -1467,6 +1497,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
+  workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
@@ -1591,6 +1623,7 @@ export function useComposerCore(
     workspaceKey: atWorkspaceCwd,
     builtinProviders: builtinAtProviders,
     providers: atProviders,
+    onUploadRequest: onFileUploadRequest,
     createInlineTagEffect: (range) =>
       addInlineTagEffect.of({
         ...range,
@@ -2379,7 +2412,8 @@ export function useComposerCore(
   ) => {
     if (
       disabledRef.current ||
-      imageIngestionLaneRef.current.pendingBatches > 0
+      imageIngestionLaneRef.current.pendingBatches > 0 ||
+      workspaceUploadBusyRef.current
     ) {
       return true;
     }
@@ -3682,7 +3716,7 @@ export function useComposerCore(
         });
       if (changes.length === 0) return;
       view.dispatch({
-        changes,
+        changes: normalizeInlineTagRemovalChanges(view, changes),
         effects: removeInlineTagEffect.of({ predicate }),
         scrollIntoView: true,
       });
@@ -3733,8 +3767,19 @@ export function useComposerCore(
       if (tagOptions?.placement === 'inline' && !isTouchComposer) {
         const view = viewRef.current;
         if (!view) return;
+        const appendToEnd = tagOptions.position === 'end';
         const selection = view.state.selection.main;
-        let at = selection.from;
+        const insertAt = appendToEnd ? view.state.doc.length : selection.from;
+        const replaceTo = appendToEnd ? view.state.doc.length : selection.to;
+        // The mention parser needs a boundary before `@`, so separate an
+        // appended reference from preceding non-whitespace text.
+        const separator =
+          appendToEnd &&
+          view.state.doc.length > 0 &&
+          !/\s/.test(view.state.doc.sliceString(view.state.doc.length - 1))
+            ? ' '
+            : '';
+        let at = insertAt + separator.length;
         const ranges: InlineTagRange[] = [];
         const insert = tags
           .map((tag) => {
@@ -3744,9 +3789,9 @@ export function useComposerCore(
             return tagText;
           })
           .join(' ');
-        const text = insert ? `${insert} ` : '';
+        const text = insert ? `${separator}${insert} ` : '';
         view.dispatch({
-          changes: { from: selection.from, to: selection.to, insert: text },
+          changes: { from: insertAt, to: replaceTo, insert: text },
           effects:
             ranges.length > 0
               ? ranges.map((range) =>
@@ -3756,10 +3801,16 @@ export function useComposerCore(
                   }),
                 )
               : undefined,
-          selection: { anchor: selection.from + text.length },
-          scrollIntoView: true,
+          // End placement serves async completions (uploads): never move the
+          // caret or scroll the viewport while the user types elsewhere.
+          selection: appendToEnd
+            ? undefined
+            : { anchor: insertAt + text.length },
+          scrollIntoView: !appendToEnd,
         });
-        view.focus();
+        // An asynchronous completion (upload) must not steal focus from
+        // whatever control the user moved to while it was in flight.
+        if (!appendToEnd || view.hasFocus) view.focus();
         return;
       }
       setComposerTags((current) => {
@@ -3842,7 +3893,8 @@ export function useComposerCore(
   const retryLast = useCallback(() => {
     if (
       disabledRef.current ||
-      imageIngestionLaneRef.current.pendingBatches > 0
+      imageIngestionLaneRef.current.pendingBatches > 0 ||
+      workspaceUploadBusyRef.current
     ) {
       return;
     }
@@ -4015,7 +4067,8 @@ export function useComposerCore(
     (match: string) => {
       if (
         disabledRef.current ||
-        imageIngestionLaneRef.current.pendingBatches > 0
+        imageIngestionLaneRef.current.pendingBatches > 0 ||
+        workspaceUploadBusyRef.current
       ) {
         return;
       }
@@ -4116,7 +4169,11 @@ export function useComposerCore(
 
   // ---- Computed ----
 
-  const canSubmit = !disabled && pendingImageBatchCount === 0 && hasContent;
+  const canSubmit =
+    !disabled &&
+    pendingImageBatchCount === 0 &&
+    !workspaceUploadBusy &&
+    hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
@@ -4212,6 +4269,7 @@ export function useComposerCore(
     canSubmit,
     pendingImageBatchCount,
     imageDragActive,
+    clearImageDragState,
     imageTransferHandlers,
     handle,
     pastedImages,

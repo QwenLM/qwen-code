@@ -13,7 +13,7 @@ import { SettingScope } from '../../config/settings.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
-import { MessageType } from '../types.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import { MultiSelect, type MultiSelectItem } from './shared/MultiSelect.js';
 import {
@@ -190,15 +190,18 @@ export function StatusLineDialog({
     };
     settings.setValue(effectiveScope, 'ui.statusLine', savedConfig);
     onSaved?.(savedConfig);
-    addItem(
-      {
-        type: MessageType.INFO,
-        text: `Status line preset saved to ${effectiveScope.toLowerCase()} settings.`,
-      },
-      Date.now(),
-    );
+    const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+      type: MessageType.INFO,
+      text: `Status line preset saved to ${effectiveScope.toLowerCase()} settings.`,
+    };
+    addItem(feedbackItem, Date.now());
+    config.getChatRecordingService?.()?.recordSlashCommand({
+      phase: 'result',
+      rawCommand: '/statusline',
+      outputHistoryItems: [feedbackItem],
+    });
     onClose();
-  }, [addItem, onClose, onSaved, presetConfig, settings]);
+  }, [addItem, config, onClose, onSaved, presetConfig, settings]);
 
   useKeypress(
     (key) => {

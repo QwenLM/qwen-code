@@ -117,6 +117,16 @@
   overflow: hidden;
 }
 
+:global([data-web-shell-reasoning-popover]) {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+:global([data-web-shell-model-submenu]) {
+  z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
+  min-width: min(280px, var(--radix-popover-content-available-width));
+}
+
 .slashPanel {
   max-height: min(
     460px,
@@ -524,6 +534,13 @@
   color: var(--muted-foreground);
   mask: var(--at-item-icon-url) center / contain no-repeat;
   -webkit-mask: var(--at-item-icon-url) center / contain no-repeat;
+}
+
+.atItemUploadIcon {
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
 }
 
 .atItemImageIcon {
@@ -1269,6 +1286,80 @@
   text-overflow: ellipsis;
 }
 
+.dropdownSubmenuTrigger {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dropdownSubmenuTrigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dropdownSubmenuTrigger svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.dropdownSubmenuSection {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.reasoningOptions {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+}
+
+.reasoningSectionTitle {
+  padding: 4px 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.reasoningThinkingRow,
+.reasoningEffortRow {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 9px;
+}
+
+.reasoningEffortRow {
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.reasoningEffortRow:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.reasoningEffortRow:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.reasoningDivider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
 .dropdownItemActive .dropdownItemIcon,
 .dropdownItemActive .dropdownItemCheck {
   color: var(--secondary-foreground);
@@ -1946,4 +2037,117 @@
   padding: 4px 2px 0;
   color: var(--chat-editor-text-dimmed);
   font-size: 12px;
+}
+
+/* File upload ----------------------------------------------------------- */
+
+.hiddenUploadInput {
+  display: none;
+}
+
+.uploadStrip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 0 8px;
+}
+
+.uploadRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 4px;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.uploadRow svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.uploadRowSpinner {
+  animation: uploadRowSpin 1s linear infinite;
+}
+
+/* Must follow the base rule: equal-specificity cascade resolves to the
+   last declaration, so an earlier override would stay dead code. */
+@media (prefers-reduced-motion: reduce) {
+  .uploadRowSpinner {
+    animation: none;
+  }
+}
+
+@keyframes uploadRowSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.uploadRowName {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.uploadRowStatus {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-editor-text-dimmed);
+}
+
+.uploadRow[data-status='error'] .uploadRowStatus {
+  color: var(--error-color);
+}
+
+.uploadRowAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--chat-editor-text-dimmed);
+  cursor: pointer;
+}
+
+.uploadRowAction:hover {
+  background: var(--chat-editor-border-color);
+  color: var(--chat-editor-text-primary);
+}
+
+.uploadDropOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--chat-editor-accent-color);
+  border-radius: 8px;
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color) 12%,
+    transparent
+  );
+  color: var(--chat-editor-text-primary);
+  font-size: 13px;
+  pointer-events: none;
 }
