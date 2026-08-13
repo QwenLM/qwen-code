@@ -95,7 +95,11 @@ describe('security workflows', () => {
       'npm audit --omit=dev --audit-level=high --workspaces=false',
     );
     expect(trufflehogStep).toContain('continue-on-error: true');
-    expect(trufflehogStep).toContain("version: '3.96.0'");
+    const trufflehogPin = trufflehogStep.match(
+      /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,
+    );
+    expect(trufflehogPin).not.toBeNull();
+    expect(trufflehogStep).toContain(`version: '${trufflehogPin?.[1]}'`);
     expect(trufflehogStep).toContain(
       "if: \"github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'\"",
     );
