@@ -477,6 +477,37 @@ describe('audio bridge service', () => {
     expect(result.parts[0]?.text).not.toContain('x'.repeat(10_001));
   });
 
+  it.each([
+    {
+      name: 'removes an emoji split by the transcript limit',
+      transcript: `${'x'.repeat(9_999)}😀tail`,
+      expectedPrefix: 'x'.repeat(9_999),
+    },
+    {
+      name: 'preserves an emoji before the transcript limit',
+      transcript: `${'x'.repeat(9_998)}😀tail`,
+      expectedPrefix: `${'x'.repeat(9_998)}😀`,
+    },
+  ])('$name', async ({ transcript, expectedPrefix }) => {
+    transcribeVoiceAudio.mockResolvedValue(transcript);
+
+    const result = await runAudioBridge({
+      config: config(),
+      settings: settings('qwen3-asr-flash'),
+      parts: [audio()],
+      signal: new AbortController().signal,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.parts[0]?.text).toContain(expectedPrefix);
+    expect(result.parts[0]?.text).toContain(
+      `[transcript truncated at 10000 characters]`,
+    );
+    expect(result.parts[0]?.text).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/,
+    );
+  });
+
   it('uses the fallback reason when formatting an unavailable notice', () => {
     expect(
       formatAudioBridgeNotice({

@@ -60,7 +60,7 @@ export function hasAudioParts(parts: PartListUnion): boolean {
 function transcriptBlock(modelId: string, transcript: string): string {
   const clamped =
     transcript.length > MAX_TRANSCRIPT_CHARS
-      ? `${transcript.slice(0, MAX_TRANSCRIPT_CHARS)}\n[transcript truncated at ${MAX_TRANSCRIPT_CHARS} characters]`
+      ? `${transcript.slice(0, MAX_TRANSCRIPT_CHARS).replace(/[\uD800-\uDBFF]$/, '')}\n[transcript truncated at ${MAX_TRANSCRIPT_CHARS} characters]`
       : transcript;
   return [
     `[Untrusted machine transcription of audio by ${modelId}. ` +
