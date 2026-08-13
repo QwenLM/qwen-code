@@ -42,6 +42,8 @@ describe('security workflows', () => {
   it('keeps Security Checks reporting-only and audits package locks', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
+    const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
+    const installStep = getWorkflowStep(dependencyJob, 'Install dependencies');
     const auditStep = getWorkflowStep(
       dependencyJob,
       'Audit production dependencies',
@@ -53,13 +55,19 @@ describe('security workflows', () => {
       'Scan for verified secrets',
     );
 
+    expect(workflow).toContain('pull_request:');
+    expect(workflow).toContain('push:');
     expect(workflow).toContain(
       'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
     );
     expect(workflow).toContain(
       'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
     );
-    expect(workflow).toContain('persist-credentials: false');
+    expect(dependencyCheckoutStep).toContain('persist-credentials: false');
+    expect(checkoutStep).toContain('persist-credentials: false');
+    expect(installStep).toContain(
+      "run: 'npm ci --ignore-scripts --no-audit --progress=false'",
+    );
     expect(auditStep).toContain('continue-on-error: true');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
