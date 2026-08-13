@@ -8313,6 +8313,28 @@ export function App({
     [refreshGoal, sessionActions, sessionOwnerGuard, t],
   );
 
+  const createGoalForAllocatedSession = useCallback(
+    async (sessionId: string, objective: string) => {
+      setGoalControlBusy(true);
+      try {
+        const response = await workspaceActions.controlGoal(sessionId, {
+          action: 'create',
+          objective,
+        });
+        if (
+          !connectionRef.current.sessionId ||
+          connectionRef.current.sessionId === sessionId
+        ) {
+          setGoalSnapshot(response.snapshot);
+        }
+        return response.snapshot;
+      } finally {
+        setGoalControlBusy(false);
+      }
+    },
+    [workspaceActions],
+  );
+
   const loadRewindSnapshots = useCallback(
     () => sessionActions.getRewindSnapshots(),
     [sessionActions],
@@ -8348,10 +8370,11 @@ export function App({
       }
 
       void (async () => {
+        let allocatedSessionId: string | undefined;
         if (!connectionRef.current.sessionId) {
-          await ensureSessionForPrompt();
+          allocatedSessionId = await ensureSessionForPrompt();
         }
-        if (!connectionRef.current.sessionId) {
+        if (!connectionRef.current.sessionId && !allocatedSessionId) {
           throw new Error(t('localCommand.noSession'));
         }
         store.appendLocalUserMessage(text);
@@ -8360,7 +8383,14 @@ export function App({
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        await controlCurrentGoal(action, objective);
+        if (allocatedSessionId && operation.kind === 'set') {
+          await createGoalForAllocatedSession(
+            allocatedSessionId,
+            operation.objective,
+          );
+        } else {
+          await controlCurrentGoal(action, objective);
+        }
       })().catch((error: unknown) => {
         reportError(error, `Failed to ${operation.kind} /goal`);
       });
@@ -8368,6 +8398,7 @@ export function App({
     },
     [
       controlCurrentGoal,
+      createGoalForAllocatedSession,
       ensureSessionForPrompt,
       openGoals,
       reportError,
@@ -11642,9 +11673,22 @@ export function App({
                           keepView: true,
                         });
                         if (!created) return false;
-                        await ensureSessionForPrompt();
-                        if (!connectionRef.current.sessionId) return false;
-                        await controlCurrentGoal('create', condition);
+                        const allocatedSessionId =
+                          await ensureSessionForPrompt();
+                        if (
+                          !connectionRef.current.sessionId &&
+                          !allocatedSessionId
+                        ) {
+                          return false;
+                        }
+                        if (allocatedSessionId) {
+                          await createGoalForAllocatedSession(
+                            allocatedSessionId,
+                            condition,
+                          );
+                        } else {
+                          await controlCurrentGoal('create', condition);
+                        }
                         onSessionIdChange?.(undefined);
                         setMainView('chat');
                       }}
