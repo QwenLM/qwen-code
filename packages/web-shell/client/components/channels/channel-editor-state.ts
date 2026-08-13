@@ -96,6 +96,13 @@ function initialFieldValue(
       if (field.key === 'groupPolicy') return 'disabled';
       if (field.key !== 'sessionScope') return '';
     }
+    if (
+      field.key === 'sessionScope' &&
+      field.default === 'thread' &&
+      field.options?.some((option) => option.value === 'chat_thread')
+    ) {
+      return 'chat_thread';
+    }
     return field.default ?? field.options?.[0]?.value ?? '';
   }
   return typeof value === 'string' ? value : '';

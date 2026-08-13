@@ -303,6 +303,30 @@ describe('ChannelEditorDialog', () => {
     expect(onWorkspaceChange).toHaveBeenCalledWith('/workspace/secondary');
   });
 
+  it('offers the legacy thread scope only for an existing legacy Channel', async () => {
+    await renderDialog();
+
+    expect(document.body.textContent).not.toContain('By thread (legacy)');
+
+    await renderDialog({ instance: INSTANCE });
+
+    expect(document.body.textContent).not.toContain('By thread (legacy)');
+
+    await renderDialog({
+      instance: {
+        ...INSTANCE,
+        config: { ...INSTANCE.config, sessionScope: 'thread' },
+      },
+    });
+
+    expect(document.body.textContent).toContain('By thread (legacy)');
+    expect(
+      document
+        .querySelector('[role="radio"][value="thread"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
+  });
+
   it('clears validation errors when switching workspaces', async () => {
     await renderDialog({ existingNames: ['duplicate'] });
 
@@ -460,6 +484,9 @@ describe('ChannelEditorDialog', () => {
     await act(async () => {
       save?.click();
     });
+    expect((fieldByLabel('Workspace') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     const cancel = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Cancel',
     );

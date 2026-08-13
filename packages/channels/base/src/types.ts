@@ -59,7 +59,7 @@ export interface ChannelConfig {
   clientSecret?: string;
   senderPolicy: SenderPolicy;
   allowedUsers: string[];
-  /** Channel routing scope. `thread` is deprecated here; use `chat_thread`. */
+  /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
   cwd: string;
   approvalMode?: string;
@@ -519,7 +519,7 @@ export interface ChannelPlugin {
 
   /**
    * Default Channel routing scope (applied when config omits sessionScope).
-   * `thread` is deprecated here; use `chat_thread`.
+   * `thread` is retained for existing configurations only.
    */
   defaultSessionScope?: SessionScope;
 

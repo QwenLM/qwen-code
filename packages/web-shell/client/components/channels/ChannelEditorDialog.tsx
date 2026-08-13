@@ -234,6 +234,10 @@ export function ChannelEditorDialog({
   const sessionScopeField = sessionFields.find(
     (field) => field.key === 'sessionScope' && field.kind === 'enum',
   );
+  const sessionScopeOptions = (sessionScopeField?.options ?? []).filter(
+    (option) =>
+      option.value !== 'thread' || instance?.config.sessionScope === 'thread',
+  );
   const remainingSessionFields = sessionFields.filter(
     (field) => field !== sessionScopeField,
   );
@@ -696,7 +700,7 @@ export function ChannelEditorDialog({
               >
                 <Select
                   value={workspaceCwd}
-                  disabled={Boolean(instance) || workspaceLoading}
+                  disabled={Boolean(instance) || workspaceLoading || saving}
                   onValueChange={onWorkspaceChange}
                 >
                   <SelectTrigger
@@ -757,7 +761,7 @@ export function ChannelEditorDialog({
                         }))
                       }
                     >
-                      {(sessionScopeField.options ?? []).map((option) => (
+                      {sessionScopeOptions.map((option) => (
                         <Label
                           key={option.value}
                           htmlFor={`${formId}-${sessionScopeField.key}-${option.value}`}

@@ -217,6 +217,19 @@ describe('Channel editor state', () => {
     ).toBe('thread');
   });
 
+  it('uses chat_thread for a new Channel whose plugin default is legacy thread', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+
+    expect(draft.values.sessionScope).toBe('chat_thread');
+  });
+
   it('fills safe policy defaults when editing a legacy instance', () => {
     const instance = configuredInstance();
     delete instance.config.senderPolicy;
