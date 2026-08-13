@@ -2415,7 +2415,7 @@ describe('qwen-autofix workflow', () => {
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
     expect(workflow).toContain(
-      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
@@ -7119,7 +7119,12 @@ exit 1
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
-      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN/);
+      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
+      // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
+      // back to the attacker-writable ~/.config/gh with http_unix_socket).
+      expect(step).toContain(
+        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+      );
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
@@ -7134,6 +7139,20 @@ exit 1
     // attacker tree.
     expect(pushAndReportStep).toMatch(
       /HEAD_NOW="\$\(git rev-parse HEAD\)"[\s\S]{0,400}!= "\$\{VERIFIED_HEAD\}"[\s\S]{0,200}refusing to push/,
+    );
+    // And it pushes the exact verified OBJECT, not symbolic HEAD (which the
+    // push would re-resolve, re-opening the check-then-use race): PUSH_SHA
+    // is pinned to VERIFIED_HEAD under the guard and re-pinned to the merge
+    // result after each salvage merge.
+    expect(pushAndReportStep).toContain('PUSH_SHA="${VERIFIED_HEAD}"');
+    expect(pushAndReportStep).toContain(
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
+    );
+    expect(pushAndReportStep).not.toMatch(
+      /git_auth push[^\n]*HEAD:"\$\{BRANCH\}"/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /PUSH_SHA="\$\(git rev-parse HEAD\)"[\s\S]{0,120}PRE_MERGE_HEAD/,
     );
     // The gate runner is digest-verified before BOTH gate passes (the branch
     // runs its own build/test between them), with PATH pinned first.
@@ -8231,7 +8250,7 @@ exit 1
     // git push twice more and the salvage legs execute against a branch
     // that was already pushed.
     expect(pushAndReportStep).toMatch(
-      /if git_auth push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+      /if git_auth push --no-verify "\$\{PUSH_URL\}" "\$\{PUSH_SHA\}:refs\/heads\/\$\{BRANCH\}"; then\n\s+break/,
     );
     // BOTH push-URL constructions stay pinned — the fork one is pinned by
     // the fork-plumbing test, and the same-repo one lost its old
@@ -8260,7 +8279,7 @@ exit 1
       /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n[\s\S]{0,600}if ! git -c commit\.gpgsign=false \\\n\s+-c user\.name=/,
     );
     expect(pushAndReportStep).toMatch(
-      /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
+      /PUSH_SHA="\$\(git rev-parse HEAD\)"\n\s+if \[\[ "\$\{PUSH_SHA\}" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
     );
     // Merge, never rebase: the agent's own conflict-resolution rounds create
     // merge commits, and a rebase would flatten them and can silently
@@ -8346,7 +8365,7 @@ exit 1
       'git config --local credential.helper',
     );
     expect(pushAndReportStep).toContain(
-      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host

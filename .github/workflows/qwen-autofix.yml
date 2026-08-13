@@ -1612,7 +1612,13 @@ jobs:
           # cannot outrank the inline GITHUB_TOKEN. (git's channels are
           # stripped in the hermetic preamble further down.)
           export GH_HOST=github.com
-          unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # Point gh at a fresh empty config dir, not the default
+          # ~/.config/gh on the shared attacker-writable HOME — its
+          # config.yml can carry http_unix_socket and other transport
+          # reroutes no sweep here touches. mktemp -d gives an
+          # unpredictable path a watcher cannot pre-seed.
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
@@ -3985,7 +3991,13 @@ jobs:
           # reroute cannot spoof the eligibility re-check and a planted
           # GH_TOKEN cannot outrank the inline GITHUB_TOKEN.
           export GH_HOST=github.com
-          unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # Point gh at a fresh empty config dir, not the default
+          # ~/.config/gh on the shared attacker-writable HOME — its
+          # config.yml can carry http_unix_socket and other transport
+          # reroutes no sweep here touches. mktemp -d gives an
+          # unpredictable path a watcher cannot pre-seed.
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           # This PAT-bearing step runs git (status/restore/fetch/checkout and a
           # push preflight) on the shared host BEFORE the agent/gate, so it
           # takes the same hermetic preamble the push steps do — the contract
@@ -5038,7 +5050,13 @@ jobs:
           # cannot outrank the inline GITHUB_TOKEN. (git's channels are
           # stripped in the hermetic preamble further down.)
           export GH_HOST=github.com
-          unset GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_TOKEN
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # Point gh at a fresh empty config dir, not the default
+          # ~/.config/gh on the shared attacker-writable HOME — its
+          # config.yml can carry http_unix_socket and other transport
+          # reroutes no sweep here touches. mktemp -d gives an
+          # unpredictable path a watcher cannot pre-seed.
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -5128,6 +5146,12 @@ jobs:
               echo "::error::HEAD ${HEAD_NOW} is not the gate's verified head ${VERIFIED_HEAD:-<empty>} — refusing to push"
               exit 1
             fi
+            # Push the exact verified COMMIT OBJECT, never the symbolic
+            # HEAD: `HEAD:branch` would re-resolve at push time, re-opening
+            # the check-then-use race the guard above just closed (a watcher
+            # moving HEAD between the check and the push). PUSH_SHA is
+            # re-pinned to the concrete object after each salvage merge below.
+            PUSH_SHA="${VERIFIED_HEAD}"
             git config --local --unset-all http.https://github.com/.extraheader || true
             # This step carries the PAT; the branch carries PR-controlled
             # .husky hooks (hooksPath was pointed there so the AGENT's
@@ -5172,7 +5196,7 @@ jobs:
             # through to the existing failure path — same as today.
             PUSH_RACE_MERGED='false'
             for push_attempt in 1 2 3; do
-              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+              if git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"; then
                 break
               fi
               if [[ "${push_attempt}" == 3 ]]; then
@@ -5204,7 +5228,11 @@ jobs:
                 echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
                 exit 1
               fi
-              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
+              # Re-pin the exact object the next attempt pushes to the
+              # merge result, captured here under control — not a symbolic
+              # HEAD the push would re-resolve.
+              PUSH_SHA="$(git rev-parse HEAD)"
+              if [[ "${PUSH_SHA}" != "${PRE_MERGE_HEAD}" ]]; then
                 PUSH_RACE_MERGED='true'
               fi
             done
