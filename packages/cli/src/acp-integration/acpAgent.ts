@@ -175,6 +175,7 @@ import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
@@ -609,6 +610,24 @@ function parseAcpLocalReadRootsEnv(
 
 function defaultAcpOnlyLocalReadRoots(): string[] {
   return process.platform === 'win32' ? [] : [POSIX_TMP_LOCAL_READ_ROOT];
+}
+
+/** Returns true when `target` lives under `<repoRoot>/.qwen/worktrees/`. */
+export function isWorktreePath(target: string): boolean {
+  const normalizedTarget = path.normalize(target);
+  let searchDir = path.resolve(normalizedTarget);
+
+  while (true) {
+    const gitPath = path.join(searchDir, '.git');
+    if (existsSync(gitPath) && statSync(gitPath).isDirectory()) {
+      const worktreesDir = path.join(searchDir, '.qwen', 'worktrees');
+      return normalizedTarget.startsWith(worktreesDir + path.sep);
+    }
+    const parentDir = path.dirname(searchDir);
+    if (parentDir === searchDir) break;
+    searchDir = parentDir;
+  }
+  return false;
 }
 
 function buildAcpLocalReadRoots(config: Config): string[] {
@@ -5298,6 +5317,10 @@ class QwenAgent implements Agent {
       if (restored.contextMessage) {
         session.pendingWorktreeNotice = restored.contextMessage;
       }
+      if (restored.session?.worktreePath) {
+        session.worktreeCwd = restored.session.worktreePath;
+        config.setActiveWorktree?.(restored.session.worktreePath);
+      }
     } catch (error) {
       debugLogger.warn(`ACP worktree restore failed: ${error}`);
     }
@@ -7880,6 +7903,46 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Resolve the cwd for `qwen/settings/*` handlers with per-session
+   * worktree awareness. Priority: session.worktreeCwd > session
+   * config's activeWorktree > explicit `cwd` param > process.cwd().
+   *
+   * TODO(#8138): The desktop Settings panel sends qwen/settings/* through a
+   * session-less shared ACP process (buildSharedAcpProcessKey never matches
+   * the session-hosting process). In that process this.sessions is empty, so
+   * resolution falls through to process.cwd(). A future fix should populate
+   * worktreeRootPath per the desktop wiring or route the settings panel
+   * through the session-hosting process.
+   */
+  private resolveSettingsCwd(params: Record<string, unknown>): string {
+    const sessionId = params['sessionId'];
+    if (typeof sessionId === 'string' && sessionId.length > 0) {
+      const session = this.sessions.get(sessionId);
+      if (session) {
+        const configWt = session.getConfig().getActiveWorktree?.();
+        if (session.worktreeCwd && existsSync(session.worktreeCwd)) {
+          return session.worktreeCwd;
+        }
+        if (configWt && existsSync(configWt)) {
+          return configWt;
+        }
+        return process.cwd();
+      }
+      return process.cwd();
+    }
+    for (const session of this.sessions.values()) {
+      if (session.worktreeCwd && existsSync(session.worktreeCwd)) {
+        return session.worktreeCwd;
+      }
+    }
+    for (const session of this.sessions.values()) {
+      const wt = session.getConfig().getActiveWorktree?.();
+      if (wt && existsSync(wt)) return wt;
+    }
+    return process.cwd();
+  }
+
   private async extMethodInternal(
     method: string,
     params: Record<string, unknown>,
@@ -7887,6 +7950,11 @@ class QwenAgent implements Agent {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
+    const resolvedWt = this.resolveSettingsCwd(params);
+    const settingsCwd =
+      (resolvedWt !== process.cwd() ? resolvedWt : undefined) ||
+      requestedCwd ||
+      process.cwd();
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
@@ -8016,7 +8084,7 @@ class QwenAgent implements Agent {
         );
       }
       case 'qwen/settings/getMemory': {
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         this.settings = settings;
         return {
           settings: normalizeQwenMemorySettings(settings.merged.memory),
@@ -8027,7 +8095,7 @@ class QwenAgent implements Agent {
         // Mutate a freshly loaded settings object and adopt it, mirroring the
         // other settings mutation handlers, instead of writing through the
         // possibly-stale cached `this.settings` and reading it back.
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -8050,9 +8118,12 @@ class QwenAgent implements Agent {
         const projectRoot =
           typeof params['projectRoot'] === 'string'
             ? params['projectRoot']
-            : cwd;
+            : settingsCwd;
         return {
-          paths: await resolveQwenMemoryPaths({ cwd, projectRoot }),
+          paths: await resolveQwenMemoryPaths({
+            cwd: settingsCwd,
+            projectRoot,
+          }),
         };
       }
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
@@ -9972,6 +10043,17 @@ class QwenAgent implements Agent {
             );
           }
 
+          if (
+            canonicalPath !== process.cwd() &&
+            isWorktreePath(canonicalPath)
+          ) {
+            session.worktreeCwd = canonicalPath;
+            session.getConfig().setActiveWorktree?.(canonicalPath);
+          } else {
+            session.worktreeCwd = null;
+            session.getConfig().setActiveWorktree?.(null);
+          }
+
           try {
             await config
               .getGeminiClient()
@@ -11184,9 +11266,9 @@ class QwenAgent implements Agent {
         return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setCoreValue': {
         const key = params['key'];
@@ -11199,7 +11281,7 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
         const normalizedValue = normalizeCoreSettingValue(
           settingKey,
@@ -11229,7 +11311,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setMcpServer': {
         const name = params['name'];
@@ -11239,7 +11321,7 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -11258,7 +11340,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeMcpServer': {
         const name = params['name'];
@@ -11268,7 +11350,7 @@ class QwenAgent implements Agent {
             'MCP server name is required',
           );
         }
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -11279,14 +11361,14 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setHook': {
         const event = params['event'];
         if (!isHookEvent(event)) {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -11326,7 +11408,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/removeHook': {
         const event = params['event'];
@@ -11341,7 +11423,7 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
@@ -11362,7 +11444,7 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setExtensionSetting': {
         const extensionId = params['extensionId'];
@@ -11380,9 +11462,9 @@ class QwenAgent implements Agent {
         if (typeof value !== 'string') {
           throw RequestError.invalidParams(undefined, 'value must be a string');
         }
-        const settings = loadSettings(cwd);
+        const settings = loadSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
-          workspaceDir: cwd,
+          workspaceDir: settingsCwd,
           isWorkspaceTrusted:
             isWorkspaceTrusted(settings.merged).isTrusted ?? true,
           locale: getCurrentLanguage(),
@@ -11410,10 +11492,10 @@ class QwenAgent implements Agent {
         // so `settings` here is just the snapshot loaded above and is reused to
         // build the response.
         this.settings = settings;
-        return this.buildCoreSettings(settings, cwd);
+        return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/permissions/getSettings': {
-        const settings = this.loadPermissionSettings(cwd);
+        const settings = this.loadPermissionSettings(settingsCwd);
         return buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
@@ -11435,7 +11517,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        const settings = this.loadPermissionSettings(cwd);
+        const settings = this.loadPermissionSettings(settingsCwd);
         const before = readPermissionRuleSet(settings.merged);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
@@ -11470,12 +11552,12 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceReload: {
         const oldMerged = structuredClone(this.settings.merged);
-
-        this.settings.reloadScopeFromDisk(SettingScope.User);
-        this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+        this.settings = loadSettings(settingsCwd, {
+          skipLoadEnvironment: true,
+        });
         const newMerged = this.settings.merged;
 
-        const envResult = reloadEnvironment(newMerged, cwd);
+        const envResult = reloadEnvironment(newMerged, settingsCwd);
 
         const changed = diffSettingsKeys(oldMerged, newMerged);
         const envChanged =
@@ -12178,6 +12260,12 @@ class QwenAgent implements Agent {
       () => this.activeWorkReporter?.notifyChanged(),
     );
     this.sessions.set(sessionId, session);
+
+    const targetDir = config.getTargetDir();
+    if (targetDir !== process.cwd() && isWorktreePath(targetDir)) {
+      session.worktreeCwd = targetDir;
+    }
+
     // The Session set itself is part of the snapshot: publish so the daemon
     // learns about this Session from a report rather than inferring it.
     this.activeWorkReporter?.notifyChanged();

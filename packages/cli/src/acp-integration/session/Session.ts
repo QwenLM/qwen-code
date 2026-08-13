@@ -1683,6 +1683,15 @@ export class Session implements SessionContext {
    */
   pendingWorktreeNotice: string | null = null;
 
+  /**
+   * Absolute path to the worktree when this session operates inside one.
+   * Set by acpAgent after session creation; `null` for regular sessions.
+   * Read by `resolveSettingsCwd` to route `qwen/settings/*` handlers to this
+   * session's worktree; cleared implicitly when the session is removed from
+   * the agent's session map.
+   */
+  worktreeCwd: string | null = null;
+
   /** One-shot model notice for background agents restored with the session. */
   pendingRecoveredAgentsNotice: string | null = null;
 

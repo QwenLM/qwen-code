@@ -27,5 +27,23 @@
     "target": "es2022",
     "types": ["node", "vitest/globals"],
     "jsx": "react-jsx"
-  }
+  },
+  "files": [],
+  "references": [
+    { "path": "packages/acp-bridge" },
+    { "path": "packages/audio-capture" },
+    { "path": "packages/channels/base" },
+    { "path": "packages/channels/dingtalk" },
+    { "path": "packages/channels/feishu" },
+    { "path": "packages/channels/github" },
+    { "path": "packages/channels/gitlab" },
+    { "path": "packages/channels/plugin-example" },
+    { "path": "packages/channels/qqbot" },
+    { "path": "packages/channels/telegram" },
+    { "path": "packages/channels/wecom" },
+    { "path": "packages/channels/weixin" },
+    { "path": "packages/cli" },
+    { "path": "packages/core" },
+    { "path": "packages/web-templates" }
+  ]
 }

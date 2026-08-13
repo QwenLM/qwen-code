@@ -92,7 +92,10 @@ vi.mock('../../../utils/stdioHelpers.js', () => ({
 }));
 
 const { createDaemonWorkspaceService } = await import('../index.js');
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  WorkspaceInitPathEscapeError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   BridgeChannelClosedError,
   type ServeWorkspaceSkillsStatus,
@@ -3701,6 +3704,69 @@ describe('createDaemonWorkspaceService', () => {
 
       await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
         /parent.*resolves outside|parent.*workspace/i,
+      );
+    });
+
+    it('uses resolveContextFile when provided', async () => {
+      const worktreeDir = path.join(tmpDir, 'worktree');
+      await fs.mkdir(worktreeDir, { recursive: true });
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          resolveContextFile: (filename, _ws) => ({
+            target: path.resolve(worktreeDir, filename),
+            effectiveWorkspace: worktreeDir,
+          }),
+        }),
+      );
+
+      const result = await svc.initWorkspace(
+        makeCtx({ workspaceCwd: tmpDir }),
+        {},
+      );
+
+      expect(result.action).toBe('created');
+      expect(result.path).toBe(path.join(worktreeDir, 'QWEN.md'));
+      const stat = await fs.stat(result.path);
+      expect(stat.isFile()).toBe(true);
+    });
+
+    it('falls back to boundWorkspace without resolveContextFile', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const result = await svc.initWorkspace(
+        makeCtx({ workspaceCwd: tmpDir }),
+        {},
+      );
+
+      expect(result.action).toBe('created');
+      expect(result.path).toBe(path.join(tmpDir, 'QWEN.md'));
+    });
+
+    it('throws when resolveContextFile returns a target outside its effectiveWorkspace', async () => {
+      const outsideDir = path.join(tmpDir, 'outside');
+      await fs.mkdir(outsideDir, { recursive: true });
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          resolveContextFile: (_filename, _ws) => ({
+            target: path.resolve(outsideDir, '..', 'escape.md'),
+            effectiveWorkspace: outsideDir,
+          }),
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        WorkspaceInitPathEscapeError,
       );
     });
   });

@@ -79,6 +79,10 @@ import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
+  findEffectiveWorkspace,
+  type SessionLister,
+} from './worktree-workspace.js';
+import {
   allowOriginCors,
   bearerAuth,
   denyBrowserOriginCors,
@@ -3805,118 +3809,133 @@ async function runQwenServeImpl(
       (workspaceRegistryForPersistence.current === undefined &&
         workspace === boundWorkspace &&
         trustedWorkspace);
-    const loadSettingsForPersistence = (workspace: string) => {
-      const trusted = isWorkspaceTrustedForPersistence(workspace);
+    const loadSettingsForPersistence = (
+      workspace: string,
+      trustWorkspace?: string,
+    ) => {
+      const trusted = isWorkspaceTrustedForPersistence(
+        trustWorkspace ?? workspace,
+      );
       return settingsRuntime.settings.loadSettings(workspace, {
         skipLoadEnvironment: true,
         skipWorkspaceSettings: !trusted,
         workspaceTrusted: trusted,
       });
     };
-    const persistDisabledToolsFn = (
-      workspace: string,
-      toolName: string,
-      enabled: boolean,
-      assertGenerationOpen?: () => void,
-    ): Promise<void> =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const fresh = loadSettingsForPersistence(workspace);
-        const wsScope = fresh.forScope(WORKSPACE_SETTING_SCOPE).settings;
-        const wsDisabled = wsScope.tools?.disabled;
-        const current = Array.isArray(wsDisabled)
-          ? wsDisabled.filter((v): v is string => typeof v === 'string')
-          : [];
-        const next = new Set(current);
-        if (enabled) next.delete(toolName);
-        else next.add(toolName);
-        assertGenerationOpen?.();
-        fresh.setValue(
-          WORKSPACE_SETTING_SCOPE,
-          'tools.disabled',
-          [...next].sort(),
-          assertGenerationOpen,
-        );
-      });
-    const persistDisabledSkillsFn = (
-      workspace: string,
-      skillName: string,
-      enabled: boolean,
-      assertGenerationOpen?: () => void,
-    ) =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const {
-          resolveSkillSettings,
-          skillSettingStrings,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
-        const normalizedName = skillName.trim().toLowerCase();
-        const resolved = resolveSkillSettings(fresh);
-        const disablement = resolved.disablements.get(normalizedName);
-        if (disablement?.reason === 'hard' && disablement.lockedScope) {
-          throw new runtime.WorkspaceSkillNotToggleableError(
-            skillName,
-            'locked',
-            disablement.lockedScope,
+    const createPersistDisabledToolsFn =
+      (localBridge: SessionLister) =>
+      (
+        workspace: string,
+        toolName: string,
+        enabled: boolean,
+        assertGenerationOpen?: () => void,
+      ): Promise<void> => {
+        const effective = findEffectiveWorkspace(localBridge, workspace);
+        return withSettingsLock(effective, async () => {
+          assertGenerationOpen?.();
+          const fresh = loadSettingsForPersistence(effective, workspace);
+          const wsScope = fresh.forScope(WORKSPACE_SETTING_SCOPE).settings;
+          const wsDisabled = wsScope.tools?.disabled;
+          const current = Array.isArray(wsDisabled)
+            ? wsDisabled.filter((v): v is string => typeof v === 'string')
+            : [];
+          const next = new Set(current);
+          if (enabled) next.delete(toolName);
+          else next.add(toolName);
+          assertGenerationOpen?.();
+          fresh.setValue(
+            WORKSPACE_SETTING_SCOPE,
+            'tools.disabled',
+            [...next].sort(),
+            assertGenerationOpen,
           );
-        }
+        });
+      };
+    const createPersistDisabledSkillsFn =
+      (localBridge: SessionLister) =>
+      (
+        workspace: string,
+        skillName: string,
+        enabled: boolean,
+        assertGenerationOpen?: () => void,
+      ) => {
+        const effective = findEffectiveWorkspace(localBridge, workspace);
+        return withSettingsLock(effective, async () => {
+          assertGenerationOpen?.();
+          const {
+            resolveSkillSettings,
+            skillSettingStrings,
+            updateWorkspaceSkillSettingLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(effective, workspace);
+          const normalizedName = skillName.trim().toLowerCase();
+          const resolved = resolveSkillSettings(fresh);
+          const disablement = resolved.disablements.get(normalizedName);
+          if (disablement?.reason === 'hard' && disablement.lockedScope) {
+            throw new runtime.WorkspaceSkillNotToggleableError(
+              skillName,
+              'locked',
+              disablement.lockedScope,
+            );
+          }
 
-        const workspaceDisabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'disabled',
-        );
-        const workspaceEnabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'enabled',
-        );
-        const next = updateWorkspaceSkillSettingLists(
-          { disabled: workspaceDisabled, enabled: workspaceEnabled },
-          skillName,
-          enabled,
-          resolved.defaultDisabledNames.has(normalizedName) &&
-            !resolved.enabledNames.has(normalizedName),
-        );
-        const settingsChanges: Array<{
-          key: 'skills.disabled' | 'skills.enabled';
-          value: string[] | undefined;
-        }> = [];
-        if (
-          JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
-        ) {
-          settingsChanges.push({
-            key: 'skills.disabled',
-            value: next.disabled.length > 0 ? next.disabled : undefined,
-          });
-        }
-        if (JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)) {
-          settingsChanges.push({
-            key: 'skills.enabled',
-            value: next.enabled.length > 0 ? next.enabled : undefined,
-          });
-        }
-        if (settingsChanges.length === 0) {
-          return { changed: false, disabled: workspaceDisabled };
-        }
+          const workspaceDisabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'disabled',
+          );
+          const workspaceEnabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'enabled',
+          );
+          const next = updateWorkspaceSkillSettingLists(
+            { disabled: workspaceDisabled, enabled: workspaceEnabled },
+            skillName,
+            enabled,
+            resolved.defaultDisabledNames.has(normalizedName) &&
+              !resolved.enabledNames.has(normalizedName),
+          );
+          const settingsChanges: Array<{
+            key: 'skills.disabled' | 'skills.enabled';
+            value: string[] | undefined;
+          }> = [];
+          if (
+            JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.disabled',
+              value: next.disabled.length > 0 ? next.disabled : undefined,
+            });
+          }
+          if (
+            JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.enabled',
+              value: next.enabled.length > 0 ? next.enabled : undefined,
+            });
+          }
+          if (settingsChanges.length === 0) {
+            return { changed: false, disabled: workspaceDisabled };
+          }
 
-        assertGenerationOpen?.();
-        fresh.setValues(
-          settingsChanges.map((change) => ({
-            scope: WORKSPACE_SETTING_SCOPE,
-            ...change,
-          })),
-          undefined,
-          assertGenerationOpen,
-        );
-        return {
-          changed: true,
-          disabled: next.disabled,
-          settingsChanges,
-        };
-      });
+          assertGenerationOpen?.();
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: WORKSPACE_SETTING_SCOPE,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+          return {
+            changed: true,
+            disabled: next.disabled,
+            settingsChanges,
+          };
+        });
+      };
     const persistDisabledSkillsBatchFn = (
       workspace: string,
       skillNames: readonly string[],
@@ -4151,15 +4170,16 @@ async function runQwenServeImpl(
         fileSystem: createBridgeFileSystemAdapter(fsFactory, {
           allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
         }),
-        persistApprovalMode: (workspace, mode) =>
-          withSettingsLock(workspace, async () => {
+        persistApprovalMode: (workspace, mode) => {
+          const effective = findEffectiveWorkspace(bridge, workspace);
+          return withSettingsLock(effective, async () => {
             primaryGenerationGuard.assertOpen();
             if (!trustedWorkspace) {
               throw new Error(
                 'Cannot persist approval mode for an untrusted workspace.',
               );
             }
-            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+            const fresh = settingsRuntime.settings.loadSettings(effective, {
               skipLoadEnvironment: true,
               workspaceTrusted: trustedWorkspace,
             });
@@ -4170,7 +4190,8 @@ async function runQwenServeImpl(
               mode,
               () => primaryGenerationGuard.assertOpen(),
             );
-          }),
+          });
+        },
       });
     if (!deps.bridge) {
       bridgeRef = bridge;
@@ -4183,14 +4204,21 @@ async function runQwenServeImpl(
       isWorkspaceTrusted: () => trustedWorkspace,
       assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
+      resolveContextFile: (filename, ws) => {
+        const effective = findEffectiveWorkspace(bridge, ws);
+        return {
+          target: path.resolve(effective, filename),
+          effectiveWorkspace: effective,
+        };
+      },
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
       skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
-      persistDisabledTools: persistDisabledToolsFn,
-      persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledTools: createPersistDisabledToolsFn(bridge),
+      persistDisabledSkills: createPersistDisabledSkillsFn(bridge),
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
@@ -4557,15 +4585,16 @@ async function runQwenServeImpl(
         fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory, {
           allowSameHostToolWritesOutsideWorkspace: true,
         }),
-        persistApprovalMode: (workspace, mode) =>
-          withSettingsLock(workspace, async () => {
+        persistApprovalMode: (workspace, mode) => {
+          const effective = findEffectiveWorkspace(secondaryBridge, workspace);
+          return withSettingsLock(effective, async () => {
             secondaryGenerationGuard.assertOpen();
             if (!secondaryTrusted) {
               throw new Error(
                 'Cannot persist approval mode for an untrusted workspace.',
               );
             }
-            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+            const fresh = settingsRuntime.settings.loadSettings(effective, {
               skipLoadEnvironment: true,
               workspaceTrusted: secondaryTrusted,
             });
@@ -4576,7 +4605,8 @@ async function runQwenServeImpl(
               mode,
               () => secondaryGenerationGuard.assertOpen(),
             );
-          }),
+          });
+        },
       });
       secondaryBridgeRef = secondaryBridge;
       runtimeBridges.push(secondaryBridge);
@@ -4587,6 +4617,13 @@ async function runQwenServeImpl(
         isWorkspaceTrusted: () => secondaryTrusted,
         assertGenerationOpen: () => secondaryGenerationGuard.assertOpen(),
         contextFilename: secondaryContextFilename,
+        resolveContextFile: (filename, ws) => {
+          const effective = findEffectiveWorkspace(secondaryBridge, ws);
+          return {
+            target: path.resolve(effective, filename),
+            effectiveWorkspace: effective,
+          };
+        },
         statusProvider: secondaryStatusProvider,
         workspaceProvidersStatusProvider:
           runtime.createWorkspaceProvidersStatusProvider({
@@ -4602,8 +4639,8 @@ async function runQwenServeImpl(
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
         isChannelLive: () => secondaryBridge.isChannelLive(),
         preheatAcpChild: () => secondaryBridge.preheat(),
-        persistDisabledTools: persistDisabledToolsFn,
-        persistDisabledSkills: persistDisabledSkillsFn,
+        persistDisabledTools: createPersistDisabledToolsFn(secondaryBridge),
+        persistDisabledSkills: createPersistDisabledSkillsFn(secondaryBridge),
         persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
@@ -5113,15 +5150,16 @@ async function runQwenServeImpl(
           fileSystem: createBridgeFileSystemAdapter(wsFsFactory, {
             allowSameHostToolWritesOutsideWorkspace: true,
           }),
-          persistApprovalMode: (workspace, mode) =>
-            withSettingsLock(workspace, async () => {
+          persistApprovalMode: (workspace, mode) => {
+            const effective = findEffectiveWorkspace(wsBridge, workspace);
+            return withSettingsLock(effective, async () => {
               generationGuard.assertOpen();
               if (!trusted) {
                 throw new Error(
                   'Cannot persist approval mode for an untrusted workspace.',
                 );
               }
-              const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              const fresh = settingsRuntime.settings.loadSettings(effective, {
                 skipLoadEnvironment: true,
                 workspaceTrusted: trusted,
               });
@@ -5132,7 +5170,8 @@ async function runQwenServeImpl(
                 mode,
                 () => generationGuard.assertOpen(),
               );
-            }),
+            });
+          },
         });
       } catch (err) {
         wsSubSessionLauncher.stop();
@@ -5146,6 +5185,13 @@ async function runQwenServeImpl(
           isWorkspaceTrusted: () => trusted,
           assertGenerationOpen: () => generationGuard.assertOpen(),
           contextFilename: wsContextFilename,
+          resolveContextFile: (filename, ws) => {
+            const effective = findEffectiveWorkspace(wsBridge, ws);
+            return {
+              target: path.resolve(effective, filename),
+              effectiveWorkspace: effective,
+            };
+          },
           statusProvider: runtime.createDaemonStatusProvider({
             env: wsEnv.effectiveEnv,
           }),
@@ -5165,8 +5211,8 @@ async function runQwenServeImpl(
             : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
           isChannelLive: () => wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
-          persistDisabledTools: persistDisabledToolsFn,
-          persistDisabledSkills: persistDisabledSkillsFn,
+          persistDisabledTools: createPersistDisabledToolsFn(wsBridge),
+          persistDisabledSkills: createPersistDisabledSkillsFn(wsBridge),
           persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
           persistSetting: persistSettingFn,
           persistSettings: persistSettingsFn,
@@ -5787,8 +5833,8 @@ async function runQwenServeImpl(
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
       clientMcpSenderRegistry,
-      persistDisabledTools: persistDisabledToolsFn,
-      persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledTools: createPersistDisabledToolsFn(bridge),
+      persistDisabledSkills: createPersistDisabledSkillsFn(bridge),
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
