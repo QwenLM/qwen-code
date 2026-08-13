@@ -151,6 +151,11 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'at least the highest severity AND confidence any absorbed sibling demonstrated',
     );
+    // The class finding must carry a demonstrated witness corner or it confirms
+    // only low, never posts, and the whole mechanism goes inert.
+    expect(body).toContain(
+      'The class finding carries one demonstrated entrance as its witness',
+    );
   });
 
   it('pins the enumeration-trap sentence in the 3b role-table row', () => {

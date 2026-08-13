@@ -323,6 +323,13 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(ENUMERATION_TRAP_LENS).toContain(
       'can be fooled into a wrong result is **Critical**',
     );
+    // The witness contract: without a concrete demonstrated corner the shape
+    // finding confirms only low, never posts, and never reaches the ledger the
+    // backstop reads (nor survives holdUnwitnessedCriticals). Drop it and the
+    // headline mechanism goes inert.
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      "Carry ONE demonstrated corner as the finding's witness",
+    );
   });
 });
 
