@@ -893,7 +893,8 @@ async function executePolicy(
       `omni object store is over its byte budget with only ` +
         `memory-referenced objects left; new policy derivations are ` +
         `suspended. Raise omni.storage.maxTotalBytes or delete memory ` +
-        `records you no longer need.`,
+        `records you no longer need, then start a new session — the ` +
+        `budget is re-evaluated once per process.`,
     );
   }
 

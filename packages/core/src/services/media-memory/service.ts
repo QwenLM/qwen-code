@@ -406,11 +406,16 @@ export class MediaMemoryService {
 
   /**
    * The GC root set (storage design §6.2): every object hash any memory
-   * record still references. Two distinct reference kinds exist and BOTH
-   * count — `entries[].artifactRef.managedId` (policy outputs) and
-   * managed-protocol `versions[].source.locator` (tool/URL media anchor
-   * their file identity in the object store because their local file is
-   * deleted the turn it lands, so the store copy is the only one).
+   * record still references. Three distinct reference kinds exist and ALL
+   * count — `entries[].artifactRef.managedId` (policy outputs),
+   * managed-protocol `versions[].source.locator` (tool media anchor
+   * their file identity in the object store), and versions of files
+   * whose `fileRef` points INTO the object store while their source
+   * keeps a different protocol (URL media: `source.locator` is the
+   * original URL, but the staging download is deleted the turn it
+   * lands, so the store copy named by the file's `fileRef` is the only
+   * persistent bytes). The last kind is rooted by content hash: each
+   * such version's bytes live in the store under its own sha256.
    *
    * Returns null when the store exists but cannot be read — the caller
    * must treat that as "roots unknown" and delete NOTHING (fail-closed:
@@ -420,6 +425,10 @@ export class MediaMemoryService {
    */
   async collectManagedRefs(): Promise<Set<string> | null> {
     const UNREADABLE = null;
+    // The store copy lives under `<omniRoot>/objects/` — matching on the
+    // objects prefix (not exact equality with objectPathFor) keeps this
+    // robust to extension differences.
+    const objectsPrefix = this.store.omniObjectsPrefix();
     try {
       return await this.store.read<Set<string> | null>(
         UNREADABLE,
@@ -438,6 +447,13 @@ export class MediaMemoryService {
           for (const version of Object.values(snapshot.versions)) {
             if (version.source.protocol === 'managed') {
               add(version.source.locator);
+            }
+            // A file anchored in the object store (URL/tool media whose
+            // staging copy is gone) roots every ledger-vouched version's
+            // bytes by content hash.
+            const file = snapshot.files[version.fileId];
+            if (file?.fileRef.startsWith(objectsPrefix)) {
+              refs.add(version.sha256);
             }
           }
           return refs;

@@ -36,12 +36,19 @@ const debugLogger = createDebugLogger('omni:gc');
  * that are gone (same invariant the recovery scan's corrupt-object path
  * already enforces).
  *
- * Multi-process safety leans on the same argument as startup recovery:
- * deletion requires BOTH "no reference in the snapshot" and "older than
- * the retention window", so another process's just-promoted object (whose
- * memory commit may still be in flight) survives on age alone. The
- * once-per-root latch is process-local by design; two processes GCing the
- * same store can only disagree toward "delete less".
+ * Multi-process safety is layered. New BYTES are covered by the
+ * retention window (deletion in pass 1 requires BOTH "no reference in
+ * the snapshot" and "older than the window", so another process's
+ * just-promoted object survives on age alone — same argument as startup
+ * recovery). New REFERENCES to old bytes are covered by touch-on-dedup:
+ * every reference is preceded by a `putFile` whose dedup hit refreshes
+ * the object's mtime before the commit lands, and both passes re-stat a
+ * candidate at delete time (the budget pass — where age protects
+ * nothing — additionally re-reads the ledger for a fresh root set).
+ * The residual window is the moment between the re-stat and the rm,
+ * down from the whole sweep duration. The once-per-root latch is
+ * process-local by design; two processes GCing the same store can only
+ * disagree toward "delete less".
  */
 
 /** Object-file shape inside a shard: `<64-hex>.<extension>`. Anything else
@@ -315,9 +322,31 @@ async function sweep(
   let deletedBytes = 0;
   const survivors: ObjectStat[] = [];
 
+  /** Freshness re-check at delete time. The root snapshot and the object
+   * listing are minutes-stale by the time a candidate is deleted, and a
+   * concurrent commit can reference OLD bytes in that gap (its putFile
+   * dedup-touch refreshes the object's mtime BEFORE the commit lands —
+   * ordering invariant). Re-statting narrows the race from "whole sweep
+   * duration" to the moment between this stat and the rm. */
+  const touchedSinceListing = async (
+    object: ObjectStat,
+    freshCutoffMs: number,
+  ): Promise<boolean> => {
+    try {
+      return (await fs.lstat(object.filePath)).mtimeMs >= freshCutoffMs;
+    } catch {
+      // Raced away — nothing left to delete either.
+      return true;
+    }
+  };
+
   // Pass 1: expired and unreferenced.
   for (const object of objects) {
     if (refs.has(object.sha256) || object.mtimeMs >= cutoffMs) {
+      survivors.push(object);
+      continue;
+    }
+    if (await touchedSinceListing(object, cutoffMs)) {
       survivors.push(object);
       continue;
     }
@@ -330,18 +359,31 @@ async function sweep(
   }
 
   // Pass 2: budget. Oldest unreferenced objects go regardless of age;
-  // referenced objects are untouchable (hard rule 2).
+  // referenced objects are untouchable (hard rule 2). Because age no
+  // longer protects anything here, the pass re-reads the ledger for a
+  // FRESH root set and skips objects touched since the sweep began —
+  // both signals catch a commit that landed while pass 1 ran.
   let remainingBytes = survivors.reduce((sum, o) => sum + o.sizeBytes, 0);
   if (remainingBytes > options.maxTotalBytes) {
-    const unreferenced = survivors
-      .filter((o) => !refs.has(o.sha256))
-      .sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const object of unreferenced) {
-      if (remainingBytes <= options.maxTotalBytes) break;
-      if (await deleteObject(object, options)) {
-        deletedObjects += 1;
-        deletedBytes += object.sizeBytes;
-        remainingBytes -= object.sizeBytes;
+    const freshRefs = await options.memoryService.collectManagedRefs();
+    if (freshRefs === null) {
+      // Ledger became unreadable mid-run: fail closed — delete nothing
+      // more. The store is still over budget, so suspension holds.
+      debugLogger.debug(
+        'gc: ledger unreadable at budget pass, skipping budget deletions',
+      );
+    } else {
+      const unreferenced = survivors
+        .filter((o) => !refs.has(o.sha256) && !freshRefs.has(o.sha256))
+        .sort((a, b) => a.mtimeMs - b.mtimeMs);
+      for (const object of unreferenced) {
+        if (remainingBytes <= options.maxTotalBytes) break;
+        if (await touchedSinceListing(object, nowMs)) continue;
+        if (await deleteObject(object, options)) {
+          deletedObjects += 1;
+          deletedBytes += object.sizeBytes;
+          remainingBytes -= object.sizeBytes;
+        }
       }
     }
   }
@@ -354,7 +396,8 @@ async function sweep(
         `(${remainingBytes} > ${options.maxTotalBytes} bytes); new policy ` +
         `derivations are suspended for this session. Raise ` +
         `omni.storage.maxTotalBytes or delete memory records you no ` +
-        `longer need.`,
+        `longer need — either change takes effect at the next session ` +
+        `start (the GC runs once per process).`,
     );
   } else {
     suspendedRoots.delete(rootKey);

@@ -288,6 +288,15 @@ export class OmniObjectStore {
       if (existing.isFile() && !existing.isSymbolicLink()) {
         const existingHash = await hashFileSha256(objectPath, signal);
         if (existingHash === sha256) {
+          // Touch-on-reference: every new memory reference is preceded by
+          // this call (ordering invariant: promote before commit), so
+          // refreshing mtime here re-arms the GC retention grace for OLD
+          // bytes gaining a NEW reference. Without it, a GC whose root
+          // snapshot predates the upcoming commit would still see the
+          // object as an expired orphan and delete it. Best-effort: a
+          // failed touch weakens the race window but never the promotion.
+          const now = new Date();
+          await fs.utimes(objectPath, now, now).catch(() => {});
           return { objectPath, deduped: true };
         }
       }

@@ -99,9 +99,21 @@ function pruneMalformedRecords(snapshot: MediaMemorySnapshot): void {
  */
 export class MediaMemoryStore {
   readonly filePath: string;
+  private readonly omniRootDir: string;
 
   constructor(omniRootDir: string) {
+    this.omniRootDir = omniRootDir;
     this.filePath = path.join(omniRootDir, MEDIA_MEMORY_FILE_NAME);
+  }
+
+  /**
+   * Prefix (with trailing separator) under which the omni object store
+   * keeps its content-addressed copies. A version whose `fileRef` starts
+   * with this prefix anchors its only persistent bytes in the store —
+   * the GC root collection matches on it.
+   */
+  omniObjectsPrefix(): string {
+    return path.join(this.omniRootDir, 'objects') + path.sep;
   }
 
   /**

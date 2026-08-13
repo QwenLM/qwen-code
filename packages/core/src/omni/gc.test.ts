@@ -165,6 +165,37 @@ describe('runOmniGcOnce', () => {
     await expect(fs.access(p)).resolves.toBeUndefined();
   });
 
+  it('roots a URL-origin version through its in-store fileRef', async () => {
+    // URL media keep the ORIGINAL URL as source.locator (protocol 'url'),
+    // but their staging download is deleted the turn it lands — the store
+    // copy named by fileRef is the only persistent bytes. A root set that
+    // only reads managed locators would delete exactly those objects
+    // while the ledger still vouches for them (hard rule 2).
+    const urlAnchored = '5'.repeat(64);
+    const p = await writeObject(urlAnchored, 30);
+    await memory.recordFileRecognized({
+      fileRef: store.objectPathFor(urlAnchored, '.bin'),
+      sha256: urlAnchored,
+      mediaType: 'video',
+      metadata: { durationMs: 1000 },
+      sizeBytes: 4,
+      mimeType: 'video/mp4',
+      origin: 'user',
+      source: { protocol: 'url', locator: 'https://example.com/clip.mp4' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+
+    // Both passes must keep it: pass 1 (expired) and pass 2 (budget).
+    const result = await runOmniGcOnce(gcOptions({ maxTotalBytes: 1 }));
+
+    expect(result.deletedObjects).toBe(0);
+    await expect(fs.access(p)).resolves.toBeUndefined();
+  });
+
   it('protects objects the live session registry still points at', async () => {
     const live = 'f'.repeat(64);
     const p = await writeObject(live, 30);
@@ -219,6 +250,59 @@ describe('runOmniGcOnce', () => {
     await expect(
       fs.access(path.join(store.getObjectsDir(), '22', `${newer}.bin`)),
     ).resolves.toBeUndefined();
+  });
+
+  it('budget pass spares an object the FRESH ledger references (stale-snapshot race)', async () => {
+    // The initial root snapshot goes stale while the sweep runs; a commit
+    // landing in that gap must not lose its object. The budget pass
+    // re-reads the ledger right before deleting — simulate the race with
+    // a service whose second read knows the new reference.
+    const contested = '7'.repeat(64);
+    const p = await writeObject(contested, 5, 600);
+    let reads = 0;
+    const racingService = {
+      collectManagedRefs: async () =>
+        ++reads === 1 ? new Set<string>() : new Set([contested]),
+    } as unknown as MediaMemoryService;
+
+    const result = await runOmniGcOnce(
+      gcOptions({ memoryService: racingService, maxTotalBytes: 100 }),
+    );
+
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(result.deletedObjects).toBe(0);
+    await expect(fs.access(p)).resolves.toBeUndefined();
+    // Still over budget with (now-)referenced bytes only → suspended.
+    expect(result.derivationsSuspended).toBe(true);
+  });
+
+  it('budget pass skips an object whose mtime was touched during the sweep', async () => {
+    // putFile's dedup touch precedes every new commit; an object touched
+    // after the sweep began signals an in-flight reference. The delete
+    // loop re-stats each candidate — the touched one must survive even
+    // though the budget still wants its bytes. (`first` is expired and
+    // goes in pass 1; young `second` is only reachable by the budget
+    // pass, whose cascade-triggered touch must spare it.)
+    const first = '3'.repeat(64);
+    const second = '4'.repeat(64);
+    await writeObject(first, 30, 600);
+    const secondPath = await writeObject(second, 5, 600);
+
+    const result = await runOmniGcOnce(
+      gcOptions({
+        maxTotalBytes: 100,
+        uploadCache: {
+          // Fires while `first` is being deleted — before `second`'s turn.
+          removeBySha256: async () => {
+            const now = new Date();
+            await fs.utimes(secondPath, now, now);
+          },
+        } as never,
+      }),
+    );
+
+    expect(result.deletedObjects).toBe(1);
+    await expect(fs.access(secondPath)).resolves.toBeUndefined();
   });
 
   it('over budget with only referenced objects: suspends derivations, deletes nothing', async () => {
