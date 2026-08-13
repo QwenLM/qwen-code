@@ -205,14 +205,14 @@ describe('manifest repository context provider', () => {
             {
               paths: ['src/**'],
               domains: Array.from(
-                { length: 129 },
+                { length: 256 },
                 (_, index) => `domain-a-${String(index).padStart(3, '0')}`,
               ),
             },
             {
               paths: ['src/**'],
               domains: Array.from(
-                { length: 129 },
+                { length: 256 },
                 (_, index) => `domain-b-${String(index).padStart(3, '0')}`,
               ),
             },
@@ -225,12 +225,13 @@ describe('manifest repository context provider', () => {
         worktree,
         ['src/change.ts'],
         manifest({
-          rules: Array.from({ length: 128 }, (_, index) => ({
+          rules: Array.from({ length: 65 }, (_, index) => ({
             paths: ['src/**'],
             verificationNotes: [
               `note-a-${String(index).padStart(3, '0')}`,
               `note-b-${String(index).padStart(3, '0')}`,
               `note-c-${String(index).padStart(3, '0')}`,
+              `note-d-${String(index).padStart(3, '0')}`,
             ],
           })),
         }),
@@ -248,14 +249,14 @@ describe('manifest repository context provider', () => {
               {
                 paths: ['src/**'],
                 relatedPaths: Array.from(
-                  { length: 129 },
+                  { length: 256 },
                   (_, index) => `p-a/${index}.ts`,
                 ),
               },
               {
                 paths: ['src/**'],
                 relatedPaths: Array.from(
-                  { length: 129 },
+                  { length: 256 },
                   (_, index) => `p-b/${index}.ts`,
                 ),
               },
@@ -570,7 +571,7 @@ describe('manifest repository context provider', () => {
     // 128 rules each contribute the same three patterns: 384 pre-dedup
     // (OVER the cap) and 3 post-dedup (under it). A cap-before-dedup
     // regression throws here; under it, two matching rules sharing one
-    // 100-pattern list would reject a legal, human-authored manifest.
+    // 200-pattern list would reject a legal, human-authored manifest.
     const worktree = temp();
     for (let index = 0; index < 5; index++) {
       write(join(worktree, 'src', `${index}.ts`));

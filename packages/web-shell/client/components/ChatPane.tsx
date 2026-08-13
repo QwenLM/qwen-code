@@ -808,6 +808,15 @@ export function ChatPane({
     },
     [actions, reportError],
   );
+  const handleSelectReasoningEffort = useCallback(
+    (value: string) =>
+      actions
+        .setReasoningEffort(value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        ),
+    [actions, reportError, t],
+  );
 
   const headerLabel =
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
@@ -1084,6 +1093,8 @@ export function ChatPane({
           availableModels={availableModels}
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
+          reasoning={connection.reasoning}
+          onSelectReasoningEffort={handleSelectReasoningEffort}
           dialogOpen={approvalActive}
           disabled={approvalActive || admissionPayloadLocked}
           voiceTarget={hidden ? undefined : voiceTarget}
