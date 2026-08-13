@@ -487,6 +487,27 @@ export function realpathNearestExisting(inputPath: string): string {
 }
 
 /**
+ * Returns true if `p` is located under an OS temp directory.
+ *
+ * Both sides are canonicalized via {@link realpathNearestExisting} first so
+ * symlinked temp roots (e.g. macOS `/tmp` -> `/private/tmp`) compare
+ * correctly even when the session directory is already gone. On POSIX,
+ * literal `/tmp` is checked in addition to `os.tmpdir()`, because macOS
+ * `os.tmpdir()` returns `$TMPDIR` (`/var/folders/...`), which does not
+ * cover `/tmp`.
+ */
+export function isTempDirPath(p: string): boolean {
+  const real = realpathNearestExisting(p);
+  const tmpRoots = [os.tmpdir()];
+  if (process.platform !== 'win32') {
+    tmpRoots.push('/tmp');
+  }
+  return tmpRoots.some((root) =>
+    isSubpath(realpathNearestExisting(root), real),
+  );
+}
+
+/**
  * Resolves a path with tilde (~) expansion and relative path resolution.
  * Handles tilde expansion for home directory and resolves relative paths
  * against the provided base directory or current working directory.

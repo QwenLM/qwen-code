@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { Mock } from 'vitest';
+import type { Mock, MockInstance } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
@@ -6851,6 +6851,51 @@ describe('Server Config (config.ts)', () => {
     await config.shutdown();
 
     expect(shutdownTelemetry).not.toHaveBeenCalled();
+  });
+
+  describe('Config shutdown temp project cleanup (issue #7906)', () => {
+    let rmSpy: MockInstance;
+
+    beforeEach(() => {
+      Storage.setRuntimeBaseDir(
+        path.join(os.tmpdir(), 'qwen-shutdown-test-runtime'),
+      );
+      rmSpy = vi.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      rmSpy.mockRestore();
+      Storage.setRuntimeBaseDir(null);
+    });
+
+    it('removes the project dir when the session ran from a temp dir', async () => {
+      const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
+      const config = new Config({
+        ...baseParams,
+        cwd: tmpCwd,
+        targetDir: tmpCwd,
+      });
+      config['initialized'] = true;
+
+      await config.shutdown();
+
+      expect(rmSpy).toHaveBeenCalledWith(config.storage.getProjectDir(), {
+        recursive: true,
+        force: true,
+      });
+    });
+
+    it('keeps the project dir for regular project roots', async () => {
+      const config = new Config(baseParams);
+      config['initialized'] = true;
+
+      await config.shutdown();
+
+      expect(rmSpy).not.toHaveBeenCalledWith(
+        config.storage.getProjectDir(),
+        expect.anything(),
+      );
+    });
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {

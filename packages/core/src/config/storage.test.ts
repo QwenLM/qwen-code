@@ -691,3 +691,75 @@ describe('Storage – runtime base dir async context isolation', () => {
     });
   });
 });
+
+describe('Storage – cleanOrphanProjectDirs', () => {
+  let baseDir: string;
+  let projectsDir: string;
+  let aliveCwd: string;
+
+  const writeSession = (entry: string, cwd: string) => {
+    const chats = path.join(projectsDir, entry, 'chats');
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.jsonl'),
+      JSON.stringify({ cwd, type: 'user' }) + '\n',
+    );
+  };
+
+  beforeEach(() => {
+    baseDir = actualFs.mkdtempSync(path.join(os.tmpdir(), 'storage-orphan-'));
+    projectsDir = path.join(baseDir, 'projects');
+    actualFs.mkdirSync(projectsDir, { recursive: true });
+    aliveCwd = actualFs.mkdtempSync(path.join(os.tmpdir(), 'alive-cwd-'));
+    Storage.setRuntimeBaseDir(baseDir);
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    actualFs.rmSync(baseDir, { recursive: true, force: true });
+    actualFs.rmSync(aliveCwd, { recursive: true, force: true });
+  });
+
+  it('removes entries whose recorded cwd no longer exists', () => {
+    writeSession('-tmp-gone-sess', path.join(baseDir, 'no-longer-here'));
+    Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-tmp-gone-sess'))).toBe(
+      false,
+    );
+  });
+
+  it('keeps entries whose recorded cwd still exists', () => {
+    writeSession('-alive-proj', aliveCwd);
+    Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-alive-proj'))).toBe(
+      true,
+    );
+  });
+
+  it('never touches the current project entry', () => {
+    writeSession('current', path.join(baseDir, 'no-longer-here'));
+    Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, 'current'))).toBe(true);
+  });
+
+  it('removes empty record-less entries older than one day', () => {
+    const stale = path.join(projectsDir, '-stale-empty');
+    actualFs.mkdirSync(stale, { recursive: true });
+    const past = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    actualFs.utimesSync(stale, past, past);
+    Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(stale)).toBe(false);
+  });
+
+  it('keeps fresh empty record-less entries (concurrent session guard)', () => {
+    const fresh = path.join(projectsDir, '-fresh-empty');
+    actualFs.mkdirSync(path.join(fresh, 'chats'), { recursive: true });
+    Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(fresh)).toBe(true);
+  });
+
+  it('is a no-op when the projects dir does not exist', () => {
+    actualFs.rmSync(projectsDir, { recursive: true, force: true });
+    expect(() => Storage.cleanOrphanProjectDirs('current')).not.toThrow();
+  });
+});

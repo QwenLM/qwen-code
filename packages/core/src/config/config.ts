@@ -214,6 +214,7 @@ import {
   type ChatRecordingFailureListener,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -3171,6 +3172,23 @@ export class Config {
         }
       })();
     }
+
+    // Fire-and-forget sweep of orphaned project snapshots under
+    // `<runtime>/projects/` — sessions that ran from one-shot temp dirs
+    // (or since-deleted worktrees) leave entries whose recorded cwd no
+    // longer exists (issue #7906). Exit-time cleanup misses crashes and
+    // SIGKILL, so startup is the backstop. Unconditional (not gated on
+    // bare mode) because temp-dir sessions are common in scripted/bare
+    // usage. Cheap: each entry costs one bounded 8 KiB read.
+    void (async () => {
+      try {
+        Storage.cleanOrphanProjectDirs(
+          sanitizeCwd(this.storage.getProjectRoot()),
+        );
+      } catch {
+        // Best-effort hygiene sweep — never fail startup.
+      }
+    })();
   }
 
   private async activateChatRecording(): Promise<void> {
@@ -5253,6 +5271,24 @@ export class Config {
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
+      }
+
+      // Remove the on-disk project snapshot when the session ran from a
+      // throwaway temp directory (e.g. `%TEMP%\qwen-*-sess-*`): such a
+      // path can never be resumed, so the entry would linger under
+      // `<runtime>/projects/` forever (issue #7906). The startup sweep
+      // backstops crash paths that skip shutdown. The chat recording
+      // flush happens in shutdown() before this runs, so no records are
+      // removed mid-write.
+      try {
+        if (isTempDirPath(this.storage.getProjectRoot())) {
+          fs.rmSync(this.storage.getProjectDir(), {
+            recursive: true,
+            force: true,
+          });
+        }
+      } catch {
+        // Best-effort — don't block shutdown
       }
 
       this.skillManager?.stopWatching();

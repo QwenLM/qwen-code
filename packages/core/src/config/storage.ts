@@ -364,6 +364,111 @@ export class Storage {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
 
+  /**
+   * Age threshold for removing record-less project directories: protects
+   * concurrently starting sessions whose chats dir was just created but
+   * not yet written.
+   */
+  private static readonly ORPHAN_EMPTY_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * Removes orphaned project snapshot directories under
+   * `<runtime>/projects/` (issue #7906). An entry is orphaned when the
+   * working directory recorded in its chat logs no longer exists (one-shot
+   * temp dirs, deleted worktrees). Entries without readable records are
+   * only removed when completely empty and older than one day. The entry
+   * for `currentProjectId` is never touched.
+   *
+   * Best-effort: per-entry failures are skipped.
+   */
+  static cleanOrphanProjectDirs(currentProjectId: string): void {
+    const projectsDir = path.join(
+      Storage.getRuntimeBaseDir(),
+      PROJECT_DIR_NAME,
+    );
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(projectsDir);
+    } catch {
+      return;
+    }
+    const now = Date.now();
+    for (const entry of entries) {
+      if (entry === currentProjectId) continue;
+      const entryPath = path.join(projectsDir, entry);
+      try {
+        const cwd = Storage.readRecordedCwd(entryPath);
+        if (cwd !== null) {
+          if (!fs.existsSync(cwd)) {
+            fs.rmSync(entryPath, { recursive: true, force: true });
+          }
+          continue;
+        }
+        // No readable records: only remove if the entry is completely
+        // empty and stale, so a concurrently starting session is never
+        // hit mid-write.
+        const stat = fs.statSync(entryPath);
+        if (
+          stat.isDirectory() &&
+          Storage.countFiles(entryPath) === 0 &&
+          now - stat.mtimeMs > Storage.ORPHAN_EMPTY_DIR_MAX_AGE_MS
+        ) {
+          fs.rmSync(entryPath, { recursive: true, force: true });
+        }
+      } catch {
+        // Skip unreadable entries.
+      }
+    }
+  }
+
+  /**
+   * Reads the `cwd` of the first chat record under `<entry>/chats/`.
+   * Only the first line of each file is read (bounded 8 KiB buffer) so
+   * startup cost stays independent of chat history size.
+   */
+  private static readRecordedCwd(entryPath: string): string | null {
+    let files: string[];
+    try {
+      files = fs.readdirSync(path.join(entryPath, 'chats'));
+    } catch {
+      return null;
+    }
+    for (const file of files) {
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(path.join(entryPath, 'chats', file), 'r');
+        const buf = Buffer.alloc(8192);
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+        const firstLine = buf.toString('utf8', 0, bytesRead).split('\n', 1)[0];
+        if (!firstLine) continue;
+        const record = JSON.parse(firstLine) as { cwd?: unknown };
+        if (typeof record.cwd === 'string' && record.cwd) {
+          return record.cwd;
+        }
+      } catch {
+        // Unreadable/truncated file — try the next one.
+      } finally {
+        if (fd !== undefined) {
+          try {
+            fs.closeSync(fd);
+          } catch {
+            // Ignore.
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private static countFiles(dirPath: string): number {
+    let count = 0;
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const child = path.join(dirPath, entry.name);
+      count += entry.isDirectory() ? Storage.countFiles(child) : 1;
+    }
+    return count;
+  }
+
   static getOAuthCredsPath(): string {
     return path.join(Storage.getGlobalQwenDir(), OAUTH_FILE);
   }

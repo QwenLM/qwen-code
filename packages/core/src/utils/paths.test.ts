@@ -24,6 +24,7 @@ import {
   resolveAndValidatePath,
   unescapePath,
   isSubpath,
+  isTempDirPath,
   shortenPath,
   tildeifyPath,
   expandHomeDir,
@@ -1183,4 +1184,46 @@ describe('expandHomeDir', () => {
       path.normalize('relative/path'),
     );
   });
+});
+
+describe('isTempDirPath', () => {
+  let tmpRoot: string;
+
+  beforeAll(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'is-temp-dir-test-'));
+  });
+
+  afterAll(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('returns true for a path under os.tmpdir()', () => {
+    expect(isTempDirPath(path.join(tmpRoot, 'sub'))).toBe(true);
+  });
+
+  it('returns true for the tmpdir itself', () => {
+    expect(isTempDirPath(tmpRoot)).toBe(true);
+  });
+
+  it('returns false for a regular project path', () => {
+    expect(isTempDirPath(path.join(os.homedir(), 'my-project'))).toBe(false);
+  });
+
+  it('returns false for nonexistent paths outside tmp', () => {
+    // Exercises the realpath fallback for paths that no longer exist.
+    expect(isTempDirPath('/nonexistent-qwen-test/project')).toBe(false);
+  });
+
+  it('returns true for nonexistent paths inside tmp (literal fallback)', () => {
+    expect(isTempDirPath(path.join(tmpRoot, 'already-gone-session'))).toBe(
+      true,
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'covers literal /tmp on POSIX even when os.tmpdir() differs',
+    () => {
+      expect(isTempDirPath('/tmp/qwen-enter-sess-abc123')).toBe(true);
+    },
+  );
 });
