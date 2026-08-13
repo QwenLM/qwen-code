@@ -64,9 +64,26 @@ async function main(): Promise<void> {
     }
   > = {};
   for (const tool of result.tools) {
+    const parameterSchema = tool.inputSchema ?? {
+      type: 'object',
+      properties: {},
+    };
+    // Normalize to the contract the other tools already use: reject unknown
+    // parameters client-side instead of forwarding them to a driver that
+    // silently ignores them (hallucinated extra params must fail fast with a
+    // schema error, not diverge silently).
+    if (
+      typeof parameterSchema === 'object' &&
+      parameterSchema !== null &&
+      (parameterSchema as Record<string, unknown>)['additionalProperties'] ===
+        true
+    ) {
+      (parameterSchema as Record<string, unknown>)['additionalProperties'] =
+        false;
+    }
     schemas[tool.name] = {
       description: tool.description ?? '',
-      parameterSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+      parameterSchema,
       annotations: tool.annotations ?? {},
     };
   }

@@ -834,7 +834,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   type_text: {
     description:
-      'Insert text into the target pid via `AXSetAttribute(kAXSelectedText)`. Works for standard Cocoa text fields and text views. No keystrokes are synthesized — special keys (Return / Escape / arrows) go through `press_key` / `hotkey`. For Chromium / Electron inputs that don\'t implement `kAXSelectedText`, the tool falls back to CGEvent character synthesis automatically.\n\nOptional `element_index` + `window_id` (from the last `get_window_state` snapshot) directs the write to a specific field. Without `element_index`, the write goes to the pid\'s currently focused element.\n\nWEB CONTENT (Chromium/WebKit/Electron — browser tabs, Slack, VS Code, X\'s compose box): AXValue is not independent proof that the renderer/DOM observed an AX write or synthesized keystrokes. The driver detects this at the element level (an AXWebArea ancestor) and refuses to trust AXValue-only read-back there — type_text returns effect:"unverifiable" + escalation, never a false "confirmed" (a browser\'s own native address bar/toolbar stays trusted). For a browser TAB the reliable path is the `page` tool (drives the DOM via CDP); for an embedded web view use this tool\'s px form: pass x,y (no element_index) to pixel-click the field then type, in one call. NOTE: a px focus-click won\'t reliably open+focus a CLOSED control; AX-press to open/activate it first (works in the background), then px-type. Always confirm via the screenshot; if px-background still drops, escalate to delivery_mode:"foreground".',
+      'Insert text into the target pid via `AXSetAttribute(kAXSelectedText)`. Works for standard Cocoa text fields and text views. No keystrokes are synthesized — special keys (Return / Escape / arrows) go through `press_key` / `hotkey`. For Chromium / Electron inputs that don\'t implement `kAXSelectedText`, the tool falls back to CGEvent character synthesis automatically.\n\nOptional `element_index` + `window_id` (from the last `get_window_state` snapshot) directs the write to a specific field. Without `element_index`, the write goes to the pid\'s currently focused element.\n\nWEB CONTENT (Chromium/WebKit/Electron — browser tabs, Slack, VS Code, X\'s compose box): AXValue is not independent proof that the renderer/DOM observed an AX write or synthesized keystrokes. The driver detects this at the element level (an AXWebArea ancestor) and refuses to trust AXValue-only read-back there — type_text returns effect:"unverifiable" + escalation, never a false "confirmed" (a browser\'s own native address bar/toolbar stays trusted). For a browser TAB the reliable path is `get_browser_state` + `browser_type`; the legacy `page` tool only works when the operator enabled CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS. For an embedded web view use this tool\'s px form: pass x,y (no element_index) to pixel-click the field then type, in one call. NOTE: a px focus-click won\'t reliably open+focus a CLOSED control; AX-press to open/activate it first (works in the background), then px-type. Always confirm via the screenshot; if px-background still drops, escalate to delivery_mode:"foreground".',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -1569,7 +1569,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   set_config: {
     description:
-      'Update cua-driver-rs configuration. Changes to max_image_dimension take effect immediately. The experimental_pip keys are persisted to ~/.cua-driver/config.json and take effect on the next daemon restart (the PiP backend is initialised once at startup).\n\nNote: capture_mode is a per-call param (on get_window_state / click), not a stored setting. Capture scope is selected by start_session, not set_config.',
+      'Update cua-driver-rs configuration. Changes to max_image_dimension take effect immediately. The experimental_pip keys are persisted to ~/.cua-driver/config.json and take effect on the next daemon restart (the PiP backend is initialised once at startup).\n\nNote: capture_mode is no longer a setting; get_window_state accepts it only as a deprecated, ignored parameter. Capture scope is selected by start_session, not set_config.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -1622,7 +1622,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   zoom: {
     description:
-      'Capture a cropped JPEG of a window region (x1,y1)–(x2,y2) in screenshot pixel coordinates, with 20% padding added on each side. The output image is at most 500 px wide.\n\nAfter a zoom, pass `from_zoom=true` to click, type_text, press_key, or hotkey to auto-translate coordinates back to full-window space.',
+      'Capture a cropped JPEG of a window region (x1,y1)–(x2,y2) in screenshot pixel coordinates, with 20% padding added on each side. The output image is at most 500 px wide.\n\nAfter a zoom, pass `from_zoom=true` to click, drag, type_text, press_key, or hotkey to auto-translate coordinates back to full-window space.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -1805,7 +1805,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
           type: 'integer',
         },
       },
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: true,
@@ -1873,7 +1873,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['pid'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -1908,7 +1908,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['target_id', 'tab_id', 'url'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -1958,7 +1958,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['target_id', 'tab_id'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2009,7 +2009,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['target_id', 'tab_id', 'ref', 'text'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2061,7 +2061,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['target_id', 'tab_id', 'action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2106,7 +2106,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['target_id', 'tab_id', 'ref', 'files'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2145,7 +2145,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['session', 'target_id', 'tab_id', 'ref', 'destination_root'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2216,7 +2216,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['target_id', 'tab_id', 'session', 'action'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2227,7 +2227,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   start_recording: {
     description:
-      "Start trajectory recording. Every subsequent non-read-only tool invocation, except recording controls and replay_trajectory, writes a turn folder under `output_dir`. Sensitive browser URLs, typed text, page scripts, clipboard content, file paths, and approval tokens are redacted from action.json:\n\n- `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI state immediately before and after the action.\n- `before.png` / `after.png` — target-window screenshots immediately before and after the action.\n- `evidence.json` — capture status and a stable classification when an expected artifact could not be captured.\n- `app_state.json` — post-action AX/UIA snapshot for the target pid.\n- `screenshot.png` — compatibility alias of `after.png`.\n- `action.json` — tool name, redacted input arguments, result summary, result-error flag, pid, click point (when applicable), ISO-8601 timestamp.\n- `click.png` — for dispatched click-family actions only, `before.png` with a red marker at the click point. A call refused before target resolution is explicitly not applicable instead.\n\nTurn folders are named `turn-00001/`, `turn-00002/`, etc.  Turn numbering restarts at 1 each time recording is (re-)started.\n\n**Video is off by default.** Pass `record_video: true` to also capture the main display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the lifetime of the session.\n\n**macOS uses native ScreenCaptureKit** (daemon-owned SCStream + SCRecordingOutput) so video inherits the daemon's Screen Recording grant — no extra TCC prompt, no ffmpeg subprocess. Requires macOS 15.0+.\n\n**Windows + Linux use an ffmpeg subprocess** (`gdigrab` / `x11grab` + libx264). Requires ffmpeg on PATH (winget install Gyan.FFmpeg / apt install ffmpeg); when ffmpeg is missing or fails on startup the per-turn capture (screenshots + action.json) still runs and the session's `last_error` field carries the diagnostic.\n\nRecording remains active until its owning MCP client disconnects, `stop_recording` or `end_session` for its owning session ends it, or the daemon restarts. A daemon restart resets recording to disabled without deleting files already written.",
+      "Start trajectory recording. Every subsequent non-read-only tool invocation, except recording controls and replay_trajectory, writes a turn folder under `output_dir`. Sensitive browser URLs, typed text, page scripts, clipboard content, file paths, and approval tokens are redacted from action.json (turns carrying redacted values are lossy: replay re-dispatches the literal `[redacted]` placeholder, not the original value):\n\n- `before_state.json` / `after_state.json` — application AX/UIA/AT-SPI state immediately before and after the action.\n- `before.png` / `after.png` — target-window screenshots immediately before and after the action.\n- `evidence.json` — capture status and a stable classification when an expected artifact could not be captured.\n- `app_state.json` — post-action AX/UIA snapshot for the target pid.\n- `screenshot.png` — compatibility alias of `after.png`.\n- `action.json` — tool name, redacted input arguments, result summary, result-error flag, pid, click point (when applicable), ISO-8601 timestamp.\n- `click.png` — for dispatched click-family actions only, `before.png` with a red marker at the click point. A call refused before target resolution is explicitly not applicable instead.\n\nTurn folders are named `turn-00001/`, `turn-00002/`, etc.  Turn numbering restarts at 1 each time recording is (re-)started.\n\n**Video is off by default.** Pass `record_video: true` to also capture the main display to `<output_dir>/recording.mp4` (H.264 / 30 fps) for the lifetime of the session.\n\n**macOS uses native ScreenCaptureKit** (daemon-owned SCStream + SCRecordingOutput) so video inherits the daemon's Screen Recording grant — no extra TCC prompt, no ffmpeg subprocess. Requires macOS 15.0+.\n\n**Windows + Linux use an ffmpeg subprocess** (`gdigrab` / `x11grab` + libx264). Requires ffmpeg on PATH (winget install Gyan.FFmpeg / apt install ffmpeg); when ffmpeg is missing or fails on startup the per-turn capture (screenshots + action.json) still runs and the session's `last_error` field carries the diagnostic.\n\nRecording remains active until its owning MCP client disconnects, `stop_recording` or `end_session` for its owning session ends it, or the daemon restarts. A daemon restart resets recording to disabled without deleting files already written.",
     parameterSchema: {
       type: 'object',
       properties: {
@@ -2284,7 +2284,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   replay_trajectory: {
     description:
-      "Replay a recorded trajectory by re-invoking every turn's tool call in lexical order. `dir` must point at a directory previously written by `start_recording`. Each `turn-NNNNN/` is parsed for `action.json`, and the recorded tool is called with its recorded `arguments` via the same dispatch path an MCP / CLI call uses.\n\nCaveats:\n- Element-indexed actions (`click({pid, element_index})` etc.) will fail because element indices are per-snapshot and don't survive across sessions. Pixel clicks (`click({pid, x, y})`) and all keyboard tools replay cleanly. Failures are reported but don't stop replay unless `stop_on_error` is true.\n- `get_window_state` and other read-only tools are NOT currently recorded, so replays do not re-populate the per-(pid, window_id) element cache.\n- If recording is ENABLED while replay runs, the replay itself is recorded into the currently configured output directory.  That's deliberate: recording a replay against a new build and diffing the two trajectories is the regression-test workflow.",
+      "Replay a recorded trajectory by re-invoking every turn's tool call in lexical order. `dir` must point at a directory previously written by `start_recording`. Each `turn-NNNNN/` is parsed for `action.json`, and the recorded tool is called with its recorded `arguments` via the same dispatch path an MCP / CLI call uses.\n\nCaveats:\n- Element-indexed actions (`click({pid, element_index})` etc.) will fail because element indices are per-snapshot and don't survive across sessions. Pixel clicks (`click({pid, x, y})`) and all keyboard tools replay cleanly. Failures are reported but don't stop replay unless `stop_on_error` is true.\n- `get_window_state` and other read-only tools are NOT currently recorded, so replays do not re-populate the per-(pid, window_id) element cache.\n- Turns whose recorded arguments carry `[redacted]` values (browser URLs, typed text, file paths, approval tokens) replay the placeholder literally — e.g. `browser_type` types the string `[redacted]` — and cannot reproduce the original action.\n- Browser actions bound via `get_browser_state` target/tab ids do not replay in a new session: the binding call is read-only and not recorded, and stale ids refuse with `browser_binding_stale`. Re-run `get_browser_state` and remap ids first.\n- If recording is ENABLED while replay runs, the replay itself is recorded into the currently configured output directory.  That's deliberate: recording a replay against a new build and diffing the two trajectories is the regression-test workflow.",
     parameterSchema: {
       type: 'object',
       properties: {
@@ -2373,7 +2373,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['session'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2409,7 +2409,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['session', 'reason'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,
@@ -2428,7 +2428,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['session'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: true,
@@ -2449,7 +2449,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
         },
       },
       required: ['session'],
-      additionalProperties: true,
+      additionalProperties: false,
     },
     annotations: {
       readOnlyHint: false,

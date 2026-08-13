@@ -67,6 +67,10 @@ describe('ComputerUseClient', () => {
       await client.start();
       expect(sdkMocks.transportOptions).toHaveBeenCalledWith(
         expect.objectContaining({
+          // ['mcp'] is the daemon/app path — macOS TCC attributes grants to
+          // com.qwencode.cua-driver. ['mcp', '--direct'] is reserved for the
+          // schema-sync script; flipping this silently breaks that design.
+          args: ['mcp'],
           env: expect.objectContaining({ MCP_MODEL_PAYLOAD_FILTER: '1' }),
         }),
       );
@@ -380,25 +384,31 @@ describe('idle shutdown', () => {
     expect(inner.close).toHaveBeenCalledTimes(1);
   });
 
-  it('only resumes idle shutdown when end_session matches the recording owner', async () => {
+  it('re-arms idle shutdown when stop_recording fails (driver disables before erroring)', async () => {
     vi.useFakeTimers();
     const c = new ComputerUseClient({
       binary: '/fake/cua-driver',
       idleTimeoutMs: 25,
     });
-    const inner = makeInner();
+    const inner: FakeInner = {
+      callTool: vi
+        .fn()
+        .mockResolvedValueOnce(successResult) // start_recording
+        .mockResolvedValueOnce({
+          // stop_recording: video finalization failed AFTER the driver
+          // already disabled recording (disabled-before-error guarantee).
+          content: [{ type: 'text', text: 'Failed to stop recording: ffmpeg' }],
+          isError: true,
+        }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
     installInner(c, inner);
 
-    await c.callTool('start_recording', {
-      output_dir: '/tmp/recording',
-      session: 'recording-session',
-    });
-    await c.callTool('end_session', { session: 'unrelated-session' });
-    await vi.advanceTimersByTimeAsync(100);
+    await c.callTool('start_recording', { output_dir: '/tmp/recording' });
+    await c.callTool('stop_recording', {});
+    await vi.advanceTimersByTimeAsync(24);
     expect(inner.close).not.toHaveBeenCalled();
-
-    await c.callTool('end_session', { session: 'recording-session' });
-    await vi.advanceTimersByTimeAsync(25);
+    await vi.advanceTimersByTimeAsync(1);
     expect(inner.close).toHaveBeenCalledTimes(1);
   });
 

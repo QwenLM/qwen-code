@@ -12,6 +12,7 @@ import {
   daemonCleanupTargets,
   runBootstrap,
   parsePermissionsStatus,
+  startStatusDaemonProcess,
   type BootstrapDeps,
   type StatusDaemon,
 } from './bootstrap.js';
@@ -242,20 +243,53 @@ describe('runBootstrap', () => {
 });
 
 describe('daemonCleanupTargets', () => {
+  // Exact patterns (incl. the trailing ` serve` that keeps `pkill -f` from
+  // matching the `qwen-cua-driver mcp` stdio proxy) and join()-built socket
+  // fragments (path separators are platform-specific on Windows).
   it('covers current and legacy daemon identities without touching installed apps', () => {
     const targets = daemonCleanupTargets('/Users/tester');
     expect(targets.processPatterns).toEqual(
       expect.arrayContaining([
-        expect.stringContaining('QwenCuaDriver.app'),
-        expect.stringContaining('CuaDriver.app'),
+        'QwenCuaDriver.app/Contents/MacOS/qwen-cua-driver serve',
+        'CuaDriver.app/Contents/MacOS/cua-driver serve',
       ]),
     );
     expect(targets.socketPaths).toEqual(
       expect.arrayContaining([
-        expect.stringContaining('/qwen-cua-driver/qwen-cua-driver.sock'),
-        expect.stringContaining('/cua-driver/cua-driver.sock'),
+        expect.stringContaining(
+          join('qwen-cua-driver', 'qwen-cua-driver.sock'),
+        ),
+        expect.stringContaining(join('cua-driver', 'cua-driver.sock')),
       ]),
     );
+  });
+});
+
+// Mock child_process for the real process-launch helpers (the runBootstrap
+// tests above inject fakes via BootstrapDeps and never reach these).
+vi.mock('node:child_process', () => ({
+  spawnSync: vi.fn(),
+  execFile: vi.fn(),
+}));
+
+describe('startStatusDaemonProcess', () => {
+  it('launches the status daemon through the QwenCuaDriver app identity', async () => {
+    const { spawnSync } = await import('node:child_process');
+    startStatusDaemonProcess();
+
+    const openCall = vi
+      .mocked(spawnSync)
+      .mock.calls.find((call) => call[0] === 'open');
+    expect(openCall).toBeDefined();
+    expect(openCall?.[1]).toEqual([
+      '-n',
+      '-g',
+      '-a',
+      'QwenCuaDriver',
+      '--args',
+      'serve',
+      '--no-permissions-gate',
+    ]);
   });
 });
 

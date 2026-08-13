@@ -207,6 +207,24 @@ describe('coerceTypes', () => {
     expect(result['x']).toBe(100);
     expect(result['y']).toBe(200);
   });
+
+  it('coerces numeric strings for nullable fields (type: [number, null])', () => {
+    // The regenerated 0.17 schemas express nullable numerics as
+    // ['number', 'null']; coercion must still recover a numeric string.
+    const nullableSchema = {
+      type: 'object',
+      properties: {
+        spring: { type: ['number', 'null'] },
+        idle_hide_ms: { type: ['integer', 'null'] },
+      },
+    } as Record<string, unknown>;
+    const result = coerceTypes(
+      { spring: '0.8', idle_hide_ms: '500' },
+      nullableSchema,
+    );
+    expect(result['spring']).toBe(0.8);
+    expect(result['idle_hide_ms']).toBe(500);
+  });
 });
 
 describe('ComputerUseTool.build() coercion integration', () => {
@@ -470,15 +488,74 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(isHighRiskCall('check_permissions', { prompt: true })).toBe(true);
   });
 
-  it('flags every non-read-only driver tool', () => {
-    for (const [name, schema] of Object.entries(COMPUTER_USE_SCHEMAS)) {
-      if (
-        schema.annotations.readOnlyHint === false &&
-        name !== 'check_permissions'
-      ) {
-        expect(isHighRiskCall(name, {})).toBe(true);
-      }
-    }
+  it('pins the high-risk classification for EVERY tool name independently of the checked-in annotations', () => {
+    // Hardcoded oracle: a future annotation flip in a sync-script
+    // regeneration must fail loudly here, not silently reclassify a
+    // mutating tool as read-only ('info' → AUTO_EDIT auto-approval).
+    const expectedHighRisk = new Set([
+      'launch_app',
+      'kill_app',
+      'bring_to_front',
+      'set_window_frame',
+      'invoke_menu',
+      'click',
+      'double_click',
+      'right_click',
+      'drag',
+      'type_text',
+      'press_key',
+      'hotkey',
+      'set_value',
+      'scroll',
+      'clipboard_write',
+      'move_cursor',
+      'set_agent_cursor_enabled',
+      'set_agent_cursor_motion',
+      'set_agent_cursor_theme',
+      'set_config',
+      'page',
+      'browser_prepare',
+      'browser_navigate',
+      'browser_click',
+      'browser_type',
+      'browser_dialog',
+      'browser_set_input_files',
+      'browser_download',
+      'browser_pointer',
+      'start_recording',
+      'stop_recording',
+      'replay_trajectory',
+      'install_ffmpeg',
+      'start_session',
+      'escalate_session',
+      'end_session',
+    ]);
+    const mismatches = Object.keys(COMPUTER_USE_SCHEMAS).filter(
+      (name) => isHighRiskCall(name, {}) !== expectedHighRisk.has(name),
+    );
+    expect(mismatches).toEqual([]);
+    expect(expectedHighRisk.size).toBe(36);
+  });
+
+  it('flags snapshot calls that write a file via screenshot_out_file', () => {
+    // get_window_state / get_desktop_state are readOnlyHint, but with
+    // screenshot_out_file the driver writes a PNG to a model-chosen path —
+    // must surface the strong ('mcp') confirmation, not 'info'.
+    expect(
+      isHighRiskCall('get_window_state', {
+        pid: 1,
+        window_id: 2,
+        screenshot_out_file: '~/.zshrc',
+      }),
+    ).toBe(true);
+    expect(
+      isHighRiskCall('get_desktop_state', {
+        screenshot_out_file: '/tmp/shot.png',
+      }),
+    ).toBe(true);
+    expect(
+      isHighRiskCall('get_window_state', { screenshot_out_file: '' }),
+    ).toBe(false);
   });
 
   it('does NOT flag read-only tools (or page with a non-mutating action)', () => {

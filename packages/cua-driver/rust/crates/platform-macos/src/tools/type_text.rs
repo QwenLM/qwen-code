@@ -74,8 +74,10 @@ fn def() -> &'static ToolDef {
              refuses to trust AXValue-only read-back there — type_text returns \
              effect:\"unverifiable\" + escalation, never a false \"confirmed\" (a \
              browser's own native address bar/toolbar stays trusted). For a browser \
-             TAB the reliable path is the `page` tool (drives the DOM via CDP); for \
-             an embedded web view use this tool's px form: pass x,y (no \
+             TAB the reliable path is `get_browser_state` + `browser_type`; the \
+             legacy `page` tool only works when the operator enabled \
+             CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS. For an embedded web view use \
+             this tool's px form: pass x,y (no \
              element_index) to pixel-click the field then type, in one call. NOTE: \
              a px focus-click won't reliably open+focus a CLOSED control; AX-press \
              to open/activate it first (works in the background), then px-type. \
