@@ -100,6 +100,82 @@ test('submits a prompt and renders a streamed assistant response @smoke', async 
   );
 });
 
+test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'low', name: 'Low' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'xhigh', name: 'Extra high' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  const modelSubmenu = page.locator('[data-web-shell-model-submenu-trigger]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  const medium = controls.locator('[data-web-shell-effort="medium"]');
+  const xhigh = controls.locator('[data-web-shell-effort="xhigh"]');
+  await expect(controls).toBeVisible();
+  await expect(modelSubmenu).toBeVisible();
+  await expect(modelButton).toContainText('Extra High');
+  await expect(thinking).toBeChecked();
+  await expect(xhigh).toHaveAttribute('aria-pressed', 'true');
+
+  await medium.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Medium');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+  });
+  await expect(thinking).not.toBeChecked();
+  await expect(medium).toBeDisabled();
+  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
+  expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Medium');
+
+  await modelSubmenu.click();
+  await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-model-submenu] input[type="search"]'),
+  ).toBeVisible();
+});
+
 test('uploads an Extension archive from the manager @smoke', async ({
   page,
 }, testInfo) => {
