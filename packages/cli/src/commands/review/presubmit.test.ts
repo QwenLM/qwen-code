@@ -801,6 +801,52 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.total).toBe(0);
       expect(result.blockOnExistingComments).toBe(false);
     });
+
+    it('does not author-match hand-written top-level comments — only finding-shaped bodies', async () => {
+      // Every posted finding opens with a severity prefix (submit refuses
+      // unmarked comments), so the authorship fallback gates on it. Without
+      // the gate, a hand comment at the same path:line lands in overlap and
+      // the blockOnExistingComments rule silently withholds a genuinely new
+      // finding — probe-verified before the gate existed.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 5,
+            body: 'nit: hand-written note on the same line',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('classifies a footer-less finding whose body opens with whitespace', async () => {
+      // submit posts through the trimming severityOf, so a drafted body with
+      // a leading newline goes out verbatim; the authorship fallback must
+      // classify through the same predicate and see that post back, or the
+      // dedup gate re-posts an identical finding as a visual duplicate.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 6,
+            body: '\n**[Critical]** x',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
   });
 });
 

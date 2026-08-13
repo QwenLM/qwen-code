@@ -120,11 +120,20 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
 
   const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
   if (!verdict.comment.effective) {
+    // The refusal must name the REAL blocker. When comment was requested —
+    // by the flag or the standing `review.comment` setting — but the target
+    // is not a PR, effective is false because the arguments name no pull
+    // request to bind the write to; blaming a missing `--comment` flag the
+    // operator never typed (and implying typing one would fix it) misdirects.
+    const commentRequested =
+      verdict.comment.requested || req.defaultComment === true;
     return {
       ok: false,
-      why:
-        '`--comment` was not in the review arguments ' +
-        `(${JSON.stringify(raw.trim())})`,
+      why: commentRequested
+        ? `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
+          'pull request, so they cannot authorise posting to one'
+        : '`--comment` was not in the review arguments ' +
+          `(${JSON.stringify(raw.trim())})`,
     };
   }
 

@@ -413,6 +413,33 @@ describe('parseReviewArgs — settings-provided defaults', () => {
     expect(got.effortSource).toBe('configured');
   });
 
+  it('an invalid explicit --effort falls back to the configured default and says so', () => {
+    // The resolution text names what is ACTUALLY in effect; the `configured`
+    // arm of that ternary is what this pins — every sibling arm is pinned
+    // already, and a mutation to 'using the default effort' here must not
+    // survive.
+    const got = parseReviewArgs('6711 --effort bogus', { effort: 'medium' });
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('configured');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('using the configured review.effort'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid configured effort warns like the flag path instead of dropping silently', () => {
+    // A hand-edited typo must not run every review at the built-in default
+    // while the operator believes another level is on — the flag path warns
+    // on the identical typo, so the configured path mirrors it.
+    const got = parseReviewArgs('6711', { effort: 'hihg' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toContain(
+      'Invalid review.effort value "hihg" in settings; using the default effort.',
+    );
+  });
+
   it('a setting-forced high names the setting in the resolution, not a flag the user never typed', () => {
     // The invalid-effort warning states what is ACTUALLY in effect; when the
     // forcing came from the standing setting it must not claim `--comment`.
@@ -741,11 +768,39 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     expect(got.effortSource).toBe('forced-by-fix');
   });
 
-  it('discards an invalid configured effort instead of leaking it into the verdict', async () => {
+  it('maps a configured auto effort to the built-in rule without warning', async () => {
+    // The schema default written explicitly must behave exactly like the
+    // setting's absence. Deleting the `auto` arm of reviewDefaultsFromSettings
+    // leaves the resolved effort correct while every run warns about a value
+    // that means the default — nothing else would surface the regression.
+    reviewSettingsMock.mockReturnValue({ effort: 'auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('maps a case-variant auto effort like auto', async () => {
+    // `"Auto"` means exactly the built-in default the operator in fact gets;
+    // a case-sensitive comparison drew a factually wrong invalid-value
+    // warning on every run instead.
+    reviewSettingsMock.mockReturnValue({ effort: 'Auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('discards an invalid configured effort, warning instead of dropping it silently', async () => {
     reviewSettingsMock.mockReturnValue({ effort: 'bogus' });
     const got = await verdictFor('6711\n');
     expect(got.effort).toBe('high');
     expect(got.effortSource).toBe('default');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid review.effort value "bogus" in settings'),
+      ),
+    ).toBe(true);
   });
 
   it('ignores workspace settings — the policy keys resolve from operator scopes only', async () => {
