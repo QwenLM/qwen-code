@@ -4197,6 +4197,42 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.round).toBe(5);
   });
 
+  it('carries the reviewed head sha as the incremental anchor on a clean run', () => {
+    const r = composeReview({
+      planPath: plan({ fetchedSha: 'deadbeef00112233' }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('withholds the sha on a fail-closed run — the findings still ride', () => {
+    // Same conditions under which Step 8 forbids advancing the cache's
+    // lastCommitSha: an anchor written past unreviewed scope lets the next
+    // round's incremental range skip it forever.
+    for (const failClosed of [
+      { unreviewedDimensions: ['security — the agent whiffed twice'] },
+      { cannotTellCriticals: ['a.ts:3 — could not fetch the full body'] },
+      { uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
+      { contextUnavailable: true },
+    ]) {
+      const r = composeReview({
+        planPath: plan({ fetchedSha: 'deadbeef00112233' }),
+        modelId: 'm',
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+        ...failClosed,
+      });
+      const ledger = parseLedger(r.body);
+      // Keyed by the fail-closed input so a regression names its condition.
+      expect({ ...failClosed, sha: ledger?.sha }).toEqual({ ...failClosed });
+      expect(ledger?.findings).toHaveLength(1);
+    }
+  });
+
   it('carries NO marker on a local review — there is no PR to hold it', () => {
     const r = composeReview({
       planPath: plan({ prNumber: undefined }),

@@ -1103,6 +1103,26 @@ describe('renderLedgerSection', () => {
     ).not.toContain('PARTIAL');
   });
 
+  it('names the reviewed-at sha when the ledger carries one, and stays silent when not', () => {
+    // The sha is the incremental anchor Step 1's recovered-anchor check reads
+    // from the side file; the rendered section names it so the orchestrator
+    // sees the anchor exists without opening the JSON.
+    const anchored = renderLedgerSection({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def56789',
+    });
+    expect(anchored).toContain('reviewed at `abc1234def56789`');
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('reviewed at');
+  });
+
   it('renders a work-list table that names the ruling owed per entry', () => {
     const md = renderLedgerSection({
       v: 1,

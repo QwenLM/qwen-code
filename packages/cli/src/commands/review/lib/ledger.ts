@@ -50,7 +50,29 @@ export interface Ledger {
    * incomplete case has to say so rather than look identical to it.
    */
   dropped?: number;
+  /**
+   * The head commit this round reviewed — the anchor the next round scopes its
+   * incremental diff from. This is the marker's second job, and the one the
+   * local cache could never do for CI: a fresh environment recovers the
+   * previous findings from the posted body but had nowhere to recover "last
+   * reviewed at", so its incremental range always degraded to the full diff.
+   * Absent on a fail-closed round ON PURPOSE — a run that left scope
+   * unreviewed must not hand the next round an anchor that scopes past it
+   * (the same rule Step 8 applies to the cache's `lastCommitSha`). The
+   * findings still ride; only the anchor is withheld.
+   */
+  sha?: string;
 }
+
+/**
+ * A usable anchor: abbreviated-to-full hex, matching what `git rev-parse`
+ * emits. The parser drops a field that fails this rather than the ledger —
+ * the findings are still a work list even when the anchor is garbage — and
+ * Step 1 additionally verifies the anchor is an ancestor of the fetched head
+ * before scoping to it, so a tampered sha costs a full-range review, never a
+ * mis-scoped one.
+ */
+const SHA_RE = /^[0-9a-f]{7,64}$/;
 
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
@@ -100,6 +122,7 @@ export function serializeLedger(ledger: Ledger): string {
   const render = (findings: LedgerFinding[], dropped: number): string => {
     const payload: Ledger = { v: 1, round: ledger.round, findings };
     if (dropped > 0) payload.dropped = dropped;
+    if (ledger.sha && SHA_RE.test(ledger.sha)) payload.sha = ledger.sha;
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
   // Drop from the END until the whole marker fits. Trailing entries are the
@@ -163,11 +186,14 @@ export function parseLedger(body: string | undefined): Ledger | null {
       Number.isInteger(raw.dropped) && (raw.dropped as number) > 0
         ? (raw.dropped as number)
         : undefined;
+    const sha =
+      typeof raw.sha === 'string' && SHA_RE.test(raw.sha) ? raw.sha : undefined;
     return {
       v: 1,
       round: raw.round,
       findings,
       ...(dropped ? { dropped } : {}),
+      ...(sha ? { sha } : {}),
     };
   } catch {
     return null;

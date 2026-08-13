@@ -505,6 +505,7 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
     if (!input.planPath) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       prNumber?: unknown;
+      fetchedSha?: unknown;
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -527,8 +528,23 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    return serializeLedger(
-      buildLedger(
+    // The anchor rides only when this round's scope was clean. These are the
+    // same conditions under which Step 8 forbids advancing the cache's
+    // `lastCommitSha`: an anchor written past unreviewed or undecided scope
+    // scopes the NEXT round's incremental diff past it, and no later round
+    // ever re-covers the gap. The findings always ride — a fail-closed round's
+    // work list is still a work list; it just cannot certify a range.
+    const failClosed =
+      (input.unreviewedDimensions?.length ?? 0) > 0 ||
+      (input.cannotTellCriticals?.length ?? 0) > 0 ||
+      (input.uncoverableChunks?.length ?? 0) > 0 ||
+      input.contextUnavailable === true;
+    const sha =
+      !failClosed && typeof plan.fetchedSha === 'string'
+        ? plan.fetchedSha
+        : undefined;
+    return serializeLedger({
+      ...buildLedger(
         prevRound + 1,
         (input.draftedComments ?? []) as Array<{
           path?: unknown;
@@ -539,7 +555,8 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           .map(stripReviewFooter)
           .filter((entry) => entry.trim() !== ''),
       ),
-    );
+      ...(sha ? { sha } : {}),
+    });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
     return null;

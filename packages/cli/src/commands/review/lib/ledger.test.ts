@@ -107,6 +107,29 @@ describe('ledger marker', () => {
     expect(parseLedger(body)).toEqual(LEDGER);
   });
 
+  it('round-trips the incremental anchor sha', () => {
+    // The sha is the marker's second job: without it a fresh environment (CI,
+    // another clone) recovers the work list but not "last reviewed at", and
+    // the incremental range degrades to the full diff every time.
+    const anchored: Ledger = { ...LEDGER, sha: 'abc1234def567890' };
+    const body = `Reviewed.\n\n${serializeLedger(anchored)}`;
+    expect(parseLedger(body)).toEqual(anchored);
+  });
+
+  it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {
+    // The body is another account's writable surface. A garbage anchor must
+    // not cost the next round its work list, and must not survive as an
+    // anchor either — Step 1 would hand it to `git`.
+    const forged = `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"$(rm -rf /)"} -->`;
+    const parsed = parseLedger(forged);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.sha).toBeUndefined();
+    // The serializer holds the same line: a non-hex sha never reaches the body.
+    expect(
+      serializeLedger({ v: 1, round: 1, findings: [], sha: 'not a sha' }),
+    ).not.toContain('sha');
+  });
+
   it('is invisible-safe: no `--` survives into the comment payload', () => {
     // `--` inside an HTML comment ends it early and the tail renders as text.
     const s = serializeLedger({
