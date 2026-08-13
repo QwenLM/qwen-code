@@ -475,6 +475,12 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  /**
+   * Built-in / host @ mention providers. Split-view panes share this context
+   * so they match the main composer without ChatPane prop drilling.
+   */
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  atProviders?: readonly WebShellAtProvider[];
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;

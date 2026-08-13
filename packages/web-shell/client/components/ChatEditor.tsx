@@ -1442,7 +1442,14 @@ export const ChatEditor = memo(
       renderComposerTagTooltip,
       onComposerTagClick,
       parseUserMessageContent,
+      builtinAtProviders: contextBuiltinAtProviders,
+      atProviders: contextAtProviders,
     } = useWebShellCustomization();
+    // Props win when set (main composer). Split-view ChatPane omits them and
+    // falls back to the App-level customization context.
+    const resolvedBuiltinAtProviders =
+      builtinAtProviders ?? contextBuiltinAtProviders;
+    const resolvedAtProviders = atProviders ?? contextAtProviders;
 
     const core = useComposerCore({
       onSubmit,
@@ -1466,8 +1473,8 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
-      builtinAtProviders,
-      atProviders,
+      builtinAtProviders: resolvedBuiltinAtProviders,
+      atProviders: resolvedAtProviders,
       atWorkspaceCwd,
       composerTagIcons,
       parseUserMessageContent,

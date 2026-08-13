@@ -554,6 +554,26 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.workspaceName).toBeUndefined();
   });
 
+  it('does not thread host at mention props onto ChatEditor', () => {
+    render(
+      { title: 'Refactor core' },
+      {
+        atProviders: [
+          {
+            id: 'tables',
+            label: 'Tables',
+            async search() {
+              return [];
+            },
+          },
+        ],
+        builtinAtProviders: { exclude: ['extensions'] },
+      },
+    );
+    expect(latestChatEditorProps.atProviders).toBeUndefined();
+    expect(latestChatEditorProps.builtinAtProviders).toBeUndefined();
+  });
+
   it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
     connectionState.capabilities = {
       features: [],

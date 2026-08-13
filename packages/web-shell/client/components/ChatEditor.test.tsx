@@ -117,93 +117,100 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
+const latestComposerCoreOptions = vi.hoisted(() => ({
+  current: null as Record<string, unknown> | null,
+}));
+
 vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   const React = await import('react');
   const actual =
     await importOriginal<typeof import('../hooks/useComposerCore')>();
   return {
     ...actual,
-    useComposerCore: () => ({
-      containerRef: React.createRef<HTMLDivElement>(),
-      viewRef: { current: null },
-      mobileComposer: composerCoreState.mobileComposer,
-      focus: composerCoreState.focus,
-      submitText: vi.fn(),
-      clearText: vi.fn(),
-      getText: vi.fn(() => ''),
-      hasInput: vi.fn(() => false),
-      hasAttachments:
-        mockComposerCoreState.pastedImages.length > 0 ||
-        mockComposerCoreState.composerTags.length > 0,
-      hasContent: false,
-      canSubmit: false,
-      pendingImageBatchCount: 0,
-      imageDragActive: false,
-      imageTransferHandlers: {},
-      handle: {
-        focus: vi.fn(),
-        insertText: vi.fn(),
-        setText: vi.fn(),
-        clear: vi.fn(),
-        retryLast: vi.fn(),
-        addTags: vi.fn(),
-        removeInlineTags: vi.fn(),
-        submit: vi.fn(),
-        hasAttachments: () =>
+    useComposerCore: (options: Record<string, unknown>) => {
+      latestComposerCoreOptions.current = options;
+      return {
+        containerRef: React.createRef<HTMLDivElement>(),
+        viewRef: { current: null },
+        mobileComposer: composerCoreState.mobileComposer,
+        focus: composerCoreState.focus,
+        submitText: vi.fn(),
+        clearText: vi.fn(),
+        getText: vi.fn(() => ''),
+        hasInput: vi.fn(() => false),
+        hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
-      },
-      pastedImages: mockComposerCoreState.pastedImages,
-      removeImage: vi.fn(),
-      composerTags: mockComposerCoreState.composerTags,
-      removeTopTag: mockComposerCoreState.removeTopTag,
-      addTags: vi.fn(),
-      removeInlineTags: vi.fn(),
-      insertText: vi.fn(),
-      setText: vi.fn(),
-      submit: vi.fn(),
-      clear: vi.fn(),
-      retryLast: vi.fn(),
-      replaceEditorText: vi.fn(),
-      shellMode: composerCoreState.shellMode,
-      setShellMode: vi.fn(),
-      toggleShellMode: vi.fn(),
-      currentMode: 'default',
-      sessionName: undefined,
-      searchState: {
-        searchMode: false,
-        searchQuery: '',
-        searchMatches: [],
-        searchActiveIndex: 0,
-        searchInputRef: React.createRef<HTMLInputElement>(),
-        searchUiRef: React.createRef<HTMLDivElement>(),
-        openHistorySearch: composerCoreState.openHistorySearch,
-        closeSearch: vi.fn(),
-        submitSearchMatch: vi.fn(),
-        handleSearchKeyDown: vi.fn(),
-        handleSearchInput: vi.fn(),
-        handleSearchCompositionEnd: vi.fn(),
-      },
-      navigatePrevHistory: vi.fn(),
-      navigateNextHistory: vi.fn(),
-      showShortcutHints: false,
-      followupState: { isVisible: false, suggestion: '' },
-      disabled: false,
-      onAcceptFollowup: vi.fn(),
-      onDismissFollowup: vi.fn(),
-      slashMenu: composerCoreState.slashMenu,
-      closeSlashMenu: composerCoreState.closeSlashMenu,
-      selectSlashCompletion: vi.fn(),
-      acceptSlashCompletion: vi.fn(),
-      atMenu: null,
-      closeAtMenu: vi.fn(),
-      selectAtCompletion: vi.fn(),
-      acceptAtCompletion: vi.fn(),
-      enterAtCategory: vi.fn(),
-      backAtCategories: vi.fn(),
-      updateAtSearch: vi.fn(),
-      selectAtTab: vi.fn(),
-    }),
+        hasContent: false,
+        canSubmit: false,
+        pendingImageBatchCount: 0,
+        imageDragActive: false,
+        imageTransferHandlers: {},
+        handle: {
+          focus: vi.fn(),
+          insertText: vi.fn(),
+          setText: vi.fn(),
+          clear: vi.fn(),
+          retryLast: vi.fn(),
+          addTags: vi.fn(),
+          removeInlineTags: vi.fn(),
+          submit: vi.fn(),
+          hasAttachments: () =>
+            mockComposerCoreState.pastedImages.length > 0 ||
+            mockComposerCoreState.composerTags.length > 0,
+        },
+        pastedImages: mockComposerCoreState.pastedImages,
+        removeImage: vi.fn(),
+        composerTags: mockComposerCoreState.composerTags,
+        removeTopTag: mockComposerCoreState.removeTopTag,
+        addTags: vi.fn(),
+        removeInlineTags: vi.fn(),
+        insertText: vi.fn(),
+        setText: vi.fn(),
+        submit: vi.fn(),
+        clear: vi.fn(),
+        retryLast: vi.fn(),
+        replaceEditorText: vi.fn(),
+        shellMode: composerCoreState.shellMode,
+        setShellMode: vi.fn(),
+        toggleShellMode: vi.fn(),
+        currentMode: 'default',
+        sessionName: undefined,
+        searchState: {
+          searchMode: false,
+          searchQuery: '',
+          searchMatches: [],
+          searchActiveIndex: 0,
+          searchInputRef: React.createRef<HTMLInputElement>(),
+          searchUiRef: React.createRef<HTMLDivElement>(),
+          openHistorySearch: composerCoreState.openHistorySearch,
+          closeSearch: vi.fn(),
+          submitSearchMatch: vi.fn(),
+          handleSearchKeyDown: vi.fn(),
+          handleSearchInput: vi.fn(),
+          handleSearchCompositionEnd: vi.fn(),
+        },
+        navigatePrevHistory: vi.fn(),
+        navigateNextHistory: vi.fn(),
+        showShortcutHints: false,
+        followupState: { isVisible: false, suggestion: '' },
+        disabled: false,
+        onAcceptFollowup: vi.fn(),
+        onDismissFollowup: vi.fn(),
+        slashMenu: composerCoreState.slashMenu,
+        closeSlashMenu: composerCoreState.closeSlashMenu,
+        selectSlashCompletion: vi.fn(),
+        acceptSlashCompletion: vi.fn(),
+        atMenu: null,
+        closeAtMenu: vi.fn(),
+        selectAtCompletion: vi.fn(),
+        acceptAtCompletion: vi.fn(),
+        enterAtCategory: vi.fn(),
+        backAtCategories: vi.fn(),
+        updateAtSearch: vi.fn(),
+        selectAtTab: vi.fn(),
+      };
+    },
   };
 });
 
@@ -250,6 +257,7 @@ afterEach(() => {
   mockComposerCoreState.composerTags = [];
   mockComposerCoreState.pastedImages = [];
   mockComposerCoreState.removeTopTag.mockReset();
+  latestComposerCoreOptions.current = null;
   vi.useRealTimers();
 });
 
@@ -278,6 +286,8 @@ function renderChatEditor(props: {
   disabled?: boolean;
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   customization?: WebShellCustomization;
+  builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
+  atProviders?: WebShellCustomization['atProviders'];
 }) {
   const {
     composerTags,
@@ -1380,6 +1390,63 @@ describe('ChatEditor mobile composer quick actions', () => {
       expect(
         container.querySelector('[data-mobile-voice-active="true"]'),
       ).toBeFalsy();
+    });
+  });
+});
+
+describe('ChatEditor at mention context fallback', () => {
+  const tablesProvider = {
+    id: 'tables',
+    label: 'Tables',
+    async search() {
+      return [];
+    },
+  };
+  const hostFilesProvider = {
+    id: 'files-host',
+    label: 'Host files',
+    async search() {
+      return [];
+    },
+  };
+
+  it('uses customization atProviders when ChatEditor props omit them', () => {
+    const contextProviders = [tablesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(
+      contextProviders,
+    );
+  });
+
+  it('prefers explicit atProviders props over customization', () => {
+    const contextProviders = [tablesProvider];
+    const propProviders = [hostFilesProvider];
+    renderChatEditor({
+      customization: { atProviders: contextProviders },
+      atProviders: propProviders,
+    });
+    expect(latestComposerCoreOptions.current?.atProviders).toBe(propProviders);
+  });
+
+  it('uses customization builtinAtProviders when ChatEditor props omit them', () => {
+    const builtinAtProviders = { exclude: ['extensions'] as const };
+    renderChatEditor({
+      customization: { builtinAtProviders },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
+      builtinAtProviders,
+    );
+  });
+
+  it('prefers explicit builtinAtProviders props over customization', () => {
+    renderChatEditor({
+      customization: { builtinAtProviders: { exclude: ['extensions'] } },
+      builtinAtProviders: { exclude: ['files'] },
+    });
+    expect(latestComposerCoreOptions.current?.builtinAtProviders).toEqual({
+      exclude: ['files'],
     });
   });
 });
