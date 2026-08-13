@@ -669,7 +669,7 @@ exit 1`;
       /TERM_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
     )?.[1];
     const resumeJq = workflow.match(
-      /RESUME_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+      /local resume refusal\n\s+resume="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{ic\}"\)"/,
     )?.[1];
     const reasonJq = workflow.match(
       /REASON="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
@@ -712,212 +712,156 @@ exit 1`;
     expect(run(resumeJq, [bot('2026-08-02T00:00:00Z', '⏸️ unrelated')])).toBe(
       '',
     );
-    // …a re-arm COMMAND comment is ALSO resume evidence, but only while
-    // fresh and unsuperseded: the command's ack rides a queued job, so
-    // counting only the ack would let a tick release a PR minutes after a
-    // human re-armed it. R4-14: the commenter's permission is checked before
-    // a command counts — a renewing stream of stranger commands must not
-    // veto a release forever.
-    const cmdLineJq = workflow.match(
-      /CMD_LINE="\$\(jq -r '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    // Resume evidence is computed by compute_resume_ts — replay the WHOLE
+    // function verbatim (markers + trusted commands + labeled events +
+    // permission gate + tie-break), with `gh` and GNU date stubbed. Each
+    // case pins one of R4-14 / R5-4 / R5-5 / R5-9.
+    const resumeFn = workflow.match(
+      /(compute_resume_ts\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
-    const refusalJq = workflow.match(
-      /REFUSAL_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
-    )?.[1];
-    expect(cmdLineJq).toBeTruthy();
-    expect(refusalJq).toBeTruthy();
-    const runCmd = (comments) =>
-      execFileSync('jq', ['-r', cmdLineJq], {
-        encoding: 'utf8',
-        input: JSON.stringify(comments),
-      }).trim();
-    // Exact trimmed command match → "ts<TAB>login", any author.
-    expect(
-      runCmd([human('2026-08-06T00:00:00Z', '  @qwen-code /takeover ')]),
-    ).toBe('2026-08-06T00:00:00Z\twenshao');
-    expect(runCmd([human('2026-08-06T00:00:00Z', '@qwen-code /retry')])).toBe(
-      '2026-08-06T00:00:00Z\twenshao',
-    );
-    // …but `/takeover stop` is a release, not a resume.
-    expect(
-      runCmd([human('2026-08-06T00:00:00Z', '@qwen-code /takeover stop')]),
-    ).toBe('');
-    // R4-31: two commands — the NEWEST wins (pins the `max` selection; a
-    // stale older command must not become CMD_TS).
-    expect(
-      runCmd([
-        human('2026-08-01T00:00:00Z', '@qwen-code /retry'),
-        human('2026-08-06T00:00:00Z', '@qwen-code /takeover'),
-      ]),
-    ).toBe('2026-08-06T00:00:00Z\twenshao');
-    // A refusal ack (fork-refused / base-refused / skip-blocked) is what
-    // supersedes a refused command — verify the variant set.
-    const runRefusal = (comments) =>
-      execFileSync(
-        'jq',
-        ['-r', '--arg', 'ab', 'qwen-code-dev-bot', refusalJq],
-        { encoding: 'utf8', input: JSON.stringify(comments) },
-      ).trim();
-    expect(
-      runRefusal([
-        bot('2026-08-06T00:01:00Z', '🚫 … <!-- takeover-ack fork-refused -->'),
-      ]),
-    ).toBe('2026-08-06T00:01:00Z');
-    expect(
-      runRefusal([
-        bot('2026-08-06T00:01:00Z', '🤝 … <!-- takeover-ack engaged -->'),
-      ]),
-    ).toBe('');
-    // The full gate: command evidence counts only when it is newer than the
-    // marker evidence, newer than any refusal, inside the grace window, AND
-    // the commenter holds write/maintain/admin (R4-14). Stub `gh` so the
-    // permission read returns a test-controlled value.
-    const cmdGate = workflow.match(
-      /(if \[\[ -n "\$\{CMD_TS\}" && "\$\{CMD_TS\}" > "\$\{RESUME_TS\}" \]\] \\[\s\S]*?\n {16}fi)/,
-    )?.[1];
-    expect(cmdGate).toBeTruthy();
-    // The extracted block runs GNU `date -u -d`; on macOS hosts BSD date
-    // lacks -d, so shim it through node (always present in this repo).
+    expect(resumeFn).toBeTruthy();
     const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
-    const gate = (env) => {
-      const dir = mkdtempSync(join(tmpdir(), 'shep-gate-'));
+    const computeResume = ({
+      comments = [],
+      events = [],
+      perm = 'write',
+      permFail = false,
+      now = '2026-08-06T00:30:00Z',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'resume-'));
       try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        writeFileSync(join(dir, 'ev.json'), JSON.stringify(events));
         writeFileSync(
           join(dir, 'gh'),
-          '#!/bin/bash\nif [[ "$1" == "api" ]]; then printf \'%s\' "${TEST_PERM}"; fi',
+          [
+            '#!/bin/bash',
+            'if [[ "$1" == "api" ]]; then',
+            `  if [[ "${permFail}" == "true" ]]; then echo "HTTP 502" >&2; exit 1; fi`,
+            // Per-user permission: the collaborators path ($2) names the
+            // user; `perm` is the default, `stranger` always reads `read`.
+            `  case "$2" in *collaborators/stranger/*) printf '%s' "read" ;; *) printf '%s' "${perm}" ;; esac`,
+            'fi',
+          ].join('\n'),
         );
         chmodSync(join(dir, 'gh'), 0o755);
-        return execFileSync(
+        const out = execFileSync(
           'bash',
           [
             '-c',
-            `${gnuDateShim}\n${cmdGate.replace(/\n {16}/g, '\n')}\necho "RESUME_TS=$RESUME_TS"`,
+            `${gnuDateShim}\n${resumeFn.replace(/\n {10}/g, '\n')}\ncompute_resume_ts "${dir}/ic.json" "${dir}/ev.json"\necho "PERM_FAILED=$PERM_READ_FAILED"`,
           ],
           {
             env: {
               ...process.env,
               PATH: `${dir}:${process.env.PATH}`,
               REPO: 'QwenLM/qwen-code',
-              NOW_EPOCH: '1786000000',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
               RESUME_COMMAND_GRACE_SEC: '7200',
-              TEST_PERM: 'write',
-              CMD_AUTHOR: 'wenshao',
-              ...env,
+              NOW_EPOCH: String(Date.parse(now) / 1000),
             },
             encoding: 'utf8',
           },
         ).trim();
+        const [ts, flag] = out.split('PERM_FAILED=');
+        return { ts, flag };
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    // fresh accepted-but-unacked command → counts (the R1 race fix).
+    const cmd = (ts, login, body = '@qwen-code /takeover') => ({
+      user: { login },
+      created_at: ts,
+      body,
+    });
+    const evt = (ts, name = 'autofix/takeover', kind = 'labeled') => ({
+      event: kind,
+      label: { name },
+      created_at: ts,
+    });
+    // bot markers: newest re-arm/engage wins.
     expect(
-      gate({
-        RESUME_TS: '',
-        CMD_TS: '2026-08-06T00:00:00Z',
-        REFUSAL_TS: '',
-        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
-      }),
-    ).toBe(`RESUME_TS=2026-08-06T00:00:00Z`);
-    // refused command (refusal ack newer) → does NOT count (R1-2).
+      computeResume({
+        comments: [
+          bot('2026-08-02T00:00:00Z', '🔄 … <!-- autofix-rearm -->'),
+          bot('2026-08-03T00:00:00Z', '🤝 … <!-- takeover-ack engaged -->'),
+        ],
+      }).ts,
+    ).toBe('2026-08-03T00:00:00Z');
+    // a fresh trusted command counts (the R1 race fix)…
     expect(
-      gate({
-        RESUME_TS: '',
-        CMD_TS: '2026-08-06T00:00:00Z',
-        REFUSAL_TS: '2026-08-06T00:01:00Z',
-        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
-      }),
-    ).toBe('RESUME_TS=');
-    // ignored command (no ack ever) past the grace window → expires (R1-1).
-    expect(
-      gate({
-        RESUME_TS: '',
-        CMD_TS: '2026-08-06T00:00:00Z',
-        REFUSAL_TS: '',
-        NOW_EPOCH: String(Date.parse('2026-08-06T03:00:00Z') / 1000),
-      }),
-    ).toBe('RESUME_TS=');
-    // an already-acked command never overrides its own newer marker.
-    expect(
-      gate({
-        RESUME_TS: '2026-08-06T00:05:00Z',
-        CMD_TS: '2026-08-06T00:00:00Z',
-        REFUSAL_TS: '',
-        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
-      }),
-    ).toBe('RESUME_TS=2026-08-06T00:05:00Z');
-    // R4-14: a stranger's fresh command (read/no permission) does NOT count,
-    // even inside the grace window.
-    expect(
-      gate({
-        RESUME_TS: '',
-        CMD_TS: '2026-08-06T00:00:00Z',
-        REFUSAL_TS: '',
-        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
-        TEST_PERM: 'read',
-      }),
-    ).toBe('RESUME_TS=');
-    expect(
-      gate({
-        RESUME_TS: '',
-        CMD_TS: '2026-08-06T00:00:00Z',
-        REFUSAL_TS: '',
-        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
-        TEST_PERM: '',
-      }),
-    ).toBe('RESUME_TS=');
-    // R4-29: a refusal OLDER than the fresh command must NOT supersede it
-    // (pins the `||` in the supersession check — an `&&` flip drops the
-    // command and reopens the R1 release race).
-    expect(
-      gate({
-        RESUME_TS: '',
-        CMD_TS: '2026-08-06T01:00:00Z',
-        REFUSAL_TS: '2026-08-06T00:01:00Z',
-        NOW_EPOCH: String(Date.parse('2026-08-06T01:30:00Z') / 1000),
-      }),
-    ).toBe('RESUME_TS=2026-08-06T01:00:00Z');
-    // A fresh `labeled` event is resume evidence too (UI re-apply).
-    const eventJq = workflow.match(
-      /EVENT_TS="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
-    )?.[1];
-    expect(eventJq).toBeTruthy();
-    const runEvent = (events) =>
-      execFileSync('jq', ['-r', '--arg', 'tl', 'autofix/takeover', eventJq], {
-        encoding: 'utf8',
-        input: JSON.stringify(events),
-      }).trim();
-    expect(
-      runEvent([
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-06T00:00:00Z',
-        },
-        {
-          event: 'labeled',
-          label: { name: 'other' },
-          created_at: '2026-08-07T00:00:00Z',
-        },
-      ]),
+      computeResume({ comments: [cmd('2026-08-06T00:00:00Z', 'wenshao')] }).ts,
     ).toBe('2026-08-06T00:00:00Z');
-    // R4-31: two takeover labeled events — the NEWEST wins (pins `max`).
+    // …but a stranger's command does not (R4-14)…
     expect(
-      runEvent([
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-01T00:00:00Z',
-        },
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-08T00:00:00Z',
-        },
-      ]),
-    ).toBe('2026-08-08T00:00:00Z');
-    expect(runEvent([{ event: 'closed' }])).toBe('');
+      computeResume({
+        comments: [cmd('2026-08-06T00:00:00Z', 'stranger')],
+        perm: 'read',
+      }).ts,
+    ).toBe('');
+    // …and a stale command past the grace window expires (R1-1)…
+    expect(
+      computeResume({
+        comments: [cmd('2026-08-06T00:00:00Z', 'wenshao')],
+        now: '2026-08-06T03:00:00Z',
+      }).ts,
+    ).toBe('');
+    // …a refusal ack NEWER than the command supersedes it (R1-2)…
+    expect(
+      computeResume({
+        comments: [
+          cmd('2026-08-06T00:00:00Z', 'wenshao'),
+          bot(
+            '2026-08-06T00:01:00Z',
+            '🚫 … <!-- takeover-ack fork-refused -->',
+          ),
+        ],
+      }).ts,
+    ).toBe('');
+    // …but a refusal OLDER than the fresh command does not (R4-29)…
+    expect(
+      computeResume({
+        comments: [
+          bot(
+            '2026-08-06T00:01:00Z',
+            '🚫 … <!-- takeover-ack fork-refused -->',
+          ),
+          cmd('2026-08-06T01:00:00Z', 'wenshao'),
+        ],
+        now: '2026-08-06T01:30:00Z',
+      }).ts,
+    ).toBe('2026-08-06T01:00:00Z');
+    // …and a stranger's echo NEWER than the maintainer's command cannot
+    // shadow it — every in-grace command is permission-checked (R5-5), so
+    // the maintainer's still promotes.
+    expect(
+      computeResume({
+        comments: [
+          cmd('2026-08-06T00:00:00Z', 'wenshao'),
+          cmd('2026-08-06T00:10:00Z', 'stranger'),
+        ],
+      }).ts,
+    ).toBe('2026-08-06T00:00:00Z');
+    // a labeled event counts (UI re-apply)…
+    expect(computeResume({ events: [evt('2026-08-06T00:00:00Z')] }).ts).toBe(
+      '2026-08-06T00:00:00Z',
+    );
+    // …and a same-second tie resolves toward RESUME (R5-9).
+    expect(
+      computeResume({
+        comments: [bot('2026-08-06T00:00:00Z', '🔄 … <!-- autofix-rearm -->')],
+        events: [evt('2026-08-06T00:00:00Z')],
+      }).ts,
+    ).toBe('2026-08-06T00:00:00Z');
+    // a failed permission read sets PERM_READ_FAILED and does not promote
+    // the command (R5-4).
+    const permFailed = computeResume({
+      comments: [cmd('2026-08-06T00:00:00Z', 'wenshao')],
+      permFail: true,
+    });
+    expect(permFailed.ts).toBe('');
+    expect(permFailed.flag).toBe('true');
     // The event read fails closed, like the comment read.
     expect(workflow).toContain(
       'event read failed — evaluation deferred this tick (fail closed)',
@@ -956,11 +900,12 @@ exit 1`;
         ),
       ]),
     ).toContain('time-budget exhaustions');
-    // The re-arm guard: a resume NEWER than the latest cap notice means the
-    // label is stale and the release must never fire. Replay the gate
-    // VERBATIM so a dropped comparison fails the test.
+    // The re-arm guard: resume evidence AT-OR-NEWER than the latest cap
+    // notice means a human acted and the release must never fire (ties
+    // resolve toward resume — R5-9). Replay the gate VERBATIM so a dropped
+    // comparison fails the test.
     const rearmGuard = workflow.match(
-      /(elif \[\[ -n "\$\{RESUME_TS\}" && "\$\{RESUME_TS\}" > "\$\{TERM_TS\}" \]\]; then\n {18}STATE='managed \(re-armed\)')/,
+      /(elif \[\[ -n "\$\{RESUME_TS\}" && ! "\$\{TERM_TS\}" > "\$\{RESUME_TS\}" \]\]; then\n {18}STATE='managed \(re-armed\)')/,
     )?.[1];
     expect(rearmGuard).toBeTruthy();
     const guard = (resume, term) =>
@@ -979,6 +924,11 @@ exit 1`;
         },
       ).trim();
     expect(guard('2026-08-06T00:00:00Z', '2026-08-05T00:00:00Z')).toBe(
+      'REARMED',
+    );
+    // A same-second tie resolves toward RESUME (the release stays
+    // suppressed) — R5-9.
+    expect(guard('2026-08-05T00:00:00Z', '2026-08-05T00:00:00Z')).toBe(
       'REARMED',
     );
     expect(guard('2026-08-04T00:00:00Z', '2026-08-05T00:00:00Z')).toBe(
@@ -1086,25 +1036,27 @@ exit 1`;
     );
     // The stale-label heal (R1-13): a HUMAN unlabeled event on an
     // awaiting-human PR clears the stale escalation label — budgeted,
-    // skip-vetoed, never triggered by the bot's own auto-release, and (R2-1)
-    // correlated to the CURRENT takeover cycle: only an unlabel newer than
-    // the latest label-apply counts, so a human unlabel from an EARLIER
-    // cycle cannot heal this cycle's label.
+    // skip-vetoed, never triggered by the bot's own auto-release, and (R5-10)
+    // anchored to the CURRENT pause boundary (the latest needs-human
+    // label-apply event), so a stale unlabel from an EARLIER cycle can't
+    // heal this cycle's label, and an absent anchor skips the cleanup
+    // (fail closed).
     expect(workflow).toContain('"${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}"');
-    const latestLabelJq = workflow.match(
-      /LATEST_LABEL_TS="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
+    const nhApplyJq = workflow.match(
+      /NH_APPLY_TS="\$\(jq -r --arg nl "\$\{NEEDS_HUMAN_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
     )?.[1];
     const unlabelJq = workflow.match(
-      /UNLABEL_ACTOR="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" --arg ab "\$\{AUTOFIX_BOT\}" --arg ll "\$\{LATEST_LABEL_TS\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
+      /UNLABEL_ACTOR="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" --arg ab "\$\{AUTOFIX_BOT\}" --arg ll "\$\{NH_APPLY_TS\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
     )?.[1];
-    expect(latestLabelJq).toBeTruthy();
+    expect(nhApplyJq).toBeTruthy();
     expect(unlabelJq).toBeTruthy();
     const runUnlabel = (events) => {
       const ll = execFileSync(
         'jq',
-        ['-r', '--arg', 'tl', 'autofix/takeover', latestLabelJq],
+        ['-r', '--arg', 'nl', 'autofix/needs-human', nhApplyJq],
         { encoding: 'utf8', input: JSON.stringify(events) },
       ).trim();
+      if (ll === '') return '';
       return execFileSync(
         'jq',
         [
@@ -1123,14 +1075,16 @@ exit 1`;
         { encoding: 'utf8', input: JSON.stringify(events) },
       ).trim();
     };
-    // Same-cycle manual release → heal fires.
+    const nhLabeled = (ts) => ({
+      event: 'labeled',
+      label: { name: 'autofix/needs-human' },
+      created_at: ts,
+    });
+    // Same-cycle manual release → heal fires (human unlabel newer than the
+    // current pause's label-apply).
     expect(
       runUnlabel([
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-01T00:00:00Z',
-        },
+        nhLabeled('2026-08-01T12:00:00Z'),
         {
           event: 'unlabeled',
           label: { name: 'autofix/takeover' },
@@ -1143,11 +1097,7 @@ exit 1`;
     // cleanup — needs-human survives auto-release by design.
     expect(
       runUnlabel([
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-01T00:00:00Z',
-        },
+        nhLabeled('2026-08-01T12:00:00Z'),
         {
           event: 'unlabeled',
           label: { name: 'autofix/takeover' },
@@ -1156,8 +1106,9 @@ exit 1`;
         },
       ]),
     ).toBe('');
-    // R2-1's two-cycle fixture: cycle-1 human release, cycle-2 re-label +
-    // bot auto-release — the stale human event must NOT heal cycle 2.
+    // R5-10's core scenario: a stale human unlabel OLDER than the current
+    // pause's needs-human apply must not heal (cycle-1 human release, then
+    // /retry re-arm + re-cap re-applied needs-human).
     expect(
       runUnlabel([
         {
@@ -1171,6 +1122,7 @@ exit 1`;
           label: { name: 'autofix/takeover' },
           created_at: '2026-08-02T00:00:00Z',
         },
+        nhLabeled('2026-08-03T00:00:00Z'),
         {
           event: 'unlabeled',
           label: { name: 'autofix/takeover' },
@@ -1179,44 +1131,23 @@ exit 1`;
         },
       ]),
     ).toBe('');
-    // R4-31: full two-cycle stream WITH cycle-1's labeled event (pins
-    // LATEST_LABEL_TS `max`; a `min` mutant would anchor to cycle 1 and let
-    // the stale human unlabel heal cycle 2) — still expects ''.
+    // An absent anchor (needs-human apply beyond the ~90-day events
+    // lookback) → cannot correlate → cleanup skipped (fail closed).
     expect(
       runUnlabel([
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-01T00:00:00Z',
-        },
         {
           event: 'unlabeled',
           label: { name: 'autofix/takeover' },
           actor: { login: 'wenshao' },
           created_at: '2026-08-02T00:00:00Z',
         },
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-03T00:00:00Z',
-        },
-        {
-          event: 'unlabeled',
-          label: { name: 'autofix/takeover' },
-          actor: { login: 'qwen-code-dev-bot' },
-          created_at: '2026-08-05T00:00:00Z',
-        },
       ]),
     ).toBe('');
-    // R4-31: a human unlabel of an UNRELATED label must not count (pins the
+    // A human unlabel of an UNRELATED label must not count (pins the
     // `.label.name == $tl` select).
     expect(
       runUnlabel([
-        {
-          event: 'labeled',
-          label: { name: 'autofix/takeover' },
-          created_at: '2026-08-01T00:00:00Z',
-        },
+        nhLabeled('2026-08-01T12:00:00Z'),
         {
           event: 'unlabeled',
           label: { name: 'autofix/skip' },
@@ -1297,7 +1228,7 @@ exit 1`;
     )?.[1];
     expect(rearmKey).toBeTruthy();
     const resumeTs = workflow.match(
-      /RESUME_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+      /local resume refusal\n\s+resume="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{ic\}"\)"/,
     )?.[1];
     expect(resumeTs).toBeTruthy();
     const markerSet = (p) =>
@@ -1315,13 +1246,13 @@ exit 1`;
     expect(autofix).toContain("TAKEOVER_COMMAND: '@qwen-code /takeover'");
     expect(autofix).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     const cmdTs = workflow.match(
-      /CMD_LINE="\$\(jq -r '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+      /cands="\$\(jq -r '([\s\S]*?)' "\$\{ic\}"\)"/,
     )?.[1];
     expect(cmdTs).toBeTruthy();
     expect(cmdTs).toContain('"@qwen-code /takeover"');
     expect(cmdTs).toContain('"@qwen-code /retry"');
     const refusalTs = workflow.match(
-      /REFUSAL_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+      /refusal="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' "\$\{ic\}"\)"/,
     )?.[1];
     expect(refusalTs).toBeTruthy();
     // Compare the refusal-variant SET against the producer's full ack
@@ -1488,15 +1419,25 @@ exit 1`;
     expect(workflow).toContain(
       'LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels',
     );
-    // R2-12: the labeled-event merge into RESUME_TS exists…
+    // R2-12/R5-9: the labeled-event merge lives in compute_resume_ts with a
+    // tie-safe comparison — an event at-or-newer than other evidence wins.
     expect(workflow).toMatch(
-      /if \[\[ -n "\$\{EVENT_TS\}" && "\$\{EVENT_TS\}" > "\$\{RESUME_TS\}" \]\]; then\n\s+RESUME_TS="\$\{EVENT_TS\}"/,
+      /if \[\[ -n "\$\{evt\}" && ! "\$\{resume\}" > "\$\{evt\}" \]\]; then\n\s+resume="\$\{evt\}"/,
     );
-    // R2-21: …and both promotions run BEFORE the evaluation chain consumes
-    // RESUME_TS (position-independent extractions can't see this).
+    // R2-21: the single compute_resume_ts call runs BEFORE the evaluation
+    // chain consumes RESUME_TS — and the R5-6 pre-write recompute exists.
     expect(workflow).toMatch(
-      /RESUME_TS="\$\{CMD_TS\}"[\s\S]*?RESUME_TS="\$\{EVENT_TS\}"[\s\S]*?if \[\[ -z "\$\{TERM_TS\}" \]\]/,
+      /RESUME_TS="\$\(compute_resume_ts \/tmp\/tk-ic\.json \/tmp\/tk-ev\.json\)"[\s\S]*?if \[\[ -z "\$\{TERM_TS\}" \]\]/,
     );
+    expect(workflow).toContain(
+      'RESUME_NOW="$(compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json)"',
+    );
+    // R5-4: a failed permission read defers the release (fail closed),
+    // pinned at both evaluation points.
+    expect(
+      workflow.match(/command-permission read failed — release deferred/g)
+        ?.length,
+    ).toBe(2);
     // R2-13: CLEANUPS increments only after the heal DELETE succeeded.
     expect(workflow).toMatch(
       /clear stale \$\{NEEDS_HUMAN_LABEL\}[\s\S]{0,400}labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}" '\$l\|@uri'\)"; then\n\s+CLEANUPS=\$\(\( CLEANUPS \+ 1 \)\)/,
@@ -1548,10 +1489,10 @@ exit 1`;
     // R4-14: a command comment counts only after a write/maintain/admin
     // permission read on its author.
     expect(workflow).toContain(
-      'gh api "repos/${REPO}/collaborators/${CMD_AUTHOR}/permission"',
+      'gh api "repos/${REPO}/collaborators/${cauthor}/permission"',
     );
     expect(workflow).toMatch(
-      /CMD_PERM}" == 'write' \|\| "\$\{CMD_PERM\}" == 'maintain' \|\| "\$\{CMD_PERM\}" == 'admin'/,
+      /cperm}" == 'write' \|\| "\$\{cperm\}" == 'maintain' \|\| "\$\{cperm\}" == 'admin'/,
     );
     // R1-10: the CI-status classifiers are shared helpers, and NEITHER loop
     // inlines its own copy of the jq (a check-naming change must land once).

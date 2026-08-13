@@ -1829,23 +1829,23 @@ jobs:
               # `/takeover stop` retries the removal — but must not disappear
               # silently either: masked, the ack reads "released" while the
               # loop keeps managing the PR.
-              # REST for the same reason as the add above; the label name is a
-              # path segment and contains a slash, so it must be URI-encoded.
               # The 404-tolerance block is pinned byte-identical to the other
               # workflows' label DELETE (a contract test), so REMOVED_OK —
-              # whether the takeover release actually LANDED — is derived from
-              # REMOVE_ERR's content AFTER the idiom instead of reworking it:
-              # empty = landed, 404 = already off (landed), anything else =
-              # the release did NOT land, and the needs-human removal below
-              # must NOT run (R4-32) — or the PR keeps the takeover label
-              # while losing its escalation label, and the release ack posted
-              # here would latch RELEASE_ACKED, blocking every automated path
-              # that could re-apply it.
+              # whether the takeover release actually LANDED — is derived
+              # AFTER the idiom from the captured stream: gh api prints the
+              # remaining-labels JSON body on success (even '[]'), while a
+              # failure carries "HTTP <status>" in the error text. 404 =
+              # already off (landed); any other HTTP error = the release did
+              # NOT land and the needs-human removal below must NOT run
+              # (R4-32) — or the PR keeps the takeover label while losing
+              # its escalation label, and the release ack posted here would
+              # latch RELEASE_ACKED, blocking every automated path that
+              # could re-apply it.
               if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
                 [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
               fi
               REMOVED_OK=true
-              if [[ -n "${REMOVE_ERR}" && "${REMOVE_ERR}" != *404* ]]; then
+              if [[ "${REMOVE_ERR}" == *"HTTP "* && "${REMOVE_ERR}" != *404* ]]; then
                 REMOVED_OK=false
               fi
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
@@ -1940,16 +1940,22 @@ jobs:
           gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '\U0001F504 AutoFix re-armed. The next scan re-reads this PR'"'"'s feedback from the start and the round counter resets. Nothing was deleted — this marker supersedes the evaluation markers above it.\n\n<details>\n<summary>中文说明</summary>\n\n\U0001F504 已重新武装 AutoFix。下一次扫描会从头重新读取本 PR 的反馈，轮次计数也已重置。未删除任何内容 —— 本标记使其上方的评估标记失效。\n\n</details>\n\n<!-- autofix-rearm -->')"
           echo "🔄 re-armed PR #${PR}"
           # Management resumed — the escalation label is stale. 404 is the
-          # common case (the PR was never paused). Skip wins over re-arm
-          # EVERYWHERE (mirrors the takeover-command guard): a frozen PR
-          # must keep its escalation label, because the fresh re-arm window
-          # won't re-apply it while skip is present and no scan manages the
-          # PR. And the read FAILS CLOSED (mirrors takeover-ack's exit-1):
-          # an unreadable label state must keep the label, never drop it.
-          if ! RETRY_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null)"; then
+          # common case (the PR was never paused). Remove it only when the
+          # PR will actually be MANAGED after this re-arm (R5-2): the scan
+          # candidate population is bot-authored or takeover-labeled PRs
+          # only, so on an auto-released human PR (no takeover label, not
+          # bot-authored) /retry posts a marker nothing will act on — the
+          # label must stay as the only filterable escalation state. Skip
+          # also wins over re-arm everywhere (a frozen PR keeps its label),
+          # and the read FAILS CLOSED (mirrors takeover-ack's exit-1).
+          if ! RETRY_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
             echo "::warning::#${PR}: label state unreadable — keeping ${NEEDS_HUMAN_LABEL} (fail closed)"
-          elif [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${RETRY_LABELS}")" == "true" ]]; then
+          elif [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${RETRY_INFO}")" == "true" ]]; then
             echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
+          elif [[ "$(jq -r --arg ab "${AUTOFIX_BOT}" --arg tk "${TAKEOVER_LABEL}" '
+                ((.author.login // "") == $ab) or (([.labels[]?.name] | index($tk)) != null)
+              ' <<< "${RETRY_INFO}")" != "true" ]]; then
+            echo "🧭 keeping ${NEEDS_HUMAN_LABEL} on #${PR}: nothing manages it until re-engaged (no takeover label, not bot-authored)"
           elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
             [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
           fi
@@ -2568,10 +2574,11 @@ jobs:
               break
             fi
             # One PR fetch for the branch name, check rollup, creation time
-            # (the watermark floor below), and labels (the effective round
-            # cap) — avoids extra round-trips per candidate PR.
+            # (the watermark floor below), labels (the effective round
+            # cap), and author (the cap branch's bot-author exemption) —
+            # avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository,author 2> /dev/null || echo '{}')"
             HEAD_REPO_FULL="${REPO}"
             if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
               HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
@@ -2950,22 +2957,24 @@ jobs:
                 [ .[] | select((.user.login // "") == $ab)
                   | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                   | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
-              # Release evidence = a takeover unlabeled EVENT newer than the
-              # window key. GitHub records it whenever the label comes off —
-              # `/takeover stop`, the ack job, or a manual UI removal —
-              # unlike the release-ack COMMENT, which both release paths
-              # tolerate losing (R4-1): the stop branch swallows a failed
-              # ack post, and the ack job's set -e aborts before it. A
-              # re-arm advances REARM_KEY past the event, re-enabling the
-              # label. Fail closed: an unreadable event history suppresses
-              # the re-label rather than risk the ping-pong.
+              # Release evidence = a takeover unlabeled EVENT at-or-newer
+              # than the window key. GitHub records it whenever the label
+              # comes off — `/takeover stop`, the ack job, or a manual UI
+              # removal — unlike the release-ack COMMENT, which both release
+              # paths tolerate losing (R4-1): the stop branch swallows a
+              # failed ack post, and the ack job's set -e aborts before it.
+              # A re-arm advances REARM_KEY past the event, re-enabling the
+              # label. Same-second ties resolve toward "released" — never
+              # re-escalate a completed release (R5-9). Fail closed: an
+              # unreadable event history suppresses the re-label rather than
+              # risk the ping-pong.
               if ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > "${WORKDIR}/ev.json"; then
                 RELEASE_ACKED='unreadable'
               else
                 RELEASE_ACKED="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg rt "${NOTICE_RT}" '
                   [ .[] | select((.event // "") == "unlabeled")
                     | select((.label.name // "") == $tl)
-                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ev.json")"
+                    | select((.created_at // "") >= $rt) ] | length' "${WORKDIR}/ev.json")"
               fi
               # A release only suppresses re-labeling for HUMAN-authored PRs.
               # A bot-authored PR released from takeover returns to STANDARD

@@ -378,10 +378,75 @@ jobs:
                 | select(((.body // "") | contains("<!-- autofix-rearm -->"))
                          or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
                 | .created_at ] | max // ""' /tmp/cf-ic.json)"
-            if [[ -n "${resume}" && ( -z "${term}" || "${resume}" > "${term}" ) ]]; then
+            # Only marker-confirmed re-arm clears "paused" — and only against
+            # a REAL cap notice. The state "label present but no notice" is
+            # reachable (the cap path applies the label before posting the
+            # notice and tolerates a lost notice; a human can delete it too):
+            # every takeover PR carries an older engage ack, so `term` empty
+            # + `resume` non-empty must NOT read as "re-armed" — that fails
+            # OPEN onto a genuinely paused PR (R5-3).
+            if [[ -n "${resume}" && -n "${term}" && "${resume}" > "${term}" ]]; then
               return 1
             fi
             return 0
+          }
+
+          # Latest resume evidence (bot re-arm/engage markers, a trusted
+          # human's fresh command comment, or a fresh takeover labeled
+          # event) as an RFC3339 timestamp, or '' when none. A command counts
+          # only while FRESH (grace window), UNSUPERSEDED by a refusal ack,
+          # and from a write/maintain/admin author — scanned newest-first so
+          # a stranger's echo can't SHADOW a maintainer's command (R5-5),
+          # with permission reads bounded at 2 per PR. Sets PERM_READ_FAILED
+          # when a command's permission check could not be evaluated — the
+          # caller fails CLOSED on that (defer; never trust-on-error, R5-4).
+          compute_resume_ts() {
+            local ic="$1" ev="$2"
+            PERM_READ_FAILED=''
+            local resume refusal
+            resume="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select(((.body // "") | contains("<!-- autofix-rearm -->"))
+                         or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
+                | .created_at ] | max // ""' "${ic}")"
+            refusal="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | test("<!-- takeover-ack (fork-refused|base-refused|skip-blocked) -->"))
+                | .created_at ] | max // ""' "${ic}")"
+            local cands cts cauthor cage cperm reads=0
+            cands="$(jq -r '
+              [ .[] | select(((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /takeover"
+                             or ((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /retry")
+                | {ts: (.created_at // ""), login: (.user.login // "")} ]
+              | sort_by(.ts) | reverse | .[] | "\(.ts)\t\(.login)"' "${ic}")"
+            while IFS=$'\t' read -r cts cauthor; do
+              [[ -z "${cts}" || -z "${cauthor}" ]] && continue
+              [[ "${cts}" > "${resume}" ]] || continue
+              [[ -z "${refusal}" || "${cts}" > "${refusal}" ]] || continue
+              cage=$(( NOW_EPOCH - $(date -u -d "${cts}" +%s) ))
+              [[ "${cage}" -lt "${RESUME_COMMAND_GRACE_SEC}" ]] || continue
+              [[ "${reads}" -ge 2 ]] && break
+              reads=$(( reads + 1 ))
+              if ! cperm="$(gh api "repos/${REPO}/collaborators/${cauthor}/permission" --jq '.permission // ""' 2> /dev/null)"; then
+                PERM_READ_FAILED=true
+                continue
+              fi
+              if [[ "${cperm}" == 'write' || "${cperm}" == 'maintain' || "${cperm}" == 'admin' ]]; then
+                resume="${cts}"
+                break
+              fi
+            done <<< "${cands}"
+            local evt
+            evt="$(jq -r --arg tl "${TAKEOVER_LABEL}" '
+              [ .[] | select((.event // "") == "labeled")
+                | select((.label.name // "") == $tl)
+                | .created_at ] | max // ""' "${ev}")"
+            # A tie (same-second) resolves toward the RESUME side: suppressing
+            # a release is always the safer direction (R5-9).
+            if [[ -n "${evt}" && ! "${resume}" > "${evt}" ]]; then
+              resume="${evt}"
+            fi
+            printf '%s' "${resume}"
           }
 
           # CI-status classifiers shared by BOTH dashboard loops, so a
@@ -715,62 +780,22 @@ jobs:
                   [ .[] | select((.user.login // "") == $ab)
                     | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                     | .created_at ] | max // ""' /tmp/tk-ic.json)"
-                # Resume evidence — anything newer than TERM_TS means a
-                # human already acted and the release must never fire:
+                # Resume evidence — anything at-or-newer than TERM_TS means
+                # a human already acted and the release must never fire;
+                # ties resolve toward resume (the safe direction, R5-9):
                 #   1. the bot's resume markers (re-arm / engage ack);
-                #   2. a re-arm COMMAND comment, but only while FRESH and
-                #      UNSUPERSEDED: an accepted command is acked within
-                #      minutes (the ack carries a resume marker); a refused
-                #      command draws a refusal ack, which supersedes it
-                #      here; a command the route ignores (no permission)
-                #      gets no reply at all, so the grace window is what
-                #      stops an ignored command from vetoing the release
-                #      forever. No permission check here on purpose — the
-                #      route's collaborator check is the authorization
-                #      gate, and mirroring it would only drift;
+                #   2. a fresh re-arm COMMAND from a write/maintain/admin
+                #      commenter, scanned newest-first so a stranger's echo
+                #      can't shadow a maintainer's (R4-14/R5-5), superseded
+                #      by a refusal ack; a route-ignored command simply
+                #      expires at the grace window;
                 #   3. a fresh `labeled` event — a UI re-apply is
                 #      timestamped immediately, while its ack rides the
                 #      queue (or, on a lost event, the scan's idle-backoff
                 #      pickup — an hours-wide window).
-                RESUME_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-                  [ .[] | select((.user.login // "") == $ab)
-                    | select(((.body // "") | contains("<!-- autofix-rearm -->"))
-                             or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
-                    | .created_at ] | max // ""' /tmp/tk-ic.json)"
-                # Latest re-arm command + its author. R4-14: a renewing
-                # stream of STRANGER commands must not veto the release
-                # forever — only a write/maintain/admin commenter's command
-                # counts (one permission read, only when a command is the
-                # sole evidence — bot markers and labeled events never need
-                # it).
-                CMD_LINE="$(jq -r '
-                  [ .[] | select(((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /takeover"
-                                 or ((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /retry")
-                    | {ts: (.created_at // ""), login: (.user.login // "")} ]
-                  | max_by(.ts) // empty | "\(.ts)\t\(.login)"' /tmp/tk-ic.json)"
-                CMD_TS="${CMD_LINE%%$'\t'*}"
-                CMD_AUTHOR="${CMD_LINE##*$'\t'}"
-                REFUSAL_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-                  [ .[] | select((.user.login // "") == $ab)
-                    | select((.body // "") | test("<!-- takeover-ack (fork-refused|base-refused|skip-blocked) -->"))
-                    | .created_at ] | max // ""' /tmp/tk-ic.json)"
-                if [[ -n "${CMD_TS}" && "${CMD_TS}" > "${RESUME_TS}" ]] \
-                  && [[ -z "${REFUSAL_TS}" || "${CMD_TS}" > "${REFUSAL_TS}" ]]; then
-                  CMD_AGE=$(( NOW_EPOCH - $(date -u -d "${CMD_TS}" +%s) ))
-                  if [[ "${CMD_AGE}" -lt "${RESUME_COMMAND_GRACE_SEC}" ]] && [[ -n "${CMD_AUTHOR}" ]]; then
-                    CMD_PERM="$(gh api "repos/${REPO}/collaborators/${CMD_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
-                    if [[ "${CMD_PERM}" == 'write' || "${CMD_PERM}" == 'maintain' || "${CMD_PERM}" == 'admin' ]]; then
-                      RESUME_TS="${CMD_TS}"
-                    fi
-                  fi
-                fi
-                EVENT_TS="$(jq -r --arg tl "${TAKEOVER_LABEL}" '
-                  [ .[] | select((.event // "") == "labeled")
-                    | select((.label.name // "") == $tl)
-                    | .created_at ] | max // ""' /tmp/tk-ev.json)"
-                if [[ -n "${EVENT_TS}" && "${EVENT_TS}" > "${RESUME_TS}" ]]; then
-                  RESUME_TS="${EVENT_TS}"
-                fi
+                # The permission read fails CLOSED: PERM_READ_FAILED defers
+                # the release below instead of trusting on error (R5-4).
+                RESUME_TS="$(compute_resume_ts /tmp/tk-ic.json /tmp/tk-ev.json)"
                 # The stop reason comes from the terminal round's headline —
                 # the scan-side notice always says "round cap" even when a
                 # breaker (consecutive failures, time budget) fired first.
@@ -787,7 +812,12 @@ jobs:
                 REASON="${REASON:0:120}"
                 if [[ -z "${TERM_TS}" ]]; then
                   NOTE='pause timestamp unreadable — release deferred (fail closed)'
-                elif [[ -n "${RESUME_TS}" && "${RESUME_TS}" > "${TERM_TS}" ]]; then
+                elif [[ "${PERM_READ_FAILED}" == "true" ]]; then
+                  # A fresh command's permission could not be verified —
+                  # fail closed: the command MIGHT be a maintainer re-arm
+                  # (R5-4), so defer rather than treat it as no-permission.
+                  NOTE='command-permission read failed — release deferred this tick (fail closed)'
+                elif [[ -n "${RESUME_TS}" && ! "${TERM_TS}" > "${RESUME_TS}" ]]; then
                   STATE='managed (re-armed)'
                   # The PR is re-armed but still carries needs-human — a
                   # resume-side removal failed. Clear the stale label here
@@ -824,6 +854,17 @@ jobs:
                       NOTE="$(skip_note release)"
                     elif [[ "$(jq -r --arg a "${TAKEOVER_LABEL}" --arg b "${NEEDS_HUMAN_LABEL}" '([.labels[]?.name] | index($a) != null) and ([.labels[]?.name] | index($b) != null)' <<< "${LIVE_LABELS_JSON}")" != "true" ]]; then
                       NOTE='labels changed since the snapshot — deferring release'
+                    elif ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ic2.json \
+                      || ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ev2.json; then
+                      NOTE='evidence re-check unreadable — release deferred (fail closed)'
+                    elif RESUME_NOW="$(compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json)"; [[ -n "${RESUME_NOW}" && ! "${TERM_TS}" > "${RESUME_NOW}" ]]; then
+                      # R5-6: the resume evidence above was read at loop
+                      # entry — a re-arm landing since must veto NOW. The
+                      # re-fetch + recompute runs immediately before the
+                      # first write, bounded by the per-tick budget.
+                      NOTE='resume evidence appeared during evaluation — release cancelled'
+                    elif [[ "${PERM_READ_FAILED}" == "true" ]]; then
+                      NOTE='command-permission read failed — release deferred this tick (fail closed)'
                     else
                       # Consume the budget BEFORE the first external write:
                       # a release ATTEMPT is what is bounded. Counting only
@@ -873,25 +914,37 @@ jobs:
                 # the escalation label there), clear the stale label. The
                 # shepherd's own auto-release authenticates as the bot and
                 # is NOT a heal trigger.
-                # ...only a human unlabel NEWER than the latest label-apply
-                # counts — an unlabel from an EARLIER takeover cycle must
-                # never heal this cycle's label.
-                LATEST_LABEL_TS="$(jq -r --arg tl "${TAKEOVER_LABEL}" '
+                # Anchor to the CURRENT pause boundary: the latest
+                # needs-human label-apply EVENT (the cap branch applies the
+                # label at pause time). A human takeover-unlabel counts only
+                # when NEWER than that — anything older belongs to an earlier
+                # cycle (R5-10) — and an absent anchor (e.g. past the ~90-day
+                # events lookback) means "cannot correlate" → skip the
+                # cleanup rather than admit everything (fail closed).
+                NH_APPLY_TS="$(jq -r --arg nl "${NEEDS_HUMAN_LABEL}" '
                   [ .[] | select((.event // "") == "labeled")
-                    | select((.label.name // "") == $tl)
+                    | select((.label.name // "") == $nl)
                     | .created_at ] | max // ""' /tmp/tk-ev.json)"
-                UNLABEL_ACTOR="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg ab "${AUTOFIX_BOT}" --arg ll "${LATEST_LABEL_TS}" '
-                  [ .[] | select((.event // "") == "unlabeled")
-                    | select((.label.name // "") == $tl)
-                    | select((.actor.login // "") != $ab)
-                    | select((.created_at // "") > $ll)
-                    | .actor.login ] | last // ""' /tmp/tk-ev.json)"
+                UNLABEL_ACTOR=''
+                if [[ -n "${NH_APPLY_TS}" ]]; then
+                  UNLABEL_ACTOR="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg ab "${AUTOFIX_BOT}" --arg ll "${NH_APPLY_TS}" '
+                    [ .[] | select((.event // "") == "unlabeled")
+                      | select((.label.name // "") == $tl)
+                      | select((.actor.login // "") != $ab)
+                      | select((.created_at // "") > $ll)
+                      | .actor.login ] | last // ""' /tmp/tk-ev.json)"
+                fi
                 NOTE='loop stopped — needs a human decision (merge / close / split / re-engage)'
                 if [[ -n "${UNLABEL_ACTOR}" ]]; then
                   if [[ "${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}" ]]; then
                     NOTE='cleanup budget reached this tick'
                   elif live_skip "${PR}"; then
                     NOTE="$(skip_note cleanup)"
+                  elif [[ "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]]; then
+                    # R5-8: takeover was re-applied between the tick-start
+                    # snapshot and now — the PR is managed again, so nothing
+                    # here is stale.
+                    NOTE='takeover label re-applied since the snapshot — cleanup cancelled'
                   elif act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (manual release by @${UNLABEL_ACTOR})" \
                     gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
                     CLEANUPS=$(( CLEANUPS + 1 ))

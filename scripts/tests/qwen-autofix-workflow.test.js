@@ -2650,7 +2650,7 @@ describe('qwen-autofix workflow', () => {
       ).length - 1,
     ).toBe(2);
     expect(reviewScanJob).toContain(
-      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
+      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository,author',
     );
     // Command-style comments are instructions, not feedback — excluded at
     // ALL FIVE feedback sites (scan count via $cf; NEWEST, LIVE_NEW,
@@ -3200,6 +3200,26 @@ describe('qwen-autofix workflow', () => {
     );
     expect(releaseGate).toBeGreaterThan(-1);
     expect(releaseGate).toBeLessThan(labelPost);
+    // R4-5 residual: IS_BOT_AUTHOR must actually resolve from PR_META — the
+    // fetch's field list must carry `author` and the jq must read
+    // .author.login. Replay both so a field-list drift fails (a dead
+    // IS_BOT_AUTHOR=false would suppress the label for bot PRs forever).
+    const botAuthorJq = reviewScanJob.match(
+      /IS_BOT_AUTHOR="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([^']+)' <<< "\$\{PR_META\}"\)"/,
+    )?.[1];
+    expect(botAuthorJq).toBeTruthy();
+    const runBotAuthor = (login) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'ab', 'qwen-code-dev-bot', botAuthorJq],
+        {
+          encoding: 'utf8',
+          input: JSON.stringify({ author: { login } }),
+        },
+      ).trim();
+    expect(runBotAuthor('qwen-code-dev-bot')).toBe('true');
+    expect(runBotAuthor('wenshao')).toBe('false');
+    expect(runBotAuthor('')).toBe('false');
     // R4-15: the RELEASE_ACKED jq body (event marker + time direction) is
     // replayed — a `> $rt` → `< $rt` flip must fail, not ship green.
     const relAckJq = reviewScanJob.match(
@@ -3473,7 +3493,7 @@ describe('qwen-autofix workflow', () => {
             // the block's two failure policies instead of the stub
             // universally exiting 0.
             `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
-            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[]'; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3706,6 +3726,8 @@ describe('qwen-autofix workflow', () => {
     );
     expect(releaseRace.writes).toContain('takeover-ack released');
     expect(releaseRace.log).not.toContain('::warning::');
+    // R5-1: a 404 counts as landed, so the needs-human cleanup still runs…
+    expect(releaseRace.writes).toContain('labels/autofix%2Fneeds-human');
     // Any other DELETE failure must not drop the release ack either — a
     // later `/takeover stop` retries the removal — but it MUST warn:
     // masked, the ack reads "released" while the loop keeps managing the
@@ -3719,6 +3741,12 @@ describe('qwen-autofix workflow', () => {
     expect(releaseFailed.log).toContain('::warning::');
     expect(releaseFailed.log).toContain('removal failed');
     expect(releaseFailed.log).toContain('HTTP 500');
+    // R5-1: …but a failed takeover release keeps needs-human — REMOVED_OK is
+    // derived from the captured stream ("HTTP " non-404 = did not land), and
+    // the stub emits the remaining-labels body on success to model the real
+    // API contract.
+    expect(releaseFailed.writes).not.toContain('labels/autofix%2Fneeds-human');
+    expect(releaseFailed.log).toContain('release did not land');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -9860,6 +9888,7 @@ exit 1
       actor = BOT,
       apiFail = false,
       labels = '[]',
+      prAuthor = BOT,
       viewFail = false,
       deleteFail = '',
     } = {}) => {
@@ -9884,7 +9913,7 @@ exit 1
             // R4-22: only serve the labels payload when the caller actually
             // asked for it — a field-selection drift must fail the guard.
             '  if [[ "$*" == *"--json labels"* ]]; then',
-            `    printf '%s' '{"labels":${labels}}'`,
+            `    printf '%s' '{"labels":${labels},"author":{"login":"${prAuthor}"}}'`,
             '  else',
             `    printf '%s' '{"number":7354}'`,
             '  fi',
@@ -9903,6 +9932,7 @@ exit 1
             AUTOFIX_BOT: BOT,
             NEEDS_HUMAN_LABEL: 'autofix/needs-human',
             SKIP_LABEL: 'autofix/skip',
+            TAKEOVER_LABEL: 'autofix/takeover',
           },
           encoding: 'utf8',
         });
@@ -9992,6 +10022,15 @@ exit 1
     expect(readFailed.calls).toContain('pr comment');
     expect(readFailed.calls).not.toContain('api -X DELETE');
     expect(readFailed.stdout).toContain('label state unreadable');
+
+    // R5-2: an auto-released HUMAN-authored PR (no takeover label, not
+    // bot-authored) is in no scan candidate set — /retry must keep the
+    // escalation label, since nothing will re-apply it.
+    const orphan = runRearm({ actor: BOT, prAuthor: 'wenshao' });
+    expect(orphan.status).toBe(0);
+    expect(orphan.calls).toContain('pr comment');
+    expect(orphan.calls).not.toContain('api -X DELETE');
+    expect(orphan.stdout).toContain('nothing manages it until re-engaged');
 
     // Actor mismatch: the PAT authenticates as someone else -> the guard exits
     // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
