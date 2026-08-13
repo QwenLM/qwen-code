@@ -1199,8 +1199,8 @@ describe('SessionMessageHandler', () => {
 
   it('encodes exported file links before rendering markdown', async () => {
     mockExportSessionToFile.mockResolvedValue({
-      filename: 'export a).html',
-      uri: { fsPath: '/workspace/export a).html' },
+      filename: 'export (#1).html',
+      uri: { fsPath: '/workspace/export (#1).html' },
     });
 
     const agentManager = {
@@ -1237,7 +1237,7 @@ describe('SessionMessageHandler', () => {
       data: expect.objectContaining({
         role: 'assistant',
         content:
-          'Session exported to HTML: [export a).html](file:///workspace/export%20a%29.html)',
+          'Session exported to HTML: [export (#1).html](file:///workspace/export%20%28%231%29.html)',
       }),
     });
   });
