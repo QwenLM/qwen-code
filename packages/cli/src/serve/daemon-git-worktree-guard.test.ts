@@ -2079,6 +2079,10 @@ it -C ${outsideRepo} reset --hard`,
     // A `command`/`builtin` prefix still runs the real removal builtin.
     () =>
       `git() { :; }; command unset -f git; git -C ${plainOutsidePath} reset --hard`,
+    // A leading redirection is stripped from argv, so it must not hide the
+    // `command unset` that removes the shadow.
+    () =>
+      `git() { :; }; 2>/dev/null command unset -f git; git -C ${plainOutsidePath} reset --hard`,
     // `enable -n unset` disables the builtin, so the removal is a no-op and
     // the relocating function survives.
     () =>

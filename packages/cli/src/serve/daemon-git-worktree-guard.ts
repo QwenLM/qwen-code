@@ -2234,7 +2234,20 @@ async function evaluateCommandWithCwd(
       // and fused flag clusters (`-nf`) hide the mode. Whenever a removal
       // could retract a name we track as a shadow, fail closed rather than
       // trust a now-doubtful replay of the harmless body.
+      // Bash strips redirections from argv, so skip redirect/fd operands the
+      // same way `readProgramWord` does before (and between) `command`/
+      // `builtin` prefixes — otherwise a leading `2>/dev/null` hides the
+      // `command unset` that really removes the shadow.
       let removalStart = 0;
+      const skipRedirectOperands = (): void => {
+        while (
+          removalStart < run.length &&
+          (run[removalStart]!.redirect || run[removalStart]!.ambiguousFd)
+        ) {
+          removalStart++;
+        }
+      };
+      skipRedirectOperands();
       while (
         removalStart < run.length &&
         (run[removalStart]!.text === 'command' ||
@@ -2243,7 +2256,9 @@ async function evaluateCommandWithCwd(
         removalStart++;
         while (
           removalStart < run.length &&
-          run[removalStart]!.text.startsWith('-')
+          (run[removalStart]!.text.startsWith('-') ||
+            run[removalStart]!.redirect ||
+            run[removalStart]!.ambiguousFd)
         ) {
           removalStart++;
         }
