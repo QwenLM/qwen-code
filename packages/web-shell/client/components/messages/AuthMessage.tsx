@@ -9,6 +9,9 @@ import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import styles from './AuthMessage.module.css';
 
+const TOS_PRIVACY_URL =
+  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
+
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
 type AuthGroup = DaemonAuthProviderCatalog['groups'][number];
@@ -835,17 +838,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             <div>{t('auth.termsTitle')}:</div>
             <a
               className={styles.link}
-              href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              href={TOS_PRIVACY_URL}
               target="_blank"
               rel="noreferrer"
-              onClick={(event) =>
-                openExternalLink(
-                  event,
-                  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
-                )
-              }
+              onClick={(event) => openExternalLink(event, TOS_PRIVACY_URL)}
             >
-              https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
+              {TOS_PRIVACY_URL}
             </a>
           </div>
         </>
