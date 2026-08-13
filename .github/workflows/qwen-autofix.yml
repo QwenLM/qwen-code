@@ -2640,6 +2640,7 @@ jobs:
                 | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
+            REVIEW_RUN_STARTED_AT=""
             if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" && -n "${BRANCH}" ]]; then
               # Delay-window fallback: a review run parked BEFORE its job
               # starts (the 10-minute environment wait) has no review-pr
@@ -2648,13 +2649,15 @@ jobs:
               # explicit-trigger review runs by PR/head identity. One paginated
               # read per candidate, and only when the rollup showed nothing live.
               REVIEW_RUNS_JSON="$(gh api --paginate "repos/${REPO}/actions/workflows/${REVIEW_WF_ID}/runs?per_page=100" 2> /dev/null || printf '{"workflow_runs":[]}')"
-              if jq -e --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" --arg branch "${BRANCH}" '
+              REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" --arg branch "${BRANCH}" '
                 [ .workflow_runs[]?
                   | select((.workflow_id | tostring) == $wf)
                   | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
-                  | select(((.head_sha // "") == $head) or ((.head_branch // "") == $branch) or any(.pull_requests[]?; (.number | tostring) == $pr)) ]
-                | length > 0
-              ' <<< "${REVIEW_RUNS_JSON}" > /dev/null; then
+                  | select(((.head_sha // "") == $head) or ((.head_branch // "") == $branch) or any(.pull_requests[]?; (.number | tostring) == $pr))
+                  | (.run_started_at // .created_at // "") ]
+                | map(select(. != "")) | sort | last // ""
+              ' <<< "${REVIEW_RUNS_JSON}")"
+              if [[ -n "${REVIEW_RUN_STARTED_AT}" ]]; then
                 REVIEW_PR_LIVE="true"
               fi
             fi
@@ -2677,6 +2680,7 @@ jobs:
                     | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review")))
                     | (.startedAt // "")
                     | select(. != "") ] | first // ""' <<< "${CHECKS_JSON}")"
+                [[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"
                 # An empty key (a queued check with no startedAt yet) would
                 # make the marker match EVERY future deferral — skip the ack
                 # this scan rather than arm a permanently-dead dedup.

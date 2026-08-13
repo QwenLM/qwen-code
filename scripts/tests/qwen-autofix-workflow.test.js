@@ -694,6 +694,8 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).not.toContain(
       "grep -qE '^(queued|waiting|pending)$'",
     );
+    expect(reviewScanJob).toContain('REVIEW_RUN_STARTED_AT=');
+    expect(reviewScanJob).toContain('.run_started_at // .created_at');
     expect(reviewScanJob).toContain('any(.pull_requests[]?');
 
     // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
@@ -702,6 +704,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
     expect(reviewScanJob).toContain('autofix-review-deferred');
     expect(reviewScanJob).toContain('select((.user.login // "") == $ab)');
+    expect(reviewScanJob).toContain(
+      '[[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"',
+    );
     expect(workflow).toContain(
       "review_sender: '${{ github.event.review.user.login }}'",
     );
