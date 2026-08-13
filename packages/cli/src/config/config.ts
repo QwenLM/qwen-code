@@ -2009,6 +2009,7 @@ export async function loadCliConfig(
       deferProjectionUntilWriterLease =
         sessionRestoreProjectionSource !== undefined &&
         (argv.chatRecording ?? settings.general?.chatRecording ?? true) &&
+        isAcpMode === true &&
         settings.experimental?.sessionWriterLease === true;
       if (sessionRestoreProjectionSource) {
         if (!deferProjectionUntilWriterLease && !argv.forkSession) {
