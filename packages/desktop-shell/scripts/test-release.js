@@ -914,7 +914,10 @@ function testElectronBridgeManifest(directory) {
         );
       }
     }
-    assert.equal((manifest.match(/^  - url:/gm) ?? []).length, selected.length);
+    assert.equal(
+      (manifest.match(/^ {2}- url:/gm) ?? []).length,
+      selected.length,
+    );
   }
   const duplicateWindowsArtifact = path.join(
     assets,
