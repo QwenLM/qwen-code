@@ -409,6 +409,23 @@ describe('CLI tool-result boundary diagnostics', () => {
     );
   });
 
+  it('does not observe the same replay-delivered ACP update twice', () => {
+    mockObserveBoundary.mockReturnValue(true);
+    const update = acpUpdate('large');
+
+    observeAcpToolResultProjection(update, update, 'session-secret');
+    expect(mockObserveBoundary).toHaveBeenCalledTimes(2);
+
+    observeAcpToolResultProjection(update, update, 'session-secret');
+    expect(mockObserveBoundary).toHaveBeenCalledTimes(2);
+
+    observeAcpToolResultWire(
+      { method: 'session/update', params: { update } },
+      20,
+    );
+    expect(mockObserveBoundary).toHaveBeenCalledTimes(3);
+  });
+
   it('swallows observer failures at projection boundaries', () => {
     mockObserveBoundary.mockImplementation(() => {
       throw new Error('diagnostic failure');

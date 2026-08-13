@@ -9038,7 +9038,7 @@ export class Session implements SessionContext {
         opts.status,
         opts.errorType,
       );
-      if (executeAttempted && !executeReturned && !producerObserved) {
+      if (executeAttempted && !producerObserved) {
         observeToolResultBoundary({
           stage: 'producer',
           sessionId: this.sessionId,

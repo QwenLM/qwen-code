@@ -37,6 +37,7 @@ export function observeAcpToolResultProjection(
   wireUpdate: SessionUpdate = output,
 ): void {
   try {
+    if (isObject(wireUpdate) && projectedAcpUpdates.has(wireUpdate)) return;
     const mutated = input !== output;
     const artifact = acpUpdateArtifacts.get(input) ?? {
       state: 'undecided',
