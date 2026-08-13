@@ -206,14 +206,17 @@ function testLegacyApplicationIdentity() {
     path.join(packageDir, 'src-tauri', 'windows', 'electron-migration.nsh'),
     'utf8',
   );
+  assert.match(migrationHook, /Software\\821b18a9-7c63-5bb4-9e20-51ba63d5ecc3/);
+  assert.match(migrationHook, /!macro NSIS_HOOK_PREINSTALL/);
   assert.match(
     migrationHook,
-    /Software\\821b18a9-7c63-5bb4-9e20-51ba63d5ecc3/,
+    /StrCpy \$R1 \$R1 17\s*\n\s*\$\{If\} \$R0 != ""\s*\n\s*\$\{AndIf\} \$R1 == "Qwen Code Desktop"/,
   );
   assert.match(
     migrationHook,
     /ExecWait '"\$R0\\Uninstall Qwen Code Desktop\.exe" \/currentuser \/S --updated _\?=\$R0'/,
   );
+  assert.match(migrationHook, /\$\{If\} \$R2 != 0\s*\n\s*Abort/);
 }
 
 function testElectronBridgeWorkflow() {
@@ -226,8 +229,19 @@ function testElectronBridgeWorkflow() {
   assert.match(workflow, /macos:latest-mac\.yml/);
   assert.match(workflow, /windows:latest\.yml/);
   assert.match(workflow, /linux:latest-linux\.yml/);
-  assert.match(workflow, /windows_installers=\(release-assets\/\*-setup\.exe\)/);
+  assert.match(
+    workflow,
+    /windows_installers=\(release-assets\/\*-setup\.exe\)/,
+  );
   assert.match(workflow, /linux_appimages=\(release-assets\/\*\.AppImage\)/);
+  assert.match(workflow, /^\s+release-assets\/latest\.yml$/m);
+  assert.match(workflow, /^\s+release-assets\/latest-linux\.yml$/m);
+  assert.match(workflow, /^\s+"\$\{windows_installers\[0\]\}"$/m);
+  assert.match(workflow, /^\s+"\$\{linux_appimages\[0\]\}"$/m);
+  assert.match(
+    workflow,
+    /if \[ "\$ELECTRON_BRIDGE" = 'true' \]; then\s+echo "::error::Electron bridge \$RELEASE_VERSION cannot replace newer stable feed \$current\."\s+exit 1/,
+  );
   for (const artifact of [
     'Qwen-Code-Desktop-arm64.zip',
     'Qwen-Code-Desktop-x64.zip',
@@ -882,39 +896,49 @@ function testElectronBridgeManifest(directory) {
         .createHash('sha512')
         .update(contents)
         .digest('base64');
-      assert.ok(manifest.includes(`url: ${artifact}`));
-      assert.ok(manifest.includes(`sha512: ${sha512}`));
-      assert.ok(manifest.includes(`size: ${contents.length}`));
+      assert.match(
+        manifest,
+        new RegExp(
+          `^  - url: ${artifact.replaceAll('.', '\\.')}\\n    sha512: ${sha512.replaceAll('+', '\\+')}\\n    size: ${contents.length}$`,
+          'm',
+        ),
+      );
+      if (artifact === selected[0]) {
+        assert.match(
+          manifest,
+          new RegExp(`^path: ${artifact.replaceAll('.', '\\.')}$`, 'm'),
+        );
+        assert.match(
+          manifest,
+          new RegExp(`^sha512: ${sha512.replaceAll('+', '\\+')}$`, 'm'),
+        );
+      }
     }
+    assert.equal((manifest.match(/^  - url:/gm) ?? []).length, selected.length);
   }
-  const manifest = fs.readFileSync(
-    path.join(directory, 'latest-mac.yml'),
-    'utf8',
+  const duplicateWindowsArtifact = path.join(
+    assets,
+    'Qwen-Code-Desktop_0.1.0_arm64-setup.exe',
   );
-  for (const artifact of artifacts.slice(0, 4)) {
-    const contents = fs.readFileSync(path.join(assets, artifact));
-    const sha512 = crypto
-      .createHash('sha512')
-      .update(contents)
-      .digest('base64');
-    assert.match(
-      manifest,
-      new RegExp(
-        `^  - url: ${artifact.replaceAll('.', '\\.')}\\n    sha512: ${sha512.replaceAll('+', '\\+')}\\n    size: ${contents.length}$`,
-        'm',
-      ),
-    );
-  }
-  const arm64Contents = fs.readFileSync(path.join(assets, artifacts[0]));
-  const arm64Sha512 = crypto
-    .createHash('sha512')
-    .update(arm64Contents)
-    .digest('base64');
-  assert.match(manifest, /^path: Qwen-Code-Desktop-arm64\.zip$/m);
-  assert.match(
-    manifest,
-    new RegExp(`^sha512: ${arm64Sha512.replaceAll('+', '\\+')}$`, 'm'),
+  fs.writeFileSync(duplicateWindowsArtifact, 'duplicate');
+  const ambiguousWindows = spawnSync(
+    process.execPath,
+    [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--platform',
+      'windows',
+      '--version',
+      '0.1.0',
+      '--output',
+      path.join(directory, 'ambiguous-windows.yml'),
+    ],
+    { encoding: 'utf8' },
   );
+  assert.notEqual(ambiguousWindows.status, 0);
+  assert.match(ambiguousWindows.stderr, /found 2/);
+  fs.rmSync(duplicateWindowsArtifact);
 
   fs.rmSync(path.join(assets, artifacts[1]));
   const failure = spawnSync(

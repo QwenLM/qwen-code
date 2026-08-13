@@ -664,6 +664,10 @@ jobs:
             fi
             newest="$(printf '%s\n%s\n' "$RELEASE_VERSION" "$current" | sort -V | tail -n 1)"
             if [ "$current" != "$RELEASE_VERSION" ] && [ "$newest" = "$current" ]; then
+              if [ "$ELECTRON_BRIDGE" = 'true' ]; then
+                echo "::error::Electron bridge $RELEASE_VERSION cannot replace newer stable feed $current."
+                exit 1
+              fi
               echo "::notice::Desktop $RELEASE_VERSION will not replace newer stable feed $current."
               exit 0
             fi

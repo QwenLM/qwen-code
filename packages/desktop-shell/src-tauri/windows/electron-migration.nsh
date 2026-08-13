@@ -4,6 +4,7 @@
 !macro NSIS_HOOK_PREINSTALL
   ReadRegStr $R0 HKCU "${ELECTRON_INSTALL_KEY}" "InstallLocation"
   ReadRegStr $R1 HKCU "${ELECTRON_UNINSTALL_KEY}" "DisplayName"
+  StrCpy $R1 $R1 17
   ${If} $R0 != ""
   ${AndIf} $R1 == "Qwen Code Desktop"
     ExecWait '"$R0\Uninstall Qwen Code Desktop.exe" /currentuser /S --updated _?=$R0' $R2
