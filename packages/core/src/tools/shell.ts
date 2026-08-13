@@ -2910,6 +2910,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
+      const outputThreshold = getShellOutputThreshold(this.config);
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -2923,8 +2924,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: getShellOutputThreshold(this.config),
-          previewChars: 4000,
+          threshold: outputThreshold,
+          previewChars: Math.min(4000, outputThreshold),
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
         },

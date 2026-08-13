@@ -3084,6 +3084,35 @@ describe('ShellTool', () => {
         },
       );
 
+      it('passes the 30k Shell default to output truncation', async () => {
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+          }));
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
+
+          await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({ threshold: 30_000 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
       it('keeps 40k model-facing output when the explicit threshold is 100k', async () => {
         (
           mockConfig.isTruncateToolOutputThresholdExplicit as Mock
@@ -3145,6 +3174,44 @@ describe('ShellTool', () => {
           );
           expect(result.llmContent).toContain(truncatedContent);
           expect(result.persistedOutputFiles).toEqual([outputFile]);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('limits the preview budget to an explicit threshold below 4k', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          1000,
+        );
+        const truncationModule = await import('../utils/truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+          }));
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(5000), exitCode: 0 });
+
+          await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              threshold: 1000,
+              previewChars: 1000,
+            }),
+          );
         } finally {
           spy.mockRestore();
         }
