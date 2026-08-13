@@ -786,6 +786,17 @@ describe('tool row rendering', () => {
     expect(summary?.textContent).not.toContain('Failed');
   });
 
+  it('shows the error icon in a failed tool line header', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'Shell', status: 'failed' }),
+    );
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('Failed');
+  });
+
   it('shows an error icon instead of the failed label on expanded tool rows', () => {
     const container = renderToolGroup([
       makeTool({

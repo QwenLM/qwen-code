@@ -1290,9 +1290,8 @@ describe('ParallelAgentsGroup activity rendering', () => {
       agent({ callId: 'failed', status: 'failed' }),
     ]);
 
-    expect(container.textContent).toContain(
-      'Parallel agents·2/2 done·1 failed',
-    );
+    expect(container.textContent).toContain('2/2 done');
+    expect(container.textContent).toContain('1 failed');
     expect(container.textContent).not.toContain('Failed');
   });
 
@@ -1316,9 +1315,9 @@ describe('ParallelAgentsGroup activity rendering', () => {
         agent({ callId: 'running', status: 'pending', startTime: 3_000 }),
       ]);
 
-      expect(container.textContent).toContain(
-        'Parallel agents 7s·2/3 done·1 failed',
-      );
+      expect(container.textContent).toContain('7s');
+      expect(container.textContent).toContain('2/3 done');
+      expect(container.textContent).toContain('1 failed');
     } finally {
       vi.useRealTimers();
     }

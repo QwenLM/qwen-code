@@ -342,6 +342,9 @@
 
 .expandedCardTitle {
   flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
