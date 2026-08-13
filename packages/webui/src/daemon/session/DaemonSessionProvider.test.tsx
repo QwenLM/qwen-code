@@ -15075,6 +15075,90 @@ describe('DaemonSessionProvider', () => {
     expect(new Headers(init?.headers).get('X-Qwen-Client-Id')).toBe('client-a');
   });
 
+  it('does not apply refresh context captured before a model update', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['client_identity'],
+    });
+    const source = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      lastEventId: 2,
+      replaySnapshot: createTextReplaySnapshot('A transcript'),
+      events: async function* sourceEvents(opts = {}) {
+        yield { v: 1, type: 'replay_complete', data: {} };
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    sdkMocks.sessions.push(source);
+    const staleContext =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    const candidate = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      eventEpoch: 'epoch-1',
+      lastEventId: 2,
+      replaySnapshot: createTextReplaySnapshot('refreshed transcript'),
+      context: vi
+        .fn()
+        .mockReturnValueOnce(staleContext.promise)
+        .mockResolvedValueOnce({
+          v: 1,
+          sessionId: 'session-a',
+          workspaceCwd: '/mock-workspace',
+          state: { models: { currentModelId: 'model-b' } },
+        }),
+    });
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(candidate);
+    let refresh!: Promise<void>;
+    act(() => {
+      refresh = requireActions(actions).loadSession('session-a');
+    });
+    await act(async () => {
+      await expect(refresh).resolves.toBeUndefined();
+      await flushPromises();
+    });
+    await vi.waitFor(() => expect(candidate.context).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      await requireActions(actions).setModel('model-b');
+      await flushPromises();
+    });
+    expect(connection?.currentModel).toBe('model-b');
+
+    await act(async () => {
+      staleContext.resolve({
+        v: 1,
+        sessionId: 'session-a',
+        workspaceCwd: '/mock-workspace',
+        state: { models: { currentModelId: 'model-a' } },
+      });
+      await flushPromises();
+    });
+    expect(connection?.currentModel).toBe('model-b');
+    expect(connection?.context?.state).toEqual({
+      models: { currentModelId: 'model-b' },
+    });
+  });
+
   it('retires a prepared same-session candidate when a cross-session target supersedes it', async () => {
     const detachFetch = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
