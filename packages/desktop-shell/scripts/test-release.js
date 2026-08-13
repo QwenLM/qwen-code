@@ -224,6 +224,29 @@ function testLegacyApplicationIdentity() {
   );
   assert.equal(config.productName, 'Qwen Code Desktop');
   assert.equal(config.identifier, 'com.alibaba.qwen-code');
+  assert.equal(
+    config.bundle.windows.nsis.installerHooks,
+    'windows/electron-migration.nsh',
+  );
+  const migrationHook = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'windows', 'electron-migration.nsh'),
+    'utf8',
+  );
+  assert.match(migrationHook, /Software\\821b18a9-7c63-5bb4-9e20-51ba63d5ecc3/);
+  assert.match(migrationHook, /!macro NSIS_HOOK_PREINSTALL/);
+  assert.match(
+    migrationHook,
+    /StrCpy \$R1 \$R1 17\s*\n\s*\$\{If\} \$R0 != ""\s*\n\s*\$\{AndIf\} \$R1 == "Qwen Code Desktop"/,
+  );
+  assert.match(
+    migrationHook,
+    /\$\{AndIf\} \$\{FileExists\} "\$R0\\Uninstall Qwen Code Desktop\.exe"/,
+  );
+  assert.match(
+    migrationHook,
+    /ExecWait '"\$R0\\Uninstall Qwen Code Desktop\.exe" \/currentuser \/S --updated _\?=\$R0'/,
+  );
+  assert.match(migrationHook, /\$\{If\} \$R2 != 0\s*\n\s*Abort/);
 }
 
 function testElectronBridgeWorkflow() {
@@ -233,6 +256,22 @@ function testElectronBridgeWorkflow() {
   );
   assert.match(workflow, /^ {6}electron_bridge:$/m);
   assert.match(workflow, /create-electron-bridge-manifest\.mjs/);
+  assert.match(workflow, /macos:latest-mac\.yml/);
+  assert.match(workflow, /windows:latest\.yml/);
+  assert.match(workflow, /linux:latest-linux\.yml/);
+  assert.match(
+    workflow,
+    /windows_installers=\(release-assets\/\*-setup\.exe\)/,
+  );
+  assert.match(workflow, /linux_appimages=\(release-assets\/\*\.AppImage\)/);
+  assert.match(workflow, /^\s+release-assets\/latest\.yml$/m);
+  assert.match(workflow, /^\s+release-assets\/latest-linux\.yml$/m);
+  assert.match(workflow, /^\s+"\$\{windows_installers\[0\]\}"$/m);
+  assert.match(workflow, /^\s+"\$\{linux_appimages\[0\]\}"$/m);
+  assert.match(
+    workflow,
+    /if \[ "\$ELECTRON_BRIDGE" = 'true' \]; then\s+echo "::error::Electron bridge \$RELEASE_VERSION cannot replace newer stable feed \$current\."\s+exit 1/,
+  );
   for (const artifact of [
     'Qwen-Code-Desktop-arm64.zip',
     'Qwen-Code-Desktop-x64.zip',
@@ -873,46 +912,89 @@ function testElectronBridgeManifest(directory) {
   for (const artifact of artifacts) {
     fs.writeFileSync(path.join(assets, artifact), `contents:${artifact}`);
   }
-  const output = path.join(directory, 'latest-mac.yml');
-  execFileSync(process.execPath, [
-    electronBridgeScript,
-    '--assets',
-    assets,
-    '--version',
-    '0.1.0',
-    '--output',
-    output,
-  ]);
-  const manifest = fs.readFileSync(output, 'utf8');
-  assert.match(manifest, /^version: 0\.1\.0$/m);
-  assert.match(
-    manifest,
-    /^releaseDate: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z'$/m,
+  artifacts.push(
+    'Qwen-Code-Desktop_0.1.0_x64-setup.exe',
+    'Qwen-Code-Desktop_0.1.0_amd64.AppImage',
   );
-  for (const artifact of artifacts) {
-    const contents = fs.readFileSync(path.join(assets, artifact));
-    const sha512 = crypto
-      .createHash('sha512')
-      .update(contents)
-      .digest('base64');
+  for (const artifact of artifacts.slice(4)) {
+    fs.writeFileSync(path.join(assets, artifact), `contents:${artifact}`);
+  }
+  const macOutput = path.join(directory, 'latest-mac.yml');
+  for (const [platform, filename, selected] of [
+    ['macos', 'latest-mac.yml', artifacts.slice(0, 4)],
+    ['windows', 'latest.yml', artifacts.slice(4, 5)],
+    ['linux', 'latest-linux.yml', artifacts.slice(5, 6)],
+  ]) {
+    const output = path.join(directory, filename);
+    execFileSync(process.execPath, [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--platform',
+      platform,
+      '--version',
+      '0.1.0',
+      '--output',
+      output,
+    ]);
+    const manifest = fs.readFileSync(output, 'utf8');
+    assert.match(manifest, /^version: 0\.1\.0$/m);
     assert.match(
       manifest,
-      new RegExp(
-        `^  - url: ${artifact.replaceAll('.', '\\.')}\\n    sha512: ${sha512.replaceAll('+', '\\+')}\\n    size: ${contents.length}$`,
-        'm',
-      ),
+      /^releaseDate: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z'$/m,
+    );
+    for (const artifact of selected) {
+      const contents = fs.readFileSync(path.join(assets, artifact));
+      const sha512 = crypto
+        .createHash('sha512')
+        .update(contents)
+        .digest('base64');
+      assert.match(
+        manifest,
+        new RegExp(
+          `^  - url: ${artifact.replaceAll('.', '\\.')}\\n    sha512: ${sha512.replaceAll('+', '\\+')}\\n    size: ${contents.length}$`,
+          'm',
+        ),
+      );
+      if (artifact === selected[0]) {
+        assert.match(
+          manifest,
+          new RegExp(`^path: ${artifact.replaceAll('.', '\\.')}$`, 'm'),
+        );
+        assert.match(
+          manifest,
+          new RegExp(`^sha512: ${sha512.replaceAll('+', '\\+')}$`, 'm'),
+        );
+      }
+    }
+    assert.equal(
+      (manifest.match(/^ {2}- url:/gm) ?? []).length,
+      selected.length,
     );
   }
-  const arm64Contents = fs.readFileSync(path.join(assets, artifacts[0]));
-  const arm64Sha512 = crypto
-    .createHash('sha512')
-    .update(arm64Contents)
-    .digest('base64');
-  assert.match(manifest, /^path: Qwen-Code-Desktop-arm64\.zip$/m);
-  assert.match(
-    manifest,
-    new RegExp(`^sha512: ${arm64Sha512.replaceAll('+', '\\+')}$`, 'm'),
+  const duplicateWindowsArtifact = path.join(
+    assets,
+    'Qwen-Code-Desktop_0.1.0_arm64-setup.exe',
   );
+  fs.writeFileSync(duplicateWindowsArtifact, 'duplicate');
+  const ambiguousWindows = spawnSync(
+    process.execPath,
+    [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--platform',
+      'windows',
+      '--version',
+      '0.1.0',
+      '--output',
+      path.join(directory, 'ambiguous-windows.yml'),
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(ambiguousWindows.status, 0);
+  assert.match(ambiguousWindows.stderr, /found 2/);
+  fs.rmSync(duplicateWindowsArtifact);
 
   fs.rmSync(path.join(assets, artifacts[1]));
   const failure = spawnSync(
@@ -921,15 +1003,17 @@ function testElectronBridgeManifest(directory) {
       electronBridgeScript,
       '--assets',
       assets,
+      '--platform',
+      'macos',
       '--version',
       '0.1.0',
       '--output',
-      output,
+      macOutput,
     ],
     { encoding: 'utf8' },
   );
   assert.notEqual(failure.status, 0);
-  assert.match(failure.stderr, /Missing Electron bridge artifact/);
+  assert.match(failure.stderr, /Expected one Electron bridge artifact/);
 
   const invalidVersion = spawnSync(
     process.execPath,
@@ -937,10 +1021,12 @@ function testElectronBridgeManifest(directory) {
       electronBridgeScript,
       '--assets',
       assets,
+      '--platform',
+      'macos',
       '--version',
       '0.1',
       '--output',
-      output,
+      macOutput,
     ],
     { encoding: 'utf8' },
   );
@@ -949,7 +1035,15 @@ function testElectronBridgeManifest(directory) {
 
   const missingOutput = spawnSync(
     process.execPath,
-    [electronBridgeScript, '--assets', assets, '--version', '0.1.0'],
+    [
+      electronBridgeScript,
+      '--assets',
+      assets,
+      '--platform',
+      'macos',
+      '--version',
+      '0.1.0',
+    ],
     { encoding: 'utf8' },
   );
   assert.notEqual(missingOutput.status, 0);
