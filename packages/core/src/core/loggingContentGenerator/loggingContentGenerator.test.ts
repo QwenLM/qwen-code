@@ -23,6 +23,7 @@ import {
   logApiError,
 } from '../../telemetry/loggers.js';
 import { isTelemetrySdkInitialized } from '../../telemetry/index.js';
+import { startLLMRequestSpanWithContext } from '../../telemetry/session-tracing.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 import { APIUserAbortError } from 'openai';
@@ -62,6 +63,7 @@ const loggingSpanNamesWithSetStatusFailure = vi.hoisted(
 );
 const loggingSpanAttributeFailures = vi.hoisted(() => new Set<string>());
 const loggingSpanAttributeSetAttempts = vi.hoisted((): string[] => []);
+const startLLMRequestSpanWithContextMock = vi.hoisted(() => vi.fn());
 const genAiExchangeState = vi.hoisted(
   (): {
     controllers: Array<{ finalize: ReturnType<typeof vi.fn> }>;
@@ -144,79 +146,21 @@ vi.mock('../../telemetry/gen-ai-request.js', () => ({
   }),
 }));
 
+vi.mock('../../telemetry/session-tracing.js', () => ({
+  startLLMRequestSpanWithContext: startLLMRequestSpanWithContextMock,
+}));
+
 vi.mock('../../telemetry/index.js', () => {
   const isTelemetrySdkInitialized = vi.fn(() => true);
-  function createSpan(
-    name: string,
-    attributes: Record<string, string | number | boolean>,
-  ) {
-    const record = {
-      name,
-      attributes: { ...attributes } as Record<
-        string,
-        string | number | boolean
-      >,
-      statuses: [] as Array<{ code: number; message?: string }>,
-      ended: false,
-    };
-    loggingSpanRecords.push(record);
-    return {
-      __spanName: name,
-      setStatus(status: { code: number; message?: string }) {
-        if (loggingSpanNamesWithSetStatusFailure.has(name)) {
-          throw new Error('set-status-fail');
-        }
-        record.statuses.push(status);
-      },
-      setAttribute(key: string, value: string | number | boolean) {
-        loggingSpanAttributeSetAttempts.push(key);
-        if (loggingSpanAttributeFailures.has(key)) {
-          throw new Error('set-attribute-fail');
-        }
-        record.attributes[key] = value;
-      },
-      setAttributes(attrs: Record<string, string | number | boolean>) {
-        Object.assign(record.attributes, attrs);
-      },
-      end() {
-        record.ended = true;
-      },
-      spanContext: () => ({
-        traceId: 'a'.repeat(32),
-        spanId: 'b'.repeat(16),
-        traceFlags: 1,
-      }),
-    };
-  }
 
   return {
-    startLLMRequestSpan: vi.fn(
-      (
-        model: string,
-        promptId: string,
-        options?: {
-          operationName?: string;
-          providerName?: string;
-          outputType?: string;
-        },
-      ) =>
-        createSpan('qwen-code.llm_request', {
-          model,
-          prompt_id: promptId,
-          ...(options?.operationName
-            ? { 'gen_ai.operation.name': options.operationName }
-            : {}),
-          ...(options?.providerName
-            ? { 'gen_ai.provider.name': options.providerName }
-            : {}),
-          ...(options?.outputType
-            ? { 'gen_ai.output.type': options.outputType }
-            : {}),
-        }),
-    ),
     endLLMRequestSpan: vi.fn(
       (
-        span: ReturnType<typeof createSpan>,
+        span: {
+          __spanName: string;
+          setStatus: (status: { code: number; message?: string }) => void;
+          end: () => void;
+        },
         metadata?: {
           success: boolean;
           inputTokens?: number;
@@ -289,6 +233,68 @@ vi.mock('../../utils/openaiLogger.js', () => ({
   })),
 }));
 
+function createOwnedLlmSpan(
+  model: string,
+  promptId: string,
+  options?: {
+    operationName?: string;
+    providerName?: string;
+    outputType?: string;
+    sessionId?: string;
+    userId?: string;
+  },
+) {
+  const name = 'qwen-code.llm_request';
+  const record = {
+    name,
+    attributes: {
+      model,
+      prompt_id: promptId,
+      ...(options?.operationName
+        ? { 'gen_ai.operation.name': options.operationName }
+        : {}),
+      ...(options?.providerName
+        ? { 'gen_ai.provider.name': options.providerName }
+        : {}),
+      ...(options?.outputType
+        ? { 'gen_ai.output.type': options.outputType }
+        : {}),
+      ...(options?.sessionId ? { 'session.id': options.sessionId } : {}),
+      ...(options?.userId ? { 'gen_ai.user.id': options.userId } : {}),
+    } as Record<string, string | number | boolean>,
+    statuses: [] as Array<{ code: number; message?: string }>,
+    ended: false,
+  };
+  loggingSpanRecords.push(record);
+  return {
+    __spanName: name,
+    setStatus(status: { code: number; message?: string }) {
+      if (loggingSpanNamesWithSetStatusFailure.has(name)) {
+        throw new Error('set-status-fail');
+      }
+      record.statuses.push(status);
+    },
+    setAttribute(key: string, value: string | number | boolean) {
+      loggingSpanAttributeSetAttempts.push(key);
+      if (loggingSpanAttributeFailures.has(key)) {
+        throw new Error('set-attribute-fail');
+      }
+      record.attributes[key] = value;
+    },
+    setAttributes(attrs: Record<string, string | number | boolean>) {
+      Object.assign(record.attributes, attrs);
+    },
+    end() {
+      record.ended = true;
+    },
+    spanContext: () => ({
+      traceId: 'a'.repeat(32),
+      spanId: 'b'.repeat(16),
+      traceFlags: 1,
+    }),
+  };
+}
+
 const realConvertGeminiRequestToOpenAI =
   OpenAIContentConverter.convertGeminiRequestToOpenAI;
 const convertGeminiRequestToOpenAISpy = vi
@@ -322,6 +328,9 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getTelemetrySensitiveSpanAttributeMaxLength: () =>
       (configContent['sensitiveSpanAttributeMaxLength'] as number) ??
       1024 * 1024,
+    getSessionId: () =>
+      (configContent['sessionId'] as string | undefined) ?? 'test-session',
+    getTelemetryUserId: () => configContent['userId'] as string | undefined,
   } as Config;
 };
 
@@ -389,6 +398,19 @@ describe('LoggingContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementation(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, options);
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => options?.sessionId,
+          } as never,
+        };
+      },
+    );
     activeOtelContext.current = 'root';
     loggingSpanRecords.length = 0;
     loggingSpanNamesWithSetStatusFailure.clear();
@@ -402,6 +424,154 @@ describe('LoggingContentGenerator', () => {
     convertGeminiRequestToOpenAISpy.mockClear();
     convertGeminiToolsToOpenAISpy.mockClear();
     convertGeminiResponseToOpenAISpy.mockClear();
+  });
+
+  it('passes the owning config identity to a standalone LLM span', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-owner', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ sessionId: 'owner-session', userId: 'owner-user' }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'owner-prompt',
+    );
+
+    expect(startLLMRequestSpanWithContext).toHaveBeenCalledWith(
+      'test-model',
+      'owner-prompt',
+      expect.objectContaining({
+        sessionId: 'owner-session',
+        userId: 'owner-user',
+      }),
+    );
+  });
+
+  it('uses the final logical-parent session for API logs', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-parent', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementationOnce(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, {
+          ...options,
+          sessionId: 'parent-session',
+        });
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => 'parent-session',
+          } as never,
+        };
+      },
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ sessionId: 'different-owner' }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'parent-prompt',
+    );
+
+    expect(logApiRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'parent-session',
+    );
+    expect(logApiResponse).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'parent-session',
+    );
+  });
+
+  it('snapshots the owning identity before stream iteration', async () => {
+    const iterationContexts: string[] = [];
+    const responseLogContexts: string[] = [];
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      responseLogContexts.push(activeOtelContext.current);
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockImplementation(async () =>
+        (async function* () {
+          iterationContexts.push(activeOtelContext.current);
+          yield createResponse('resp-stream', 'test-model', [{ text: 'ok' }]);
+        })(),
+      ),
+    );
+    let activeSessionId = 'stream-session-B';
+    const config = createConfig({ userId: 'stream-user' });
+    vi.spyOn(config, 'getSessionId').mockImplementation(() => activeSessionId);
+    const generator = new LoggingContentGenerator(wrapped, config, {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'stream-owner-prompt',
+    );
+    activeSessionId = 'stream-session-C';
+    for await (const _chunk of stream) {
+      // Drain the stream so all logging and span finalization paths execute.
+    }
+
+    expect(startLLMRequestSpanWithContext).toHaveBeenCalledWith(
+      'test-model',
+      'stream-owner-prompt',
+      expect.objectContaining({
+        sessionId: 'stream-session-B',
+        userId: 'stream-user',
+      }),
+    );
+    expect(iterationContexts).toEqual(['qwen-code.llm_request']);
+    expect(responseLogContexts).toEqual(['qwen-code.llm_request']);
+    expect(logApiRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'stream-session-B',
+    );
+    expect(logApiResponse).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'stream-session-B',
+    );
+    expect(activeOtelContext.current).toBe('root');
   });
 
   it('logs request/response, normalizes thought parts, and logs OpenAI interaction', async () => {

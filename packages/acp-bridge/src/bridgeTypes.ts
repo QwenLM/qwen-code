@@ -18,6 +18,8 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -907,8 +909,23 @@ export interface BridgeDaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
+  /**
+   * Per-session BASELINE journal caps. A session's effective caps can be
+   * higher mid-turn under adaptive growth — see
+   * `BridgeDaemonSessionDiagnostic.maxJournalEvents` /
+   * `maxJournalBytes` and `journalGrowth` below.
+   */
   maxJournalEvents: number;
   maxJournalBytes: number;
+  /**
+   * Adaptive live-journal growth configuration, or `null` when growth is
+   * disabled (fixed caps above). The pool is daemon-wide: every bridge of
+   * the daemon accounts its sessions against the same aggregate.
+   */
+  journalGrowth: {
+    poolBytes: number;
+    hardCapBytes: number;
+  } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }
@@ -928,6 +945,12 @@ export interface BridgeDaemonSessionDiagnostic {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /**
+   * The session's EFFECTIVE live-journal caps right now — the configured
+   * baseline, or higher when adaptive growth raised them mid-turn.
+   */
+  maxJournalEvents: number;
+  maxJournalBytes: number;
 }
 
 export interface BridgeDaemonStatusSnapshot {
@@ -1546,6 +1569,12 @@ export interface AcpSessionBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /** Change one advertised ACP configuration option for a live session. */
+  setSessionConfigOption(
+    sessionId: string,
+    req: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse>;
 
   /**
    * Switch UI language and optionally LLM output language for a live
