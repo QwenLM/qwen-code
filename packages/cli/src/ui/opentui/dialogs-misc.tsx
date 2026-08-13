@@ -321,7 +321,7 @@ export function OpenTuiSubagentListDialog({ config, onClose }: P) {
   useEffect(() => {
     let alive = true;
     const mgr = (
-      config as {
+      config as unknown as {
         getSubagentManager?: () => {
           listSubagents: () => Promise<Array<Record<string, unknown>>>;
         };
