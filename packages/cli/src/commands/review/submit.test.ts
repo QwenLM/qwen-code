@@ -248,7 +248,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       skillArgs: missing,
       pr: 123,
       repo: 'o/r',
-    } as never;
+    };
 
     const bySetting = reviewWriteAuthorization({
       ...base,
