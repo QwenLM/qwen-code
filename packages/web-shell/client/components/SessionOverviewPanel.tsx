@@ -176,6 +176,7 @@ function SessionOverviewPanelInner({
 
   const { sessions, loading, error, reload } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
+    pollIntervalMs: LIST_POLL_MS,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
     ...(organizationEnabled
@@ -186,7 +187,10 @@ function SessionOverviewPanelInner({
   // single-workspace daemon), so the overview is mission control for every
   // workspace, not just the primary one.
   const { sessions: otherSessions, reload: reloadOther } =
-    useOtherWorkspaceSessions(includeOtherWorkspaces && !workspaceCwd);
+    useOtherWorkspaceSessions(
+      includeOtherWorkspaces && !workspaceCwd,
+      LIST_POLL_MS,
+    );
   const mergedSessions = useMemo(
     () => mergeSessionsById(sessions, otherSessions),
     [sessions, otherSessions],
@@ -201,20 +205,6 @@ function SessionOverviewPanelInner({
 
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [popupBlocked, setPopupBlocked] = useState(false);
-
-  // Poll the cheap list. Skip a tick when the tab is hidden or the previous
-  // request is still outstanding (mirrors the sidebar / daemon-status polls).
-  const listInFlight = useRef(false);
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (document.hidden || listInFlight.current) return;
-      listInFlight.current = true;
-      void Promise.all([reload(), reloadOther()]).finally(() => {
-        listInFlight.current = false;
-      });
-    }, LIST_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [reload, reloadOther]);
 
   // Poll the richer status report less often — it is the only source of
   // per-session "needs approval" and current-model, but costs more to build.
@@ -312,9 +302,9 @@ function SessionOverviewPanelInner({
   }, [splitIds]);
 
   const refresh = useCallback(() => {
-    void reload();
-    void reloadOther();
-    void statusReload();
+    void reload().catch(() => undefined);
+    void reloadOther().catch(() => undefined);
+    void statusReload().catch(() => undefined);
   }, [reload, reloadOther, statusReload]);
 
   if (cards.length === 0) {

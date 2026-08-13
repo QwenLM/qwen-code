@@ -253,6 +253,8 @@ export {
   type DaemonWorkspaceFileBytes,
   type DaemonWorkspaceFileEditRequest,
   type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileUploadRequest,
+  type DaemonWorkspaceFileUploadResult,
   type DaemonWorkspaceFileWriteRequest,
   type DaemonWorkspaceFileWriteResult,
   type DaemonWorkspaceMemoryDreamOptions,
@@ -404,6 +406,11 @@ export type {
 export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
+export type {
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
 
 export type {

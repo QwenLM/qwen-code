@@ -74,15 +74,6 @@ export interface RoundSchedule {
 }
 
 /**
- * The loop's hard cap, mirroring SKILL.md's Step 5 ("Stop after 5 rounds
- * regardless"). Enforcing it is the orchestrator's — the builder will build
- * a sixth round if asked — but the retirement note is the orchestrator's
- * only word about a skipped chunk, and it must not promise a cold check the
- * cap has already forbidden.
- */
-export const REVERSE_AUDIT_MAX_ROUNDS = 5;
-
-/**
  * The round part of a per-chunk reverse-audit record key, as `runAllChunks`
  * and the single-chunk rebuild path both spell it. The digest tail is matched
  * loosely on purpose: its width is the digest function's business, and a key
@@ -122,7 +113,7 @@ const REVERSE_AUDIT_MARKER = 'reverse-audit';
  * transcript classifies `unknown`, and no chunk retires — the territory is
  * never consulted.
  */
-function bakedRanges(
+export function bakedRanges(
   prompt: string,
   diffPath: string | undefined,
 ): Array<[number, number]> {
@@ -366,7 +357,7 @@ function classifyReturn(
  * single read holds it all. A read with no line range (a `read_file` with
  * no limit) proves no lines at all and overlaps nothing.
  */
-function openedTheTerritory(
+export function openedTheTerritory(
   diffReads: Array<[number, number]>,
   territory: Array<[number, number]>,
 ): boolean {
@@ -415,7 +406,8 @@ export function scheduleReverseAuditRound(
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
 ): RoundSchedule {
-  // Rounds 1 and 2 establish the record; there is nothing to retire on.
+  // Rounds 1 and 2 establish each chunk's record; retirement needs two
+  // consecutive dry audits, so nothing can retire before round 3.
   if (round < 3) {
     return {
       due: [...chunkIds],
@@ -567,8 +559,9 @@ export function scheduleReverseAuditRound(
         dryRounds: [lastTwo[0].round, lastTwo[1].round],
         // The next even round — this branch only runs on odd rounds, so
         // that is always round + 1. Whether the cap allows it is the note
-        // composer's question, not the schedule's (see
-        // REVERSE_AUDIT_MAX_ROUNDS).
+        // composer's question, not the schedule's: the plan's cap
+        // (`reverseAuditRoundCap` in budget.ts, floored at the huge-diff
+        // tier's 3) is what the admission gate enforces.
         nextColdCheck: round + 1,
       });
     }

@@ -21,17 +21,21 @@ import express, {
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
-  scrubAndReportInheritedLoaderEnv,
+  acquireInheritedLoaderEnvScrub,
+  clearLoaderKeyRejectionReporterIfCurrent,
   scrubInheritedLoaderEnv,
   setLoaderKeyRejectionReporter,
+  type LoaderKeyRejectionReporter,
 } from '../config/shared-env-keys.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
+  type JournalGrowthSessionLimit,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -51,6 +55,7 @@ import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
+  serveJournalGrowthPoolMb,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   createChildHeapPolicy,
@@ -1179,6 +1184,7 @@ async function loadServeRuntimeModules() {
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
+    daemonAcpNdJsonLimits: spawnChannelModule.DAEMON_ACP_NDJSON_LIMITS,
     ProcessRegistry: processRegistryModule.ProcessRegistry,
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
@@ -1577,6 +1583,17 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    // Same gate the runtime applies (see runQwenServeImpl): pinned journal
+    // flags or a budget with no usable pool disable growth, so the
+    // bootstrap response matches what the runtime will wire.
+    const bootstrapJournalGrowthPoolMb =
+      opts.daemonMemoryBudget !== undefined
+        ? serveJournalGrowthPoolMb({
+            budget: opts.daemonMemoryBudget,
+            maxJournalEvents: opts.maxJournalEvents,
+            maxJournalBytes: opts.maxJournalBytes,
+          })
+        : 0;
     const channelWorker = getChannelWorkerSnapshot();
     const channelWorkers = getChannelWorkerSnapshots();
     const runtimeFailed = runtimeError !== undefined;
@@ -1663,7 +1680,20 @@ function createBootstrapServeApp(input: {
         // No child-heap policy during bootstrap: it is built with the
         // runtime, so `enforced` is correctly false and `childHeap` null in
         // this window even when the flag says `enforce`.
-        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
+        memory: toDaemonStatusMemoryLimits(
+          opts.daemonMemoryBudget,
+          undefined,
+          bootstrapJournalGrowthPoolMb > 0
+            ? {
+                poolBytes: bootstrapJournalGrowthPoolMb * 1024 * 1024,
+                hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                baselineMaxEvents:
+                  opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
+                baselineMaxBytes:
+                  opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
+              }
+            : null,
+        ),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -1976,6 +2006,10 @@ interface DaemonLoggerLifecycleCallbacks {
   // startup fails after the scrub — the close() path is unreachable then,
   // and an embedded caller must not keep a permanently scrubbed env.
   scrubApplied(restoreScrubbedLoaderEnv: () => void): void;
+  // Called with the loader-key rejection reporter this run installed, so the
+  // startup-failure catch can clear it only when it is still the active one —
+  // a co-resident daemon that installed after us must keep its own reporter.
+  reporterInstalled(reporter: LoaderKeyRejectionReporter): void;
 }
 
 /**
@@ -2039,6 +2073,7 @@ export async function runQwenServe(
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
   let restoreScrubbedLoaderEnv: (() => void) | undefined;
+  let installedLoaderRejectionReporter: LoaderKeyRejectionReporter | undefined;
   try {
     return await runQwenServeImpl(optsIn, deps, {
       initialized: (logger) => {
@@ -2053,12 +2088,18 @@ export async function runQwenServe(
       scrubApplied: (restore) => {
         restoreScrubbedLoaderEnv = restore;
       },
+      reporterInstalled: (reporter) => {
+        installedLoaderRejectionReporter = reporter;
+      },
     });
   } catch (error) {
     // Startup failed after the scrub and (when the logger was up) the
     // reporter install; the close() path that reverts both is unreachable.
-    if (daemonLog) {
-      setLoaderKeyRejectionReporter(undefined);
+    // Clear only our own reporter so a co-resident daemon keeps its own.
+    if (installedLoaderRejectionReporter) {
+      clearLoaderKeyRejectionReporterIfCurrent(
+        installedLoaderRejectionReporter,
+      );
     }
     if (daemonLog && owner === 'startup') {
       const startupLog = daemonLog;
@@ -2112,17 +2153,25 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  // Snapshot before any scrub: close() restores the host's launch
-  // environment from this copy, not from the (possibly scrubbed) base env.
-  const launchEnv = { ...process.env };
-  const baseEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...(optsIn.memoryProjectScope !== undefined
-      ? {
-          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
-        }
-      : {}),
-  };
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const launchMemoryProjectScopeValue =
+    baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
+    ? launchMemoryProjectScopeValue
+    : undefined;
+  const memoryProjectScopeValue =
+    optsIn.memoryProjectScope ?? launchMemoryProjectScope ?? 'workspace';
+  const memoryProjectScopeSource =
+    optsIn.memoryProjectScope !== undefined
+      ? 'option'
+      : launchMemoryProjectScope !== undefined
+        ? 'environment'
+        : 'default';
+  const resolvedMemoryProjectScope =
+    memoryProjectScopeValue.trim().toLowerCase() === 'workspace'
+      ? 'workspace'
+      : 'git-root';
+  baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = memoryProjectScopeValue;
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
   // keep loader vars — dev-mode ACP children and channel workers need the
@@ -2140,20 +2189,19 @@ async function runQwenServeImpl(
     Object.freeze(baseEnv);
   // The daemon process itself is done with loader vars either way:
   // session-shell subprocesses run here with process.env while their cwd is
-  // another workspace. The scrub is reverted on close() so an embedded
-  // caller reusing the host process gets its launch environment back.
-  const scrubbedLoaderEnvKeys = scrubAndReportInheritedLoaderEnv(
+  // another workspace. The scrub is reference-counted (see
+  // acquireInheritedLoaderEnvScrub) so overlapping embedded daemons in one
+  // process do not restore each other's loader vars mid-flight, and reverted
+  // on close() so an embedded caller reusing the host process gets its launch
+  // environment back.
+  const loaderEnvScrub = acquireInheritedLoaderEnvScrub(
     process.env,
     'qwen serve',
     'daemon',
   );
+  const scrubbedLoaderEnvKeys = loaderEnvScrub.removedKeys;
   const restoreScrubbedLoaderEnv = (): void => {
-    for (const key of scrubbedLoaderEnvKeys) {
-      if (Object.hasOwn(process.env, key)) continue;
-      const value = launchEnv[key];
-      if (value === undefined) continue;
-      process.env[key] = value;
-    }
+    loaderEnvScrub.release();
   };
   loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
@@ -2451,8 +2499,9 @@ async function runQwenServeImpl(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
           ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
-            'token gates API routes; /health and /demo remain pre-auth ' +
-            'on loopback unless --require-auth is set)'
+            'token gates API routes; the Web Shell static assets stay ' +
+            'pre-auth in every mode unless --no-web, and /health stays ' +
+            'pre-auth on loopback unless --require-auth is set)'
           : ''),
     );
   }
@@ -2525,11 +2574,11 @@ async function runQwenServeImpl(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once, for reporting only. Nothing
-  // downstream consumes them to size a child: dividing a pool by a workspace
-  // count is unsound while registration does not spawn a child, and bounding
-  // the aggregate needs admission at spawn time keyed on live children. This
-  // establishes the denominator that work will be designed against.
+  // Resolve the daemon's memory figures once. Nothing downstream consumes
+  // them to size a child: dividing a pool by a workspace count is unsound
+  // while registration does not spawn a child, and bounding the aggregate
+  // needs admission at spawn time keyed on live children. The one consumer
+  // today is the adaptive live-journal growth pool below.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
@@ -2539,6 +2588,48 @@ async function runQwenServeImpl(
   ) {
     writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
+  // Adaptive live-journal growth: sessions whose in-flight turn outgrows
+  // the journal caps can grow into a daemon-wide pool (derived once from
+  // the memory budget and shared by every bridge), instead of silently
+  // truncating the live replay window (the canonical case: one turn fanning
+  // out many concurrent subagents). An operator-pinned journal flag
+  // disables growth — explicit config wins — as does a budget with no
+  // usable pool (insufficient host, no headroom after the root reserve).
+  const journalGrowthPoolMbValue =
+    opts.daemonMemoryBudget !== undefined
+      ? serveJournalGrowthPoolMb({
+          budget: opts.daemonMemoryBudget,
+          maxJournalEvents: opts.maxJournalEvents,
+          maxJournalBytes: opts.maxJournalBytes,
+        })
+      : 0;
+  const journalGrowthPoolBytes =
+    journalGrowthPoolMbValue > 0
+      ? journalGrowthPoolMbValue * 1024 * 1024
+      : undefined;
+  // ONE aggregate pool for the whole daemon: every bridge registers its
+  // live-session cap enumerator here and receives the aggregator, so each
+  // bridge's growth advisor accounts every sharing session — across all
+  // workspaces — against the same pool instead of holding its own copy.
+  const journalGrowthSessionLimitProviders = new Set<
+    () => readonly JournalGrowthSessionLimit[]
+  >();
+  const journalGrowthSessionLimits =
+    (): readonly JournalGrowthSessionLimit[] => {
+      const limits: JournalGrowthSessionLimit[] = [];
+      for (const provider of journalGrowthSessionLimitProviders) {
+        limits.push(...provider());
+      }
+      return limits;
+    };
+  const registerJournalGrowthSessionLimits = (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ): (() => void) => {
+    journalGrowthSessionLimitProviders.add(provider);
+    return () => {
+      journalGrowthSessionLimitProviders.delete(provider);
+    };
+  };
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
     workspaceRegistrationStore === undefined &&
@@ -2672,16 +2763,29 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  daemonLog.info('project memory scope resolved', {
+    projectMemoryScope: resolvedMemoryProjectScope,
+    projectMemoryScopeSource: memoryProjectScopeSource,
+    projectMemoryScopeRaw: memoryProjectScopeValue,
+  });
   // Per-workspace .env loads keep running after boot (skill status, voice
   // capability checks, settings reloads); boot stderr is long gone by then,
   // so fresh loader-key rejections must land in the durable daemon log or
   // they vanish without a diagnostic.
-  setLoaderKeyRejectionReporter((source, freshKeys) => {
+  const loaderRejectionReporter: LoaderKeyRejectionReporter = (
+    source,
+    freshKeys,
+  ) => {
     daemonLog.warn(
       'rejected loader-affecting env keys; they were not applied',
-      { source, rejectedKeys: freshKeys },
+      {
+        source,
+        rejectedKeys: freshKeys,
+      },
     );
-  });
+  };
+  setLoaderKeyRejectionReporter(loaderRejectionReporter);
+  loggerLifecycle.reporterInstalled(loaderRejectionReporter);
   // Boot stderr rarely survives desktop/systemd daemon launches, so persist
   // the scrub decision in the durable daemon log as well.
   if (scrubbedLoaderEnvKeys.length > 0) {
@@ -3746,6 +3850,7 @@ async function runQwenServeImpl(
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
       childHeapPolicy,
+      pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -4113,6 +4218,13 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -4145,7 +4257,9 @@ async function runQwenServeImpl(
         permissionAudit: permissionAuditPublisher,
         statusProvider,
         delegateReadTextFileToClient: false,
-        fileSystem: createBridgeFileSystemAdapter(fsFactory),
+        fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             primaryGenerationGuard.assertOpen();
@@ -4450,6 +4564,7 @@ async function runQwenServeImpl(
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4514,6 +4629,13 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -4548,7 +4670,9 @@ async function runQwenServeImpl(
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
         delegateReadTextFileToClient: false,
-        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
+        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: true,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             secondaryGenerationGuard.assertOpen();
@@ -4989,6 +5113,7 @@ async function runQwenServeImpl(
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -5065,6 +5190,13 @@ async function runQwenServeImpl(
           ...(opts.maxJournalBytes !== undefined
             ? { maxJournalBytes: opts.maxJournalBytes }
             : {}),
+          ...(journalGrowthPoolBytes !== undefined
+            ? {
+                journalGrowthPoolBytes,
+                journalGrowthSessionLimits,
+                registerJournalGrowthSessionLimits,
+              }
+            : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
             : {}),
@@ -5101,7 +5233,9 @@ async function runQwenServeImpl(
             env: wsEnv.effectiveEnv,
           }),
           delegateReadTextFileToClient: false,
-          fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+          fileSystem: createBridgeFileSystemAdapter(wsFsFactory, {
+            allowSameHostToolWritesOutsideWorkspace: true,
+          }),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {
               generationGuard.assertOpen();
@@ -7267,7 +7401,9 @@ async function runQwenServeImpl(
                         daemonLog.info('daemon stopped');
                       }
                     });
-                    setLoaderKeyRejectionReporter(undefined);
+                    clearLoaderKeyRejectionReporterIfCurrent(
+                      loaderRejectionReporter,
+                    );
                     await daemonLog.close();
                   }
                   restoreScrubbedLoaderEnv();

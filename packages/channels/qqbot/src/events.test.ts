@@ -290,6 +290,7 @@ describe('handleC2C', () => {
     expect(env['senderId']).toBe('user-openid-1');
     expect(env['chatId']).toBe('user-openid-1');
     expect(env['text']).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
+    expect(env['displayText']).toBe('你好，帮我查一下天气');
   });
 
   it('斜杠命令不包装 atMention', async () => {
@@ -414,6 +415,25 @@ describe('handleGroup', () => {
     expect(env['text']).toBe(
       '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: <@OPENID_BOT> 你好',
     );
+    expect(env['displayText']).toBe('你好');
+  });
+
+  it('可见文本只移除机器人 mention', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> ask <@OPENID_ALICE> now',
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true },
+          { member_openid: 'alice-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['displayText']).toBe('ask <@OPENID_ALICE> now');
   });
 
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
@@ -502,6 +522,24 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toBe('/status');
+  });
+
+  it('其他成员 mention 后的斜杠命令仍被识别', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> <@OPENID_ALICE> /schedule list',
+        mentions: [
+          { member_openid: 'bot-openid', is_you: true },
+          { member_openid: 'alice-openid', is_you: false },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
+    expect(env['text']).toBe('/schedule list');
+    expect(env['displayText']).toBe('<@OPENID_ALICE> /schedule list');
   });
 
   it('重复消息不触发', async () => {
@@ -1068,6 +1106,7 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['isGroup']).toBe(true);
     expect(env['text']).toContain('[atMention=false]');
+    expect(env['displayText']).toBe('hello world');
   });
 
   it('policy=keyword 时只有匹配关键词才触发', async () => {

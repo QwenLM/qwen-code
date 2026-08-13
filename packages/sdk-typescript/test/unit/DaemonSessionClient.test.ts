@@ -300,6 +300,7 @@ describe('DaemonSessionClient', () => {
           state: { configOptions: [] },
           hasActivePrompt: true,
           lastEventId: 42,
+          eventEpoch: 'epoch-42',
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 42, v: 1, type: 'session_update', data: {} }],
         });
@@ -319,6 +320,10 @@ describe('DaemonSessionClient', () => {
     expect(session.clientId).toBe('client-1');
     expect(session.hasActivePrompt).toBe(true);
     expect(session.state).toEqual({ configOptions: [] });
+    expect(session.eventEpoch).toBe('epoch-42');
+    expect(session.replaySnapshotComplete).toBe(true);
+    expect(session.replayPartial).toBe(false);
+    expect(session.replayError).toBeUndefined();
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
@@ -381,6 +386,31 @@ describe('DaemonSessionClient', () => {
     expect(session.replayDegraded).toBe(true);
   });
 
+  it('reports incomplete and partial load replay snapshots', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          compactedReplay: [],
+          partial: true,
+          replayError: 'journal read failed',
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1');
+
+    expect(session.replaySnapshotComplete).toBe(false);
+    expect(session.replayPartial).toBe(true);
+    expect(session.replayError).toBe('journal read failed');
+  });
+
   it('resumes an existing daemon session using server watermark', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
@@ -409,6 +439,7 @@ describe('DaemonSessionClient', () => {
     expect(session.state).toEqual({ modes: null });
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
     expect(session.replaySnapshot.liveJournal).toHaveLength(0);
+    expect(session.replaySnapshotComplete).toBe(false);
     for await (const _event of session.events()) {
       /* empty */
     }
@@ -708,6 +739,63 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/session%20with%2Fslash/pending-prompts/prompt%20with%2Fslash',
     );
     expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards stable mid-turn ids and the session clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { accepted: true, messageId: 'stable-1' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.enqueueMidTurnMessage('shared message', {
+        messageId: 'stable-1',
+      }),
+    ).resolves.toEqual({ accepted: true, messageId: 'stable-1' });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-message',
+    );
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      message: 'shared message',
+      messageId: 'stable-1',
+    });
+  });
+
+  it('forwards the mid-turn snapshot query with session and client ids', async () => {
+    const snapshot = {
+      messages: [{ messageId: 'mid-1', text: 'shared message' }],
+      settledMessageIds: ['mid-2'],
+      promotedMessageIds: ['mid-3'],
+    };
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, snapshot));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getMidTurnMessages()).resolves.toEqual(snapshot);
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/mid-turn-messages',
+    );
+    expect(calls[0]?.method).toBe('GET');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
