@@ -45,7 +45,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
-  expectedRoundSeconds,
+  expectedAdmissionSeconds,
   readRoundStamps,
   reverseAuditBudgetExhausted,
   reverseAuditBudgetMessage,
@@ -73,8 +73,10 @@ import {
 import {
   BRIEFS,
   isRepositoryContextRoleId,
+  MODELED_SYSTEM_EXECUTION_LENS,
   type RoleId,
 } from './lib/agent-briefs.js';
+import { MODELED_SYSTEM_DOMAIN } from './lib/audit-layers.js';
 import {
   repositoryContextOf,
   type RepositoryContext,
@@ -545,6 +547,30 @@ export function buildChunkAgentPrompt(
   const repositoryContext = repositoryContextOf(report);
   if (repositoryContext) {
     parts.push('', ...repositoryContextBlock(repositoryContext));
+    // On a modeled-executable-system diff the execution-model divergence lens is
+    // Agent 2's on a 3A fan-out, but 3B replaces the dimension agents with these
+    // per-territory ones — so Agent 2's brief never reaches a chunk agent. Attach
+    // the same lens here, scoped to this chunk, so a huge guard/interpreter diff
+    // gets within-territory finder coverage of the class; a divergence whose add
+    // and check both live in this chunk's lines is this agent's. The cross-chunk
+    // contract still falls to the reverse audit's layer receipts and invariant-c.
+    // NOT for an unreachable chunk (as with the tool-budget block below): its one
+    // instruction is to return the exact `Uncoverable:` line and stop.
+    if (
+      !unreachable &&
+      repositoryContext.domains.includes(MODELED_SYSTEM_DOMAIN)
+    ) {
+      parts.push(
+        '',
+        '## Modeled-executable-system lens — your territory',
+        '',
+        'This diff models how an external system executes. Apply this lens to the ' +
+          'modeled-system logic in YOUR chunk (the cross-territory contract is the ' +
+          "reverse audit's):",
+        '',
+        MODELED_SYSTEM_EXECUTION_LENS,
+      );
+    }
   }
 
   // NOT for an unreachable chunk: its instruction is to return the exact
@@ -1862,12 +1888,17 @@ function requireAuditableChunks(report: PlanReport): DiffChunk[] {
  * round was refused: the caller builds nothing. The admission STAMP is not
  * written here — it lands after the build succeeds, in each build path: the
  * stamp is what the next round's gate measures cost from, and a build that
- * throws must not leave one behind.
+ * throws must not leave one behind. `fanOutWidth` is the auditors this
+ * round fans out (1 for a whole-diff round): when the previous round is
+ * still in flight — the convergence pair's second member — the price
+ * covers both members' wall in waves of the tool-concurrency pool, not
+ * just this round's (deadline.ts `expectedAdmissionSeconds`).
  */
 function admitReverseAuditRound(
   planPath: string,
   round: number | undefined,
   cap: number,
+  fanOutWidth: number,
 ): boolean {
   // The plan's round cap first: deterministic, and cheaper than the
   // deadline arithmetic. The full cap normally; a reduced cap for a huge
@@ -1900,7 +1931,7 @@ function admitReverseAuditRound(
   }
   const spent = reverseAuditBudgetExhausted(
     process.env,
-    expectedRoundSeconds(planPath, round),
+    expectedAdmissionSeconds(planPath, round, fanOutWidth, process.env),
   );
   if (spent !== null) {
     writeBudgetStop(planPath, spent, round);
@@ -2009,6 +2040,7 @@ function runAllChunks(
       planPath,
       round,
       reverseAuditRoundCap(report.budget),
+      chunks.length,
     )
   ) {
     return;
@@ -2403,7 +2435,9 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // admits on the reserve alone hands the terminal round a start right at
   // the boundary, which is the killed-mid-verification failure one round
   // wide. The round's cost is the previous round's, measured admission to
-  // admission. The admission is stamped AFTER the build succeeds (below),
+  // admission — except when this round launches with the previous one still
+  // in flight (the convergence pair), where it covers both. The admission is
+  // stamped AFTER the build succeeds (below),
   // never here: the stamp is what the next round's gate measures cost from,
   // and a build that throws must not leave one behind — priced from a
   // failed build, the next round would be floored to the 600s minimum,
@@ -2421,6 +2455,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       args.plan,
       args.round,
       reverseAuditRoundCap(report.budget),
+      1,
     )
   ) {
     return;
@@ -2471,14 +2506,17 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     hasChunk &&
     !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
   ) {
+    const planChunkIds = (
+      Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : []
+    )
+      .map((c) => c?.id)
+      .filter((id): id is number => typeof id === 'number');
     if (args.round !== undefined) {
       let schedule: RoundSchedule | null = null;
       try {
         schedule = scheduleReverseAuditRound(
           args.plan,
-          (Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : [])
-            .map((c) => c?.id)
-            .filter((id): id is number => typeof id === 'number'),
+          planChunkIds,
           args.round,
           process.env,
           typeof report.diffPathAbsolute === 'string'
@@ -2500,6 +2538,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         args.plan,
         args.round,
         reverseAuditRoundCap(report.budget),
+        planChunkIds.length,
       )
     )
       return;

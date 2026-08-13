@@ -21,6 +21,7 @@ import {
   useSettings,
   useProviders,
   useSessionNotices,
+  useDaemonSessionOwnerGuard,
   useStreamingState,
   useTranscriptHistory,
   useTranscriptStore,
@@ -29,6 +30,7 @@ import {
   useWorkspaceEventSignals,
   type DaemonSessionActions,
   type DaemonSessionNotice,
+  type DaemonSessionOwnerSnapshot,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
@@ -66,6 +68,11 @@ import {
   type VoiceStatusRevision,
 } from './voice/voice-workspace-target';
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
+import { useSessionCatalogController } from './session-catalog/session-catalog-hooks';
+import {
+  loadSessionCatalogOnce,
+  SESSION_CATALOG_TRAILING_REFRESH_MS,
+} from './session-catalog/session-catalog-store';
 import { useLiveVoiceSetup } from './live/useLiveVoiceSetup';
 import {
   ChatEditor,
@@ -203,7 +210,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { isEditableTarget } from './utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from './utils/dom';
 import {
   invokeSlashCommandHandler,
   SLASH_COMMAND_PATTERN,
@@ -437,9 +444,6 @@ interface ArtifactPanelSessionState {
 interface PaneArtifactSnapshot {
   artifacts: readonly DaemonSessionArtifact[];
 }
-// Cap on how long a manual "run now" waits for its bound session to become
-// active before giving up, so the scheduled-tasks UI can't stay stuck disabled
-// if the switch never completes.
 const BOUND_RUN_SWITCH_TIMEOUT_MS = 30_000;
 
 function availableSkillInfos(status: {
@@ -493,14 +497,28 @@ interface SendPromptOptionsWithRetry {
 interface OptimisticUserMessage {
   sessionId: string;
   messageId: string;
+  identity: TranscriptUserMessageIdentity;
+  previousIdentity?: TranscriptUserMessageIdentity;
+  owner: CancelledRetryOwner;
 }
 
 interface FailedPrompt {
   sessionId: string;
   messageId: string;
+  identity: TranscriptUserMessageIdentity;
+  previousIdentity?: TranscriptUserMessageIdentity;
   text: string;
   images?: PromptImage[];
   inputAnnotations?: DaemonInputAnnotation[];
+  owner: CancelledRetryOwner;
+}
+
+interface TranscriptUserMessageIdentity {
+  block: DaemonTranscriptBlock;
+}
+
+interface TranscriptTurnErrorIdentity {
+  block: DaemonTranscriptBlock;
 }
 
 interface FailedPromptRetry {
@@ -509,6 +527,80 @@ interface FailedPromptRetry {
   startedAt: number;
   admitted: boolean;
   settled: boolean;
+  owner: CancelledRetryOwner;
+  transcriptIdentity:
+    | { kind: 'failed-prompt'; identity: TranscriptUserMessageIdentity }
+    | { kind: 'turn-error'; identity: TranscriptTurnErrorIdentity };
+}
+
+type CancelledRetryState =
+  | {
+      kind: 'failed-prompt';
+      attemptId: number;
+      failed: FailedPrompt;
+    }
+  | {
+      kind: 'turn-error';
+      attemptId: number;
+      errorId: string;
+      identity: TranscriptTurnErrorIdentity;
+      text: string;
+      images?: PromptImage[];
+      inputAnnotations?: DaemonInputAnnotation[];
+      previousRetriedTurnErrorId: string | null;
+      previousShowRetryHint: boolean;
+    };
+
+type CancelledRetryRestoreResult = 'restored' | 'pending' | 'invalid';
+
+interface CancelledRetryOwner {
+  sessionId?: string;
+  workspaceCwd?: string;
+  sessionKey?: string;
+  sourceVersion: number;
+  snapshot: DaemonSessionOwnerSnapshot;
+}
+
+function retryOwnerMatchesCurrent(
+  owner: CancelledRetryOwner,
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+  sourceVersion: number,
+): boolean {
+  const workspaceMatches =
+    (owner.workspaceCwd !== undefined && owner.workspaceCwd === workspaceCwd) ||
+    owner.snapshot.isCurrent();
+  return (
+    owner.sessionId === sessionId &&
+    owner.sourceVersion === sourceVersion &&
+    workspaceMatches
+  );
+}
+
+interface CancelledRetryEntry {
+  owner?: CancelledRetryOwner;
+  state: CancelledRetryState;
+}
+
+function mergeCancelledRetryEntries(
+  current: readonly CancelledRetryEntry[],
+  incoming: readonly CancelledRetryEntry[],
+): CancelledRetryEntry[] {
+  return incoming.reduce<CancelledRetryEntry[]>(
+    (merged, candidate) => {
+      const existing = merged.find(
+        (entry) => entry.state.kind === candidate.state.kind,
+      );
+      if (existing && existing.state.attemptId >= candidate.state.attemptId) {
+        return merged;
+      }
+      return [
+        ...merged.filter((entry) => entry.state.kind !== candidate.state.kind),
+        candidate,
+      ];
+    },
+    [...current],
+  );
 }
 
 interface UnknownPromptAdmission {
@@ -523,11 +615,125 @@ interface UnknownPromptAdmission {
 function getLatestUserBlockId(
   blocks: readonly DaemonTranscriptBlock[],
 ): string | undefined {
+  return getLatestUserBlock(blocks)?.id;
+}
+
+function getLatestUserBlock(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (block?.kind === 'user') return block.id;
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification'
+    ) {
+      return block;
+    }
   }
   return undefined;
+}
+
+function matchesUserMessageIdentity(
+  block: DaemonTranscriptBlock | undefined,
+  identity: TranscriptUserMessageIdentity | undefined,
+  allowLocalId = false,
+): boolean {
+  if (!identity) return block === undefined;
+  if (!block || block.kind !== 'user' || identity.block.kind !== 'user') {
+    return false;
+  }
+  if (block === identity.block) return true;
+  if (allowLocalId && block.id === identity.block.id) return true;
+  const expectedRecords = identity.block.sourceRecordIds;
+  const currentRecords = block.sourceRecordIds;
+  return (
+    expectedRecords !== undefined &&
+    expectedRecords.length > 0 &&
+    currentRecords !== undefined &&
+    currentRecords.length === expectedRecords.length &&
+    currentRecords.every((record, index) => record === expectedRecords[index])
+  );
+}
+
+function findUserMessageByIdentity(
+  blocks: readonly DaemonTranscriptBlock[],
+  identity: TranscriptUserMessageIdentity,
+  allowLocalId = false,
+): DaemonTranscriptBlock | undefined {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (
+      block?.kind === 'user' &&
+      block.meta?.['source'] !== 'background_notification' &&
+      matchesUserMessageIdentity(block, identity, allowLocalId)
+    ) {
+      return block;
+    }
+  }
+  return undefined;
+}
+
+function getLogicalSessionKey(
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+): string | undefined {
+  return sessionId ? `${workspaceCwd ?? ''}\0${sessionId}` : undefined;
+}
+
+function getRetryableTurnError(
+  blocks: readonly DaemonTranscriptBlock[],
+): DaemonTranscriptBlock | undefined {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (block?.kind === 'user') {
+      if (block.meta?.['source'] === 'background_notification') continue;
+      break;
+    }
+    if (block?.kind === 'error' && block.source === 'turn_error') {
+      return block;
+    }
+    if (block?.kind !== 'debug') break;
+  }
+  return undefined;
+}
+
+function matchesTurnErrorIdentity(
+  block: DaemonTranscriptBlock | undefined,
+  identity: TranscriptTurnErrorIdentity,
+): boolean {
+  if (
+    !block ||
+    block.kind !== 'error' ||
+    block.source !== 'turn_error' ||
+    identity.block.kind !== 'error' ||
+    identity.block.source !== 'turn_error'
+  ) {
+    return false;
+  }
+  if (block === identity.block) return true;
+  const expectedPromptId = identity.block.promptId;
+  if (expectedPromptId) return block.promptId === expectedPromptId;
+  return (
+    identity.block.eventId !== undefined &&
+    block.eventId === identity.block.eventId
+  );
+}
+
+function retryTranscriptIdentityMatches(
+  blocks: readonly DaemonTranscriptBlock[],
+  transcriptIdentity: FailedPromptRetry['transcriptIdentity'],
+  allowLocalUserId = false,
+): boolean {
+  return transcriptIdentity.kind === 'failed-prompt'
+    ? matchesUserMessageIdentity(
+        getLatestUserBlock(blocks),
+        transcriptIdentity.identity,
+        allowLocalUserId,
+      )
+    : matchesTurnErrorIdentity(
+        getRetryableTurnError(blocks),
+        transcriptIdentity.identity,
+      );
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -640,6 +846,7 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  desiredSessionTargetPending?: boolean;
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
@@ -868,6 +1075,16 @@ const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
   ['environment', 'subagents', 'backgroundTasks'];
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
+
+// One preview tab per image, keyed by its content, so opening several images
+// keeps a tab each while re-clicking the same image just focuses its tab.
+function imageTabId(src: string): string {
+  let hash = 0;
+  for (let i = 0; i < src.length; i++) {
+    hash = (hash * 31 + src.charCodeAt(i)) | 0;
+  }
+  return `image:${hash.toString(36)}`;
+}
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -1569,6 +1786,7 @@ function readScopedModelSetting(
 }
 
 export function App({
+  desiredSessionTargetPending = false,
   onSessionIdChange,
   onSessionCreated,
   theme: providedTheme,
@@ -1878,8 +2096,33 @@ export function App({
   const store = useTranscriptStore();
   const blocks = useAnimationFrameTranscriptBlocks();
   const connection = useConnection();
+  const logicalSessionKey = getLogicalSessionKey(
+    connection.sessionId,
+    connection.workspaceCwd,
+  );
+  const sessionWriteBlocked =
+    desiredSessionTargetPending ||
+    connection.sessionTransition?.phase === 'queued' ||
+    connection.sessionTransition?.phase === 'preparing';
+  const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
+  const sessionWriteBlockGenerationRef = useRef(0);
+  if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
+    sessionWriteBlockGenerationRef.current += 1;
+  }
+  sessionWriteBlockedRef.current = sessionWriteBlocked;
+  const appMountedRef = useRef(true);
+  useLayoutEffect(() => {
+    appMountedRef.current = true;
+    return () => {
+      appMountedRef.current = false;
+    };
+  }, []);
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const sessionCatalogController = useSessionCatalogController(
+    workspace.client,
+  );
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -2033,12 +2276,17 @@ export function App({
   const [sessionStatusDisplayName, setSessionStatusDisplayName] = useState<
     string | undefined
   >(undefined);
-  // Tracks the session id from the latest effect run. In-flight fetches
-  // compare their captured sid against this ref on resolve: a match means
+  // Tracks the logical session from the latest effect run. In-flight fetches
+  // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
-  const worktreeSessionIdRef = useRef<string | undefined>(undefined);
+  const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    setSessionWorktree(undefined);
+    setSessionBranch(undefined);
+    setSessionStatusDisplayName(undefined);
+  }, [logicalSessionKey]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
   // cleanup: connection.sessionId can cycle through several sessions during
@@ -2046,18 +2294,14 @@ export function App({
   // discard the one response we actually need.
   useEffect(() => {
     const sid = connection.sessionId;
-    const previousSid = worktreeSessionIdRef.current;
-    worktreeSessionIdRef.current = sid;
+    const sessionKey = logicalSessionKey;
+    const owner = sessionOwnerGuard.capture();
+    worktreeSessionKeyRef.current = sessionKey;
     if (!sid) {
       setSessionWorktree(undefined);
       setSessionBranch(undefined);
       setSessionStatusDisplayName(undefined);
       return;
-    }
-    if (previousSid !== sid) {
-      setSessionWorktree(undefined);
-      setSessionBranch(undefined);
-      setSessionStatusDisplayName(undefined);
     }
     if (
       connection.status !== 'connected' ||
@@ -2069,16 +2313,28 @@ export function App({
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
-        if (worktreeSessionIdRef.current === sid) {
+        if (worktreeSessionKeyRef.current === sessionKey && owner.isCurrent()) {
           setSessionWorktree(summary.worktree);
           setSessionBranch(summary.branch);
           setSessionStatusDisplayName(summary.displayName);
         }
-        return workspace.client
-          .listWorkspaceSessions(summary.workspaceCwd, { pageSize: 200 })
-          .then((sessions) => {
-            if (worktreeSessionIdRef.current !== sid) return;
-            const listedSession = sessions.find(
+        return loadSessionCatalogOnce(
+          workspace.client,
+          {
+            routeKind: 'legacy',
+            workspaceCwd: summary.workspaceCwd,
+            options: { pageSize: 200 },
+          },
+          { fresh: true },
+        )
+          .then((page) => {
+            if (
+              worktreeSessionKeyRef.current !== sessionKey ||
+              !owner.isCurrent()
+            ) {
+              return;
+            }
+            const listedSession = page.sessions.find(
               (session) => session.sessionId === sid,
             );
             setSessionStatusDisplayName(
@@ -2088,7 +2344,7 @@ export function App({
           .catch(() => undefined);
       })
       .catch(() => {
-        if (worktreeSessionIdRef.current === sid) {
+        if (worktreeSessionKeyRef.current === sessionKey && owner.isCurrent()) {
           setSessionWorktree(undefined);
           setSessionBranch(undefined);
           setSessionStatusDisplayName(undefined);
@@ -2096,9 +2352,13 @@ export function App({
       });
   }, [
     connection.catchingUp,
+    connection.clientId,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    connection.workspaceCwd,
+    logicalSessionKey,
+    sessionOwnerGuard,
     workspace.client,
   ]);
   // Active workspace: the connected session's workspace, else the workspace
@@ -2242,6 +2502,11 @@ export function App({
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
   const [failedPromptRetry, setFailedPromptRetry] =
     useState<FailedPromptRetry | null>(null);
+  const cancelledRetryStatesRef = useRef(
+    new Map<string, CancelledRetryEntry[]>(),
+  );
+  const cancelledRetryAttemptRef = useRef(0);
+  const [cancelledRetryRevision, setCancelledRetryRevision] = useState(0);
   const [unknownPromptAdmission, setUnknownPromptAdmission] =
     useState<UnknownPromptAdmission | null>(null);
   const unknownPromptAdmissionRef = useRef<UnknownPromptAdmission | null>(null);
@@ -2256,6 +2521,40 @@ export function App({
     failedPromptRef.current = next;
     setFailedPrompt(next);
   }, []);
+  const failedPromptOwnerRef = useRef<{
+    sessionId?: string;
+    workspaceCwd?: string;
+    snapshot: DaemonSessionOwnerSnapshot;
+  }>({
+    sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
+    snapshot: sessionOwnerGuard.capture(),
+  });
+  useLayoutEffect(() => {
+    const previousOwner = failedPromptOwnerRef.current;
+    failedPromptOwnerRef.current = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+      snapshot: sessionOwnerGuard.capture(),
+    };
+    if (
+      previousOwner.sessionId === connection.sessionId &&
+      previousOwner.workspaceCwd === undefined &&
+      connection.workspaceCwd !== undefined &&
+      previousOwner.snapshot.isCurrent()
+    ) {
+      return;
+    }
+    updateFailedPrompt(null);
+    setFailedPromptRetry(null);
+    updateUnknownPromptAdmission(null);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    sessionOwnerGuard,
+    updateFailedPrompt,
+    updateUnknownPromptAdmission,
+  ]);
   const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
     null,
   );
@@ -2270,7 +2569,6 @@ export function App({
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceCwdRef = useRef<string | undefined>(undefined);
-  const lastGoalSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
       (message): message is LocalAnchoredMessage => message !== null,
@@ -2299,19 +2597,51 @@ export function App({
   useEffect(() => {
     const failed = failedPromptRef.current;
     if (!failed) return;
-    const failedIndex = displayMessages.findIndex(
-      (message) => message.id === failed.messageId,
+    const currentFailedBlock = findUserMessageByIdentity(
+      store.getSnapshot().blocks,
+      failed.identity,
+      failed.owner.snapshot.isCurrent(),
     );
+    const failedBlock = findUserMessageByIdentity(
+      blocks,
+      failed.identity,
+      failed.owner.snapshot.isCurrent(),
+    );
+    if (failed.sessionId !== connection.sessionId || !currentFailedBlock) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (!failedBlock) return;
+    const failedIndex = displayMessages.findIndex(
+      (message) => message.id === failedBlock.id,
+    );
+    if (failedIndex < 0) return;
     if (
-      failed.sessionId !== connection.sessionId ||
-      failedIndex < 0 ||
       displayMessages
         .slice(failedIndex + 1)
         .some((message) => message.role === 'user')
     ) {
       updateFailedPrompt(null);
+      return;
     }
-  }, [connection.sessionId, displayMessages, failedPrompt, updateFailedPrompt]);
+    if (
+      failed.messageId !== failedBlock.id ||
+      failed.identity.block !== failedBlock
+    ) {
+      updateFailedPrompt({
+        ...failed,
+        messageId: failedBlock.id,
+        identity: { block: failedBlock },
+      });
+    }
+  }, [
+    blocks,
+    connection.sessionId,
+    displayMessages,
+    failedPrompt,
+    store,
+    updateFailedPrompt,
+  ]);
   useEffect(() => {
     const unknown = unknownPromptAdmissionRef.current;
     if (unknown && unknown.sessionId !== connection.sessionId) {
@@ -2478,7 +2808,7 @@ export function App({
   useLayoutEffect(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     setEnvironmentPanelOpen(false);
-  }, [connection.sessionId]);
+  }, [logicalSessionKey]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
@@ -2521,7 +2851,7 @@ export function App({
   const artifactPanelStateBySessionRef = useRef(
     new Map<string, ArtifactPanelSessionState>(),
   );
-  const artifactPanelSessionIdRef = useRef(connection.sessionId);
+  const artifactPanelSessionIdRef = useRef(logicalSessionKey);
   artifactPanelSessionStateRef.current = {
     open: artifactPanelOpen,
     tabs: artifactPanelTabs,
@@ -2554,7 +2884,7 @@ export function App({
       }
     }
 
-    const nextSessionId = connection.sessionId;
+    const nextSessionId = logicalSessionKey;
     artifactPanelSessionIdRef.current = nextSessionId;
     const savedState = nextSessionId
       ? artifactPanelStateBySessionRef.current.get(nextSessionId)
@@ -2581,7 +2911,7 @@ export function App({
     setPaneArtifactSnapshots(new Map());
     setArtifactPanelWidth(savedState.width);
     setArtifactPanelFullscreen(false);
-  }, [connection.sessionId]);
+  }, [logicalSessionKey]);
   const sideTasksAvailable =
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
@@ -2590,6 +2920,9 @@ export function App({
     items: [],
     loaded: false,
   });
+  useLayoutEffect(() => {
+    setSideTaskCatalog({ items: [], loaded: false });
+  }, [logicalSessionKey]);
   const optimisticSideTaskIdsRef = useRef(new Set<string>());
   const visibleSideTasks =
     sideTaskCatalog.parentSessionId === connection.sessionId
@@ -2628,6 +2961,7 @@ export function App({
   }, [createSideTask, pushToast, t]);
   const createSideTaskSession = useCallback(
     async (_tabId: string, parentSessionId: string, title: string) => {
+      const ownerCwd = connection.workspaceCwd;
       const parentClientId =
         connection.sessionId === parentSessionId
           ? connection.clientId
@@ -2639,6 +2973,9 @@ export function App({
         },
         parentClientId,
       );
+      if (ownerCwd) {
+        sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
+      }
       await workspace.client
         .detachSession(session.sessionId, session.clientId)
         .catch(() => undefined);
@@ -2647,7 +2984,13 @@ export function App({
         displayName: session.displayName,
       };
     },
-    [connection.clientId, connection.sessionId, workspace.client],
+    [
+      connection.clientId,
+      connection.sessionId,
+      connection.workspaceCwd,
+      sessionCatalogController,
+      workspace.client,
+    ],
   );
   const handleSideTaskCreated = useCallback(
     (tabId: string, sessionId: string) => {
@@ -2784,16 +3127,23 @@ export function App({
         : { parentSessionId, items: [], loaded: false },
     );
     let cancelled = false;
-    void workspace.client
-      .listWorkspaceSessions(workspaceCwd, {
-        pageSize: SESSION_LIST_PAGE_SIZE,
-        archiveState: 'active',
-        sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
-        sourceId: parentSessionId,
-      })
-      .then((sessions) => {
+    void loadSessionCatalogOnce(
+      workspace.client,
+      {
+        routeKind: 'legacy',
+        workspaceCwd,
+        options: {
+          pageSize: SESSION_LIST_PAGE_SIZE,
+          archiveState: 'active',
+          sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+          sourceId: parentSessionId,
+        },
+      },
+      { fresh: true },
+    )
+      .then((page) => {
         if (cancelled) return;
-        const listedItems = sessions.map((session) => ({
+        const listedItems = page.sessions.map((session) => ({
           sessionId: session.sessionId,
           title:
             session.displayName?.trim() ||
@@ -3013,6 +3363,28 @@ export function App({
     },
     [getDefaultReviewPanelWidth],
   );
+  const openImagePanel = useCallback(
+    (src: string, alt?: string) => {
+      const tab: ArtifactPanelTab = {
+        id: imageTabId(src),
+        kind: 'image',
+        title: t('turnOutputs.imagePreview'),
+        src,
+        ...(alt ? { alt } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [tab, ...tabs],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3154,6 +3526,10 @@ export function App({
         );
         return;
       }
+      if (request.kind === 'image') {
+        openImagePanel(request.src, request.alt);
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3209,6 +3585,7 @@ export function App({
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
+      openImagePanel,
       openSubagentPanelForSession,
     ],
   );
@@ -3529,9 +3906,11 @@ export function App({
     async (tool: ACPToolCall): Promise<boolean> => {
       const sessionId = monitorDetailsSessionIdRef.current;
       if (!sessionId) return false;
+      const owner = sessionOwnerGuard.capture();
       try {
         const snapshot = await sessionActions.getTasks();
         if (
+          !owner.isCurrent() ||
           monitorDetailsSessionIdRef.current !== sessionId ||
           snapshot.sessionId !== sessionId
         ) {
@@ -3546,7 +3925,7 @@ export function App({
         return false;
       }
     },
-    [openMonitorPanel, sessionActions],
+    [openMonitorPanel, sessionActions, sessionOwnerGuard],
   );
   useEffect(() => {
     const monitors = new Map(
@@ -3651,6 +4030,7 @@ export function App({
     assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
   }, [composerRef]);
   const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
+  useLayoutEffect(() => setActiveGoal(null), [logicalSessionKey]);
   const [isCreatingMissingSession, setIsCreatingMissingSession] =
     useState(false);
   const creatingMissingSessionRef = useRef(false);
@@ -3673,18 +4053,31 @@ export function App({
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
+  const failedPromptRetryIsCurrent = Boolean(
+    failedPromptRetry &&
+      retryOwnerMatchesCurrent(
+        failedPromptRetry.owner,
+        connection.sessionId,
+        connection.workspaceCwd,
+        composerSourceVersionRef.current,
+      ) &&
+      retryTranscriptIdentityMatches(
+        blocks,
+        failedPromptRetry.transcriptIdentity,
+      ),
+  );
   useEffect(() => {
     if (
       failedPromptRetry &&
-      (failedPromptRetry.sessionId !== connection.sessionId ||
+      (!failedPromptRetryIsCurrent ||
         (streamingState === 'idle' && failedPromptRetry.settled))
     ) {
       setFailedPromptRetry(null);
     }
-  }, [connection.sessionId, failedPromptRetry, streamingState]);
+  }, [failedPromptRetry, failedPromptRetryIsCurrent, streamingState]);
   const suppressFailedPromptRetryStreaming = Boolean(
     failedPromptRetry &&
-      failedPromptRetry.sessionId === connection.sessionId &&
+      failedPromptRetryIsCurrent &&
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
@@ -3727,10 +4120,289 @@ export function App({
     composerSourceVersionRef.current,
   );
   const retryableTurnErrorIdRef = useRef<string | null>(null);
+  const retryableTurnErrorIdentityRef = useRef<
+    TranscriptTurnErrorIdentity | undefined
+  >(undefined);
   const retriedTurnErrorIdRef = useRef<string | null>(null);
+  const failedTurnErrorRetryRef = useRef<{
+    errorId: string;
+    text: string;
+    images?: PromptImage[];
+    inputAnnotations?: DaemonInputAnnotation[];
+    owner: CancelledRetryOwner;
+  } | null>(null);
   const [showRetryHint, setShowRetryHint] = useState(false);
   const showRetryHintRef = useRef(showRetryHint);
   showRetryHintRef.current = showRetryHint;
+  const rearmFailedTurnErrorRetry = useCallback(
+    (
+      retryableTurnError: DaemonTranscriptBlock,
+      currentBlocks: readonly DaemonTranscriptBlock[],
+    ) => {
+      const failedRetry = failedTurnErrorRetryRef.current;
+      if (!failedRetry || retryableTurnError.id === failedRetry.errorId) {
+        return;
+      }
+      if (
+        !retryOwnerMatchesCurrent(
+          failedRetry.owner,
+          connectionRef.current.sessionId,
+          connectionRef.current.workspaceCwd,
+          composerSourceVersionRef.current,
+        )
+      ) {
+        failedTurnErrorRetryRef.current = null;
+        return;
+      }
+      if (
+        !currentBlocks.some(
+          (block) =>
+            block.kind === 'error' &&
+            block.source === 'turn_error' &&
+            block.id === failedRetry.errorId,
+        )
+      ) {
+        failedTurnErrorRetryRef.current = null;
+        return;
+      }
+      lastSubmittedPromptRef.current = failedRetry.text;
+      lastSubmittedImagesRef.current = failedRetry.images;
+      lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
+      lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
+      retryableTurnErrorIdRef.current = retryableTurnError.id;
+      retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
+      retriedTurnErrorIdRef.current = null;
+      failedTurnErrorRetryRef.current = null;
+      setShowRetryHint(true);
+    },
+    [],
+  );
+  const retryOwnerRef = useRef<CancelledRetryOwner>({
+    sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
+    sessionKey: logicalSessionKey,
+    sourceVersion: composerSourceVersionRef.current,
+    snapshot: sessionOwnerGuard.capture(),
+  });
+  useLayoutEffect(() => {
+    const previousOwner = retryOwnerRef.current;
+    const currentSnapshot = sessionOwnerGuard.capture();
+    const workspaceBecameKnown =
+      previousOwner.sessionId !== undefined &&
+      previousOwner.sessionId === connection.sessionId &&
+      previousOwner.workspaceCwd === undefined &&
+      connection.workspaceCwd !== undefined &&
+      previousOwner.snapshot.isCurrent();
+    if (workspaceBecameKnown && logicalSessionKey) {
+      const previousSessionKey = previousOwner.sessionKey;
+      previousOwner.workspaceCwd = connection.workspaceCwd;
+      previousOwner.sessionKey = logicalSessionKey;
+      previousOwner.snapshot = currentSnapshot;
+      const previousStates =
+        previousSessionKey !== undefined
+          ? cancelledRetryStatesRef.current.get(previousSessionKey)
+          : undefined;
+      if (
+        previousSessionKey &&
+        previousStates &&
+        previousSessionKey !== logicalSessionKey
+      ) {
+        const currentStates =
+          cancelledRetryStatesRef.current.get(logicalSessionKey) ?? [];
+        cancelledRetryStatesRef.current.set(
+          logicalSessionKey,
+          mergeCancelledRetryEntries(
+            currentStates,
+            previousStates.map((previous) => ({ state: previous.state })),
+          ),
+        );
+        cancelledRetryStatesRef.current.delete(previousSessionKey);
+      }
+      return;
+    }
+    if (
+      retryOwnerMatchesCurrent(
+        previousOwner,
+        connection.sessionId,
+        connection.workspaceCwd,
+        composerSourceVersionRef.current,
+      )
+    ) {
+      return;
+    }
+    if (previousOwner.workspaceCwd === undefined && previousOwner.sessionKey) {
+      cancelledRetryStatesRef.current.delete(previousOwner.sessionKey);
+    }
+    retryOwnerRef.current = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+      sessionKey: logicalSessionKey,
+      sourceVersion: composerSourceVersionRef.current,
+      snapshot: currentSnapshot,
+    };
+    lastSubmittedPromptRef.current = '';
+    lastSubmittedImagesRef.current = undefined;
+    lastSubmittedInputAnnotationsRef.current = undefined;
+    lastSubmittedSourceVersionRef.current = -1;
+    retryableTurnErrorIdRef.current = null;
+    retryableTurnErrorIdentityRef.current = undefined;
+    retriedTurnErrorIdRef.current = null;
+    failedTurnErrorRetryRef.current = null;
+    setShowRetryHint(false);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    logicalSessionKey,
+    sessionOwnerGuard,
+  ]);
+  const applyCancelledRetryState = useCallback(
+    (state: CancelledRetryState): CancelledRetryRestoreResult => {
+      const currentBlocks = store.getSnapshot().blocks;
+      if (state.kind === 'failed-prompt') {
+        let failed = state.failed;
+        const latestUserMessage = getLatestUserBlock(currentBlocks);
+        if (!matchesUserMessageIdentity(latestUserMessage, failed.identity)) {
+          if (
+            !matchesUserMessageIdentity(
+              latestUserMessage,
+              failed.previousIdentity,
+            )
+          ) {
+            return 'invalid';
+          }
+          store.appendLocalUserMessage(
+            failed.text,
+            failed.images?.map((image) => ({
+              data: image.data,
+              mimeType: image.media_type,
+            })),
+            failed.inputAnnotations?.length
+              ? { inputAnnotations: failed.inputAnnotations }
+              : undefined,
+          );
+          const rehydratedMessage = getLatestUserBlock(
+            store.getSnapshot().blocks,
+          );
+          if (!rehydratedMessage || rehydratedMessage === latestUserMessage) {
+            return 'invalid';
+          }
+          failed = {
+            ...failed,
+            messageId: rehydratedMessage.id,
+            identity: { block: rehydratedMessage },
+          };
+          state.failed = failed;
+        } else if (
+          latestUserMessage &&
+          (latestUserMessage.id !== failed.messageId ||
+            latestUserMessage !== failed.identity.block)
+        ) {
+          failed = {
+            ...failed,
+            messageId: latestUserMessage.id,
+            identity: { block: latestUserMessage },
+          };
+          state.failed = failed;
+        }
+        if (
+          !displayMessages.some((message) => message.id === failed.messageId)
+        ) {
+          return 'pending';
+        }
+        failed = {
+          ...failed,
+          owner: retryOwnerRef.current,
+        };
+        state.failed = failed;
+        updateFailedPrompt(failed);
+        setFailedPromptRetry(null);
+        return 'restored';
+      }
+      const currentTurnError = getRetryableTurnError(currentBlocks);
+      if (!matchesTurnErrorIdentity(currentTurnError, state.identity)) {
+        return 'invalid';
+      }
+      const renderedTurnError = getRetryableTurnError(blocks);
+      if (
+        !renderedTurnError ||
+        !matchesTurnErrorIdentity(renderedTurnError, state.identity)
+      ) {
+        return 'pending';
+      }
+      lastSubmittedPromptRef.current = state.text;
+      lastSubmittedImagesRef.current = state.images;
+      lastSubmittedInputAnnotationsRef.current = state.inputAnnotations;
+      lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
+      retryableTurnErrorIdRef.current = renderedTurnError.id;
+      retryableTurnErrorIdentityRef.current = { block: renderedTurnError };
+      retriedTurnErrorIdRef.current = state.previousRetriedTurnErrorId;
+      setShowRetryHint(state.previousShowRetryHint);
+      setFailedPromptRetry(null);
+      return 'restored';
+    },
+    [blocks, displayMessages, store, updateFailedPrompt],
+  );
+  const restoreOrDeferCancelledRetry = useCallback(
+    (owner: CancelledRetryOwner, state: CancelledRetryState) => {
+      const resolvedSessionKey = owner.sessionKey;
+      if (
+        !resolvedSessionKey ||
+        (owner.workspaceCwd === undefined && !owner.snapshot.isCurrent())
+      ) {
+        return;
+      }
+      const states = mergeCancelledRetryEntries(
+        cancelledRetryStatesRef.current.get(resolvedSessionKey) ?? [],
+        [
+          {
+            ...(owner.workspaceCwd === undefined ? { owner } : {}),
+            state,
+          },
+        ],
+      );
+      cancelledRetryStatesRef.current.set(resolvedSessionKey, states);
+      if (appMountedRef.current) {
+        setCancelledRetryRevision((current) => current + 1);
+      }
+    },
+    [],
+  );
+  useLayoutEffect(() => {
+    if (
+      !logicalSessionKey ||
+      sessionWriteBlocked ||
+      connection.loadingTranscript ||
+      connection.catchingUp
+    ) {
+      return;
+    }
+    const exactStates =
+      cancelledRetryStatesRef.current.get(logicalSessionKey) ?? [];
+    const pendingExactStates: CancelledRetryEntry[] = [];
+    for (const entry of exactStates) {
+      if (entry.owner && !entry.owner.snapshot.isCurrent()) {
+        continue;
+      }
+      if (applyCancelledRetryState(entry.state) === 'pending') {
+        pendingExactStates.push(entry);
+      }
+    }
+    if (pendingExactStates.length > 0) {
+      cancelledRetryStatesRef.current.set(
+        logicalSessionKey,
+        pendingExactStates,
+      );
+    } else {
+      cancelledRetryStatesRef.current.delete(logicalSessionKey);
+    }
+  }, [
+    applyCancelledRetryState,
+    cancelledRetryRevision,
+    connection.catchingUp,
+    connection.loadingTranscript,
+    logicalSessionKey,
+    sessionWriteBlocked,
+  ]);
   const connected = connection.status === 'connected';
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
@@ -3899,8 +4571,8 @@ export function App({
     }
     // document.activeElement retargets to the shadow host in shadow-DOM
     // portal mode; read the focused node from the surface's own root.
-    const surfaceRoot = surface.getRootNode() as Document | ShadowRoot;
-    if (!surface.contains(surfaceRoot.activeElement)) surface.focus();
+    const surfaceActive = getShadowAwareActiveElement(surface);
+    if (!surface.contains(surfaceActive)) surface.focus();
     // Keydowns inside the sandboxed HTML preview iframe never reach the
     // surface's Tab-wrap handler or the window Escape handler, and a Tab
     // past the preview's last focusable lands focus natively outside the
@@ -3960,9 +4632,7 @@ export function App({
         return;
       }
       const [first, last] = getFullscreenSurfaceTabEdges(event.currentTarget);
-      const focused = (
-        event.currentTarget.getRootNode() as Document | ShadowRoot
-      ).activeElement;
+      const focused = getShadowAwareActiveElement(event.currentTarget);
       if (!first || !last) {
         if (focused === event.currentTarget) event.preventDefault();
         return;
@@ -4531,29 +5201,90 @@ export function App({
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
     if (!activeConnection.sessionId || !activeConnection.workspaceCwd) return;
+    const owner = sessionOwnerGuard.capture();
     try {
-      const sessions = await workspace.client.listWorkspaceSessions(
-        activeConnection.workspaceCwd,
-        { pageSize: 200 },
+      const page = await loadSessionCatalogOnce(
+        workspace.client,
+        {
+          routeKind: 'legacy',
+          workspaceCwd: activeConnection.workspaceCwd,
+          options: { pageSize: 200 },
+        },
+        { fresh: true },
       );
       if (
+        !owner.isCurrent() ||
         connectionRef.current.sessionId !== activeConnection.sessionId ||
+        connectionRef.current.workspaceCwd !== activeConnection.workspaceCwd ||
         connectionRef.current.displayName
       ) {
         return;
       }
-      const displayName = sessions.find(
+      const displayName = page.sessions.find(
         (session) => session.sessionId === activeConnection.sessionId,
       )?.displayName;
       if (displayName?.trim()) setSessionStatusDisplayName(displayName);
     } catch {
       // The live session_metadata_updated event remains the primary path.
     }
-  }, [workspace.client]);
+  }, [sessionOwnerGuard, workspace.client]);
   const refreshActiveSessionDisplayNameRef = useRef(
     refreshActiveSessionDisplayName,
   );
   refreshActiveSessionDisplayNameRef.current = refreshActiveSessionDisplayName;
+  const delayedDisplayNameRefreshTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const pendingDisplayNameRefreshRef = useRef<
+    { sessionId: string; workspaceCwd: string } | undefined
+  >(undefined);
+  const refreshDisplayNameIfCurrent = useCallback(
+    (sessionId: string, workspaceCwd: string) => {
+      const activeConnection = connectionRef.current;
+      if (
+        activeConnection.sessionId !== sessionId ||
+        activeConnection.workspaceCwd !== workspaceCwd ||
+        activeConnection.displayName
+      ) {
+        return;
+      }
+      void refreshActiveSessionDisplayNameRef.current();
+    },
+    [],
+  );
+  const scheduleDelayedActiveSessionDisplayNameRefresh = useCallback(
+    (sessionId: string, workspaceCwd: string) => {
+      pendingDisplayNameRefreshRef.current = undefined;
+      if (delayedDisplayNameRefreshTimerRef.current !== null) {
+        clearTimeout(delayedDisplayNameRefreshTimerRef.current);
+      }
+      delayedDisplayNameRefreshTimerRef.current = setTimeout(() => {
+        delayedDisplayNameRefreshTimerRef.current = null;
+        if (typeof document !== 'undefined' && document.hidden) {
+          pendingDisplayNameRefreshRef.current = { sessionId, workspaceCwd };
+          return;
+        }
+        refreshDisplayNameIfCurrent(sessionId, workspaceCwd);
+      }, SESSION_CATALOG_TRAILING_REFRESH_MS);
+    },
+    [refreshDisplayNameIfCurrent],
+  );
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.hidden) return;
+      const pending = pendingDisplayNameRefreshRef.current;
+      if (!pending) return;
+      pendingDisplayNameRefreshRef.current = undefined;
+      refreshDisplayNameIfCurrent(pending.sessionId, pending.workspaceCwd);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      if (delayedDisplayNameRefreshTimerRef.current !== null) {
+        clearTimeout(delayedDisplayNameRefreshTimerRef.current);
+      }
+    };
+  }, [refreshDisplayNameIfCurrent]);
   const requireActiveSessionForLocalCommand = useCallback((): boolean => {
     if (connectionRef.current.sessionId) return true;
     pushToast('info', t('localCommand.noSession'));
@@ -4568,10 +5299,35 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
+  const promptPreparationOwnerRef = useRef<symbol | null>(null);
+  const beginPromptPreparation = useCallback(() => {
+    const owner = Symbol('prompt-preparation');
+    promptPreparationOwnerRef.current = owner;
+    setIsPreparingPrompt(true);
+    return owner;
+  }, []);
+  const finishPromptPreparation = useCallback((owner: symbol | undefined) => {
+    if (!owner || promptPreparationOwnerRef.current !== owner) return;
+    promptPreparationOwnerRef.current = null;
+    setIsPreparingPrompt(false);
+  }, []);
+  const planPreparationTokenRef = useRef(0);
+  useLayoutEffect(() => {
+    planPreparationTokenRef.current += 1;
+    promptPreparationOwnerRef.current = null;
+    setIsPreparingPrompt(false);
+  }, [logicalSessionKey]);
   const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
     null,
   );
   const preparingSessionIdRef = useRef<string | null>(null);
+  const allocatedSessionCatalogOwnerRef = useRef<
+    | {
+        sessionId: string;
+        workspaceCwd: string;
+      }
+    | undefined
+  >(undefined);
   /** Git mode intent for the next lazily-created session (branch or worktree). */
   const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
     mode: 'current',
@@ -4641,39 +5397,61 @@ export function App({
               entry.cwd === requestedWorkspaceCwd && entry.trusted === true,
           )?.cwd
         : undefined;
-      await createAndAttachSessionForPrompt({
-        sessionActions: sessionActions as typeof sessionActions &
-          SessionActionsWithCreate,
-        modelId,
-        modeId,
-        workspaceCwd:
-          lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd,
-        worktree:
-          gitModeIntentRef.current.mode === 'worktree'
-            ? { slug: gitModeIntentRef.current.slug }
-            : undefined,
-        branch:
-          gitModeIntentRef.current.mode === 'branch'
-            ? { name: gitModeIntentRef.current.name }
-            : undefined,
-        onSessionCreated: onSessionCreatedRef.current,
-        onSessionAllocated: (sessionId) => {
-          preparingSessionIdRef.current = sessionId;
-          allocatedSessionId = sessionId;
-        },
-        getCurrentSessionId: () => connectionRef.current.sessionId,
-      }).then((result) => {
-        if (result.worktree) {
-          setSessionWorktree(result.worktree);
+      const targetWorkspaceCwd =
+        lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd;
+      const catalogWorkspaceCwd =
+        targetWorkspaceCwd ??
+        workspace.workspaceCwd ??
+        connectionRef.current.workspaceCwd;
+      try {
+        await createAndAttachSessionForPrompt({
+          sessionActions: sessionActions as typeof sessionActions &
+            SessionActionsWithCreate,
+          modelId,
+          modeId,
+          workspaceCwd: targetWorkspaceCwd,
+          worktree:
+            gitModeIntentRef.current.mode === 'worktree'
+              ? { slug: gitModeIntentRef.current.slug }
+              : undefined,
+          branch:
+            gitModeIntentRef.current.mode === 'branch'
+              ? { name: gitModeIntentRef.current.name }
+              : undefined,
+          onSessionCreated: onSessionCreatedRef.current,
+          onSessionAllocated: (sessionId) => {
+            preparingSessionIdRef.current = sessionId;
+            allocatedSessionId = sessionId;
+            if (catalogWorkspaceCwd) {
+              allocatedSessionCatalogOwnerRef.current = {
+                sessionId,
+                workspaceCwd: catalogWorkspaceCwd,
+              };
+              sessionCatalogController.sessionCreated(
+                catalogWorkspaceCwd,
+                sessionId,
+              );
+            }
+          },
+          getCurrentSessionId: () => connectionRef.current.sessionId,
+        }).then((result) => {
+          if (result.worktree) {
+            setSessionWorktree(result.worktree);
+          }
+          if (result.branch) {
+            setSessionBranch(result.branch);
+          }
+          // Clear the pending intent only on success. On failure the
+          // composer chip stays in the selected mode so the user knows
+          // the intent was not fulfilled and can retry.
+          setGitModeIntent({ mode: 'current' });
+        });
+      } catch (error) {
+        if (allocatedSessionId && catalogWorkspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(catalogWorkspaceCwd);
         }
-        if (result.branch) {
-          setSessionBranch(result.branch);
-        }
-        // Clear the pending intent only on success. On failure the
-        // composer chip stays in the selected mode so the user knows
-        // the intent was not fulfilled and can retry.
-        setGitModeIntent({ mode: 'current' });
-      });
+        throw error;
+      }
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
@@ -4689,7 +5467,13 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [lockedWorkspaceCwd, sessionActions, workspaces]);
+  }, [
+    lockedWorkspaceCwd,
+    sessionActions,
+    sessionCatalogController,
+    workspace.workspaceCwd,
+    workspaces,
+  ]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const onSlashCommandRef = useRef(onSlashCommand);
@@ -4704,38 +5488,21 @@ export function App({
       workspacesRef.current.find((entry) => entry.primary)?.cwd
     );
   }, [lockedWorkspaceCwd]);
-  const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
-  const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
+  const retryOwnerIsCurrent = useCallback(
+    (owner: CancelledRetryOwner) =>
+      retryOwnerMatchesCurrent(
+        owner,
+        connectionRef.current.sessionId,
+        getComposerWorkspaceCwd(),
+        composerSourceVersionRef.current,
+      ),
+    [getComposerWorkspaceCwd],
   );
-  useEffect(
-    () => () => {
-      if (delayedReloadTimerRef.current !== null) {
-        clearTimeout(delayedReloadTimerRef.current);
-      }
-    },
-    [],
-  );
-  // Daemon-side session registration lags behind the client, so schedule a
-  // backup reload ~2 s after the immediate one to pick up newly created sessions.
-  const scheduleDelayedSessionListReload = useCallback(() => {
-    if (delayedReloadTimerRef.current !== null) {
-      clearTimeout(delayedReloadTimerRef.current);
-    }
-    delayedReloadTimerRef.current = setTimeout(() => {
-      setSessionListReloadToken((n) => n + 1);
-      void refreshActiveSessionDisplayNameRef.current();
-    }, 2000);
-  }, []);
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
-      setSessionListReloadToken((n) => n + 1);
-      if (event.type === 'turn_complete') {
-        scheduleDelayedSessionListReload();
-      }
     },
-    [onSessionChange, scheduleDelayedSessionListReload],
+    [onSessionChange],
   );
   // Ref-stable handle so that useCallback hooks (sendPrompt, enqueuePrompt,
   // turn_complete effect) don't need dispatchSessionChange in their dep arrays.
@@ -4755,50 +5522,74 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
         onAdmissionStarted?: (sessionId: string | undefined) => void;
         onAdmitted?: () => void;
+        onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
+        ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
-      const isUserPrompt = !text.trimStart().startsWith('/');
-      const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
-      const previousLastSubmittedImages = lastSubmittedImagesRef.current;
-      const previousLastSubmittedInputAnnotations =
-        lastSubmittedInputAnnotationsRef.current;
-      const previousLastSubmittedSourceVersion =
-        lastSubmittedSourceVersionRef.current;
-      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
-      const previousShowRetryHint = showRetryHintRef.current;
-      const restoreCancelledSubmitState = () => {
-        setIsPreparingPrompt(false);
-        lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
-        lastSubmittedImagesRef.current = previousLastSubmittedImages;
-        lastSubmittedInputAnnotationsRef.current =
-          previousLastSubmittedInputAnnotations;
-        lastSubmittedSourceVersionRef.current =
-          previousLastSubmittedSourceVersion;
-        retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
-        setShowRetryHint(previousShowRetryHint);
-      };
-      if (!opts?.retry && isUserPrompt) {
-        lastSubmittedPromptRef.current = text;
-        lastSubmittedImagesRef.current = images;
-        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
-        lastSubmittedSourceVersionRef.current =
-          composerSourceVersionRef.current;
-        retriedTurnErrorIdRef.current = null;
+      if (sessionWriteBlockedRef.current) {
+        throw new DOMException(
+          'Session switch is still preparing',
+          'InvalidStateError',
+        );
       }
-      setShowRetryHint(false);
+      const isUserPrompt = !text.trimStart().startsWith('/');
+      let promptPreparationOwner: symbol | undefined;
+      const startPreparing = () => {
+        promptPreparationOwner ??= beginPromptPreparation();
+      };
+      const finishPreparing = () => {
+        finishPromptPreparation(promptPreparationOwner);
+      };
+      const restoreCancelledSubmitState = () => {
+        finishPreparing();
+        opts?.onCancelledBeforeAdmission?.();
+      };
       const shouldShowPreparing = !connectionRef.current.sessionId;
-      if (onSubmitBeforeRef.current) {
-        const sourceSessionId = connectionRef.current.sessionId;
-        const sourceWorkspaceCwd = getComposerWorkspaceCwd();
-        const sourceVersion = composerSourceVersionRef.current;
-        setIsPreparingPrompt(true);
+      const submitBefore = onSubmitBeforeRef.current;
+      const admissionSource = {
+        owner: sessionOwnerGuard.capture(),
+        sessionId: connectionRef.current.sessionId,
+        workspaceCwd: getComposerWorkspaceCwd(),
+        sourceVersion: composerSourceVersionRef.current,
+        writeBlockGeneration: sessionWriteBlockGenerationRef.current,
+      };
+      const admissionOwnerIsCurrent = (allocatedSessionId?: string) => {
+        if (!appMountedRef.current) return false;
+        const currentSessionId = connectionRef.current.sessionId;
+        const sessionMatches =
+          currentSessionId === admissionSource.sessionId ||
+          (admissionSource.sessionId === undefined &&
+            (currentSessionId === undefined ||
+              (allocatedSessionId !== undefined &&
+                currentSessionId === allocatedSessionId)));
+        const ownAllocationSucceeded =
+          admissionSource.sessionId === undefined &&
+          allocatedSessionId !== undefined &&
+          (currentSessionId === undefined ||
+            currentSessionId === allocatedSessionId);
+        return (
+          (admissionSource.owner.isCurrent() || ownAllocationSucceeded) &&
+          sessionMatches &&
+          (ownAllocationSucceeded ||
+            getComposerWorkspaceCwd() === admissionSource.workspaceCwd) &&
+          composerSourceVersionRef.current === admissionSource.sourceVersion
+        );
+      };
+      const admissionSourceIsCurrent = (allocatedSessionId?: string) =>
+        admissionOwnerIsCurrent(allocatedSessionId) &&
+        !sessionWriteBlockedRef.current &&
+        sessionWriteBlockGenerationRef.current ===
+          admissionSource.writeBlockGeneration;
+      if (submitBefore) {
+        startPreparing();
         try {
-          await onSubmitBeforeRef.current({
-            sessionId: sourceSessionId,
+          await submitBefore({
+            sessionId: admissionSource.sessionId,
             prompt: text,
           });
         } catch (err) {
+          if (!appMountedRef.current) return;
           console.warn(
             '[web-shell] onSubmitBefore rejected, prompt cancelled',
             err,
@@ -4808,54 +5599,95 @@ export function App({
           restoreCancelledSubmitState();
           return;
         }
-        if (
-          connectionRef.current.sessionId !== sourceSessionId ||
-          getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
-          composerSourceVersionRef.current !== sourceVersion
-        ) {
+        if (!appMountedRef.current) return;
+        if (!admissionSourceIsCurrent()) {
           restoreCancelledSubmitState();
           return;
         }
-        // Only reset if session already exists; otherwise keep true and let
-        // ensureSessionForPrompt's finally block handle it.
-        if (!shouldShowPreparing) {
-          setIsPreparingPrompt(false);
-        }
       }
-      if (!onSubmitBeforeRef.current && shouldShowPreparing) {
-        setIsPreparingPrompt(true);
+      if (!submitBefore && shouldShowPreparing) {
+        startPreparing();
       }
-      clearFollowup();
+      const existingSessionWorkspaceCwd = getComposerWorkspaceCwd();
       let allocatedSessionId: string | undefined;
       try {
         allocatedSessionId = await ensureSessionForPrompt();
       } finally {
-        if (shouldShowPreparing) {
-          setIsPreparingPrompt(false);
+        if (appMountedRef.current && shouldShowPreparing) {
+          finishPreparing();
         }
       }
-      const promptOptions: SendPromptOptionsWithRetry = {
-        images,
-        inputAnnotations: opts?.inputAnnotations,
-        optimisticUserMessage: opts?.optimisticUserMessage,
-        retry: opts?.retry,
-        ...(opts?.onAdmissionStarted
-          ? {
-              onAdmissionStarted: () =>
-                opts.onAdmissionStarted?.(
-                  connectionRef.current.sessionId ?? allocatedSessionId,
-                ),
-            }
-          : {}),
-        ...(opts?.onAdmitted ? { onAdmitted: opts.onAdmitted } : {}),
-      };
+      if (!appMountedRef.current) return;
+      if (!admissionSourceIsCurrent(allocatedSessionId)) {
+        restoreCancelledSubmitState();
+        return;
+      }
+      const sessionIdAfterEnsure =
+        connectionRef.current.sessionId ?? allocatedSessionId;
+      const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
+      const promptWorkspaceCwd = allocatedSessionId
+        ? allocatedOwner?.sessionId === allocatedSessionId
+          ? allocatedOwner.workspaceCwd
+          : undefined
+        : existingSessionWorkspaceCwd;
+      if (
+        !opts?.retry &&
+        opts?.optimisticUserMessage !== false &&
+        isUserPrompt
+      ) {
+        lastSubmittedPromptRef.current = text;
+        lastSubmittedImagesRef.current = images;
+        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
+        lastSubmittedSourceVersionRef.current =
+          composerSourceVersionRef.current;
+        retryableTurnErrorIdRef.current = null;
+        retryableTurnErrorIdentityRef.current = undefined;
+        retriedTurnErrorIdRef.current = null;
+        failedTurnErrorRetryRef.current = null;
+        retryOwnerRef.current = {
+          sessionId: sessionIdAfterEnsure,
+          workspaceCwd: promptWorkspaceCwd,
+          sessionKey: getLogicalSessionKey(
+            sessionIdAfterEnsure,
+            promptWorkspaceCwd,
+          ),
+          sourceVersion: composerSourceVersionRef.current,
+          snapshot: sessionOwnerGuard.capture(),
+        };
+      }
+      setShowRetryHint(false);
+      finishPreparing();
+      if (opts?.ownerRef) opts.ownerRef.current = sessionOwnerGuard.capture();
+      clearFollowup();
       if (opts?.commitComposerAccepted) {
         opts.commitComposerAccepted();
       } else if (opts?.clearComposerOnPromptStart) {
         editorRef.current?.clear();
       }
-      const sessionIdAfterEnsure =
-        connectionRef.current.sessionId ?? allocatedSessionId;
+      let admissionStarted = false;
+      let admitted = false;
+      const promptOptions: SendPromptOptionsWithRetry = {
+        images,
+        inputAnnotations: opts?.inputAnnotations,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+        retry: opts?.retry,
+        onAdmissionStarted: () => {
+          admissionStarted = true;
+          opts?.onAdmissionStarted?.(
+            connectionRef.current.sessionId ?? allocatedSessionId,
+          );
+        },
+        onAdmitted: () => {
+          admitted = true;
+          if (sessionIdAfterEnsure && promptWorkspaceCwd) {
+            sessionCatalogController.promptAdmitted(
+              promptWorkspaceCwd,
+              sessionIdAfterEnsure,
+            );
+          }
+          opts?.onAdmitted?.();
+        },
+      };
       if (sessionIdAfterEnsure && (text.trim() || (images?.length ?? 0) > 0)) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
@@ -4863,10 +5695,9 @@ export function App({
           prompt: text,
           queued: false,
         });
-        scheduleDelayedSessionListReload();
       }
-      const previousUserMessageId = opts?.onOptimisticUserMessage
-        ? getLatestUserBlockId(store.getSnapshot().blocks)
+      const previousUserMessage = opts?.onOptimisticUserMessage
+        ? getLatestUserBlock(store.getSnapshot().blocks)
         : undefined;
       const resultPromise = (
         sessionActions.sendPrompt as (
@@ -4879,22 +5710,42 @@ export function App({
         opts?.optimisticUserMessage !== false &&
         opts?.onOptimisticUserMessage
       ) {
-        const messageId = getLatestUserBlockId(store.getSnapshot().blocks);
-        if (messageId && messageId !== previousUserMessageId) {
+        const message = getLatestUserBlock(store.getSnapshot().blocks);
+        if (message && message !== previousUserMessage) {
           opts.onOptimisticUserMessage({
             sessionId: sessionIdAfterEnsure,
-            messageId,
+            messageId: message.id,
+            identity: { block: message },
+            owner: retryOwnerRef.current,
+            ...(previousUserMessage
+              ? { previousIdentity: { block: previousUserMessage } }
+              : {}),
           });
         }
       }
-      return await resultPromise;
+      try {
+        return await resultPromise;
+      } catch (error) {
+        if (
+          admissionStarted &&
+          !admitted &&
+          !isDefinitelyRejectedPromptAdmission(error) &&
+          promptWorkspaceCwd
+        ) {
+          sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
+        }
+        throw error;
+      }
     },
     [
+      beginPromptPreparation,
       clearFollowup,
       ensureSessionForPrompt,
+      finishPromptPreparation,
       getComposerWorkspaceCwd,
-      scheduleDelayedSessionListReload,
+      sessionCatalogController,
       sessionActions,
+      sessionOwnerGuard,
       store,
     ],
   );
@@ -4912,15 +5763,22 @@ export function App({
             return connection.sessionId;
           }
           // Fetch the most recent session for this workspace.
-          const sessions = await workspace.client
-            .workspaceByCwd(cwd)
-            .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
-          if (sessions.length > 0) return sessions[0].sessionId;
+          const page = await loadSessionCatalogOnce(
+            workspace.client,
+            {
+              routeKind: 'qualified',
+              workspaceCwd: cwd,
+              options: { pageSize: 1, archiveState: 'active' },
+            },
+            { fresh: true },
+          );
+          if (page.sessions.length > 0) return page.sessions[0].sessionId;
         }
         // No session exists or forced: create one.
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({ workspaceCwd: cwd });
+        sessionCatalogController.sessionCreated(cwd, result.sessionId);
         return result.sessionId;
       } catch {
         return undefined;
@@ -4929,6 +5787,7 @@ export function App({
     [
       connection.sessionId,
       activeWorkspaceCwd,
+      sessionCatalogController,
       workspace.client,
       sessionActions,
       sessionWorktree,
@@ -5076,28 +5935,62 @@ export function App({
     [pushToast],
   );
   const handleFailedPromptRetry = useCallback(() => {
-    const failed = failedPromptRef.current;
+    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+      return;
+    }
+    let failed = failedPromptRef.current;
     if (!failed || failed.sessionId !== connectionRef.current.sessionId) {
       updateFailedPrompt(null);
       return;
     }
-    const retryOwner = {
-      sourceVersion: composerSourceVersionRef.current,
-      sessionId: connectionRef.current.sessionId,
-      workspaceCwd: getComposerWorkspaceCwd(),
-    };
-    const retryOwnerIsCurrent = () =>
-      composerSourceVersionRef.current === retryOwner.sourceVersion &&
-      connectionRef.current.sessionId === retryOwner.sessionId &&
-      getComposerWorkspaceCwd() === retryOwner.workspaceCwd;
+    const retryOwner = failed.owner;
+    if (!retryOwnerIsCurrent(retryOwner)) {
+      updateFailedPrompt(null);
+      return;
+    }
+    const currentFailedBlock = getLatestUserBlock(store.getSnapshot().blocks);
+    if (
+      !currentFailedBlock ||
+      !matchesUserMessageIdentity(
+        currentFailedBlock,
+        failed.identity,
+        retryOwner.snapshot.isCurrent(),
+      )
+    ) {
+      updateFailedPrompt(null);
+      return;
+    }
+    if (
+      currentFailedBlock !== failed.identity.block ||
+      currentFailedBlock.id !== failed.messageId
+    ) {
+      failed = {
+        ...failed,
+        messageId: currentFailedBlock.id,
+        identity: { block: currentFailedBlock },
+      };
+    }
     updateFailedPrompt(null);
     const retryStartedAt = Date.now();
+    const retryAttemptId = ++cancelledRetryAttemptRef.current;
+    const retryTranscriptIdentity: FailedPromptRetry['transcriptIdentity'] = {
+      kind: 'failed-prompt',
+      identity: failed.identity,
+    };
+    const retryTranscriptIsCurrent = () =>
+      retryTranscriptIdentityMatches(
+        store.getSnapshot().blocks,
+        retryTranscriptIdentity,
+        retryOwner.snapshot.isCurrent(),
+      );
     setFailedPromptRetry({
       sessionId: failed.sessionId,
       messageId: failed.messageId,
       startedAt: retryStartedAt,
       admitted: false,
       settled: false,
+      owner: retryOwner,
+      transcriptIdentity: retryTranscriptIdentity,
     });
     let admitted = false;
     let admissionStarted = false;
@@ -5109,19 +6002,28 @@ export function App({
       },
       onAdmitted: () => {
         admitted = true;
-        if (!retryOwnerIsCurrent()) return;
+        if (!retryOwnerIsCurrent(retryOwner)) return;
         setFailedPromptRetry((current) =>
-          current?.sessionId === failed.sessionId &&
-          current.messageId === failed.messageId
-            ? { ...current, admitted: true }
+          current?.transcriptIdentity === retryTranscriptIdentity
+            ? retryTranscriptIsCurrent()
+              ? { ...current, admitted: true }
+              : null
             : current,
         );
       },
+      onCancelledBeforeAdmission: () => {
+        restoreOrDeferCancelledRetry(retryOwner, {
+          kind: 'failed-prompt',
+          attemptId: retryAttemptId,
+          failed,
+        });
+      },
     })
       .catch((error: unknown) => {
-        if (!retryOwnerIsCurrent()) return;
+        if (!retryOwnerIsCurrent(retryOwner)) return;
         const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
         if (admissionStarted && !admitted && !definitelyRejected) {
+          if (!retryTranscriptIsCurrent()) return;
           updateUnknownPromptAdmission({
             sessionId: failed.sessionId,
             messageId: failed.messageId,
@@ -5137,28 +6039,32 @@ export function App({
           );
           return;
         }
-        if (
-          !admitted &&
-          connectionRef.current.sessionId === failed.sessionId &&
-          getLatestUserBlockId(store.getSnapshot().blocks) === failed.messageId
-        ) {
-          updateFailedPrompt(failed);
+        if (!admitted) {
+          restoreOrDeferCancelledRetry(retryOwner, {
+            kind: 'failed-prompt',
+            attemptId: retryAttemptId,
+            failed,
+          });
         }
-        reportError(error, 'Failed to resend message');
+        if (retryTranscriptIsCurrent()) {
+          reportError(error, 'Failed to resend message');
+        }
       })
       .finally(() => {
-        if (!retryOwnerIsCurrent()) return;
+        if (!retryOwnerIsCurrent(retryOwner)) return;
         setFailedPromptRetry((current) =>
-          current?.sessionId === failed.sessionId &&
-          current.messageId === failed.messageId
-            ? { ...current, settled: true }
+          current?.transcriptIdentity === retryTranscriptIdentity
+            ? retryTranscriptIsCurrent()
+              ? { ...current, settled: true }
+              : null
             : current,
         );
       });
   }, [
-    getComposerWorkspaceCwd,
     pushToast,
     reportError,
+    restoreOrDeferCancelledRetry,
+    retryOwnerIsCurrent,
     sendPrompt,
     store,
     t,
@@ -5185,7 +6091,9 @@ export function App({
     discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
+    writeBlocked: sessionWriteBlocked,
     sessionId: connection.sessionId,
+    workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
@@ -5206,9 +6114,11 @@ export function App({
       inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
+        const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
+        const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
         onSubmitBeforeRef
           .current({
             sessionId: sourceSessionId,
@@ -5216,6 +6126,10 @@ export function App({
           })
           .then(() => {
             if (
+              !appMountedRef.current ||
+              !sourceOwner.isCurrent() ||
+              sessionWriteBlockedRef.current ||
+              sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
               connectionRef.current.sessionId !== sourceSessionId ||
               getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
               composerSourceVersionRef.current !== sourceVersion
@@ -5242,6 +6156,11 @@ export function App({
                 prompt: text,
                 queued: true,
               });
+              if (sourceWorkspaceCwd) {
+                sessionCatalogController.invalidateWorkspace(
+                  sourceWorkspaceCwd,
+                );
+              }
             }
           })
           .catch((err: unknown) => {
@@ -5266,10 +6185,19 @@ export function App({
           prompt: text,
           queued: true,
         });
+        const workspaceCwd = getComposerWorkspaceCwd();
+        if (workspaceCwd) {
+          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+        }
       }
       return result;
     },
-    [getComposerWorkspaceCwd, rawEnqueuePrompt],
+    [
+      getComposerWorkspaceCwd,
+      rawEnqueuePrompt,
+      sessionCatalogController,
+      sessionOwnerGuard,
+    ],
   );
 
   useEffect(() => {
@@ -5294,14 +6222,16 @@ export function App({
     setBtwMessage(null);
     setTasksDialogMessage(null);
     lastRecapBlockCountRef.current = 0;
-  }, [connection.sessionId]);
+  }, [connection.sessionId, connection.workspaceCwd]);
 
   const runVisibleRecap = useCallback(() => {
+    if (sessionWriteBlocked) return;
     if (!requireActiveSessionForLocalCommand()) return;
     const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
     const anchorIndex = messages.length;
     const anchorAfterId = messages.at(-1)?.id;
     const sessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
     setRecapMessage({
       anchorAfterId,
       anchorIndex,
@@ -5315,7 +6245,11 @@ export function App({
     });
     sessionActions.recapSession().then(
       (result) => {
-        if (currentSessionIdRef.current !== sessionId) return;
+        if (
+          currentSessionIdRef.current !== sessionId ||
+          connectionRef.current.workspaceCwd !== workspaceCwd
+        )
+          return;
         setRecapMessage({
           anchorAfterId,
           anchorIndex,
@@ -5331,7 +6265,11 @@ export function App({
         });
       },
       (error: unknown) => {
-        if (currentSessionIdRef.current !== sessionId) return;
+        if (
+          currentSessionIdRef.current !== sessionId ||
+          connectionRef.current.workspaceCwd !== workspaceCwd
+        )
+          return;
         setRecapMessage(null);
         if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           console.warn('[web-shell] unhandled recap failure', error);
@@ -5340,14 +6278,17 @@ export function App({
     );
   }, [
     connection.sessionId,
+    connection.workspaceCwd,
     messages,
     requireActiveSessionForLocalCommand,
+    sessionWriteBlocked,
     sessionActions,
     t,
   ]);
 
   const runVisibleBtw = useCallback(
     (rawQuestion: string) => {
+      if (sessionWriteBlocked) return;
       const question = rawQuestion.trim();
       if (!question) {
         pushToast('error', t('btw.empty'));
@@ -5357,6 +6298,7 @@ export function App({
 
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
+      const workspaceCwd = connection.workspaceCwd;
       btwAbortControllerRef.current?.abort();
       const abortController = new AbortController();
       btwAbortControllerRef.current = abortController;
@@ -5372,7 +6314,11 @@ export function App({
         .btwSession(question, { signal: abortController.signal })
         .then(
           (result) => {
-            if (currentSessionIdRef.current !== sessionId) return;
+            if (
+              currentSessionIdRef.current !== sessionId ||
+              connectionRef.current.workspaceCwd !== workspaceCwd
+            )
+              return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
             setBtwMessage({
@@ -5384,7 +6330,11 @@ export function App({
             });
           },
           (error: unknown) => {
-            if (currentSessionIdRef.current !== sessionId) return;
+            if (
+              currentSessionIdRef.current !== sessionId ||
+              connectionRef.current.workspaceCwd !== workspaceCwd
+            )
+              return;
             if (btwAbortControllerRef.current !== abortController) return;
             btwAbortControllerRef.current = null;
             setBtwMessage(null);
@@ -5396,8 +6346,10 @@ export function App({
     },
     [
       connection.sessionId,
+      connection.workspaceCwd,
       pushToast,
       requireActiveSessionForLocalCommand,
+      sessionWriteBlocked,
       sessionActions,
       t,
     ],
@@ -5529,6 +6481,11 @@ export function App({
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
   const [modelActionBusy, setModelActionBusy] = useState(false);
+  const modelActionTokenRef = useRef(0);
+  useLayoutEffect(() => {
+    modelActionTokenRef.current += 1;
+    setModelActionBusy(false);
+  }, [logicalSessionKey]);
   const {
     settings: workspaceSettings,
     setValue: setWorkspaceSetting,
@@ -5593,6 +6550,9 @@ export function App({
   );
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
+  );
+  const compactModeSetting = workspaceSettings.find(
+    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
   );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
@@ -5858,6 +6818,11 @@ export function App({
   compactModeRef.current = compactMode;
 
   useEffect(() => {
+    const value = compactModeSetting?.values.effective;
+    if (typeof value === 'boolean') setCompactMode(value);
+  }, [compactModeSetting?.values.effective]);
+
+  useEffect(() => {
     if (providedTheme) {
       setSelectedTheme(providedTheme);
       return;
@@ -5885,6 +6850,8 @@ export function App({
 
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
+      if (sessionWriteBlocked) return;
+      const owner = { current: sessionOwnerGuard.capture() };
       const previousLanguage = selectedLanguage;
       // Forward the settings tab's scope to the command so a Workspace-tab edit
       // persists to workspace settings instead of always writing user scope
@@ -5894,8 +6861,9 @@ export function App({
       const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
       handleLanguageChange(nextLanguage);
-      const refreshSettings = () => {
-        return Promise.all([
+      const refreshSettings = async () => {
+        if (!owner.current.isCurrent()) return;
+        await Promise.all([
           sessionActions.refreshCommands(),
           reloadWorkspaceSettings(),
         ]);
@@ -5905,9 +6873,10 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(command, undefined)
+      sendPrompt(command, undefined, { ownerRef: owner })
         .then(refreshSettings)
         .catch((error: unknown) => {
+          if (!owner.current.isCurrent()) return;
           handleLanguageChange(previousLanguage);
           reportError(error, 'Failed to sync /language command');
         });
@@ -5917,9 +6886,11 @@ export function App({
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
+      sessionWriteBlocked,
       sendPrompt,
       selectedLanguage,
       sessionActions,
+      sessionOwnerGuard,
     ],
   );
 
@@ -5947,6 +6918,7 @@ export function App({
 
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (sessionWriteBlocked) return;
       if (!isDaemonApprovalMode(modeId)) {
         reportError(
           new Error(`Unsupported approval mode: ${modeId}`),
@@ -5958,9 +6930,11 @@ export function App({
         setPendingMode(modeId);
         return;
       }
+      const owner = sessionOwnerGuard.capture();
       sessionActions
         .setApprovalMode(modeId)
         .then((result) => {
+          if (!owner.isCurrent()) return;
           const effectiveMode = result.mode || modeId;
           setCurrentMode(effectiveMode);
           const approval = pendingApprovalRef.current;
@@ -5989,10 +6963,19 @@ export function App({
           }
         })
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           reportError(error, t('local.approvalMode'));
         });
     },
-    [sessionActions, reportError, store, t, setPendingMode],
+    [
+      sessionWriteBlocked,
+      reportError,
+      sessionActions,
+      sessionOwnerGuard,
+      setPendingMode,
+      store,
+      t,
+    ],
   );
 
   useEffect(() => {
@@ -6001,10 +6984,10 @@ export function App({
 
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
-  const prevQueueSessionIdRef = useRef(connection.sessionId);
+  const prevQueueSessionIdRef = useRef(logicalSessionKey);
   useEffect(() => {
-    if (prevQueueSessionIdRef.current === connection.sessionId) return;
-    prevQueueSessionIdRef.current = connection.sessionId;
+    if (prevQueueSessionIdRef.current === logicalSessionKey) return;
+    prevQueueSessionIdRef.current = logicalSessionKey;
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
     // Skip the bump when the transition is into the session that
@@ -6017,7 +7000,7 @@ export function App({
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
-  }, [connection.sessionId, pushToast, t]);
+  }, [connection.sessionId, logicalSessionKey, pushToast, t]);
 
   // Declared after the session-switch wipe effect above: React runs effects in
   // declaration order, so the queue is already cleared before this drain sees it.
@@ -6039,6 +7022,8 @@ export function App({
     isDrainingRef.current = true;
     const generation = ++drainGenerationRef.current;
     const drainSessionId = connectionRef.current.sessionId;
+    const drainWorkspaceCwd = getComposerWorkspaceCwd();
+    const drainOwner = sessionOwnerGuard.capture();
     void (async () => {
       try {
         let batch = cmds;
@@ -6047,6 +7032,7 @@ export function App({
             const generationChanged = drainGenerationRef.current !== generation;
             if (
               generationChanged ||
+              !drainOwner.isCurrent() ||
               connectionRef.current.sessionId !== drainSessionId ||
               connectionRef.current.status !== 'connected'
             ) {
@@ -6074,6 +7060,10 @@ export function App({
                 error,
                 `Failed to execute shell command: !${batch[i]}`,
               );
+            } finally {
+              if (drainWorkspaceCwd) {
+                sessionCatalogController.invalidateWorkspace(drainWorkspaceCwd);
+              }
             }
           }
           batch = queuedShellCommandsRef.current;
@@ -6088,30 +7078,59 @@ export function App({
         }
       }
     })();
-  }, [streamingState, sessionActions, reportError, pushToast, t]);
+  }, [
+    getComposerWorkspaceCwd,
+    pushToast,
+    reportError,
+    sessionActions,
+    sessionCatalogController,
+    sessionOwnerGuard,
+    streamingState,
+    t,
+  ]);
 
   useEffect(() => {
-    let retryableTurnErrorId: string | null = null;
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const block = blocks[i];
-      if (block?.kind === 'user') break;
-      if (block?.kind === 'error' && block.source === 'turn_error') {
-        retryableTurnErrorId = block.id;
-        break;
-      }
-      if (block?.kind !== 'debug') break;
+    const retryableTurnError = getRetryableTurnError(blocks);
+    if (retryableTurnError) {
+      rearmFailedTurnErrorRetry(retryableTurnError, blocks);
+    }
+    const previousIdentity = retryableTurnErrorIdentityRef.current;
+    const identityMatches =
+      previousIdentity === undefined ||
+      (retryableTurnError !== undefined &&
+        matchesTurnErrorIdentity(retryableTurnError, previousIdentity));
+    if (
+      retryableTurnError &&
+      previousIdentity &&
+      identityMatches &&
+      retriedTurnErrorIdRef.current !== null
+    ) {
+      retriedTurnErrorIdRef.current = retryableTurnError.id;
     }
     const canRetry =
       connected &&
-      retryableTurnErrorId !== null &&
-      retryableTurnErrorId !== retriedTurnErrorIdRef.current &&
+      retryableTurnError !== undefined &&
+      identityMatches &&
+      retryableTurnError.id !== retriedTurnErrorIdRef.current &&
+      failedPromptRetry === null &&
       lastSubmittedSourceVersionRef.current ===
         composerSourceVersionRef.current &&
       (lastSubmittedPromptRef.current.length > 0 ||
         (lastSubmittedImagesRef.current?.length ?? 0) > 0);
-    retryableTurnErrorIdRef.current = canRetry ? retryableTurnErrorId : null;
+    if (retryableTurnError && previousIdentity && !identityMatches) {
+      lastSubmittedPromptRef.current = '';
+      lastSubmittedImagesRef.current = undefined;
+      lastSubmittedInputAnnotationsRef.current = undefined;
+      lastSubmittedSourceVersionRef.current = -1;
+      retryableTurnErrorIdentityRef.current = undefined;
+      retriedTurnErrorIdRef.current = null;
+      failedTurnErrorRetryRef.current = null;
+    } else if (canRetry) {
+      retryableTurnErrorIdentityRef.current = { block: retryableTurnError };
+    }
+    retryableTurnErrorIdRef.current = canRetry ? retryableTurnError.id : null;
     setShowRetryHint(canRetry);
-  }, [blocks, connected]);
+  }, [blocks, connected, failedPromptRetry, rearmFailedTurnErrorRetry]);
 
   useEffect(() => {
     onStreamingStateChange?.(streamingState);
@@ -6122,29 +7141,68 @@ export function App({
   // so that within the same render, the ref is already updated before we read it.
   const prevStreamingForTurnCompleteRef = useRef(streamingState);
   const streamingSessionIdRef = useRef<string | undefined>(undefined);
+  const streamingWorkspaceCwdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const prev = prevStreamingForTurnCompleteRef.current;
     prevStreamingForTurnCompleteRef.current = streamingState;
     if (streamingState !== 'idle') {
-      streamingSessionIdRef.current = connectionRef.current.sessionId;
+      if (prev === 'idle' || streamingSessionIdRef.current === undefined) {
+        streamingSessionIdRef.current = connection.sessionId;
+        streamingWorkspaceCwdRef.current = connection.workspaceCwd;
+      } else if (
+        connection.sessionId === streamingSessionIdRef.current &&
+        streamingWorkspaceCwdRef.current === undefined
+      ) {
+        streamingWorkspaceCwdRef.current = connection.workspaceCwd;
+      }
     }
     if (prev !== 'idle' && streamingState === 'idle') {
       const sessionId = connectionRef.current.sessionId;
+      const workspaceCwd = connectionRef.current.workspaceCwd;
       // Only fire if the session that was streaming is still the active one.
       // Session switches reset streamingState to idle, which must not produce
       // a spurious turn_complete for the new session.
-      if (!sessionId || sessionId !== streamingSessionIdRef.current) return;
+      if (
+        !sessionId ||
+        sessionId !== streamingSessionIdRef.current ||
+        workspaceCwd !== streamingWorkspaceCwdRef.current
+      ) {
+        return;
+      }
       const turnError =
         retryableTurnErrorIdRef.current != null
           ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
           : undefined;
+      if (workspaceCwd) {
+        sessionCatalogController.turnCompleted(workspaceCwd);
+        if (!connectionRef.current.displayName) {
+          scheduleDelayedActiveSessionDisplayNameRefresh(
+            sessionId,
+            workspaceCwd,
+          );
+          if (typeof document !== 'undefined' && document.hidden) {
+            pendingDisplayNameRefreshRef.current = {
+              sessionId,
+              workspaceCwd,
+            };
+          } else {
+            void refreshActiveSessionDisplayNameRef.current();
+          }
+        }
+      }
       dispatchSessionChangeRef.current?.({
         type: 'turn_complete',
         sessionId,
         error: turnError,
       });
     }
-  }, [streamingState]);
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    scheduleDelayedActiveSessionDisplayNameRefresh,
+    sessionCatalogController,
+    streamingState,
+  ]);
 
   useEffect(() => {
     onConnectionChange?.(connection.status);
@@ -6161,23 +7219,15 @@ export function App({
     }
   }, [connection.error, onError]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setCurrentModel(connection.currentModel ?? '');
-  }, [connection.currentModel, connection.sessionId]);
+  }, [connection.currentModel, logicalSessionKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setCurrentMode(connection.currentMode ?? 'default');
-  }, [connection.currentMode, connection.sessionId]);
+  }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
-    const previousGoalSessionId = lastGoalSessionIdRef.current;
-    if (
-      connection.sessionId &&
-      connection.sessionId !== previousGoalSessionId
-    ) {
-      setActiveGoal(null);
-    }
-    lastGoalSessionIdRef.current = connection.sessionId;
     if (!connection.sessionId && connection.missingSession) {
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
@@ -6186,12 +7236,9 @@ export function App({
       lastNotifiedWorkspaceCwdRef.current = undefined;
       return;
     }
-    // After a session is cleared the connection's workspaceCwd is a leftover
-    // from the previous session; reporting it would misroute the host back to
-    // the old workspace. activeWorkspaceCwd resolves the workspace picked for
-    // the next session (locked / selected / primary) and is what the composer
-    // chip reports, so the host and the chip stay in agreement.
-    const reportedWorkspaceCwd = activeWorkspaceCwd ?? connection.workspaceCwd;
+    const reportedWorkspaceCwd = connection.sessionId
+      ? connection.workspaceCwd
+      : activeWorkspaceCwd;
     const activeWorkspace = workspaces.find(
       (entry) => entry.cwd === reportedWorkspaceCwd,
     );
@@ -6227,23 +7274,71 @@ export function App({
 
   const lastRenameSessionRef = useRef<string | undefined>(undefined);
   const lastRenameNameRef = useRef<string | undefined>(undefined);
+  const lastReconciledRenameRef = useRef<
+    | {
+        workspaceCwd?: string;
+        sessionId: string;
+        displayName: string;
+      }
+    | undefined
+  >(undefined);
+  const reconcileCatalogRename = useCallback(
+    (
+      workspaceCwd: string | undefined,
+      sessionId: string,
+      displayName: string,
+    ) => {
+      lastReconciledRenameRef.current = {
+        workspaceCwd,
+        sessionId,
+        displayName,
+      };
+      if (workspaceCwd) {
+        sessionCatalogController.renamed(workspaceCwd, sessionId, displayName);
+      }
+    },
+    [sessionCatalogController],
+  );
   useEffect(() => {
     const sessionId = connection.sessionId;
     const displayName = connection.displayName;
     if (!sessionId || !displayName) return;
-    if (sessionId !== lastRenameSessionRef.current) {
-      lastRenameSessionRef.current = sessionId;
+    if (logicalSessionKey !== lastRenameSessionRef.current) {
+      lastRenameSessionRef.current = logicalSessionKey;
       lastRenameNameRef.current = displayName;
+      lastReconciledRenameRef.current = undefined;
       return;
     }
     if (displayName === lastRenameNameRef.current) return;
     lastRenameNameRef.current = displayName;
+    const reconciled = lastReconciledRenameRef.current;
+    lastReconciledRenameRef.current = undefined;
+    const alreadyReconciled =
+      reconciled !== undefined &&
+      reconciled.workspaceCwd === connection.workspaceCwd &&
+      reconciled.sessionId === sessionId &&
+      reconciled.displayName === displayName;
+    if (!alreadyReconciled) {
+      if (connection.workspaceCwd) {
+        sessionCatalogController.renamed(
+          connection.workspaceCwd,
+          sessionId,
+          displayName,
+        );
+      }
+    }
     dispatchSessionChangeRef.current?.({
       type: 'rename',
       sessionId,
       newName: displayName,
     });
-  }, [connection.sessionId, connection.displayName]);
+  }, [
+    connection.displayName,
+    connection.sessionId,
+    connection.workspaceCwd,
+    logicalSessionKey,
+    sessionCatalogController,
+  ]);
 
   useEffect(() => {
     const nextGoal = getLatestActiveGoalFromBlocks(blocks);
@@ -6291,7 +7386,7 @@ export function App({
   useEffect(() => {
     lastRecapBlockCountRef.current = 0;
     autoRecapVersionRef.current += 1;
-  }, [connection.sessionId]);
+  }, [logicalSessionKey]);
   useEffect(() => {
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
@@ -6304,6 +7399,7 @@ export function App({
       hiddenAtRef.current = null;
       if (hiddenAt === null) return;
       if (Date.now() - hiddenAt < AWAY_THRESHOLD_MS) return;
+      if (sessionWriteBlocked) return;
       if (streamingStateRef.current !== 'idle') return;
       if (!connection.sessionId) return;
       const currentCount = store.getSnapshot().blocks.length;
@@ -6312,6 +7408,7 @@ export function App({
       lastRecapBlockCountRef.current = currentCount;
       const sessionId = connection.sessionId;
       const version = autoRecapVersionRef.current;
+      const owner = sessionOwnerGuard.capture();
       // Local-only commands also append user blocks. Treat any new visible user
       // activity as invalidating the recap rather than risk placing it too late.
       const userBlockId = getLatestUserBlockId(store.getSnapshot().blocks);
@@ -6325,6 +7422,7 @@ export function App({
           // catch those. Kept so it is not simplified away as redundant.
           if (
             autoRecapVersionRef.current !== version ||
+            !owner.isCurrent() ||
             connectionRef.current.sessionId !== sessionId ||
             result.sessionId !== sessionId ||
             currentUserBlockId !== userBlockId ||
@@ -6360,7 +7458,14 @@ export function App({
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [connection.sessionId, sessionActions, store, t]);
+  }, [
+    connection.sessionId,
+    sessionActions,
+    sessionOwnerGuard,
+    sessionWriteBlocked,
+    store,
+    t,
+  ]);
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
@@ -6381,13 +7486,16 @@ export function App({
       // "context detail" click) runs immediately, even mid-turn — only the
       // echo is skipped while streaming so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
+      const owner = sessionOwnerGuard.capture();
       echoLocalCommandIfIdle(commandText);
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
+          if (!owner.isCurrent()) return;
           dispatchReadOnlyStatus(serializeContextUsageMessage(result));
         })
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           reportError(error, 'Failed to load context usage');
         });
     },
@@ -6396,6 +7504,7 @@ export function App({
       dispatchReadOnlyStatus,
       requireActiveSessionForLocalCommand,
       sessionActions,
+      sessionOwnerGuard,
       reportError,
     ],
   );
@@ -6414,6 +7523,7 @@ export function App({
 
   const branchCurrentSession = useCallback(
     (name?: string) => {
+      if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
       sessionActions
         .branchSession(name || undefined)
@@ -6434,6 +7544,7 @@ export function App({
     [
       reportError,
       requireActiveSessionForLocalCommand,
+      sessionWriteBlocked,
       sessionActions,
       store,
       t,
@@ -6727,6 +7838,13 @@ export function App({
     },
     [],
   );
+  const generateSuggestionContent = useCallback(
+    (prompt: string, options?: { signal?: AbortSignal }) => {
+      void logicalSessionKey;
+      return sessionActions.generateSessionContent(prompt, options);
+    },
+    [logicalSessionKey, sessionActions],
+  );
 
   const {
     suggestion: newSessionSuggestion,
@@ -6745,7 +7863,7 @@ export function App({
     isRunning: streamingState !== 'idle',
     dialogOpen: interactionBlocked || approvalOverlayActive,
     hasAttachments: hasComposerAttachments,
-    generateContent: sessionActions.generateSessionContent,
+    generateContent: generateSuggestionContent,
   });
 
   const handleComposerTextChange = useCallback(
@@ -6925,27 +8043,25 @@ export function App({
     }
   }, [createNewSession, onSessionIdChange]);
 
+  const sessionOpenInvocationRef = useRef(0);
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
-      composerSourceVersionRef.current += 1;
+      const invocation = ++sessionOpenInvocationRef.current;
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
-      setGitModeIntent({ mode: 'current' });
-      setSessionWorktree(undefined);
-      setSessionBranch(undefined);
-      // Close the drawer before awaiting the load; the transcript clears
-      // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
       // Loading another session should reveal its chat, not stay on the
       // Settings/Status panel (no-op when the panel is closed).
       closePanel();
       try {
-        autoRecapVersionRef.current += 1;
         await sessionActions.loadSession(sessionId, { workspaceCwd });
+        if (sessionOpenInvocationRef.current === invocation) {
+          composerSourceVersionRef.current += 1;
+        }
       } catch (error) {
-        setSidebarSwitchingSessionId((current) =>
-          current === sessionId ? null : current,
-        );
+        if (sessionOpenInvocationRef.current === invocation) {
+          setSidebarSwitchingSessionId(null);
+        }
         throw error;
       }
     },
@@ -6996,7 +8112,8 @@ export function App({
       sidebarSwitchingSessionId !== null &&
       connection.sessionId === sidebarSwitchingSessionId &&
       !connection.loadingTranscript &&
-      !connection.catchingUp
+      !connection.catchingUp &&
+      !sessionWriteBlocked
     ) {
       setSidebarSwitchingSessionId(null);
       scheduleComposerFocus(sidebarSwitchingSessionId);
@@ -7006,6 +8123,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     scheduleComposerFocus,
+    sessionWriteBlocked,
     sidebarSwitchingSessionId,
   ]);
 
@@ -7023,12 +8141,13 @@ export function App({
     prompt: string;
     resolve: () => void;
     reject: (err: unknown) => void;
-    timer: ReturnType<typeof setTimeout>;
+    timer?: ReturnType<typeof setTimeout>;
+    owner?: { isCurrent(): boolean };
   } | null>(null);
   const clearPendingBoundRun = useCallback((sessionId: string) => {
     const cur = pendingBoundRunRef.current;
     if (cur && cur.sessionId === sessionId) {
-      clearTimeout(cur.timer);
+      if (cur.timer !== undefined) clearTimeout(cur.timer);
       pendingBoundRunRef.current = null;
     }
   }, []);
@@ -7083,12 +8202,27 @@ export function App({
     if (
       !pending ||
       conn.sessionId !== pending.sessionId ||
-      conn.loadingTranscript ||
-      conn.catchingUp
+      conn.loadingTranscript
     ) {
       return;
     }
-    clearTimeout(pending.timer);
+    if (conn.catchingUp) {
+      if (pending.timer === undefined) {
+        pending.timer = setTimeout(() => {
+          clearPendingBoundRun(pending.sessionId);
+          pending.reject(new Error('Timed out waiting for session replay'));
+        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
+      }
+      return;
+    }
+    if (pending.owner && !pending.owner.isCurrent()) {
+      clearPendingBoundRun(pending.sessionId);
+      pending.reject(
+        new DOMException('Bound run session was replaced', 'AbortError'),
+      );
+      return;
+    }
+    if (pending.timer !== undefined) clearTimeout(pending.timer);
     pendingBoundRunRef.current = null;
     // Resolves at prompt admission (see enqueueManualRun); the switch-timeout was
     // cleared above, so a long turn can't trip it. Recording happens in the
@@ -7097,7 +8231,7 @@ export function App({
       () => pending.resolve(),
       (error: unknown) => pending.reject(error),
     );
-  }, [enqueueManualRun]);
+  }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
     (prompt: string, sessionId: string | null): Promise<void> => {
       setMainView('chat');
@@ -7109,28 +8243,29 @@ export function App({
       // reject the old promise so its caller doesn't record a dropped run.
       const prev = pendingBoundRunRef.current;
       if (prev) {
-        clearTimeout(prev.timer);
+        if (prev.timer !== undefined) clearTimeout(prev.timer);
         pendingBoundRunRef.current = null;
         prev.reject(new Error('superseded by another run'));
       }
       return new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          clearPendingBoundRun(sessionId);
-          reject(new Error('Timed out switching to the task session'));
-        }, BOUND_RUN_SWITCH_TIMEOUT_MS);
-        pendingBoundRunRef.current = {
+        const pending: NonNullable<typeof pendingBoundRunRef.current> = {
           sessionId,
           prompt,
           resolve,
           reject,
-          timer,
         };
+        pendingBoundRunRef.current = pending;
         loadSidebarSession(sessionId)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
-          .then(() => tryFireBoundRun())
+          .then(() => {
+            if (pendingBoundRunRef.current !== pending) return;
+            pending.owner = sessionOwnerGuard.capture();
+            tryFireBoundRun();
+          })
           .catch((error: unknown) => {
+            if (pendingBoundRunRef.current !== pending) return;
             clearPendingBoundRun(sessionId);
             reject(error);
           });
@@ -7140,6 +8275,7 @@ export function App({
       enqueueManualRun,
       loadSidebarSession,
       clearPendingBoundRun,
+      sessionOwnerGuard,
       tryFireBoundRun,
     ],
   );
@@ -7154,16 +8290,24 @@ export function App({
 
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
+    const owner = sessionOwnerGuard.capture();
     sessionActions
       .getTasks()
       .then((snapshot) => {
+        if (!owner.isCurrent()) return;
         setTasksDialogMessage({ snapshot });
       })
       .catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
         if (isSessionDisconnectedError(error)) return;
         reportError(error, 'Failed to load tasks');
       });
-  }, [reportError, requireActiveSessionForLocalCommand, sessionActions]);
+  }, [
+    reportError,
+    requireActiveSessionForLocalCommand,
+    sessionActions,
+    sessionOwnerGuard,
+  ]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
@@ -7224,14 +8368,24 @@ export function App({
 
   const handleBusyGoalClear = useCallback(
     (text: string) => {
+      if (sessionWriteBlocked) return false;
       if (!requireActiveSessionForLocalCommand()) return false;
+      const owner = sessionOwnerGuard.capture();
       store.appendLocalUserMessage(text);
       sessionActions.clearGoal().catch((error: unknown) => {
+        if (!owner.isCurrent()) return;
         reportError(error, 'Failed to clear /goal');
       });
       return true;
     },
-    [reportError, requireActiveSessionForLocalCommand, sessionActions, store],
+    [
+      reportError,
+      requireActiveSessionForLocalCommand,
+      sessionWriteBlocked,
+      sessionActions,
+      sessionOwnerGuard,
+      store,
+    ],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -7268,15 +8422,20 @@ export function App({
       const goalArg = goalArgOf(text);
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
-        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const owner = { current: sessionOwnerGuard.capture() };
+        const deferComposerCommit =
+          Boolean(onSubmitBeforeRef.current) ||
+          createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(text, images, {
+          ownerRef: owner,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
             ? opts?.commitComposerAccepted
             : undefined,
         }).catch((error: unknown) => {
+          if (!owner.current.isCurrent()) return;
           reportError(error, 'Failed to send /goal command');
         });
         return clearComposerOnPromptStart ? false : true;
@@ -7311,6 +8470,7 @@ export function App({
       openGoals,
       reportError,
       sendPrompt,
+      sessionOwnerGuard,
       store,
       connectionRef,
     ],
@@ -7332,6 +8492,7 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (sessionWriteBlockedRef.current) return false;
       if (
         unknownPromptAdmissionRef.current?.payloadAvailable &&
         unknownPromptAdmissionRef.current.sessionId ===
@@ -7370,18 +8531,24 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        const admissionAttachment = {
+          current: sessionOwnerGuard.capture(),
+        };
         const admissionOwner = {
           sourceVersion: composerSourceVersionRef.current,
           sessionId: connectionRef.current.sessionId,
           workspaceCwd: getComposerWorkspaceCwd(),
         };
         const admissionOwnerIsCurrent = () =>
+          admissionAttachment.current.isCurrent() &&
           composerSourceVersionRef.current === admissionOwner.sourceVersion &&
           (admissionOwner.sessionId === undefined ||
             (connectionRef.current.sessionId === admissionOwner.sessionId &&
               getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
-        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const deferComposerCommit =
+          Boolean(onSubmitBeforeRef.current) ||
+          createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
@@ -7389,6 +8556,7 @@ export function App({
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
         sendPrompt(promptText, promptImages, {
+          ownerRef: admissionAttachment,
           ...sendOptions,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
@@ -7440,12 +8608,17 @@ export function App({
             !admitted &&
             failedMessage &&
             failedMessage.sessionId === connectionRef.current.sessionId &&
-            store
-              .getSnapshot()
-              .blocks.some(
-                (block) =>
-                  block.kind === 'user' && block.id === failedMessage.messageId,
-              )
+            matchesUserMessageIdentity(
+              store
+                .getSnapshot()
+                .blocks.find(
+                  (block) =>
+                    block.kind === 'user' &&
+                    block.id === failedMessage.messageId,
+                ),
+              failedMessage.identity,
+              failedMessage.owner.snapshot.isCurrent(),
+            )
           ) {
             updateFailedPrompt({
               ...failedMessage,
@@ -7598,19 +8771,27 @@ export function App({
                 return true;
               }
               const nextLanguage = normalizeLanguage(languageArg);
+              const owner = { current: sessionOwnerGuard.capture() };
               handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
-                const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+                const deferComposerCommit =
+                  Boolean(onSubmitBeforeRef.current) ||
+                  createSessionPromiseRef.current !== null;
                 const clearComposerOnPromptStart =
                   !connectionRef.current.sessionId || deferComposerCommit;
                 sendPrompt(`/language ui ${nextLanguage}`, undefined, {
+                  ownerRef: owner,
                   clearComposerOnPromptStart,
                   commitComposerAccepted: clearComposerOnPromptStart
                     ? commitComposerAccepted
                     : undefined,
                 })
-                  .then(() => sessionActions.refreshCommands())
+                  .then(() => {
+                    if (!owner.current.isCurrent()) return;
+                    return sessionActions.refreshCommands();
+                  })
                   .catch((error: unknown) => {
+                    if (!owner.current.isCurrent()) return;
                     reportError(error, 'Failed to sync /language command');
                   });
                 return clearComposerOnPromptStart ? false : true;
@@ -7661,9 +8842,11 @@ export function App({
               pushToast('error', t('fork.empty'));
               return true;
             }
+            const owner = sessionOwnerGuard.capture();
             sessionActions
               .forkSession(directive)
               .then((result) => {
+                if (!owner.isCurrent()) return;
                 if (!result.launched) {
                   pushToast('warning', t('fork.notStarted'));
                   return;
@@ -7675,6 +8858,7 @@ export function App({
                 );
               })
               .catch((error: unknown) => {
+                if (!owner.isCurrent()) return;
                 const reason =
                   error instanceof Error ? error.message : String(error);
                 reportError(error, t('fork.failed', { reason }));
@@ -7740,12 +8924,15 @@ export function App({
                 setPendingModel(modelArg);
                 return true;
               }
+              const owner = sessionOwnerGuard.capture();
               sessionActions
                 .setModel(modelArg)
                 .then(() => {
+                  if (!owner.isCurrent()) return;
                   setPendingModel(modelArg);
                 })
                 .catch((error: unknown) => {
+                  if (!owner.isCurrent()) return;
                   reportError(error, t('model.switch'));
                 });
             } else {
@@ -7768,12 +8955,25 @@ export function App({
               }
               return true;
             }
-            if (prompt) setIsPreparingPrompt(true);
+            const planPreparationToken = prompt
+              ? ++planPreparationTokenRef.current
+              : undefined;
+            const planPromptPreparationOwner = prompt
+              ? beginPromptPreparation()
+              : undefined;
+            const owner = sessionOwnerGuard.capture();
+            const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
             sessionActions
               .setApprovalMode('plan')
               .then(() => {
+                if (!owner.isCurrent()) return;
                 setPendingMode('plan');
-                if (prompt) {
+                if (
+                  prompt &&
+                  !sessionWriteBlockedRef.current &&
+                  sessionWriteBlockGenerationRef.current ===
+                    writeBlockGeneration
+                ) {
                   return sendPrompt(prompt, images, {
                     clearComposerOnPromptStart: true,
                     inputAnnotations: metadata?.inputAnnotations,
@@ -7783,10 +8983,16 @@ export function App({
                 }
               })
               .catch((error: unknown) => {
+                if (!owner.isCurrent()) return;
                 reportError(error, t('mode.plan'));
               })
               .finally(() => {
-                if (prompt) setIsPreparingPrompt(false);
+                if (
+                  prompt &&
+                  planPreparationTokenRef.current === planPreparationToken
+                ) {
+                  finishPromptPreparation(planPromptPreparationOwner);
+                }
               });
             return prompt ? false : true;
           }
@@ -8075,9 +9281,20 @@ export function App({
               return true;
             }
             if (!requireActiveSessionForLocalCommand()) return false;
+            const renamedSessionId = connectionRef.current.sessionId;
+            const renamedWorkspaceCwd = connectionRef.current.workspaceCwd;
+            const owner = sessionOwnerGuard.capture();
             sessionActions
               .renameSession(displayName)
               .then(() => {
+                if (renamedSessionId) {
+                  reconcileCatalogRename(
+                    renamedWorkspaceCwd,
+                    renamedSessionId,
+                    displayName,
+                  );
+                }
+                if (!owner.isCurrent()) return;
                 store.dispatch([
                   {
                     type: 'status',
@@ -8086,6 +9303,12 @@ export function App({
                 ]);
               })
               .catch((error: unknown) => {
+                if (renamedWorkspaceCwd) {
+                  sessionCatalogController.invalidateWorkspace(
+                    renamedWorkspaceCwd,
+                  );
+                }
+                if (!owner.isCurrent()) return;
                 reportError(error, 'Failed to rename session');
               });
             return true;
@@ -8093,13 +9316,7 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
-              closeMobileDrawer();
-              // Resuming a session means the user wants to see that chat, so
-              // close any open Settings/Status panel (no-op when already closed),
-              // consistent with createNewSession / loadSidebarSession.
-              closePanel();
-              autoRecapVersionRef.current += 1;
-              sessionActions.loadSession(sessionId).catch((error: unknown) => {
+              loadSidebarSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
@@ -8135,15 +9352,18 @@ export function App({
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
             if (!requireActiveSessionForLocalCommand()) return false;
+            const owner = sessionOwnerGuard.capture();
             echoLocalCommandIfIdle(text);
             sessionActions
               .getStats()
               .then((result) => {
+                if (!owner.isCurrent()) return;
                 dispatchReadOnlyStatus(
                   serializeStatsMessage(result, statsView),
                 );
               })
               .catch((error: unknown) => {
+                if (!owner.isCurrent()) return;
                 reportError(error, 'Failed to load stats');
               });
             return true;
@@ -8290,17 +9510,18 @@ export function App({
           return true;
         }
         const needsSession = !connectionRef.current.sessionId;
+        let shellPromptPreparationOwner: symbol | undefined;
         if (needsSession) {
           if (shellSubmitInFlightRef.current) return false;
           shellSubmitInFlightRef.current = true;
-          setIsPreparingPrompt(true);
+          shellPromptPreparationOwner = beginPromptPreparation();
         }
         let sessionCreated = false;
         const generationAtSubmit = drainGenerationRef.current;
         void ensureSessionForPrompt()
           .finally(() => {
             if (needsSession) {
-              setIsPreparingPrompt(false);
+              finishPromptPreparation(shellPromptPreparationOwner);
               shellSubmitInFlightRef.current = false;
             }
           })
@@ -8319,9 +9540,18 @@ export function App({
                 prompt: `!${cmd}`,
                 queued: false,
               });
-              scheduleDelayedSessionListReload();
             }
-            return sessionActions.sendShellCommand(cmd);
+            const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
+            const workspaceCwd = createdSessionId
+              ? allocatedOwner?.sessionId === createdSessionId
+                ? allocatedOwner.workspaceCwd
+                : undefined
+              : getComposerWorkspaceCwd();
+            return sessionActions.sendShellCommand(cmd).finally(() => {
+              if (workspaceCwd) {
+                sessionCatalogController.invalidateWorkspace(workspaceCwd);
+              }
+            });
           })
           .catch((error: unknown) => {
             reportError(
@@ -8349,8 +9579,10 @@ export function App({
       }
     },
     [
+      beginPromptPreparation,
       sendPrompt,
       sessionActions,
+      sessionOwnerGuard,
       store,
       enqueuePrompt,
       echoOrDeferLocalCommand,
@@ -8358,13 +9590,14 @@ export function App({
       dispatchReadOnlyStatus,
       branchCurrentSession,
       closeMobileDrawer,
-      closePanel,
       openPanel,
       openScheduledTasks,
       openGoals,
       createNewSession,
       ensureSessionForPrompt,
-      scheduleDelayedSessionListReload,
+      finishPromptPreparation,
+      getComposerWorkspaceCwd,
+      sessionCatalogController,
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
@@ -8376,13 +9609,14 @@ export function App({
       blockLocalCommandDuringTurn,
       createSideTask,
       sideTasksAvailable,
-      getComposerWorkspaceCwd,
       openEnvironmentTasksPanel,
       hiddenCommands,
+      loadSidebarSession,
       pushToast,
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       restartSseOnPrompt,
       resumeChatBottomFollow,
@@ -8425,13 +9659,15 @@ export function App({
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
+      const owner = sessionOwnerGuard.capture();
       sessionActions
         .submitPermission(id, selectedOption, answers)
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           reportError(error, 'Failed to submit permission choice');
         });
     },
-    [sessionActions, reportError],
+    [sessionActions, reportError, sessionOwnerGuard],
   );
   const handleAskUserConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) =>
@@ -8440,6 +9676,7 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    const owner = sessionOwnerGuard.capture();
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
     drainGenerationRef.current++;
@@ -8449,9 +9686,10 @@ export function App({
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
     sessionActions.cancel().catch((error: unknown) => {
+      if (!owner.isCurrent()) return;
       reportError(error, 'Failed to cancel request');
     });
-  }, [sessionActions, reportError, pushToast, t]);
+  }, [sessionActions, reportError, pushToast, sessionOwnerGuard, t]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;
@@ -8516,32 +9754,71 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
+    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+      return;
+    }
     if (
       showRetryHintRef.current &&
       connected &&
       streamingStateRef.current === 'idle' &&
       retryableTurnErrorIdRef.current &&
+      retryableTurnErrorIdentityRef.current &&
       connectionRef.current.sessionId &&
       (lastSubmittedPromptRef.current ||
         (lastSubmittedImagesRef.current?.length ?? 0) > 0)
     ) {
-      const retryErrorId = retryableTurnErrorIdRef.current;
+      const savedRetryErrorIdentity = retryableTurnErrorIdentityRef.current;
+      const currentRetryError = getRetryableTurnError(
+        store.getSnapshot().blocks,
+      );
+      if (
+        !savedRetryErrorIdentity ||
+        !currentRetryError ||
+        !matchesTurnErrorIdentity(currentRetryError, savedRetryErrorIdentity)
+      ) {
+        lastSubmittedPromptRef.current = '';
+        lastSubmittedImagesRef.current = undefined;
+        lastSubmittedInputAnnotationsRef.current = undefined;
+        lastSubmittedSourceVersionRef.current = -1;
+        retryableTurnErrorIdRef.current = null;
+        retryableTurnErrorIdentityRef.current = undefined;
+        retriedTurnErrorIdRef.current = null;
+        setShowRetryHint(false);
+        return;
+      }
+      const retryErrorId = currentRetryError.id;
+      const retryErrorIdentity = { block: currentRetryError };
       const retrySessionId = connectionRef.current.sessionId;
-      const retrySourceVersion = composerSourceVersionRef.current;
       const retryText = lastSubmittedPromptRef.current;
       const retryImages = lastSubmittedImagesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
-      const retryOwnerIsCurrent = () =>
-        composerSourceVersionRef.current === retrySourceVersion &&
-        connectionRef.current.sessionId === retrySessionId;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
+      const retryAttemptId = ++cancelledRetryAttemptRef.current;
+      const retryOwner = retryOwnerRef.current;
+      if (!retryOwnerIsCurrent(retryOwner)) {
+        setShowRetryHint(false);
+        return;
+      }
       retriedTurnErrorIdRef.current = retryErrorId;
       setShowRetryHint(false);
+      const retryTranscriptIdentity: FailedPromptRetry['transcriptIdentity'] = {
+        kind: 'turn-error',
+        identity: retryErrorIdentity,
+      };
+      const retryTranscriptIsCurrent = () =>
+        retryTranscriptIdentityMatches(
+          store.getSnapshot().blocks,
+          retryTranscriptIdentity,
+        );
       setFailedPromptRetry({
         sessionId: retrySessionId,
         messageId: retryErrorId,
         startedAt: Date.now(),
         admitted: false,
         settled: false,
+        owner: retryOwner,
+        transcriptIdentity: retryTranscriptIdentity,
       });
       let admissionStarted = false;
       let admitted = false;
@@ -8554,19 +9831,34 @@ export function App({
         },
         onAdmitted: () => {
           admitted = true;
-          if (!retryOwnerIsCurrent()) return;
+          if (!retryOwnerIsCurrent(retryOwner)) return;
           setFailedPromptRetry((current) =>
-            current?.sessionId === retrySessionId &&
-            current.messageId === retryErrorId
-              ? { ...current, admitted: true }
+            current?.transcriptIdentity === retryTranscriptIdentity
+              ? retryTranscriptIsCurrent()
+                ? { ...current, admitted: true }
+                : null
               : current,
           );
         },
+        onCancelledBeforeAdmission: () => {
+          restoreOrDeferCancelledRetry(retryOwner, {
+            kind: 'turn-error',
+            attemptId: retryAttemptId,
+            errorId: retryErrorId,
+            identity: retryErrorIdentity,
+            text: retryText,
+            images: retryImages,
+            inputAnnotations: retryInputAnnotations,
+            previousRetriedTurnErrorId,
+            previousShowRetryHint,
+          });
+        },
       })
         .catch((error: unknown) => {
-          if (!retryOwnerIsCurrent()) return;
+          if (!retryOwnerIsCurrent(retryOwner)) return;
           const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
           if (admissionStarted && !admitted && !definitelyRejected) {
+            if (!retryTranscriptIsCurrent()) return;
             updateUnknownPromptAdmission({
               sessionId: retrySessionId,
               messageId: retryErrorId,
@@ -8582,14 +9874,48 @@ export function App({
             );
             return;
           }
-          reportError(error, 'Failed to retry prompt');
+          if (!admitted) {
+            restoreOrDeferCancelledRetry(retryOwner, {
+              kind: 'turn-error',
+              attemptId: retryAttemptId,
+              errorId: retryErrorId,
+              identity: retryErrorIdentity,
+              text: retryText,
+              images: retryImages,
+              inputAnnotations: retryInputAnnotations,
+              previousRetriedTurnErrorId,
+              previousShowRetryHint,
+            });
+          }
+          if (isDaemonTurnError(error)) {
+            failedTurnErrorRetryRef.current = {
+              errorId: retryErrorId,
+              text: retryText,
+              images: retryImages,
+              inputAnnotations: retryInputAnnotations,
+              owner: retryOwner,
+            };
+            const nextTurnError = getRetryableTurnError(
+              store.getSnapshot().blocks,
+            );
+            if (nextTurnError) {
+              rearmFailedTurnErrorRetry(
+                nextTurnError,
+                store.getSnapshot().blocks,
+              );
+            }
+          }
+          if (retryTranscriptIsCurrent()) {
+            reportError(error, 'Failed to retry prompt');
+          }
         })
         .finally(() => {
-          if (!retryOwnerIsCurrent()) return;
+          if (!retryOwnerIsCurrent(retryOwner)) return;
           setFailedPromptRetry((current) =>
-            current?.sessionId === retrySessionId &&
-            current.messageId === retryErrorId
-              ? { ...current, settled: true }
+            current?.transcriptIdentity === retryTranscriptIdentity
+              ? retryTranscriptIsCurrent()
+                ? { ...current, settled: true }
+                : null
               : current,
           );
         });
@@ -8600,6 +9926,9 @@ export function App({
     connected,
     pushToast,
     reportError,
+    rearmFailedTurnErrorRetry,
+    restoreOrDeferCancelledRetry,
+    retryOwnerIsCurrent,
     sendPrompt,
     store,
     t,
@@ -8782,11 +10111,36 @@ export function App({
     };
   }, [resetEscapeState]);
 
-  const isDisabled = shouldDisableComposerInput({
-    catchingUp: Boolean(connection.catchingUp),
-    pendingApproval: pendingApproval !== null,
-    isPreparingPrompt,
-  });
+  const isDisabled =
+    sessionWriteBlocked ||
+    shouldDisableComposerInput({
+      catchingUp: Boolean(connection.catchingUp),
+      pendingApproval: pendingApproval !== null,
+      isPreparingPrompt,
+    });
+  const retryableTurnErrorIdentity = retryableTurnErrorIdentityRef.current;
+  const showCurrentRetryHint = Boolean(
+    showRetryHint &&
+      !isPreparingPrompt &&
+      retryableTurnErrorIdentity &&
+      matchesTurnErrorIdentity(
+        getRetryableTurnError(blocks),
+        retryableTurnErrorIdentity,
+      ) &&
+      retryOwnerIsCurrent(retryOwnerRef.current),
+  );
+  const latestUserBlock = getLatestUserBlock(blocks);
+  const visibleFailedPromptBlock =
+    failedPrompt &&
+    latestUserBlock &&
+    matchesUserMessageIdentity(
+      latestUserBlock,
+      failedPrompt.identity,
+      failedPrompt.owner.snapshot.isCurrent(),
+    ) &&
+    retryOwnerIsCurrent(failedPrompt.owner)
+      ? latestUserBlock
+      : undefined;
   const composerPlaceholderInputState = {
     catchingUp: Boolean(connection.catchingUp),
     isPreparingPrompt,
@@ -8803,6 +10157,7 @@ export function App({
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
+      if (sessionWriteBlocked) return;
       if (!connectionRef.current.sessionId) {
         setPendingModel(modelId);
         return;
@@ -8811,10 +10166,13 @@ export function App({
       // selection is in flight — rapid Set current clicks would otherwise launch
       // concurrent setModel calls that can resolve out of order and leave a
       // model other than the user's last click active.
+      const owner = sessionOwnerGuard.capture();
+      const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
       sessionActions
         .setModel(modelId)
         .then((result) => {
+          if (!owner.isCurrent()) return;
           const summary = getModelSwitchSummary(result);
           setPendingModel(summary?.modelId ?? modelId);
           if (summary) {
@@ -8827,15 +10185,29 @@ export function App({
           }
         })
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           reportError(error, t('model.switch'));
         })
-        .finally(() => setModelActionBusy(false));
+        .finally(() => {
+          if (modelActionTokenRef.current === modelActionToken) {
+            setModelActionBusy(false);
+          }
+        });
     },
-    [sessionActions, store, reportError, t, setPendingModel],
+    [
+      sessionWriteBlocked,
+      reportError,
+      sessionActions,
+      sessionOwnerGuard,
+      setPendingModel,
+      store,
+      t,
+    ],
   );
 
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
+      const modelActionToken = ++modelActionTokenRef.current;
       setModelActionBusy(true);
       workspaceActions
         .deleteModel(target)
@@ -8866,7 +10238,11 @@ export function App({
         .catch((error: unknown) => {
           reportError(error, t('settings.models.deleteFailed'));
         })
-        .finally(() => setModelActionBusy(false));
+        .finally(() => {
+          if (modelActionTokenRef.current === modelActionToken) {
+            setModelActionBusy(false);
+          }
+        });
     },
     // Depend on the stable `reload` fn, not the whole providersState object,
     // which useProviders returns fresh each render (would defeat the memo).
@@ -8955,8 +10331,12 @@ export function App({
       // and ignore the user's User-vs-Workspace choice.
       const scopeFlag =
         modelSettingScope === 'user' ? ' --global' : ' --project';
-      sendPrompt(`/model --fast ${modelId}${scopeFlag}`)
+      const owner = { current: sessionOwnerGuard.capture() };
+      sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, {
+        ownerRef: owner,
+      })
         .then(() => {
+          if (!owner.current.isCurrent()) return;
           // sendPrompt resolves only after the `/model --fast` turn *completes*
           // (actions.ts → waitForAcceptedPromptCompletion), so the change is
           // already applied here — this reload reads the new value, not a stale
@@ -8973,6 +10353,7 @@ export function App({
           });
         })
         .catch((error: unknown) => {
+          if (!owner.current.isCurrent()) return;
           reportError(error, 'Failed to switch fast model');
         });
     },
@@ -8984,6 +10365,7 @@ export function App({
       reportError,
       reloadWorkspaceSettings,
       modelSettingScope,
+      sessionOwnerGuard,
     ],
   );
 
@@ -9455,14 +10837,9 @@ export function App({
               <ResumeDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onSelect={(sessionId) => {
-                  closeMobileDrawer();
-                  closePanel();
-                  autoRecapVersionRef.current += 1;
-                  sessionActions
-                    .loadSession(sessionId)
-                    .catch((error: unknown) => {
-                      reportError(error, 'Failed to load session');
-                    });
+                  loadSidebarSession(sessionId).catch((error: unknown) => {
+                    reportError(error, 'Failed to load session');
+                  });
                 }}
                 onClose={() => setShowResumeDialog(false)}
               />
@@ -9704,9 +11081,7 @@ export function App({
             <AddWorkspaceDialog
               onClose={() => setShowAddWorkspaceDialog(false)}
               onAdd={handleAddWorkspace}
-              onSuggest={(prefix) =>
-                workspaceActions.suggestWorkspacePaths(prefix)
-              }
+              onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={async () => {
                 const result = await workspaceActions.pickWorkspaceDirectory();
                 return result.selected ? result.path : undefined;
@@ -9835,9 +11210,9 @@ export function App({
                     setMainView('chat');
                     closePanel();
                   }}
+                  onSessionRenameConfirmed={reconcileCatalogRename}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
-                  sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
@@ -10369,17 +11744,24 @@ export function App({
                         // would land in an empty session with no explanation.
                         // Letting this reject keeps the error in the form the
                         // user is looking at.
+                        const owner = {
+                          current: sessionOwnerGuard.capture(),
+                        };
                         try {
                           await sendPrompt(`/goal ${condition}`, undefined, {
                             clearComposerOnPromptStart: true,
+                            ownerRef: owner,
                           });
+                          if (!owner.current.isCurrent()) return false;
                         } catch (error) {
                           // `sendPrompt` creates the session lazily, so by now
                           // one may exist even though the prompt never landed.
                           // Remember it so the retry reuses it rather than
                           // stranding it.
-                          strandedGoalSessionRef.current =
-                            connectionRef.current.sessionId;
+                          if (owner.current.isCurrent()) {
+                            strandedGoalSessionRef.current =
+                              connectionRef.current.sessionId;
+                          }
                           throw error;
                         }
                         strandedGoalSessionRef.current = undefined;
@@ -10430,9 +11812,6 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
-                        // Refresh the "add pane" picker when the session list
-                        // changes elsewhere, matching the sidebar.
-                        sessionListReloadToken={sessionListReloadToken}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
                         // Back returns to the Session Overview (the hub the split
@@ -10576,10 +11955,12 @@ export function App({
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }
-                                showRetryHint={showRetryHint}
+                                showRetryHint={showCurrentRetryHint}
                                 onRetryClick={handleRetry}
                                 failedPromptMessageId={
-                                  failedPrompt?.messageId
+                                  isPreparingPrompt
+                                    ? undefined
+                                    : visibleFailedPromptBlock?.id
                                 }
                                 onRetryFailedPrompt={handleFailedPromptRetry}
                                 onBranchSession={handleBranchCurrentSession}
@@ -10612,6 +11993,7 @@ export function App({
                                     : undefined
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
+                                onImagePreview={openImagePanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -10904,6 +12286,7 @@ export function App({
                             handleComposerAttachmentsChange
                           }
                           onImageIngestionNotice={pushToast}
+                          onImagePreview={openImagePanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}

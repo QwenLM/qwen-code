@@ -47,6 +47,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { parsePositiveIntegerEnv } from '@qwen-code/qwen-code-core';
 import { promptRecordDir } from './prompt-record.js';
 
 /** Unix seconds at which the review process will be killed. Set by CI. */
@@ -138,6 +139,16 @@ export const DEFAULT_ROUND_SECONDS = 1800;
 /** Floor for an observed round cost — a quick same-round rebuild is not a round. */
 const MIN_OBSERVED_ROUND_SECONDS = 600;
 
+/**
+ * The runtime's concurrent-agent slots — the pool every fan-out launch
+ * shares. The core tool scheduler runs the orchestrator's parallel `agent`
+ * calls under this cap (default 10), the review workflow does not override
+ * it, and an `agent-prompt` subprocess inherits the orchestrator's
+ * environment — so the gate and the launches it gates read the same pool.
+ */
+export const TOOL_CONCURRENCY_ENV = 'QWEN_CODE_MAX_TOOL_CONCURRENCY';
+export const DEFAULT_TOOL_CONCURRENCY = 10;
+
 interface RoundStamp {
   round: number | null;
   atMs: number;
@@ -227,6 +238,27 @@ export function stampRound(
 }
 
 /**
+ * The costliest of `stamps`' admission-to-admission spans — each span ends
+ * at the next stamp, the last at `endMs` — floored at the observation
+ * floor; `null` when there are no stamps.
+ */
+function costliestSpanSeconds(
+  stamps: RoundStamp[],
+  endMs: number,
+): number | null {
+  if (stamps.length === 0) return null;
+  let maxSeconds = 0;
+  for (let i = 0; i < stamps.length; i++) {
+    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : endMs;
+    maxSeconds = Math.max(
+      maxSeconds,
+      Math.round((end - stamps[i].atMs) / 1000),
+    );
+  }
+  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
+}
+
+/**
  * What the round about to be admitted is expected to cost, in seconds: the
  * COSTLIEST round the run has measured (admission-to-admission — its audit
  * fan-out and the orchestration around it; under the pipelined loop a
@@ -249,16 +281,70 @@ export function expectedRoundSeconds(
   const stamps = readRoundStamps(planPath).filter(
     (s) => round === undefined || s.round !== round,
   );
-  if (stamps.length === 0) return DEFAULT_ROUND_SECONDS;
-  let maxSeconds = 0;
-  for (let i = 0; i < stamps.length; i++) {
-    const end = i + 1 < stamps.length ? stamps[i + 1].atMs : nowMs;
-    maxSeconds = Math.max(
-      maxSeconds,
-      Math.round((end - stamps[i].atMs) / 1000),
-    );
+  return costliestSpanSeconds(stamps, nowMs) ?? DEFAULT_ROUND_SECONDS;
+}
+
+/**
+ * What the ADMISSION itself commits, in seconds — `expectedRoundSeconds`,
+ * except when the round being admitted launches while its predecessor is
+ * still in flight: the convergence pair's second member, built in the same
+ * response as the first. The predecessor's stamp is fresher than the
+ * observation floor — nothing has measured the round yet, and no elapsed
+ * time has paid for it — so the admission must cover BOTH members' wall,
+ * not just its own. That wall is the pair's two fan-outs sharing the
+ * tool-concurrency pool: ceil(2C/N) waves against one round's ceil(C/N),
+ * for C auditors on a pool of N, and the first never exceeds twice the
+ * second — so the price is the single-round estimate scaled by exactly
+ * those waves: one round's price when the pool holds both members at once
+ * (the 3A shape, and a 3B pair whose chunks fit), more as the pool
+ * serializes them, and never beyond the two-round bound whatever the pool.
+ * Pricing the second member off the just-written first stamp instead — a
+ * seconds-old span clamped to the floor — committed the pair at one
+ * round's price for up to two rounds' wall, and near the deadline the
+ * pair consumed the reserve and hit the outer timeout before posting.
+ *
+ * The price deliberately covers the pair's AUDITOR fan-outs only: the pair
+ * launches in the same response as the Step 4 verifier shards, which share
+ * the same pool waves, and if they stretch the batch past the priced waves
+ * the extra wall is bounded by the verifier batch's own wave count — one
+ * wave for any normal finding set — which the reserve the gate holds ahead
+ * of every admission is there to carry.
+ *
+ * One ledger shape the price does not correct: the pair stamps rounds 1
+ * and 2 seconds apart, so after the pair returns, the span from round 2's
+ * stamp to the next admission covers the pair's whole wall, and every solo
+ * round after it prices at up to twice its true cost. Accepted
+ * conservatism: an over-priced gate refuses a round near the deadline that
+ * would have fit — a capped verdict that still posts — never the
+ * killed-before-compose shape the gate exists to prevent.
+ */
+export function expectedAdmissionSeconds(
+  planPath: string,
+  round: number | undefined,
+  fanOutWidth: number,
+  env: NodeJS.ProcessEnv,
+  nowMs: number = Date.now(),
+): number {
+  const stamps = readRoundStamps(planPath).filter(
+    (s) => round === undefined || s.round !== round,
+  );
+  const last = stamps.length > 0 ? stamps[stamps.length - 1] : undefined;
+  const predecessorInFlight =
+    last !== undefined && nowMs - last.atMs < MIN_OBSERVED_ROUND_SECONDS * 1000;
+  if (!predecessorInFlight) {
+    return expectedRoundSeconds(planPath, round, nowMs);
   }
-  return Math.max(MIN_OBSERVED_ROUND_SECONDS, maxSeconds);
+  const single =
+    costliestSpanSeconds(stamps.slice(0, -1), last.atMs) ??
+    DEFAULT_ROUND_SECONDS;
+  const pool = parsePositiveIntegerEnv(
+    env[TOOL_CONCURRENCY_ENV],
+    DEFAULT_TOOL_CONCURRENCY,
+  );
+  const width = Math.max(1, Math.floor(fanOutWidth));
+  const pairWaves = Math.ceil((2 * width) / pool);
+  const roundWaves = Math.ceil(width / pool);
+  return Math.ceil((single * pairWaves) / roundWaves);
 }
 
 export interface BudgetExhausted {

@@ -2110,3 +2110,59 @@ describe('ArtifactPanel fullscreen toggle', () => {
     ).toBeNull();
   });
 });
+
+describe('ArtifactPanel image preview tabs', () => {
+  it('renders one preview tab per image and shows the active image', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'image:a',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,aWFh',
+                alt: 'Uploaded image 1',
+              },
+              {
+                id: 'image:b',
+                kind: 'image',
+                title: 'Image Preview',
+                src: 'data:image/png;base64,iWJi',
+              },
+            ]}
+            activeTabId="image:a"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    const preview = container.querySelector(
+      'img[class*="imagePreview"]',
+    ) as HTMLImageElement;
+    expect(preview).not.toBeNull();
+    expect(preview.getAttribute('src')).toBe('data:image/png;base64,aWFh');
+    expect(preview.getAttribute('alt')).toBe('Uploaded image 1');
+
+    const download = container.querySelector(
+      'a[class*="imageDownloadButton"]',
+    ) as HTMLAnchorElement;
+    expect(download).not.toBeNull();
+    expect(download.getAttribute('href')).toBe('data:image/png;base64,aWFh');
+    expect(download.getAttribute('download')).toBe('image.png');
+  });
+});

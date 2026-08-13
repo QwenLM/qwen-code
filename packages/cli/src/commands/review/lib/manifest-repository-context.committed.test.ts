@@ -61,14 +61,7 @@ const expectedManifest = {
       relatedPaths: [
         'packages/web-shell/client/adapters/**',
         'packages/web-shell/client/completions/**',
-        'packages/web-shell/client/e2e/*',
-        'packages/web-shell/client/e2e/utils/*',
-        'packages/web-shell/client/e2e/visuals/*',
-        // `hooks/*.ts`, not `hooks/**`: the co-match bound test below
-        // (MAX_ARRAY_ITEMS = 128) overflows when every glob expands fully,
-        // so this narrowing deliberately drops hooks' .tsx test files from
-        // relatedPaths. Widening it fails that bound test.
-        'packages/web-shell/client/hooks/*.ts',
+        'packages/web-shell/client/hooks/**',
       ],
     },
     {
@@ -105,13 +98,7 @@ const relatedPathSentinels: Readonly<Record<string, string>> = {
     'packages/web-shell/client/adapters/types.ts',
   'packages/web-shell/client/completions/**':
     'packages/web-shell/client/completions/slashCompletion.ts',
-  'packages/web-shell/client/e2e/*':
-    'packages/web-shell/client/e2e/web-shell.smoke.spec.ts',
-  'packages/web-shell/client/e2e/utils/*':
-    'packages/web-shell/client/e2e/utils/mockDaemon.ts',
-  'packages/web-shell/client/e2e/visuals/*':
-    'packages/web-shell/client/e2e/visuals/constants.ts',
-  'packages/web-shell/client/hooks/*.ts':
+  'packages/web-shell/client/hooks/**':
     'packages/web-shell/client/hooks/useMessages.ts',
 };
 

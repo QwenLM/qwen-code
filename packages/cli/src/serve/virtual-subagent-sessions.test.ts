@@ -79,54 +79,184 @@ function activeTarget(sessions: VirtualSubagentSessions): {
 }
 
 describe('VirtualSubagentSessions', () => {
-  it('rejects id parts that the parser cannot accept', () => {
+  it('rejects invalid, oversized, or non-round-trippable id parts', () => {
     expect(() =>
       createVirtualSubagentSessionId('parent session', 'agent-1'),
     ).toThrow('valid id parts');
     expect(() =>
-      createVirtualSubagentSessionId('parent-session', 'agent/1'),
+      createVirtualSubagentSessionId('parent/session', 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent:session', 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent.session', 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() => createVirtualSubagentSessionId('', 'agent-1')).toThrow(
+      'valid id parts',
+    );
+    expect(() =>
+      createVirtualSubagentSessionId('a'.repeat(501), 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() => createVirtualSubagentSessionId('parent-session', '')).toThrow(
+      'valid id parts',
+    );
+    expect(() =>
+      createVirtualSubagentSessionId('parent-session', 'a'.repeat(501)),
+    ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent-session', '界'.repeat(493)),
+    ).toThrow('exceeds 2000 characters');
+    expect(() =>
+      createVirtualSubagentSessionId('parent-session', '\ud800'),
     ).toThrow('valid id parts');
   });
 
-  it('resolves an out-of-band fork by agent task id', async () => {
-    const runtime = {
-      workspaceId: 'workspace-1',
-      workspaceCwd: '/workspace',
-      env: { mode: 'parent-process', overlayKeys: [] },
-      bridge: {
-        getSessionTasksStatus: async () => ({
-          v: 1 as const,
-          sessionId: 'parent-session',
-          now: Date.now(),
-          tasks: [
-            {
-              kind: 'agent' as const,
-              id: 'fork-agent-1',
-              label: 'Review current changes',
-              description: 'Review current changes',
-              status: 'running' as const,
-              startTime: Date.now(),
-              runtimeMs: 1,
-              outputFile: '/tmp/fork-agent-1.jsonl',
-              isBackgrounded: true,
-            },
-          ],
-        }),
-      },
-    } as unknown as WorkspaceRuntime;
+  it.each([
+    ['a'.repeat(500), 696],
+    [`${'界'.repeat(492)}aa`, 2_000],
+  ])(
+    'round-trips an agent id at an accepted length boundary',
+    (agentId, expectedSessionIdLength) => {
+      const sessionId = createVirtualSubagentSessionId(
+        'parent-session',
+        agentId,
+      );
 
-    const resolved = await new VirtualSubagentSessions().resolve(
-      runtime,
+      expect(sessionId).toHaveLength(expectedSessionIdLength);
+      expect(parseVirtualSubagentSessionId(sessionId)).toEqual({
+        parentSessionId: 'parent-session',
+        agentId,
+      });
+    },
+  );
+
+  it.each([
+    ['non-canonical parent encoding', true, false],
+    ['non-canonical agent encoding', false, true],
+  ])('rejects %s', (_name, padParent, padAgent) => {
+    const sessionId = createVirtualSubagentSessionId(
       'parent-session',
-      'fork-agent-1',
+      'agent-1',
     );
+    const [parentPart, agentPart] = sessionId
+      .slice('subagent.'.length)
+      .split('.');
+    const nonCanonicalSessionId = `subagent.${parentPart}${padParent ? '=' : ''}.${agentPart}${padAgent ? '=' : ''}`;
 
-    expect(resolved).toMatchObject({
-      taskId: 'fork-agent-1',
-      title: 'Review current changes',
-      status: 'running',
-    });
+    expect(
+      parseVirtualSubagentSessionId(nonCanonicalSessionId),
+    ).toBeUndefined();
   });
+
+  it('rejects a non-canonical agent encoding that decodes as garbage', () => {
+    const sessionId = createVirtualSubagentSessionId(
+      'parent-session',
+      'agent-1',
+    );
+    const [parentPart] = sessionId.slice('subagent.'.length).split('.');
+
+    expect(
+      parseVirtualSubagentSessionId(`subagent.${parentPart}.garbage`),
+    ).toBeUndefined();
+  });
+
+  it('rejects a parent part outside the strict charset', () => {
+    const parentPart = Buffer.from('../foo', 'utf8').toString('base64url');
+    const agentPart = Buffer.from('agent-1', 'utf8').toString('base64url');
+
+    expect(
+      parseVirtualSubagentSessionId(`subagent.${parentPart}.${agentPart}`),
+    ).toBeUndefined();
+  });
+
+  it('rejects an oversized parent part above the part length cap', () => {
+    const parentPart = Buffer.from('a'.repeat(600), 'utf8').toString(
+      'base64url',
+    );
+    const agentPart = Buffer.from('agent-1', 'utf8').toString('base64url');
+
+    expect(
+      parseVirtualSubagentSessionId(`subagent.${parentPart}.${agentPart}`),
+    ).toBeUndefined();
+  });
+
+  it('rejects an oversized session id at the parse-side total length cap', () => {
+    // Both decoded parts sit exactly at the part length cap, so only the
+    // total length check can reject this id.
+    const parentPart = Buffer.from('a'.repeat(500), 'utf8').toString(
+      'base64url',
+    );
+    const agentPart = Buffer.from('界'.repeat(500), 'utf8').toString(
+      'base64url',
+    );
+    const sessionId = `subagent.${parentPart}.${agentPart}`;
+
+    expect(sessionId).toHaveLength(2677);
+    expect(parseVirtualSubagentSessionId(sessionId)).toBeUndefined();
+  });
+
+  it.each(['general-purpose-agent:8', 'general-purpose-agent/8'])(
+    'round-trips an existing agent id containing reserved characters: %s',
+    (agentId) => {
+      const sessionId = createVirtualSubagentSessionId(
+        'parent-session',
+        agentId,
+      );
+
+      expect(parseVirtualSubagentSessionId(sessionId)).toEqual({
+        parentSessionId: 'parent-session',
+        agentId,
+      });
+    },
+  );
+
+  it.each(['fork-agent-1', 'general-purpose-agent:8'])(
+    'resolves an out-of-band task by agent task id: %s',
+    async (taskId) => {
+      const runtime = {
+        workspaceId: 'workspace-1',
+        workspaceCwd: '/workspace',
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: {
+          getSessionTasksStatus: async () => ({
+            v: 1 as const,
+            sessionId: 'parent-session',
+            now: Date.now(),
+            tasks: [
+              {
+                kind: 'agent' as const,
+                id: taskId,
+                label: 'Review current changes',
+                description: 'Review current changes',
+                status: 'running' as const,
+                startTime: Date.now(),
+                runtimeMs: 1,
+                outputFile: `/tmp/${taskId}.jsonl`,
+                isBackgrounded: true,
+              },
+            ],
+          }),
+        },
+      } as unknown as WorkspaceRuntime;
+
+      const resolved = await new VirtualSubagentSessions().resolve(
+        runtime,
+        'parent-session',
+        taskId,
+      );
+
+      expect(resolved).toMatchObject({
+        taskId,
+        title: 'Review current changes',
+        status: 'running',
+      });
+      expect(parseVirtualSubagentSessionId(resolved!.sessionId)).toEqual({
+        parentSessionId: 'parent-session',
+        agentId: taskId,
+      });
+    },
+  );
 
   it('resolves, fully loads, and independently streams an agent transcript', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));

@@ -245,6 +245,8 @@ interface ChatEditorProps {
   voiceTarget?: VoiceWorkspaceTarget;
   voiceStatusRevision?: VoiceStatusRevision;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  /** Click a pasted image in the composer to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -1291,6 +1293,7 @@ export const ChatEditor = memo(
       voiceTarget,
       voiceStatusRevision,
       onImageIngestionNotice,
+      onImagePreview,
     } = props;
 
     const {
@@ -2456,26 +2459,48 @@ export const ChatEditor = memo(
                 )}
                 {core.pastedImages.length > 0 && (
                   <div className={styles.images}>
-                    {core.pastedImages.map((img, i) => (
-                      <div key={i} className={styles.imageThumb}>
-                        <img
-                          src={`data:${img.media_type};base64,${img.data}`}
-                          alt=""
-                        />
-                        <button
-                          type="button"
-                          className={styles.imageRemove}
-                          disabled={disabled}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (disabled) return;
-                            core.removeImage(i);
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
+                    {core.pastedImages.map((img, i) => {
+                      const src = `data:${img.media_type};base64,${img.data}`;
+                      return (
+                        <div key={i} className={styles.imageThumb}>
+                          <img
+                            src={src}
+                            alt=""
+                            onClick={
+                              onImagePreview
+                                ? () => onImagePreview(src)
+                                : undefined
+                            }
+                          />
+                          <button
+                            type="button"
+                            className={styles.imageRemove}
+                            disabled={disabled}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (disabled) return;
+                              core.removeImage(i);
+                            }}
+                            aria-label="Remove image"
+                          >
+                            <svg
+                              width="8"
+                              height="8"
+                              viewBox="0 0 10 10"
+                              fill="none"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="M2 2l6 6M8 2l-6 6"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                              />
+                            </svg>
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

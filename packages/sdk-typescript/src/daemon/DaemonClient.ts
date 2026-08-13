@@ -2705,24 +2705,24 @@ export class DaemonClient {
 
   async resolveSubagentSession(
     sessionId: string,
-    toolCallId: string,
+    subagentRef: string,
     clientId?: string,
   ): Promise<DaemonSubagentSessionResolution> {
     return await this.jsonRequest<DaemonSubagentSessionResolution>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}`,
-      'GET /session/:id/subagents/:toolCallId',
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}`,
+      'GET /session/:id/subagents/:subagentRef',
       { clientId, mode: 'rest' },
     );
   }
 
   async cancelSubagentSession(
     sessionId: string,
-    toolCallId: string,
+    subagentRef: string,
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
     return await this.jsonRequest<{ cancelled: boolean }>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}/cancel`,
-      'POST /session/:id/subagents/:toolCallId/cancel',
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(subagentRef)}/cancel`,
+      'POST /session/:id/subagents/:subagentRef/cancel',
       { clientId, mode: 'rest', method: 'POST' },
     );
   }
