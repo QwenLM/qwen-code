@@ -23,11 +23,34 @@ export const FOOTER_MARKER = 'via Qwen Code /review';
  * The invisible marker every attribution-OFF inline comment carries instead
  * of the footer. Renders as nothing on GitHub; it is the one signal that
  * survives the prefix strip and the footer removal, so `presubmit` can still
- * recognize earlier posts for dedup — from ANY account, not just the
- * reviewing one. Deliberately not added when attribution is on: the footer
- * already identifies those posts, and a second marker is noise.
+ * recognize earlier posts for dedup and `pr-context` can still promote an
+ * unresolved Critical to the re-check section. The marker carries the
+ * severity because the visible prefix that carried it is stripped in this
+ * mode. Deliberately not added when attribution is on: the footer and the
+ * visible prefix already identify and classify those posts.
  */
 export const COMMENT_MARKER = '<!-- qwen-review -->';
+
+/** The marker with the finding's severity — the shape `submit` posts. */
+export function commentMarker(severity: 'critical' | 'suggestion'): string {
+  return `<!-- qwen-review ${severity} -->`;
+}
+
+/** The trailing shape `submit` posts on attribution-off comments. */
+const POSTED_MARKER_RE = /<!-- qwen-review (?:critical|suggestion) -->$/;
+
+/** Whether the body ends with the posted marker shape. */
+export function carriesCommentMarker(body: string): boolean {
+  return POSTED_MARKER_RE.test(body.trimEnd());
+}
+
+/** The severity a posted marker carries, or null when absent. */
+export function commentMarkerSeverity(
+  body: string,
+): 'critical' | 'suggestion' | null {
+  const m = /<!-- qwen-review (critical|suggestion) -->/.exec(body);
+  return m === null ? null : (m[1] as 'critical' | 'suggestion');
+}
 
 /** The footer naming the reviewing model and the CLI version it ran under. */
 export function reviewFooter(modelId: string, cliVersion: string): string {
@@ -96,18 +119,41 @@ export function stripReviewFooter(body: string): string {
  * the surviving forged line redundant-but-harmless. Under attribution-off
  * that surviving line is the ONLY attribution the post carries — the exact
  * signal the mode exists to remove — so it goes regardless of position.
- * Whole lines only: the marker substring inside ordinary prose is not a
- * footer. Linear by construction: the literal `_— ` prefix bounds the
- * engine's start positions and `[^\n]` cannot cross a line.
+ *
+ * Whole lines only, matched per line after splitting: the marker substring
+ * inside ordinary prose is not a footer, a footer-shaped span with text
+ * after it on the same line is not one either, and a line inside a code
+ * fence or indented as a code block is a quotation (a re-review quoting an
+ * earlier round's comment verbatim), not attribution. The closing `_` is
+ * optional — a looping model truncates its forged footer mid-character,
+ * the case this strip exists for. Lines longer than 400 characters are
+ * left alone (a footer line is short; the cap bounds the per-line match).
+ * A body with no footer-shaped line is returned byte-identical — no
+ * whitespace rewriting.
  */
 const FORGED_FOOTER_LINE_RE =
-  /\n?[ \t]*_— [^\n]* via Qwen Code \/review(?: \(v[^\n)]*\))?_[ \t]*(?=\n|$)/g;
+  /^[ \t]{0,3}_— [^\n]{0,400} via Qwen Code \/review(?: \(v[^\n)]*\))?_?[ \t]*\r?$/;
 
 export function stripForgedFooterLines(body: string): string {
   if (!body.includes(FOOTER_MARKER)) return body;
-  return body
-    .replace(FORGED_FOOTER_LINE_RE, '')
+  let inFence = false;
+  let removed = false;
+  const kept = body.split('\n').filter((line) => {
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence;
+      return true;
+    }
+    if (!inFence && FORGED_FOOTER_LINE_RE.test(line)) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+  if (!removed) return body;
+  return kept
+    .join('\n')
     .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+/, '')
     .trimEnd();
 }
 

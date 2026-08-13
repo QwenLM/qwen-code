@@ -705,7 +705,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     }
     // The severity prefix goes with the footer: it is the same template. In
     // their place rides the invisible marker presubmit dedups on.
-    expect(inline).toBe('tidy\n\n<!-- qwen-review -->');
+    expect(inline).toBe('tidy\n\n<!-- qwen-review suggestion -->');
   });
 
   it('attribution off strips a forged footer even when text follows it', () => {
@@ -773,9 +773,9 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       body: string;
     }>;
     expect(critical.body).toBe(
-      'null deref when the list is empty\n\n<!-- qwen-review -->',
+      'null deref when the list is empty\n\n<!-- qwen-review critical -->',
     );
-    expect(suggestion.body).toBe('tidy\n\n<!-- qwen-review -->');
+    expect(suggestion.body).toBe('tidy\n\n<!-- qwen-review suggestion -->');
   });
 
   it('attribution on keeps the severity prefixes in the posted bodies', () => {
@@ -879,7 +879,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     // comment marker; the assertion is on the rest of the body reaching
     // GitHub byte-for-byte.
     expect(posted().comments[0].body).toBe(
-      `${body.slice('**[Suggestion]** '.length)}\n\n<!-- qwen-review -->`,
+      `${body.slice('**[Suggestion]** '.length)}\n\n<!-- qwen-review suggestion -->`,
     );
   });
 

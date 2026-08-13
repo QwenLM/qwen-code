@@ -10,6 +10,7 @@ import {
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripForgedFooterLines,
   stripReviewFooter,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
@@ -128,6 +129,64 @@ describe('the review footer and the regex that strips it', () => {
       expect(
         stripReviewFooter(`${finding}\n\n${reviewFooter('m', '0.21.3')}`),
       ).toBe(finding);
+    });
+  });
+
+  describe('stripForgedFooterLines — the attribution-off anywhere strip', () => {
+    it('strips a forged footer on the very first line', () => {
+      expect(
+        stripForgedFooterLines(
+          '_— forged via Qwen Code /review (v0.21.4)_\n\na finding',
+        ),
+      ).toBe('a finding');
+    });
+
+    it('strips a mid-body forged footer and one missing its closing underscore', () => {
+      // The looping model truncates its forged footer mid-character — the
+      // case this strip exists for.
+      expect(
+        stripForgedFooterLines(
+          'a finding\n\n_— qwen3.7-max via Qwen Code /review (v0.21.3)\n\nUpdate: reproduced again',
+        ),
+      ).toBe('a finding\n\nUpdate: reproduced again');
+    });
+
+    it('strips every forged line when there are several', () => {
+      expect(
+        stripForgedFooterLines(
+          'one\n\n_— a via Qwen Code /review (v1)_\n\ntwo\n\n_— b via Qwen Code /review_',
+        ),
+      ).toBe('one\n\ntwo');
+    });
+
+    it('tolerates CRLF line endings', () => {
+      expect(
+        stripForgedFooterLines(
+          'null deref\r\n_— qwen3-coder via Qwen Code /review (v0.21.3)_\r\nUpdate: more',
+        ),
+      ).toBe('null deref\r\nUpdate: more');
+    });
+
+    it('leaves a footer-shaped span with text after it on the same line alone', () => {
+      const body =
+        'See _— model via Qwen Code /review (v0.21.3)_ quoted above for context.';
+      expect(stripForgedFooterLines(body)).toBe(body);
+    });
+
+    it('leaves a footer-shaped line inside a code fence alone — it is a quotation', () => {
+      const body =
+        'the earlier comment said:\n\n```\n_— model via Qwen Code /review (v1.2.3)_\n```\n\nand it was wrong';
+      expect(stripForgedFooterLines(body)).toBe(body);
+    });
+
+    it('leaves an indented (code-block) footer-shaped line alone', () => {
+      const body = 'quoted:\n\n    _— model via Qwen Code /review (v1.2.3)_';
+      expect(stripForgedFooterLines(body)).toBe(body);
+    });
+
+    it('returns a body with no footer-shaped line byte-identical — no whitespace rewrite', () => {
+      const body = `mentions the marker via Qwen Code /review in prose\n\n\n\nwith wide gaps  \n`;
+      expect(stripForgedFooterLines(body)).toBe(body);
     });
   });
 });

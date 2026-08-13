@@ -59,24 +59,38 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
 }
 
 /**
- * The body with its leading severity marker removed — the shape an
+ * The body with its leading severity markers removed — the shape an
  * attribution-off (`review.attribution: false`) run POSTS, applied by
  * `submit` after the verdict was counted from the marked payload.
  *
- * A body that was nothing but its marker is returned unchanged: `submit`'s
- * consistency gate refuses exactly that shape before this ever runs, and
- * posting the bare marker is worse than handing the draft defect back to
- * the re-compose loop as a structured refusal.
+ * Iterative: a looping model can draft stacked markers
+ * (`**[Critical]** **[Suggestion]** …`), and stripping only the first posts
+ * the second — the bare machine marker the mode exists to remove. The
+ * classification delegates to `severityOf` so "marked" keeps its ONE
+ * statement.
+ *
+ * A body that is nothing but markers is returned unchanged: at `submit`'s
+ * call site the consistency gate refuses exactly that shape before this
+ * ever runs, and posting the bare marker is worse than handing the draft
+ * defect back to the re-compose loop as a structured refusal. Note the
+ * gate lives at that call site — `compose-review`'s body-Critical quoting
+ * has no equivalent, and a marker-only entry there posts as a bare marker
+ * line (the same degenerate shape attribution-on posts via `withMarker`).
  */
 export function stripSeverityPrefix(body: string): string {
-  const trimmed = body.trimStart();
-  for (const prefix of [CRITICAL_PREFIX, SUGGESTION_PREFIX]) {
-    if (trimmed.startsWith(prefix)) {
-      const rest = trimmed.slice(prefix.length).replace(/^:?\s*/, '');
-      return rest === '' ? body : rest;
-    }
+  let current = body;
+  for (;;) {
+    const severity = severityOf({ body: current });
+    if (severity === null) return current;
+    const prefix =
+      severity === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+    const rest = current
+      .trimStart()
+      .slice(prefix.length)
+      .replace(/^:?\s*/, '');
+    if (rest === '') return current;
+    current = rest;
   }
-  return body;
 }
 
 /**

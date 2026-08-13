@@ -26,6 +26,7 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { parseLedger, stripLedgerMarker, type Ledger } from './lib/ledger.js';
+import { commentMarkerSeverity } from './lib/review-footer.js';
 
 /**
  * Marker embedded in the "suggestion summary" issue comment that /review used
@@ -493,18 +494,25 @@ export function classifyInlineThreads(inline: RawComment[]): InlineThreads {
   //
   // (This used to key on the literal `[Critical]` marker, which only /review
   // emits — a human blocker phrased any other way settled into "do NOT
-  // re-report". `carriesBlockerSignal` is the semantic test.)
+  // re-report". `carriesBlockerSignal` is the semantic test. Attribution-off
+  // posts carry no prefix at all; their severity rides the invisible comment
+  // marker, so a posted Critical re-promotes through it every round —
+  // including from round N+2, where the ledger no longer resurfaces a
+  // "cannot tell" ruling.)
+  const isBlockerRoot = (c: RawComment): boolean =>
+    carriesBlockerSignal(c.body) ||
+    commentMarkerSeverity(c.body ?? '') === 'critical';
   const repliedBlockerRoots = roots.filter(
-    (c) => repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
+    (c) => repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
   const openBlockerRoots = roots.filter(
-    (c) => !repliesByRoot.has(c.id) && carriesBlockerSignal(c.body),
+    (c) => !repliesByRoot.has(c.id) && isBlockerRoot(c),
   );
   const repliedRoots = roots.filter(
-    (c) => repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+    (c) => repliesByRoot.has(c.id) && !isBlockerRoot(c),
   );
   const openRoots = roots.filter(
-    (c) => !repliesByRoot.has(c.id) && !carriesBlockerSignal(c.body),
+    (c) => !repliesByRoot.has(c.id) && !isBlockerRoot(c),
   );
 
   return {

@@ -939,6 +939,27 @@ describe('classifyInlineThreads', () => {
     expect(t.repliesByRoot.get(1)!.map((c) => c.id)).toEqual([2]);
   });
 
+  it('promotes an attribution-off Critical through its invisible severity marker', () => {
+    // The posted shape with attribution off: no prefix, the severity rides
+    // the comment marker — and a Critical must still land in the re-check
+    // section every round, not settle into a one-line open-thread snippet.
+    const inline: RawComment[] = [
+      {
+        id: 7,
+        user: { login: 'qwen-code-ci-bot' },
+        body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+      },
+      {
+        id: 8,
+        user: { login: 'qwen-code-ci-bot' },
+        body: 'this reads fine but could be shorter\n\n<!-- qwen-review suggestion -->',
+      },
+    ];
+    const t = classifyInlineThreads(inline);
+    expect(t.openBlockerRoots.map((c) => c.id)).toEqual([7]);
+    expect(t.openRoots.map((c) => c.id)).toEqual([8]);
+  });
+
   it('promotes an un-replied blocker root to the re-check section, in full', () => {
     // The gap this closes: a fresh `[Critical]` with no reply used to go
     // straight into "Open inline comments" as a 240-char snippet, past the read

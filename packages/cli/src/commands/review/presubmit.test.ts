@@ -765,15 +765,37 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(true);
     });
 
-    it('classifies the shape attribution-off actually posts — markerless body, invisible marker, any account', async () => {
+    it('classifies the shape attribution-off actually posts — markerless body, trailing marker, reviewing account', async () => {
       // `submit` strips the severity prefix and appends the comment marker;
-      // GitHub stores exactly this. The marker — not authorship, not the
-      // prefix — is what the dedup set recognizes.
+      // GitHub stores exactly this. The marker only counts together with
+      // authorship — the string is public and renders invisibly.
       const result = await presubmitWithComments(
         [
           {
             id: 2,
-            body: 'x\n\n<!-- qwen-review -->',
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('does not admit a marker-carrying comment from another account — the marker is plantable', async () => {
+      // The adversarial shape: a PR author who read the setting description
+      // plants the invisible marker on the line they expect a blocker on.
+      // Authorship is the gate that keeps this out of the dedup set.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 2,
+            body: 'x\n\n<!-- qwen-review critical -->',
             path: 'a.ts',
             line: 12,
             commit_id: 'abc123',
@@ -782,9 +804,30 @@ describe('presubmitCommand', () => {
         ],
         FINDINGS,
       );
-      expect(result.existingComments.total).toBe(1);
-      expect(result.existingComments.byBucket.overlap).toBe(1);
-      expect(result.blockOnExistingComments).toBe(true);
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('does not admit a marker-carrying reply either — quote-reply copies the marker', async () => {
+      // GitHub's quote-reply copies raw markdown, so a reply to an
+      // attribution-off finding carries the marker and inherits the
+      // finding's path:line anchor. The reply guard keeps it out.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 4,
+            body: 'x\n\n<!-- qwen-review critical -->',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
     });
 
     it('ignores a footer-less, marker-less comment from another account', async () => {

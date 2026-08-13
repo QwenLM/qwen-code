@@ -68,6 +68,7 @@ import {
 } from './lib/inline-counts.js';
 import {
   COMMENT_MARKER,
+  commentMarker,
   footerVersion,
   reviewFooter,
   stripForgedFooterLines,
@@ -361,19 +362,19 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
       );
     }
 
-    // A body that is nothing but its marker is the empty case wearing one:
-    // it passes the empty-body check (truthy) and the unmarked gate
-    // (severityOf matches), and under attribution-off the posted comment
-    // would BE the bare machine marker that mode exists to remove.
-    if (
-      c.body &&
-      severityOf(c) !== null &&
-      stripSeverityPrefix(c.body) === c.body
-    ) {
-      problems.push(
-        `${at} is nothing but its severity marker — redraft it with the ` +
-          `finding's description; a marker alone is not a comment`,
-      );
+    // A body that is nothing but its marker is the empty case wearing one.
+    // The check must see past BOTH additions the post path can make — the
+    // canonical footer (attribution on) and any markers stacked by a looping
+    // draft — so it strips iteratively and through the footer, and also
+    // refuses when what remains still opens with a marker.
+    if (c.body && severityOf(c) !== null) {
+      const remainder = stripReviewFooter(stripSeverityPrefix(c.body)).trim();
+      if (remainder === '' || severityOf({ body: remainder }) !== null) {
+        problems.push(
+          `${at} is nothing but its severity marker — redraft it with the ` +
+            `finding's description; a marker alone is not a comment`,
+        );
+      }
     }
 
     if (!isDiffLine(c.line)) {
@@ -533,19 +534,19 @@ export function runSubmit(
     // the one place the bracket-prefix template is visible. Everything above
     // (counting, the unmarked gate, the ledger) already ran on the marked
     // payload, so the verdict this post carries is unchanged. The invisible
-    // comment marker goes on in the markers' place: it is what presubmit
-    // recognizes these posts by on a later round (the footer would do it,
-    // but the footer is exactly what the operator turned off).
+    // comment marker goes on in the markers' place, carrying the severity
+    // the visible prefix carried: presubmit dedups on it, and pr-context
+    // re-promotes an unresolved Critical to the re-check section off it.
     comments: attribution
       ? (payload.comments ?? [])
-      : (payload.comments ?? []).map((c) =>
-          typeof c.body === 'string'
-            ? {
-                ...c,
-                body: `${stripSeverityPrefix(c.body)}\n\n${COMMENT_MARKER}`,
-              }
-            : c,
-        ),
+      : (payload.comments ?? []).map((c) => {
+          if (typeof c.body !== 'string') return c;
+          const sev = severityOf(c);
+          return {
+            ...c,
+            body: `${stripSeverityPrefix(c.body)}\n\n${sev === null ? COMMENT_MARKER : commentMarker(sev)}`,
+          };
+        }),
   };
 
   const target = `repos/${args.repo}/pulls/${args.pr}/reviews`;

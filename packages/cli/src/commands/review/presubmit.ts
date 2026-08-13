@@ -22,7 +22,7 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { severityOf } from './lib/inline-counts.js';
-import { COMMENT_MARKER } from './lib/review-footer.js';
+import { carriesCommentMarker } from './lib/review-footer.js';
 
 interface FindingAnchor {
   path: string;
@@ -553,23 +553,29 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // alone goes blind to every earlier attribution-off post — the overlap and
   // stale classification (and the `blockOnExistingComments` gate that exists
   // to stop duplicate posting) silently stop seeing them. Attribution-off
-  // posts carry the invisible comment marker instead, which this filter
-  // matches from ANY account — the marker, not authorship, is what survives
-  // the strip. The authorship fallback remains for posts made before the
-  // marker existed, gated on the finding shape through `severityOf` — the
-  // same trimmed predicate `submit` posts through (a body that leaves with
-  // leading whitespace must still be recognized here), while a hand-written
-  // comment by the same account is not a posted finding: admitting one lets
-  // a same-line hand comment trip the overlap gate into silently dropping a
-  // genuinely new finding. Replies stay excluded either way.
+  // posts carry the invisible comment marker instead, and this filter
+  // matches it only together with authorship by the reviewing account AND
+  // the exact shape `submit` posts (the marker trailing the body): the
+  // marker string is public and renders invisibly, so an ungated match would
+  // let a PR author plant it on the line they expect a blocker on and have
+  // the next round silently withhold that blocker — provenance the
+  // commenter cannot fake is the account, not the marker. The `severityOf`
+  // disjunct remains for posts made before the marker existed, gated on the
+  // finding shape — the same trimmed predicate `submit` posts through (a
+  // body that leaves with leading whitespace must still be recognized
+  // here), while a hand-written comment by the same account is not a posted
+  // finding: admitting one lets a same-line hand comment trip the overlap
+  // gate into silently dropping a genuinely new finding. Replies stay
+  // excluded either way. Attribution-off posts from OTHER accounts still
+  // escape detection — no footer, no authorship signal — and the setting's
+  // description says so.
   const qwenComments = allComments.filter(
     (c) =>
       /via Qwen Code \/review/.test(c.body ?? '') ||
-      (!c.in_reply_to_id && (c.body ?? '').includes(COMMENT_MARKER)) ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
-        severityOf(c) !== null),
+        (carriesCommentMarker(c.body ?? '') || severityOf(c) !== null)),
   );
 
   const repliedToIds = new Set<number>();

@@ -77,6 +77,7 @@ import {
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripForgedFooterLines,
   stripReviewFooter,
 } from './lib/review-footer.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
@@ -366,16 +367,29 @@ function formatCannotTell(
   attribution: boolean,
 ): Bi {
   const parsed = cannotTell.map((raw) => {
+    // An unattributed post strips forged footer lines here too — the entry
+    // is quoted into a body that carries no canonical footer, so a surviving
+    // mid-entry footer would be the post's only attribution.
+    const source = attribution ? raw : stripForgedFooterLines(raw);
     // Entries render as one-line list items: an unindented newline ends a
     // list item (CommonMark), so a model-written entry spanning lines would
     // leak its continuation out of the list. Collapsed by split/join, not
     // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
     // a long whitespace run with no newline in it, and these entries are
     // model-written with no length cap — one such entry stalled a measured
-    // probe for seconds at 80k characters.
-    const unmarked = raw.startsWith(CRITICAL_PREFIX)
-      ? raw.slice(CRITICAL_PREFIX.length).trim()
-      : raw;
+    // probe for seconds at 80k characters. The marker check goes through
+    // `severityOf` (trims first — a leading space used to leak the marker
+    // past this strip into the posted body).
+    const sev = severityOf({ body: source });
+    const unmarked =
+      sev === null
+        ? source
+        : source
+            .trimStart()
+            .slice(
+              (sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX).length,
+            )
+            .trim();
     const line = linkifyCommentRefs(
       unmarked.includes('\n')
         ? unmarked
@@ -1473,9 +1487,15 @@ function composeReviewBody(
   // Model-written blockers: quoted as-is in both halves. The marker is the
   // attributed template's severity signal; an unattributed post quotes the
   // blocker without it — stripping one the model already wrote, exactly as
-  // `submit` strips the inline comments' prefixes.
+  // `submit` strips the inline comments' prefixes, and dropping forged
+  // footer lines (the body carries no canonical footer here, so a surviving
+  // one would be the post's only attribution).
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => (attribution ? withMarker(l) : stripSeverityPrefix(l)))
+    .map((l) =>
+      attribution
+        ? withMarker(l)
+        : stripForgedFooterLines(stripSeverityPrefix(l)),
+    )
     .map((l) => ({ en: l, zh: l }));
 
   const contextUnavailableClause: Bi = {
@@ -2476,7 +2496,10 @@ export function buildLedger(
     });
   }
   for (const b of bodyCriticals) {
-    const { id: carried, title } = titleOf(b);
+    // Strip a model-written marker before the title goes into the ledger:
+    // the ledger marker rides the posted body as an HTML comment, and the
+    // autofix grep reads the whole body — including comments.
+    const { id: carried, title } = titleOf(stripSeverityPrefix(b));
     findings.push({
       id: idFor(carried),
       sev: 'C',

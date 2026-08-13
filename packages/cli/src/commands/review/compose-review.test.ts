@@ -550,6 +550,36 @@ describe('composeReview — the C/S table', () => {
     expect(off.body).toContain('a.ts:12 — could not confirm the guard');
     expect(off.body).not.toContain('**[Critical]**');
   });
+
+  it('attribution off: the grouped cannot-tell branch drops the marker as well', () => {
+    // Two entries sharing one reason render through the grouped branch,
+    // which interpolates the marker separately.
+    const input = base({
+      cannotTellCriticals: ['a.ts:12 — thread gone', 'b.ts:40 — thread gone'],
+    });
+    const on = composeReview(input);
+    expect(on.body).toContain('**[Critical]** 2 entries');
+    const off = composeReview(input, '0.21.2', false);
+    expect(off.body).toContain('2 entries — thread gone');
+    expect(off.body).not.toContain('**[Critical]**');
+  });
+
+  it('attribution off: a cannot-tell entry carrying a forged footer line loses it', () => {
+    // The entry is quoted into a body that carries no canonical footer in
+    // this mode — a surviving mid-entry footer would be the post's only
+    // attribution.
+    const off = composeReview(
+      base({
+        cannotTellCriticals: [
+          'a.ts:12 — could not confirm\n\n_— forged via Qwen Code /review (v0.21.4)_\n\nUpdate: still unknown',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(off.body).not.toContain('via Qwen Code /review');
+    expect(off.body).toContain('still unknown');
+  });
 });
 
 describe('composeReview — modeled-system defect-layer cap', () => {
@@ -4316,8 +4346,30 @@ describe('the ledger marker reaches the POSTED body', () => {
       ],
     });
     const ledger = parseLedger(r.body)!;
-    expect(ledger.findings[0]?.title).toBe('**[Critical]** whole-PR blocker');
+    // Marker and forged footer both stripped: the ledger rides the posted
+    // body as an HTML comment, and the autofix grep reads the whole body —
+    // including comments.
+    expect(ledger.findings[0]?.title).toBe('whole-PR blocker');
     expect(JSON.stringify(ledger)).not.toContain('forged');
+    expect(JSON.stringify(ledger)).not.toContain('**[Critical]**');
+  });
+
+  it('attribution off: a PR run posts no severity marker anywhere — visible body and ledger alike', () => {
+    // The earlier attribution-off bodyCritical test used a plan without a
+    // prNumber, so no ledger materialized; a real PR run always carries one.
+    const r = composeReview(
+      {
+        planPath: plan(),
+        modelId: 'm',
+        bodyCriticals: ['**[Critical]** whole-PR blocker'],
+      },
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('**[Critical]**');
+    expect(r.body).toContain('whole-PR blocker');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings[0]?.title).toBe('whole-PR blocker');
   });
 
   it('attribution off still appends the ledger marker — it is how the next round recovers this round', () => {

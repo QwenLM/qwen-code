@@ -89,21 +89,22 @@ template at all — no new plumbing anywhere.
   rides posted review bodies — invisible when rendered, but present in the
   markdown source. It is how the next review round recovers this round's
   findings; dropping it would break multi-round re-reviews. It stays.
-- Attribution-off inline comments carry an invisible
-  `<!-- qwen-review -->` marker for the same reason: it is the one signal
-  that survives the prefix strip and the footer removal, and `presubmit`'s
-  duplicate detection matches it — from any account, which also closes
-  #8994's documented "other accounts escape dedup" gap. Invisible when
-  rendered; disclosed here and in the setting's description.
-- Markerless, footerless Criticals are recognized on later rounds only by
-  the semantic blocker patterns (`carriesBlockerSignal`), exactly like a
-  human's comment. That is the unavoidable price of posting without visible
-  markers: the machine cannot tell its own comments apart either.
+- Attribution-off inline comments carry an invisible severity marker
+  (`<!-- qwen-review critical -->` / `<!-- qwen-review suggestion -->`) for
+  the same reason: it is the one signal that survives the prefix strip and
+  the footer removal. `presubmit`'s duplicate detection matches it only
+  together with authorship by the reviewing account — the string is public
+  and renders invisibly, so an ungated match would let a PR author plant it
+  on a line they expect a blocker on and have the next round silently
+  withhold that blocker. The "other accounts escape dedup" limitation from
+  #8994 therefore stands. `pr-context`'s blocker promotion reads the
+  marker's severity, so an unresolved Critical re-enters the re-check
+  section every round even without the visible prefix.
 - `qwen-autofix`'s Critical-only mode (after round 5) greps posted bodies
   for `**[Critical]**`; attribution-off findings no longer match and are
   deferred as non-Critical. Disclosed in the setting's description. A fix
-  (severity in an invisible marker the workflow parses instead) is possible
-  follow-up, not this PR.
+  (the workflow parsing the severity marker instead) is possible follow-up,
+  not this PR.
 
 ### Prompt layer (SKILL.md, dogfooded)
 
