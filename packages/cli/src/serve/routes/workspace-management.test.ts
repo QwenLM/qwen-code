@@ -352,7 +352,6 @@ describe('owned workspace runtime publication', () => {
     runtimeRemoval.runtimeAdded = vi.fn().mockResolvedValue(undefined);
     const validate = vi
       .fn()
-      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('root changed before publication'));
     const { handle } = createApp({
       workspaceRegistry: registry,
@@ -368,7 +367,7 @@ describe('owned workspace runtime publication', () => {
       ),
     ).rejects.toThrow('root changed before publication');
 
-    expect(validate).toHaveBeenCalledTimes(2);
+    expect(validate).toHaveBeenCalledOnce();
     expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
       undefined,
     );
@@ -391,10 +390,7 @@ describe('owned workspace runtime publication', () => {
     const validationGate = new Promise<void>((resolve) => {
       releaseValidation = resolve;
     });
-    const validate = vi
-      .fn()
-      .mockResolvedValueOnce(undefined)
-      .mockImplementationOnce(async () => validationGate);
+    const validate = vi.fn(async () => validationGate);
     const runWorkspaceTrustOperation = vi.fn(async (operation) => operation());
     const { handle } = createApp({
       workspaceRegistry: registry,
@@ -408,7 +404,7 @@ describe('owned workspace runtime publication', () => {
       'live-conversation',
       validate,
     );
-    await vi.waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(validate).toHaveBeenCalledOnce());
     expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBeUndefined();
     expect(
       registry.getManagedByWorkspaceCwd(runtime.workspaceCwd),

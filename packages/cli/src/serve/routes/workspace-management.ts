@@ -106,8 +106,7 @@ export interface WorkspaceManagementHandle {
   publishOwnedRuntime(
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
-    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
-    validateBeforePublication?: (
+    validateBeforePublication: (
       runtime: WorkspaceRuntime,
     ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime>;
@@ -250,10 +249,9 @@ export function registerWorkspaceManagementRoutes(
   const publishOwnedRuntime = async (
     canonicalCwd: string,
     provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
-    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
     validateBeforePublication: (
       runtime: WorkspaceRuntime,
-    ) => void | Promise<void> = validate,
+    ) => void | Promise<void>,
   ): Promise<WorkspaceRuntime> => {
     if (!createWorkspaceRuntime || !runtimeRemoval) {
       throw new Error('Managed workspace runtime publication is unavailable');
@@ -268,7 +266,6 @@ export function registerWorkspaceManagementRoutes(
       if (runtime.primary) {
         throw new Error('Daemon-owned workspace runtime must not be primary');
       }
-      await validate(runtime);
       await validateBeforePublication(runtime);
       const publish = async () => {
         if (sealed) throw new Error('Daemon is shutting down');

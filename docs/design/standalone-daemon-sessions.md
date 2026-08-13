@@ -129,12 +129,14 @@ loadable by identity but are excluded from top-level Recents. Parent and child
 archive or deletion operations do not cascade; each transcript and private
 directory has an independent lifecycle.
 
-Live task list, read, wait, and follow-up operations continue to treat explicit
-and legacy standalone sessions as loadable projectless task targets. This does
-not relabel them as Live in WebShell and does not expose Live-only tools in their
-ordinary text turns. Projectless Live task creation must use the same standalone
-creation service instead of creating new legacy `sourceType: "default"`
-sessions.
+PR2 extends the relocated source-classification helper so Live task list, read,
+wait, and follow-up operations treat explicit and legacy standalone sessions as
+loadable projectless task targets. It accepts top-level explicit standalone
+sources with no `sourceId` and standalone children resolved through their parent
+chain. This does not relabel them as Live in WebShell and does not expose
+Live-only tools in their ordinary text turns. Projectless Live task creation
+must use the same standalone creation service instead of creating new legacy
+`sourceType: "default"` sessions.
 
 ## Runtime architecture
 
@@ -444,17 +446,22 @@ orphan before the UUID can be released. Exact lookup returns
 `202 state: "creating"` until teardown confirms that no orphan remains, then
 returns `404`; a connected create request receives
 `500 standalone_creation_outcome_unknown` with the UUID and must poll exact
-lookup rather than retry create. After source persistence, transcript existence
-is the durable outcome marker. Under the lifecycle lock, the daemon first closes
-the ACP session, removes only an empty child, and then attempts orphan transcript
-cleanup. Cleanup is complete only after ACP session teardown succeeds, the empty
-child is removed, the orphan transcript is removed, and the UUID reservation is
-released. Complete cleanup returns
+lookup rather than retry create. If pre-persistence cleanup completes, the
+connected request returns `500 standalone_creation_rolled_back` with the UUID
+and is safe to retry with that UUID. After source persistence, transcript
+existence is the durable outcome marker. Under the lifecycle lock, the daemon
+first closes the ACP session, removes only an empty child, and then attempts
+orphan transcript cleanup. Cleanup is complete only after ACP session teardown
+succeeds, the empty child is removed, the orphan transcript is removed, and the
+UUID reservation is released. Complete cleanup returns
 `500 standalone_creation_rolled_back` with the UUID and is safe to retry with
 that UUID. If ACP-session closure or transcript cleanup fails, or the process
 crashes, the daemon preserves the transcript and UUID and reports
 `500 standalone_creation_outcome_unknown` with the UUID so the client can query
-exact identity.
+exact identity. A relocated child that is non-empty or cannot be removed is not
+deleted, and transcript cleanup is not attempted. The daemon preserves the
+transcript, child, and UUID and returns the same outcome-unknown result; exact
+lookup exposes the partial but loadable session.
 Once source persistence has succeeded, transcript deletion is not attempted
 unless ACP session teardown and empty-child removal have both succeeded; a
 partial unwind therefore remains discoverable by exact lookup. The design does
@@ -612,6 +619,7 @@ deletion was authorized.
 | Existing managed path fails validation                    | `409 working_directory_compromised`                 |
 | Deletion journal or staged state is inconsistent          | `409 deletion_recovery_compromised`                 |
 | Create crossed persistence and cleanup completed          | `500 standalone_creation_rolled_back` with UUID     |
+| Create failed before persistence and cleanup completed    | `500 standalone_creation_rolled_back` with UUID     |
 | Transcript deletion failed and directory state recovered  | `500 transcript_deletion_failed`                    |
 | Transcript or sidecar deletion outcome is partial/unknown | `500 transcript_deletion_outcome_unknown`           |
 | Transcript rollback cannot restore staged child           | `500 working_directory_recovery_failed`             |
@@ -682,7 +690,7 @@ validation, absence of ACP/Host/provider preheat, Live enabled/disabled
 lifecycle, concurrent Live work sharing the runtime, and complete Live regression
 behavior.
 
-Estimated size: 180-320 production lines and 300-550 test lines. Keep the
+Estimated size: 180-320 production lines and approximately 750-850 test lines. Keep the
 production refactor below the repository's 500-line core-refactor gate.
 
 Exit criterion: Live uses the generalized manager, and the runtime/bridge can be
@@ -862,7 +870,7 @@ foundations) are follow-up dependencies rather than MVP blockers. No capability
 is advertised before PR3.
 
 Expected total implementation size is approximately 2,500-4,400 production
-lines plus 4,600-7,900 test lines. The companion document is excluded from
+lines plus 5,050-8,150 test lines. The companion document is excluded from
 those totals. Capability advertisement is the atomic rollout boundary: partial
 internal stages remain unavailable to SDK/WebShell clients until PR3 completes
 the daemon contract.

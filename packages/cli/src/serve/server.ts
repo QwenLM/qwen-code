@@ -1291,7 +1291,6 @@ export function createServeApp(
           const runtime = await workspaceManagementHandle.publishOwnedRuntime(
             canonicalRoot,
             'live-conversation',
-            validate,
             async (candidate) => {
               await validate(candidate);
               await deps.liveConversationWorkspace!.revalidate();
