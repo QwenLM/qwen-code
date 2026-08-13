@@ -29,6 +29,13 @@ describe('security workflows', () => {
     expect(workflow).toContain(
       'ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc',
     );
+    expect(workflow).toContain(
+      'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+    );
+    expect(workflow).toContain(
+      'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+    );
+    expect(workflow).toContain('persist-credentials: false');
   });
 
   it('keeps Security Checks reporting-only and audits package locks', () => {
@@ -45,10 +52,21 @@ describe('security workflows', () => {
       'Scan for verified secrets',
     );
 
+    expect(workflow).toContain(
+      'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
+    );
+    expect(workflow).toContain(
+      'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
+    );
+    expect(workflow).toContain('persist-credentials: false');
     expect(auditStep).toContain('continue-on-error: true');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
     expect(auditStep).toContain('npm audit --omit=dev --audit-level=high');
+    expect(auditStep).toContain(
+      'npm audit --omit=dev --audit-level=high || status=$?',
+    );
+    expect(auditStep).toContain(') || status=$?');
     expect(auditStep).toContain('for lockfile in packages/*/package-lock.json');
     expect(auditStep).toContain(
       'npm ci --ignore-scripts --no-audit --progress=false &&',
@@ -56,6 +74,9 @@ describe('security workflows', () => {
     expect(trufflehogStep).toContain('continue-on-error: true');
     expect(trufflehogStep).toContain("version: '3.96.0'");
     expect(trufflehogStep).toContain("extra_args: '--only-verified'");
+    expect(trufflehogStep).toContain(
+      'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11',
+    );
     expect(checkoutStep).toContain('fetch-depth: 0');
   });
 });
