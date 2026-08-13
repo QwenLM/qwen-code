@@ -155,13 +155,14 @@ export interface WorkflowMeta {
  * Implementation:
  *   1. `findMetaBlockBounds` (shared with `stripExportMeta`) locates the
  *      object-literal source range via the brace-walker.
- *   2. The literal source is evaluated as `(${metaSource})` inside a fresh
+ *   2. The literal source is evaluated and copied inside a fresh
  *      vm context whose globalThis is a null-prototyped object — no
  *      bridge to the host realm, no access to host primitives like
  *      `process` / `require` / the workflow-sandbox bridge globals
- *      (`args` / `agent` / `phase` / `log` / etc.), and bounded by
- *      `META_EVAL_TIMEOUT_MS` so a field value that never returns cannot
- *      wedge the caller. The vm realm DOES
+ *      (`args` / `agent` / `phase` / `log` / etc.). Evaluation, accessor
+ *      reads, thenable rejection, and copying are all bounded by
+ *      `META_EVAL_TIMEOUT_MS`, so model-authored code cannot run later in
+ *      the host realm and wedge the caller. The vm realm DOES
  *      provide its own intrinsics (`Object`, `Array`, `Math`, `Date`,
  *      `JSON`, …) which is fine: meta extraction is a one-shot at tool-
  *      invocation time, not replayed during resume, so non-determinism in
@@ -195,77 +196,48 @@ export function extractAndStripMeta(source: string): {
   // provides its own intrinsics, but that's intentional — see the
   // docstring above.
   const metaContext = vm.createContext(Object.create(null));
-  let raw: unknown;
+  let serialized: unknown;
   try {
-    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
-      timeout: META_EVAL_TIMEOUT_MS,
-    });
+    serialized = new vm.Script(
+      `(() => {
+        const active = new WeakSet();
+        function copy(value) {
+          if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+            return value;
+          }
+          if (typeof value !== 'object') return undefined;
+          if (active.has(value)) return undefined;
+          active.add(value);
+          if (typeof value.then === 'function') {
+            try { value.catch(() => {}); } catch {}
+            throw new Error(
+              'extractAndStripMeta: meta values must not be Promises ' +
+              '(no async / dynamic import allowed in meta literal)',
+            );
+          }
+          if (Array.isArray(value)) {
+            const out = [];
+            for (let i = 0; i < value.length; i++) out.push(copy(value[i]));
+            active.delete(value);
+            return out;
+          }
+          const out = Object.create(null);
+          for (const key of Object.keys(value)) out[key] = copy(value[key]);
+          active.delete(value);
+          return out;
+        }
+        return JSON.stringify(copy((${metaSource})));
+      })()`,
+    ).runInContext(metaContext, { timeout: META_EVAL_TIMEOUT_MS });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(
       `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
     );
   }
-
-  // P4a R3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
-  // value in the meta literal would otherwise leave a dangling rejection
-  // behind — `runInContext` returns synchronously with the Promise scheduled
-  // to reject on the next tick, validateMeta drops the non-contract field
-  // silently, and the run completes successfully. Then Node's default
-  // `--unhandled-rejections=throw` terminates the host process, decoupled
-  // from the run that triggered it. Walk `raw`, neutralise any thenables
-  // with `.catch(() => {})` so the rejection is marked handled, and reject
-  // the meta literal up front.
-  rejectThenablesInMeta(raw);
-
+  const raw = JSON.parse(serialized as string) as unknown;
   const meta = validateMeta(raw);
   return { stripped, meta };
-}
-
-/**
- * Recursively scan a vm-eval'd value, marking any thenable as handled
- * (so its rejection cannot terminate the host on the next tick) and
- * throwing an explicit "meta values must not be Promises" so the
- * malformed meta is reported clearly.
- *
- * Recurses through plain objects and arrays — `phases[]` entries may
- * embed an `import()` below the top level.
- */
-function rejectThenablesInMeta(
-  value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
-): void {
-  if (value === null || typeof value !== 'object') return;
-  // P4 Round 4 (wenshao): a cyclic meta literal built via spread of a
-  // self-referential object would otherwise overflow the call stack on
-  // this walk — the walker exists to reject Promises before they leave
-  // a dangling rejection, but the walk itself must terminate on any
-  // shape vm-eval can return. Track visited nodes in a WeakSet so cycles
-  // and shared subgraphs both early-return without re-walking.
-  if (seen.has(value as object)) return;
-  seen.add(value as object);
-  const maybeThen = (value as { then?: unknown }).then;
-  if (typeof maybeThen === 'function') {
-    // Mark handled so Node's unhandled-rejection trap does not later kill
-    // the process. `.catch` on a non-Promise thenable would synchronously
-    // throw if the implementation is non-standard, so swallow defensively.
-    try {
-      (value as Promise<unknown>).catch(() => {});
-    } catch {
-      /* non-standard thenable — already rejecting below */
-    }
-    throw new Error(
-      'extractAndStripMeta: meta values must not be Promises ' +
-        '(no async / dynamic import allowed in meta literal)',
-    );
-  }
-  if (Array.isArray(value)) {
-    for (const v of value) rejectThenablesInMeta(v, seen);
-    return;
-  }
-  for (const v of Object.values(value as Record<string, unknown>)) {
-    rejectThenablesInMeta(v, seen);
-  }
 }
 
 /**
@@ -389,8 +361,8 @@ const ARGS_MAX_DEPTH = 64;
 // loop that would otherwise wedge the calling thread with no way out.
 // Generous for a contract object whose fields are strings and small arrays;
 // tight enough that a wedge surfaces as a normal malformed-meta error.
-// Callers evaluate meta on interactive paths (tool confirmation, saved-workflow
-// enumeration), so this must never be unbounded.
+// Meta is evaluated at the top of sandbox.run() before the run's watchdog is
+// armed, so this must never be unbounded.
 const META_EVAL_TIMEOUT_MS = 250;
 
 /**

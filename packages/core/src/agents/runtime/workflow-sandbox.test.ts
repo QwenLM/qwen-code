@@ -266,12 +266,9 @@ describe('extractAndStripMeta', () => {
     expect(() => extractAndStripMeta(src)).toThrow(/unbalanced/i);
   });
 
-  // The meta literal is model-authored source, and every caller evaluates it
-  // on a path where a wedged thread is unrecoverable: the tool-confirmation
-  // dialog (the user has not consented yet, so there is nothing to cancel)
-  // and saved-workflow enumeration (no run exists to abort). A synchronous
-  // IIFE that never returns must therefore surface as an ordinary malformed
-  // -meta error, not as a hang.
+  // Meta is evaluated at the top of sandbox.run() before its watchdog is
+  // armed. A synchronous IIFE that never returns must therefore surface as
+  // an ordinary malformed-meta error, not as a hang.
   it('a meta field that never returns times out instead of hanging', () => {
     const src = `export const meta = { name: (function () { while (true) {} })(), description: 'd' }\nreturn 1`;
     const startedAt = Date.now();
@@ -288,6 +285,39 @@ describe('extractAndStripMeta', () => {
     const src = `export const meta = { name: 'w', description: 'd', phases: [{ title: 'One' }] }\nreturn 1`;
     const { meta } = extractAndStripMeta(src);
     expect(meta).toEqual({
+      name: 'w',
+      description: 'd',
+      phases: [{ title: 'One' }],
+    });
+  });
+
+  it('bounds accessor execution while copying meta values', () => {
+    const src = `export const meta = {
+      get name() {
+        const until = Date.now() + 1_000;
+        while (Date.now() < until) {}
+        return 'late';
+      },
+      description: 'd',
+    }
+    return 1`;
+    const startedAt = Date.now();
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal/,
+    );
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it('does not invoke a custom phases iterator in the host realm', () => {
+    const src = `export const meta = {
+      name: 'w',
+      description: 'd',
+      phases: Object.defineProperty([{ title: 'One' }], Symbol.iterator, {
+        value() { throw new Error('custom iterator invoked'); },
+      }),
+    }
+    return 1`;
+    expect(extractAndStripMeta(src).meta).toEqual({
       name: 'w',
       description: 'd',
       phases: [{ title: 'One' }],
