@@ -789,6 +789,9 @@ describe('channel registry', () => {
           ?.find((field) => field.key === 'senderPolicy')
           ?.options?.map((option) => option.value),
       ).toEqual(['pairing', 'allowlist', 'open']);
+      expect(
+        fields?.find((field) => field.key === 'senderPolicy'),
+      ).toMatchObject({ default: 'pairing' });
       expect(fields).toContainEqual(
         expect.objectContaining({
           key: 'allowedUsers',

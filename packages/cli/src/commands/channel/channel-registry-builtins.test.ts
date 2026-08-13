@@ -128,6 +128,6 @@ describe('built-in channel registry', () => {
     ]);
     expect(
       entry?.fields.find((field) => field.key === 'senderPolicy'),
-    ).toMatchObject({ default: 'allowlist' });
+    ).toMatchObject({ default: 'pairing' });
   });
 });
