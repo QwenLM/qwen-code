@@ -73,12 +73,12 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
-  FOOTER_MARKER,
-  REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripReviewFooter,
 } from './lib/review-footer.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -456,17 +456,6 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
-function stripReviewFooter(entry: string): string {
-  // Guarded on the marker: the strip regex opens `\s*` under an unanchored
-  // search, which scans quadratically on a long whitespace run in an entry
-  // that carries no footer at all — and these entries are model-written
-  // with no length cap (measured ~20 s at 80k characters). An entry
-  // without the marker has nothing to strip.
-  return entry.includes(FOOTER_MARKER)
-    ? entry.replace(REVIEW_FOOTER_RE, '')
-    : entry;
-}
-
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -484,8 +473,9 @@ function toBool(value: unknown, field: string): boolean {
 export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
+  attribution = true,
 ): ComposeReviewResult {
-  const result = composeReviewBody(input, cliVersion);
+  const result = composeReviewBody(input, cliVersion, attribution);
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
   // handler left the feature inert end to end: the marker reached only the
@@ -576,6 +566,7 @@ function ledgerMarkerFor(
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
+  attribution: boolean,
 ): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -1058,17 +1049,21 @@ function composeReviewBody(
     'presubmit.downgradeReasons',
   );
   const modelId: unknown = input.modelId;
-  if (typeof modelId !== 'string' || modelId.trim() === '') {
-    throw new TypeError(
-      'compose-review: modelId is required (the public footer names the reviewing model)',
-    );
-  }
-  if (!isFooterSafeModelId(modelId)) {
-    throw new TypeError(
-      'compose-review: modelId is interpolated into the public footer ' +
-        'verbatim — it must be a single line that does not contain the ' +
-        'footer marker',
-    );
+  let footer = '';
+  if (attribution) {
+    if (typeof modelId !== 'string' || modelId.trim() === '') {
+      throw new TypeError(
+        'compose-review: modelId is required (the public footer names the reviewing model)',
+      );
+    }
+    if (!isFooterSafeModelId(modelId)) {
+      throw new TypeError(
+        'compose-review: modelId is interpolated into the public footer ' +
+          'verbatim — it must be a single line that does not contain the ' +
+          'footer marker',
+      );
+    }
+    footer = reviewFooter(modelId, cliVersion);
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
@@ -1187,7 +1182,6 @@ function composeReviewBody(
     }
   }
 
-  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -1207,7 +1201,7 @@ function composeReviewBody(
       bilingual && zh !== en
         ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
         : en;
-    return `${text}\n\n${footer}`;
+    return footer === '' ? text : `${text}\n\n${footer}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
@@ -2344,6 +2338,7 @@ export const composeReviewCommand: CommandModule = {
       // compose time — a shared runner can rewrite the install mid-session.
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
+      operatorReviewSettings().attribution,
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
