@@ -452,7 +452,6 @@ export function ChannelsManagerPage({
                     !supportsManagement ||
                     Boolean(editor) ||
                     loading ||
-                    busy !== null ||
                     deleting
                   }
                   onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}

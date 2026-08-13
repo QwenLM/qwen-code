@@ -599,17 +599,10 @@ describe('ChannelsManagerPage', () => {
       (button) => button.textContent?.trim() === 'Start',
     );
     await act(async () => start?.click());
-    const platform = container.querySelector<HTMLButtonElement>(
-      '[data-testid="channel-platform-dingtalk"]',
+    const workspaceTrigger = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Workspace"]',
     );
-    await act(async () => platform?.click());
-    const dialog = document.querySelector('[role="dialog"]');
-    const workspaceLabel = Array.from(
-      dialog?.querySelectorAll<HTMLLabelElement>('label') ?? [],
-    ).find((label) => label.textContent?.includes('Workspace'));
-    const workspaceTrigger = workspaceLabel?.htmlFor
-      ? document.getElementById(workspaceLabel.htmlFor)
-      : undefined;
+    expect(workspaceTrigger?.disabled).toBe(false);
     await act(async () => {
       workspaceTrigger?.dispatchEvent(
         new MouseEvent('click', { bubbles: true }),
