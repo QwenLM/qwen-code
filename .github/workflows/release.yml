@@ -406,7 +406,12 @@ jobs:
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
             echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
+            # Force: a failed earlier attempt may have left this branch on an
+            # older head, and its divergent bump commit would fail a plain
+            # retry push as non-fast-forward. Replacing it is safe because a
+            # computed version with no npm package, tag, or release behind it
+            # cannot have shipped, so the stale tip is only a prior bump.
+            git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags
           else
             echo "Dry run enabled. Skipping push."
           fi

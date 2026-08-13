@@ -60,6 +60,17 @@ describe('release workflow', () => {
     );
   });
 
+  it('force-pushes the release branch so a retry replaces a failed attempt', () => {
+    // A failed attempt leaves release/<tag> on an older head, and the
+    // retry's divergent bump commit makes a plain push fail as
+    // non-fast-forward, blocking every retry of the release. Force is safe
+    // here: a computed version with no npm package, tag, or release behind
+    // it cannot have shipped.
+    expect(workflow).toContain(
+      'git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags',
+    );
+  });
+
   it('keeps a dispatch failure from failing an already-published release', () => {
     // The packages are published before this step runs, so it must not fail
     // the release; but the failure must still surface (as an error, not a
